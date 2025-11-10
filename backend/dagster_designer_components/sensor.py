@@ -2,13 +2,12 @@
 
 from typing import Optional, Literal
 
-from dagster import sensor, SensorEvaluationContext, RunRequest, SkipReason, DefaultSensorStatus
-from pydantic import BaseModel
+import dagster as dg
 from pathlib import Path
 
 
-class SensorComponentParams(BaseModel):
-    """Parameters for sensor component."""
+class SensorComponent(dg.Component, dg.Model, dg.Resolvable):
+    """Component for creating sensors from YAML configuration."""
 
     sensor_name: str
     sensor_type: Literal["file", "run_status", "custom"]
@@ -18,93 +17,78 @@ class SensorComponentParams(BaseModel):
     minimum_interval_seconds: int = 30
     default_status: str = "RUNNING"
 
-
-class SensorComponent:
-    """Component for creating sensors from YAML configuration."""
-
-    params_schema = SensorComponentParams
-
-    def __init__(self, **params):
-        """Initialize the sensor component."""
-        self.params = SensorComponentParams(**params)
-
-    def build_defs(self, context):
+    def build_defs(self, context: dg.ComponentLoadContext) -> dg.Definitions:
         """Build Dagster definitions from component parameters."""
-        from dagster import Definitions
-
         # Create sensor based on type
-        if self.params.sensor_type == "file":
+        if self.sensor_type == "file":
             sensor_def = self._create_file_sensor()
-        elif self.params.sensor_type == "run_status":
+        elif self.sensor_type == "run_status":
             sensor_def = self._create_run_status_sensor()
         else:
             sensor_def = self._create_custom_sensor()
 
-        return Definitions(sensors=[sensor_def])
+        return dg.Definitions(sensors=[sensor_def])
 
     def _create_file_sensor(self):
         """Create a file-watching sensor."""
-        file_path = self.params.file_path
-        job_name = self.params.job_name
+        file_path = self.file_path
+        job_name = self.job_name
 
-        @sensor(
-            name=self.params.sensor_name,
+        @dg.sensor(
+            name=self.sensor_name,
             job_name=job_name,
-            minimum_interval_seconds=self.params.minimum_interval_seconds,
-            description=self.params.description or f"Watch for file: {file_path}",
+            minimum_interval_seconds=self.minimum_interval_seconds,
+            description=self.description or f"Watch for file: {file_path}",
             default_status=(
-                DefaultSensorStatus.RUNNING
-                if self.params.default_status == "RUNNING"
-                else DefaultSensorStatus.STOPPED
+                dg.DefaultSensorStatus.RUNNING
+                if self.default_status == "RUNNING"
+                else dg.DefaultSensorStatus.STOPPED
             ),
         )
-        def file_sensor(context: SensorEvaluationContext):
+        def file_sensor(context: dg.SensorEvaluationContext):
             """Sensor that triggers when a file exists."""
             if file_path and Path(file_path).exists():
-                return RunRequest(run_key=f"file_{file_path}_{context.cursor or '0'}")
-            return SkipReason(f"File {file_path} does not exist")
+                return dg.RunRequest(run_key=f"file_{file_path}_{context.cursor or '0'}")
+            return dg.SkipReason(f"File {file_path} does not exist")
 
         return file_sensor
 
     def _create_run_status_sensor(self):
         """Create a run status sensor."""
-        from dagster import run_status_sensor, DagsterRunStatus, RunStatusSensorContext
-
-        @run_status_sensor(
-            name=self.params.sensor_name,
-            run_status=DagsterRunStatus.SUCCESS,
-            request_job_name=self.params.job_name,
-            description=self.params.description or "Monitor run status",
-            minimum_interval_seconds=self.params.minimum_interval_seconds,
+        @dg.run_status_sensor(
+            name=self.sensor_name,
+            run_status=dg.DagsterRunStatus.SUCCESS,
+            request_job_name=self.job_name,
+            description=self.description or "Monitor run status",
+            minimum_interval_seconds=self.minimum_interval_seconds,
             default_status=(
-                DefaultSensorStatus.RUNNING
-                if self.params.default_status == "RUNNING"
-                else DefaultSensorStatus.STOPPED
+                dg.DefaultSensorStatus.RUNNING
+                if self.default_status == "RUNNING"
+                else dg.DefaultSensorStatus.STOPPED
             ),
         )
-        def status_sensor(context: RunStatusSensorContext):
+        def status_sensor(context: dg.RunStatusSensorContext):
             """Sensor that triggers on run status changes."""
-            return RunRequest(run_key=f"status_{context.dagster_run.run_id}")
+            return dg.RunRequest(run_key=f"status_{context.dagster_run.run_id}")
 
         return status_sensor
 
     def _create_custom_sensor(self):
         """Create a custom sensor."""
-
-        @sensor(
-            name=self.params.sensor_name,
-            job_name=self.params.job_name,
-            minimum_interval_seconds=self.params.minimum_interval_seconds,
-            description=self.params.description or "Custom sensor",
+        @dg.sensor(
+            name=self.sensor_name,
+            job_name=self.job_name,
+            minimum_interval_seconds=self.minimum_interval_seconds,
+            description=self.description or "Custom sensor",
             default_status=(
-                DefaultSensorStatus.RUNNING
-                if self.params.default_status == "RUNNING"
-                else DefaultSensorStatus.STOPPED
+                dg.DefaultSensorStatus.RUNNING
+                if self.default_status == "RUNNING"
+                else dg.DefaultSensorStatus.STOPPED
             ),
         )
-        def custom_sensor(context: SensorEvaluationContext):
+        def custom_sensor(context: dg.SensorEvaluationContext):
             """Custom sensor - modify this logic as needed."""
             # Default: always trigger
-            return RunRequest(run_key=context.cursor or "0")
+            return dg.RunRequest(run_key=context.cursor or "0")
 
         return custom_sensor

@@ -99,6 +99,9 @@ class ProjectService:
         print(f"📝 Copying designer component classes...")
         self._copy_component_classes_to_project(project)
 
+        # Update pyproject.toml to register designer components (without .lib)
+        self._update_pyproject_registry(project)
+
         # Generate definitions.py with custom lineage support
         print(f"📝 Generating definitions.py...")
         self._generate_definitions_with_asset_customizations(project)
@@ -1184,6 +1187,32 @@ if custom_lineage_edges:
             print(f"Copied component classes to {components_dest}")
         except Exception as e:
             print(f"Error copying component classes: {e}")
+
+    def _update_pyproject_registry(self, project: Project):
+        """Update pyproject.toml to register dagster_designer_components without .lib prefix."""
+        project_dir = self._get_project_dir(project)
+        pyproject_file = project_dir / "pyproject.toml"
+
+        if not pyproject_file.exists():
+            print(f"pyproject.toml not found at {pyproject_file}")
+            return
+
+        try:
+            content = pyproject_file.read_text()
+            module_name = project.directory_name.replace("-", "_")
+
+            # Replace any .lib.dagster_designer_components with .dagster_designer_components
+            old_pattern = f"{module_name}.lib.dagster_designer_components"
+            new_pattern = f"{module_name}.dagster_designer_components"
+
+            if old_pattern in content:
+                content = content.replace(old_pattern, new_pattern)
+                pyproject_file.write_text(content)
+                print(f"✅ Updated pyproject.toml registry_modules: {old_pattern} -> {new_pattern}")
+            else:
+                print(f"ℹ️  No registry update needed in pyproject.toml")
+        except Exception as e:
+            print(f"⚠️  Error updating pyproject.toml: {e}")
 
     def _generate_component_yaml_files(self, project: Project):
         """Generate YAML files for primitive components (job, schedule, sensor, asset_check).

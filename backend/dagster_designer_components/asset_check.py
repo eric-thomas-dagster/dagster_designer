@@ -2,12 +2,11 @@
 
 from typing import Optional, Literal
 
-from dagster import asset_check, AssetCheckResult, AssetCheckSeverity
-from pydantic import BaseModel
+import dagster as dg
 
 
-class AssetCheckComponentParams(BaseModel):
-    """Parameters for asset check component."""
+class AssetCheckComponent(dg.Component, dg.Model, dg.Resolvable):
+    """Component for creating asset checks from YAML configuration."""
 
     check_name: str
     asset_name: str
@@ -17,47 +16,35 @@ class AssetCheckComponentParams(BaseModel):
     max_age_hours: Optional[int] = None
     column_name: Optional[str] = None
 
-
-class AssetCheckComponent:
-    """Component for creating asset checks from YAML configuration."""
-
-    params_schema = AssetCheckComponentParams
-
-    def __init__(self, **params):
-        """Initialize the asset check component."""
-        self.params = AssetCheckComponentParams(**params)
-
-    def build_defs(self, context):
+    def build_defs(self, context: dg.ComponentLoadContext) -> dg.Definitions:
         """Build Dagster definitions from component parameters."""
-        from dagster import Definitions
-
         # Create asset check based on type
-        if self.params.check_type == "row_count":
+        if self.check_type == "row_count":
             check_def = self._create_row_count_check()
-        elif self.params.check_type == "freshness":
+        elif self.check_type == "freshness":
             check_def = self._create_freshness_check()
-        elif self.params.check_type == "schema":
+        elif self.check_type == "schema":
             check_def = self._create_schema_check()
         else:
             check_def = self._create_custom_check()
 
-        return Definitions(asset_checks=[check_def])
+        return dg.Definitions(asset_checks=[check_def])
 
     def _create_row_count_check(self):
         """Create a row count check."""
-        asset_name = self.params.asset_name
-        threshold = self.params.threshold or 0
+        asset_name = self.asset_name
+        threshold = self.threshold or 0
 
-        @asset_check(
+        @dg.asset_check(
             asset=asset_name,
-            name=self.params.check_name,
-            description=self.params.description or f"Check row count >= {threshold}",
+            name=self.check_name,
+            description=self.description or f"Check row count >= {threshold}",
         )
         def row_count_check(context):
             """Check that row count meets threshold."""
             # This is a template - user needs to implement actual count logic
             # For now, return a passing check
-            return AssetCheckResult(
+            return dg.AssetCheckResult(
                 passed=True,
                 description=f"Row count check template for {asset_name}",
                 metadata={"threshold": threshold},
@@ -67,19 +54,19 @@ class AssetCheckComponent:
 
     def _create_freshness_check(self):
         """Create a freshness check."""
-        asset_name = self.params.asset_name
-        max_age = self.params.max_age_hours or 24
+        asset_name = self.asset_name
+        max_age = self.max_age_hours or 24
 
-        @asset_check(
+        @dg.asset_check(
             asset=asset_name,
-            name=self.params.check_name,
-            description=self.params.description
+            name=self.check_name,
+            description=self.description
             or f"Check data is less than {max_age} hours old",
         )
         def freshness_check(context):
             """Check data freshness."""
             # This is a template - user needs to implement actual freshness logic
-            return AssetCheckResult(
+            return dg.AssetCheckResult(
                 passed=True,
                 description=f"Freshness check template for {asset_name}",
                 metadata={"max_age_hours": max_age},
@@ -89,18 +76,18 @@ class AssetCheckComponent:
 
     def _create_schema_check(self):
         """Create a schema validation check."""
-        asset_name = self.params.asset_name
-        column_name = self.params.column_name
+        asset_name = self.asset_name
+        column_name = self.column_name
 
-        @asset_check(
+        @dg.asset_check(
             asset=asset_name,
-            name=self.params.check_name,
-            description=self.params.description or f"Check schema for {asset_name}",
+            name=self.check_name,
+            description=self.description or f"Check schema for {asset_name}",
         )
         def schema_check(context):
             """Check schema validity."""
             # This is a template - user needs to implement actual schema logic
-            return AssetCheckResult(
+            return dg.AssetCheckResult(
                 passed=True,
                 description=f"Schema check template for {asset_name}",
                 metadata={"column_name": column_name} if column_name else {},
@@ -110,16 +97,16 @@ class AssetCheckComponent:
 
     def _create_custom_check(self):
         """Create a custom check."""
-        asset_name = self.params.asset_name
+        asset_name = self.asset_name
 
-        @asset_check(
+        @dg.asset_check(
             asset=asset_name,
-            name=self.params.check_name,
-            description=self.params.description or "Custom asset check",
+            name=self.check_name,
+            description=self.description or "Custom asset check",
         )
         def custom_check(context):
             """Custom asset check - modify as needed."""
-            return AssetCheckResult(
+            return dg.AssetCheckResult(
                 passed=True, description=f"Custom check template for {asset_name}"
             )
 

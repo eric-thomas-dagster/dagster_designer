@@ -46,7 +46,7 @@ def generate_defs_yaml(
 
     # Add job component
     asset_list_lines = "\n".join([f"    - {asset}" for asset in asset_selection])
-    job_component = f"""type: {project_module}.lib.dagster_designer_components.JobComponent
+    job_component = f"""type: {project_module}.dagster_designer_components.JobComponent
 attributes:
   job_name: {pipeline_name}
   description: "{description}"
@@ -57,7 +57,7 @@ attributes:
 
     # Add schedule component if schedule trigger
     if trigger_type == "schedule" and cron_schedule:
-        schedule_component = f"""type: {project_module}.lib.dagster_designer_components.ScheduleComponent
+        schedule_component = f"""type: {project_module}.dagster_designer_components.ScheduleComponent
 attributes:
   schedule_name: {pipeline_name}_schedule
   cron_expression: "{cron_schedule}"
@@ -127,7 +127,7 @@ attributes:
                 if "auth_token" in sensor_config and sensor_config["auth_token"]:
                     sensor_attrs.append(f"  auth_token: \"{sensor_config['auth_token']}\"")
 
-            sensor_component = f"type: {project_module}.lib.dagster_designer_components.SensorComponent\nattributes:\n" + "\n".join(sensor_attrs)
+            sensor_component = f"type: {project_module}.dagster_designer_components.SensorComponent\nattributes:\n" + "\n".join(sensor_attrs)
             components.append(sensor_component)
 
         else:

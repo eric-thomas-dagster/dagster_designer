@@ -2,13 +2,12 @@
 
 from typing import Optional
 
-from dagster import define_asset_job
+import dagster as dg
 from dagster._core.definitions.asset_selection import AssetSelection
-from pydantic import BaseModel
 
 
-class JobComponentParams(BaseModel):
-    """Parameters for job component."""
+class JobComponent(dg.Component, dg.Model, dg.Resolvable):
+    """Component for creating jobs from YAML configuration."""
 
     job_name: str
     asset_selection: list[str]
@@ -16,30 +15,18 @@ class JobComponentParams(BaseModel):
     tags: Optional[dict[str, str]] = None
     config: Optional[dict] = None
 
-
-class JobComponent:
-    """Component for creating jobs from YAML configuration."""
-
-    params_schema = JobComponentParams
-
-    def __init__(self, **params):
-        """Initialize the job component."""
-        self.params = JobComponentParams(**params)
-
-    def build_defs(self, context):
+    def build_defs(self, context: dg.ComponentLoadContext) -> dg.Definitions:
         """Build Dagster definitions from component parameters."""
-        from dagster import Definitions
-
         # Create asset selection
-        asset_sel = AssetSelection.keys(*self.params.asset_selection)
+        asset_sel = AssetSelection.keys(*self.asset_selection)
 
         # Create job
-        job = define_asset_job(
-            name=self.params.job_name,
+        job = dg.define_asset_job(
+            name=self.job_name,
             selection=asset_sel,
-            description=self.params.description,
-            tags=self.params.tags or {},
-            config=self.params.config,
+            description=self.description,
+            tags=self.tags or {},
+            config=self.config,
         )
 
-        return Definitions(jobs=[job])
+        return dg.Definitions(jobs=[job])
