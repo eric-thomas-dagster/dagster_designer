@@ -382,8 +382,10 @@ function renderCheckForm(
           type="text"
           value={config.name || ''}
           onChange={(e) => onChange({ name: e.target.value })}
-          className="w-full px-2 py-1 text-sm border border-gray-300 rounded-md"
-          placeholder="my_check"
+          className={`w-full px-2 py-1 text-sm border rounded-md ${
+            !config.name ? 'border-red-300 bg-red-50' : 'border-gray-300'
+          }`}
+          placeholder="my_check (required)"
         />
       </div>
     </>

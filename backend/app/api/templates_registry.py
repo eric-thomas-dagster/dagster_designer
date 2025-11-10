@@ -485,12 +485,13 @@ async def install_component(
             manifest_file.write_text(component_manifest)
         else:
             # Create a basic manifest from component metadata
+            # Component type is always just the module path, regardless of src/ layout
             basic_manifest = {
                 "name": component.name,
                 "description": component.description,
                 "version": component.version,
                 "category": component.category,
-                "component_type": f"{actual_module_name}.components.{component_id}.{class_name}" if not use_src_layout else f"src.{actual_module_name}.components.{component_id}.{class_name}",
+                "component_type": f"{actual_module_name}.components.{component_id}.{class_name}",
             }
             with open(manifest_file, 'w') as f:
                 yaml.dump(basic_manifest, f, default_flow_style=False, sort_keys=False)
@@ -559,12 +560,10 @@ async def install_component(
             from ..models.project import ProjectUpdate
             project_service.update_project(request.project_id, ProjectUpdate(is_imported=True))
 
-        if use_src_layout:
-            component_type = f"src.{actual_module_name}.components.{component_id}.{class_name}"
-            defs_dir = base_dir / "defs"
-        else:
-            component_type = f"{actual_module_name}.components.{component_id}.{class_name}"
-            defs_dir = base_dir / "defs"
+        # Component type is always just the module path, regardless of src/ layout
+        # The src/ directory is in sys.path, so imports are module_name.components.X
+        component_type = f"{actual_module_name}.components.{component_id}.{class_name}"
+        defs_dir = base_dir / "defs"
 
         instance_name = request.config.get('name', component_id)
 
