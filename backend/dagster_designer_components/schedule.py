@@ -3,9 +3,6 @@
 from typing import Optional
 
 from dagster import ScheduleDefinition, DefaultScheduleStatus
-from dagster._core.definitions.declarative_automation.serialized_objects import (
-    AssetSelection as SerializableAssetSelection,
-)
 from dagster._core.definitions.asset_selection import AssetSelection
 from pydantic import BaseModel
 

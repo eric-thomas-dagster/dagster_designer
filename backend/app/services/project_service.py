@@ -57,12 +57,13 @@ class ProjectService:
         if project_create.git_repo:
             from ..models.component import ComponentInstance
             repo_name = self._extract_repo_name(project_create.git_repo)
+            # Store path relative to project root (dg scaffold will handle the rest)
             dbt_component = ComponentInstance(
                 id=f"dbt-{uuid.uuid4().hex[:8]}",
                 component_type="dagster_dbt.DbtProjectComponent",
                 label=f"{project.name} dbt",
                 attributes={
-                    "project_path": repo_name,
+                    "project": repo_name,
                 },
                 is_asset_factory=True,
             )
@@ -93,6 +94,14 @@ class ProjectService:
         if project.components:
             print(f"📦 Scaffolding {len(project.components)} components...")
             self._scaffold_components(project)
+
+        # Copy designer component classes (needed for custom primitives)
+        print(f"📝 Copying designer component classes...")
+        self._copy_component_classes_to_project(project)
+
+        # Generate definitions.py with custom lineage support
+        print(f"📝 Generating definitions.py...")
+        self._generate_definitions_with_asset_customizations(project)
 
         print(f"✅ Project {project.name} created successfully!")
         print(f"{'='*60}\n")
@@ -907,7 +916,8 @@ if custom_lineage_edges:
             try:
                 # Build the scaffold command based on component type
                 if component.component_type == "dagster_dbt.DbtProjectComponent":
-                    project_path = component.attributes.get("project_path", "dbt")
+                    # Use 'project' field (the new standard) or fall back to legacy 'project_path'
+                    project_path = component.attributes.get("project") or component.attributes.get("project_path", "dbt")
                     folder_name = component.id
 
                     cmd = f"source {str(venv_dir.resolve())}/bin/activate && {str(dg_path.resolve())} scaffold defs dagster_dbt.DbtProjectComponent {folder_name} --project-path '{project_path}'"
@@ -1151,7 +1161,7 @@ if custom_lineage_edges:
         import shutil
 
         project_dir = self._get_project_dir(project)
-        module_name = project.directory_name.replace("project_", "").replace("-", "_")
+        module_name = project.directory_name.replace("-", "_")
         project_src_dir = project_dir / "src" / module_name
 
         if not project_src_dir.exists():
@@ -1313,6 +1323,11 @@ if custom_lineage_edges:
             component_type = component.component_type
             print(f"[YAML Generation] Component {component.id}: type={component_type}", flush=True)
 
+            # Skip dbt components - they should be managed by dg scaffold only
+            if component_type.startswith("dagster_dbt"):
+                print(f"[YAML Generation] Skipping dbt component {component.id} - managed by dg scaffold", flush=True)
+                continue
+
             # Only generate YAML for components in the type map
             if component_type not in component_type_map:
                 print(f"[YAML Generation] Skipping {component_type} - not in type map", flush=True)
@@ -1439,7 +1454,7 @@ import dagster as dg
 
 # Import custom components to register them with Dagster
 # The @component_type decorator registers them when imported
-from .lib.dagster_designer_components import (
+from .dagster_designer_components import (
     JobComponent,
     ScheduleComponent,
     SensorComponent,

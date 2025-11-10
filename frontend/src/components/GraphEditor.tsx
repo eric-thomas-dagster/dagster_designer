@@ -1164,6 +1164,12 @@ function GraphEditorInner({ onNodeSelect }: GraphEditorProps) {
           const response = await fetch(`/api/v1/projects/${currentProject.id}/regenerate-assets`, {
             method: 'POST',
           });
+
+          if (!response.ok) {
+            const errorData = await response.json();
+            throw new Error(errorData.detail || 'Failed to regenerate assets');
+          }
+
           const updatedProject = await response.json();
 
           // Update the graph with regenerated assets
