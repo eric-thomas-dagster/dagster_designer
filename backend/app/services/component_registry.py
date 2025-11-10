@@ -131,7 +131,7 @@ class ComponentRegistry:
                 "icon": "database",
                 "schema": {
                     "properties": {
-                        "project_path": {
+                        "project": {
                             "type": "string",
                             "description": "Path to your dbt project directory relative to the Dagster project root",
                         },
@@ -148,7 +148,7 @@ class ComponentRegistry:
                             "description": "Additional command-line arguments to pass to dbt commands",
                         },
                     },
-                    "required": ["project_path"],
+                    "required": ["project"],
                 },
             },
             {
