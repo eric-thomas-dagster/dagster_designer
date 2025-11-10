@@ -176,7 +176,8 @@ export function ProjectManager() {
     setIsRegeneratingLineage(true);
 
     try {
-      await projectsApi.regenerateAssets(currentProject.id);
+      // Regenerate with layout recalculation to keep the graph beautiful
+      await projectsApi.regenerateAssets(currentProject.id, true);
 
       // Reload project to get updated graph
       await loadProject(currentProject.id);

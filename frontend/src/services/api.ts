@@ -82,8 +82,9 @@ export const projectsApi = {
     return response.data;
   },
 
-  regenerateAssets: async (projectId: string) => {
-    const response = await api.post<Project>(`/projects/${projectId}/regenerate-assets`);
+  regenerateAssets: async (projectId: string, recalculateLayout: boolean = false) => {
+    const url = `/projects/${projectId}/regenerate-assets${recalculateLayout ? '?recalculate_layout=true' : ''}`;
+    const response = await api.post<Project>(url);
     return response.data;
   },
 

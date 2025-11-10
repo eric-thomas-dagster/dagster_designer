@@ -28,11 +28,12 @@ class AssetIntrospectionService:
             return settings.projects_dir / project.directory_name
         return settings.projects_dir / project.id
 
-    def get_assets_for_project(self, project: Project) -> tuple[list[GraphNode], list[GraphEdge]]:
+    def get_assets_for_project(self, project: Project, recalculate_layout: bool = False) -> tuple[list[GraphNode], list[GraphEdge]]:
         """Get assets and dependencies for a project by running dg list defs.
 
         Args:
             project: Project to introspect
+            recalculate_layout: If True, recalculates all node positions instead of preserving existing ones
 
         Returns:
             Tuple of (asset_nodes, asset_edges)
@@ -45,9 +46,9 @@ class AssetIntrospectionService:
             # Just run dg list defs to get assets
             assets_data = self._run_dg_list_defs(project, project_dir)
 
-            # Build a map of existing node positions
+            # Build a map of existing node positions (unless we're recalculating)
             existing_positions = {}
-            if project.graph and project.graph.nodes:
+            if not recalculate_layout and project.graph and project.graph.nodes:
                 for node in project.graph.nodes:
                     existing_positions[node.id] = node.position
 

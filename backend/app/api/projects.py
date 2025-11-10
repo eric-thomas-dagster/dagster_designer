@@ -152,15 +152,19 @@ async def clone_repo(project_id: str, request: CloneRepoRequest):
 
 
 @router.post("/{project_id}/regenerate-assets", response_model=Project)
-async def regenerate_assets(project_id: str):
+async def regenerate_assets(project_id: str, recalculate_layout: bool = False):
     """Regenerate assets for a project by running dg list defs.
 
     This introspects the Dagster components and updates the project graph
     with the actual assets that will be generated.
+
+    Args:
+        project_id: The project ID
+        recalculate_layout: If True, recalculates all node positions instead of preserving existing ones
     """
     import sys
     print(f"\n[regenerate_assets] ====== START ======", flush=True)
-    print(f"[regenerate_assets] project_id: {project_id}", flush=True)
+    print(f"[regenerate_assets] project_id: {project_id}, recalculate_layout: {recalculate_layout}", flush=True)
     sys.stdout.flush()
 
     project = project_service.get_project(project_id)
@@ -169,7 +173,7 @@ async def regenerate_assets(project_id: str):
 
     try:
         # Get assets from dg list defs
-        asset_nodes, asset_edges = asset_introspection_service.get_assets_for_project(project)
+        asset_nodes, asset_edges = asset_introspection_service.get_assets_for_project(project, recalculate_layout=recalculate_layout)
         print(f"[regenerate_assets] Got {len(asset_nodes)} nodes, {len(asset_edges)} edges from introspection", flush=True)
         sys.stdout.flush()
 

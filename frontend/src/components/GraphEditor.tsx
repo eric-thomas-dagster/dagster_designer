@@ -1158,10 +1158,10 @@ function GraphEditorInner({ onNodeSelect }: GraphEditorProps) {
           // Call API to add custom lineage (non-blocking)
           await projectsApi.addCustomLineage(currentProject.id, sourceAssetKey, targetAssetKey);
 
-          console.log('[GraphEditor] Custom lineage saved, triggering background regeneration');
+          console.log('[GraphEditor] Custom lineage saved, triggering background regeneration with layout recalculation');
 
-          // Trigger asset regeneration in background to confirm
-          const response = await fetch(`/api/v1/projects/${currentProject.id}/regenerate-assets`, {
+          // Trigger asset regeneration in background to confirm and recalculate layout
+          const response = await fetch(`/api/v1/projects/${currentProject.id}/regenerate-assets?recalculate_layout=true`, {
             method: 'POST',
           });
 
@@ -1420,8 +1420,33 @@ function GraphEditorInner({ onNodeSelect }: GraphEditorProps) {
 
       console.log('[GraphEditor] Adding new node:', newNode.id);
       setNodes((nds) => [...nds, newNode]);
+
+      // Trigger layout recalculation after adding a new asset
+      if (currentProject) {
+        console.log('[GraphEditor] Triggering layout recalculation after adding component');
+        fetch(`/api/v1/projects/${currentProject.id}/regenerate-assets?recalculate_layout=true`, {
+          method: 'POST',
+        }).then(async (response) => {
+          if (response.ok) {
+            const updatedProject = await response.json();
+            // Update the graph with regenerated layout
+            if (updatedProject.graph && updatedProject.graph.nodes) {
+              const flowNodes: Node[] = updatedProject.graph.nodes.map((node: any) => ({
+                id: node.id,
+                type: node.node_kind === 'asset' ? 'asset' : 'component',
+                position: node.position,
+                data: node.data,
+              }));
+              setNodes(flowNodes);
+              setEdges(updatedProject.graph.edges);
+            }
+          }
+        }).catch((error) => {
+          console.error('[GraphEditor] Failed to recalculate layout:', error);
+        });
+      }
     },
-    [setNodes, screenToFlowPosition]
+    [setNodes, screenToFlowPosition, currentProject, setEdges]
   );
 
   if (!currentProject) {
