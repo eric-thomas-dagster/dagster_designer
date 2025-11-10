@@ -203,6 +203,10 @@ async def get_installed_components(project_id: str):
             # No valid project structure found, return empty list
             return {"components": []}
 
+        # Check if components directory exists
+        if not components_dir.exists():
+            return {"components": []}
+
         # Scan for installed components
         installed_components = []
         for item in components_dir.iterdir():
