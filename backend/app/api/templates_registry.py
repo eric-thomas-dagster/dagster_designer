@@ -4,6 +4,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 import httpx
 import yaml
+import json
 import subprocess
 import os
 from pathlib import Path
@@ -197,6 +198,58 @@ async def get_installed_components(project_id: str):
         )
 
 
+@router.get("/installed/{project_id}/{component_id}/schema")
+async def get_installed_component_schema(project_id: str, component_id: str):
+    """Get the schema for an installed community component."""
+    try:
+        # Get project
+        project = project_service.get_project(project_id)
+        if not project:
+            raise HTTPException(status_code=404, detail="Project not found")
+
+        project_dir = project_service._get_project_dir(project)
+        project_name_sanitized = project.name.replace(" ", "_").replace("-", "_")
+
+        # Find components directory
+        flat_components_dir = project_dir / project_name_sanitized / "components"
+        src_components_dir = project_dir / "src" / project_name_sanitized / "components"
+
+        components_dir = None
+        if flat_components_dir.exists():
+            components_dir = flat_components_dir
+        elif src_components_dir.exists():
+            components_dir = src_components_dir
+
+        if not components_dir or not components_dir.exists():
+            raise HTTPException(status_code=404, detail="Components directory not found")
+
+        # Find the component
+        component_dir = components_dir / component_id
+        if not component_dir.exists():
+            raise HTTPException(status_code=404, detail=f"Component {component_id} not found")
+
+        # Read schema.json
+        schema_file = component_dir / "schema.json"
+        if not schema_file.exists():
+            raise HTTPException(status_code=404, detail="Schema file not found")
+
+        with open(schema_file, 'r') as f:
+            schema = json.load(f)
+
+        return schema
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        error_details = traceback.format_exc()
+        print(f"Error fetching component schema: {error_details}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error fetching component schema: {str(e)}"
+        )
+
+
 @router.get("/manifest")
 async def get_manifest() -> TemplateManifest:
     """Fetch the component templates manifest from GitHub."""
@@ -325,6 +378,16 @@ async def install_component(
                 except Exception as e:
                     print(f"Warning: Could not download manifest: {e}")
 
+            # Download schema.json if available
+            component_schema = None
+            if component.schema_url:
+                try:
+                    schema_response = await client.get(component.schema_url, timeout=10.0)
+                    schema_response.raise_for_status()
+                    component_schema = schema_response.text
+                except Exception as e:
+                    print(f"Warning: Could not download schema.json: {e}")
+
         # Parse component code to find the class name
         import re
         class_match = re.search(r'class\s+(\w+)\s*\(', component_code)
@@ -401,6 +464,12 @@ async def install_component(
             }
             with open(manifest_file, 'w') as f:
                 yaml.dump(basic_manifest, f, default_flow_style=False, sort_keys=False)
+
+        # Save schema.json if available
+        if component_schema:
+            schema_file = component_dir / "schema.json"
+            schema_file.write_text(component_schema)
+            print(f"[Install] Saved schema.json to: {schema_file}")
 
         # 3. Install requirements.txt dependencies using uv add
         # This ensures dependencies are added to pyproject.toml

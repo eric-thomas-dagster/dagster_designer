@@ -509,7 +509,7 @@ class ComponentRegistry:
                         },
                         "sensor_type": {
                             "type": "string",
-                            "description": "Type of sensor (file, run_status, custom)",
+                            "description": "Type of sensor (file, run_status, asset, custom)",
                         },
                         "job_name": {
                             "type": "string",
@@ -522,6 +522,10 @@ class ComponentRegistry:
                         "file_path": {
                             "type": "string",
                             "description": "File path to monitor (for file sensors)",
+                        },
+                        "asset_key": {
+                            "type": "string",
+                            "description": "Asset key to monitor (for asset sensors, e.g., 'my_asset' or 'path/to/asset'). Can reference assets in other Dagster projects.",
                         },
                         "monitored_job_name": {
                             "type": "string",

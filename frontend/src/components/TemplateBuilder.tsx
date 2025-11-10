@@ -13,6 +13,7 @@ import {
   FileCode,
   Plus,
   Users,
+  ArrowLeftRight,
 } from 'lucide-react';
 import { primitivesApi } from '@/services/api';
 import { CommunityTemplates } from './CommunityTemplates';
@@ -42,6 +43,52 @@ export function TemplateBuilder() {
     queryFn: () => currentProject ? primitivesApi.listAll(currentProject.id) : Promise.reject('No project'),
     enabled: !!currentProject && needsPrimitives,
   });
+
+  // Fetch installed community components for sensors
+  const { data: installedComponents } = useQuery({
+    queryKey: ['installed-components', currentProject?.id],
+    queryFn: () => currentProject ? templatesApi.getInstalled(currentProject.id) : Promise.reject('No project'),
+    enabled: !!currentProject && activeTab === 'sensor',
+  });
+
+  // Filter for sensor components only
+  const communitySensors = installedComponents?.components.filter(
+    (component) => component.category === 'sensors'
+  ) || [];
+
+  // Fetch schema for selected community sensor
+  const [selectedCommunitySensor, setSelectedCommunitySensor] = useState<string | null>(null);
+  const [communitySensorAttributes, setCommunitySensorAttributes] = useState<Record<string, any>>({});
+
+  const { data: communitySensorSchema, isLoading: schemaLoading } = useQuery({
+    queryKey: ['component-schema', currentProject?.id, selectedCommunitySensor],
+    queryFn: () =>
+      currentProject && selectedCommunitySensor
+        ? templatesApi.getInstalledComponentSchema(currentProject.id, selectedCommunitySensor)
+        : Promise.reject('No component selected'),
+    enabled: !!currentProject && !!selectedCommunitySensor,
+  });
+
+  // Initialize community sensor attributes with defaults when schema loads
+  useEffect(() => {
+    if (communitySensorSchema?.attributes) {
+      console.log('Community sensor schema loaded:', communitySensorSchema);
+      const defaults: Record<string, any> = {};
+      Object.entries(communitySensorSchema.attributes).forEach(([key, attr]) => {
+        if (attr.default !== undefined) {
+          defaults[key] = attr.default;
+        }
+      });
+      setCommunitySensorAttributes(defaults);
+    }
+  }, [communitySensorSchema]);
+
+  // Debug log
+  useEffect(() => {
+    console.log('Selected community sensor:', selectedCommunitySensor);
+    console.log('Schema loading:', schemaLoading);
+    console.log('Schema data:', communitySensorSchema);
+  }, [selectedCommunitySensor, schemaLoading, communitySensorSchema]);
 
   // Python Asset Form State
   const [pythonAsset, setPythonAsset] = useState<PythonAssetParams>({
@@ -86,6 +133,7 @@ export function TemplateBuilder() {
   const [jobSelectionMode, setJobSelectionMode] = useState<'select' | 'filter'>('select');
   const [pythonAssetSelectionMode, setPythonAssetSelectionMode] = useState<'select' | 'filter'>('select');
   const [scheduleSelectionMode, setScheduleSelectionMode] = useState<'select' | 'filter'>('select');
+  const [assetSensorMode, setAssetSensorMode] = useState<'select' | 'external'>('select');
 
   // Sensor Form State
   const [sensor, setSensor] = useState<SensorParams>({
@@ -168,7 +216,18 @@ export function TemplateBuilder() {
   });
 
   const generateSensorMutation = useMutation({
-    mutationFn: () => templatesApi.generateSensor(sensor),
+    mutationFn: () => {
+      // Merge community sensor attributes into sensor params if it's a community sensor
+      let sensorParams = sensor;
+      if (selectedCommunitySensor && communitySensorSchema) {
+        sensorParams = {
+          ...sensor,
+          ...communitySensorAttributes,
+          component_type: communitySensorSchema.type, // Include the actual component type
+        };
+      }
+      return templatesApi.generateSensor(sensorParams);
+    },
     onSuccess: (data) => setGeneratedCode(data.code),
   });
 
@@ -991,15 +1050,24 @@ export function TemplateBuilder() {
               </label>
               <select
                 value={sensor.sensor_type}
-                onChange={(e) =>
-                  setSensor({ ...sensor, sensor_type: e.target.value as any })
-                }
+                onChange={(e) => {
+                  const newType = e.target.value;
+                  setSensor({ ...sensor, sensor_type: newType as any });
+
+                  // Check if this is a community sensor
+                  const isCommunity = communitySensors.some(c => c.id === newType);
+                  setSelectedCommunitySensor(isCommunity ? newType : null);
+                  if (!isCommunity) {
+                    setCommunitySensorAttributes({});
+                  }
+                }}
                 className="w-full px-3 py-2 border border-gray-300 rounded-md"
               >
                 <optgroup label="Basic Sensors">
                   <option value="custom">Custom</option>
                   <option value="file">File Sensor</option>
                   <option value="run_status">Run Status Sensor</option>
+                  <option value="asset">Asset Sensor</option>
                 </optgroup>
                 <optgroup label="Convenience Sensors">
                   <option value="s3">S3 Bucket Sensor</option>
@@ -1008,6 +1076,15 @@ export function TemplateBuilder() {
                   <option value="database">Database Table Sensor</option>
                   <option value="webhook">Webhook Sensor</option>
                 </optgroup>
+                {communitySensors.length > 0 && (
+                  <optgroup label="Installed Community Sensors">
+                    {communitySensors.map((component) => (
+                      <option key={component.id} value={component.id}>
+                        {component.name}
+                      </option>
+                    ))}
+                  </optgroup>
+                )}
               </select>
             </div>
 
@@ -1120,6 +1197,74 @@ export function TemplateBuilder() {
                   </p>
                 </div>
               </>
+            )}
+
+            {sensor.sensor_type === 'asset' && (
+              <div>
+                <div className="flex items-center justify-between mb-1">
+                  <label className="block text-sm font-medium text-gray-700">
+                    Asset Key <span className="text-red-500">*</span>
+                  </label>
+                  <button
+                    type="button"
+                    onClick={() => setAssetSensorMode(assetSensorMode === 'select' ? 'external' : 'select')}
+                    className="text-xs text-blue-600 hover:text-blue-800 flex items-center gap-1"
+                  >
+                    <ArrowLeftRight className="w-3 h-3" />
+                    {assetSensorMode === 'select' ? 'Use external asset' : 'Select from project'}
+                  </button>
+                </div>
+
+                {assetSensorMode === 'select' ? (
+                  <>
+                    {currentProject?.graph.nodes.filter((node: any) => node.node_kind === 'asset' || node.type === 'asset').length > 0 ? (
+                      <select
+                        value={sensor.asset_key || ''}
+                        onChange={(e) => setSensor({ ...sensor, asset_key: e.target.value })}
+                        className="w-full px-3 py-2 border border-gray-300 rounded-md"
+                      >
+                        <option value="">Select an asset...</option>
+                        {currentProject.graph.nodes
+                          .filter((node: any) => node.node_kind === 'asset' || node.type === 'asset')
+                          .map((node: any) => (
+                            <option key={node.id} value={node.data.asset_key || node.id}>
+                              {node.data.asset_key || node.data.label || node.id}
+                            </option>
+                          ))}
+                      </select>
+                    ) : (
+                      <>
+                        <input
+                          type="text"
+                          value={sensor.asset_key || ''}
+                          onChange={(e) => setSensor({ ...sensor, asset_key: e.target.value })}
+                          className="w-full px-3 py-2 border border-gray-300 rounded-md"
+                          placeholder="my_asset"
+                        />
+                        <p className="text-xs text-amber-600 mt-1">
+                          No assets found in project. Enter asset key manually or add assets first.
+                        </p>
+                      </>
+                    )}
+                    <p className="text-xs text-gray-500 mt-1">
+                      Select an asset from your current project to monitor
+                    </p>
+                  </>
+                ) : (
+                  <>
+                    <input
+                      type="text"
+                      value={sensor.asset_key || ''}
+                      onChange={(e) => setSensor({ ...sensor, asset_key: e.target.value })}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md"
+                      placeholder="other_project/my_asset"
+                    />
+                    <p className="text-xs text-gray-500 mt-1">
+                      Enter an asset key from another Dagster project for cross-project monitoring
+                    </p>
+                  </>
+                )}
+              </div>
             )}
 
             {/* S3 Sensor Fields */}
@@ -1454,31 +1599,125 @@ export function TemplateBuilder() {
               </>
             )}
 
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Description</label>
-              <input
-                type="text"
-                value={sensor.description}
-                onChange={(e) => setSensor({ ...sensor, description: e.target.value })}
-                className="w-full px-3 py-2 border border-gray-300 rounded-md"
-                placeholder="Sensor to trigger..."
-              />
-            </div>
+            {/* Community Sensor Dynamic Form */}
+            {selectedCommunitySensor && (
+              <>
+                {schemaLoading ? (
+                  <div className="bg-gray-50 border border-gray-200 rounded-md p-4 text-center">
+                    <p className="text-sm text-gray-600">Loading sensor configuration...</p>
+                  </div>
+                ) : communitySensorSchema ? (
+                  <>
+                    <div className="bg-blue-50 border border-blue-200 rounded-md p-3 mb-4">
+                      <p className="text-sm text-blue-800 font-medium">
+                        {communitySensorSchema.name}
+                      </p>
+                      <p className="text-xs text-blue-600 mt-1">
+                        {communitySensorSchema.description}
+                      </p>
+                    </div>
 
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">
-                Minimum Interval (seconds)
-              </label>
-              <input
-                type="number"
-                value={sensor.minimum_interval_seconds}
-                onChange={(e) =>
-                  setSensor({ ...sensor, minimum_interval_seconds: parseInt(e.target.value) })
-                }
-                className="w-full px-3 py-2 border border-gray-300 rounded-md"
-                placeholder="30"
-              />
-            </div>
+                    {Object.entries(communitySensorSchema.attributes).map(([key, attr]) => (
+                    <div key={key}>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">
+                        {attr.label} {attr.required && <span className="text-red-500">*</span>}
+                      </label>
+
+                      {attr.type === 'select' || attr.enum ? (
+                        <select
+                          value={communitySensorAttributes[key] || ''}
+                          onChange={(e) =>
+                            setCommunitySensorAttributes({ ...communitySensorAttributes, [key]: e.target.value })
+                          }
+                          className="w-full px-3 py-2 border border-gray-300 rounded-md"
+                        >
+                          <option value="">Select...</option>
+                          {attr.enum?.map((option) => (
+                            <option key={option} value={option}>
+                              {option}
+                            </option>
+                          ))}
+                        </select>
+                      ) : attr.type === 'number' ? (
+                        <input
+                          type="number"
+                          value={communitySensorAttributes[key] ?? ''}
+                          onChange={(e) =>
+                            setCommunitySensorAttributes({
+                              ...communitySensorAttributes,
+                              [key]: e.target.value ? Number(e.target.value) : undefined,
+                            })
+                          }
+                          min={attr.min}
+                          max={attr.max}
+                          className="w-full px-3 py-2 border border-gray-300 rounded-md"
+                          placeholder={attr.placeholder}
+                        />
+                      ) : attr.type === 'boolean' ? (
+                        <input
+                          type="checkbox"
+                          checked={communitySensorAttributes[key] || false}
+                          onChange={(e) =>
+                            setCommunitySensorAttributes({ ...communitySensorAttributes, [key]: e.target.checked })
+                          }
+                          className="h-4 w-4 text-blue-600 border-gray-300 rounded"
+                        />
+                      ) : (
+                        <input
+                          type={attr.sensitive ? 'password' : 'text'}
+                          value={communitySensorAttributes[key] || ''}
+                          onChange={(e) =>
+                            setCommunitySensorAttributes({ ...communitySensorAttributes, [key]: e.target.value })
+                          }
+                          className="w-full px-3 py-2 border border-gray-300 rounded-md"
+                          placeholder={attr.placeholder}
+                        />
+                      )}
+
+                      {attr.description && (
+                        <p className="text-xs text-gray-500 mt-1">{attr.description}</p>
+                      )}
+                    </div>
+                    ))}
+                  </>
+                ) : (
+                  <div className="bg-red-50 border border-red-200 rounded-md p-4 text-center">
+                    <p className="text-sm text-red-600">Failed to load sensor configuration</p>
+                  </div>
+                )}
+              </>
+            )}
+
+            {/* Only show these common fields if NOT a community sensor */}
+            {!selectedCommunitySensor && (
+              <>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Description</label>
+                  <input
+                    type="text"
+                    value={sensor.description}
+                    onChange={(e) => setSensor({ ...sensor, description: e.target.value })}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md"
+                    placeholder="Sensor to trigger..."
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Minimum Interval (seconds)
+                  </label>
+                  <input
+                    type="number"
+                    value={sensor.minimum_interval_seconds}
+                    onChange={(e) =>
+                      setSensor({ ...sensor, minimum_interval_seconds: parseInt(e.target.value) })
+                    }
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md"
+                    placeholder="30"
+                  />
+                </div>
+              </>
+            )}
 
             <button
               onClick={handleGenerate}

@@ -274,7 +274,7 @@ from typing import Any
     def generate_sensor(
         self,
         sensor_name: str,
-        sensor_type: Literal["file", "run_status", "custom", "s3", "email", "filesystem", "database", "webhook"],
+        sensor_type: str,  # Accept any string for community sensors
         job_name: str,
         description: str = "",
         file_path: str = "",
@@ -312,22 +312,52 @@ from typing import Any
         validate_signature: bool = False,
         signature_header: str = "X-Hub-Signature-256",
         secret_key: str = "",
+        **kwargs,  # Accept extra attributes for community sensors
     ) -> str:
         """
         Generate a sensor template (YAML component config for all sensor types).
 
         Args:
             sensor_name: Name of the sensor
-            sensor_type: Type of sensor
+            sensor_type: Type of sensor (or community sensor ID)
             job_name: Job to trigger
             description: Sensor description
             file_path: File path to watch (for file sensors)
             minimum_interval_seconds: Minimum interval between evaluations
             Additional params for each sensor type
+            **kwargs: Extra attributes for community sensors
 
         Returns:
             Generated YAML component configuration
         """
+        # Built-in sensor types
+        built_in_types = {"file", "run_status", "asset", "custom", "s3", "email", "filesystem", "database", "webhook"}
+
+        # Check if this is a community sensor (not a built-in type)
+        if sensor_type not in built_in_types:
+            # This is a community sensor - use the component_type if provided
+            component_type = kwargs.pop('component_type', f"community.{sensor_type}")
+
+            config = {
+                "type": component_type,
+                "attributes": {
+                    "sensor_name": sensor_name,
+                    "job_name": job_name,
+                    "minimum_interval_seconds": minimum_interval_seconds,
+                }
+            }
+
+            # Add description if provided
+            if description:
+                config["attributes"]["description"] = description
+
+            # Add all extra kwargs (community sensor specific attributes)
+            for key, value in kwargs.items():
+                if value not in (None, "", [], {}):  # Only include non-empty values
+                    config["attributes"][key] = value
+
+            return yaml.dump(config, default_flow_style=False, sort_keys=False)
+
         # For convenience sensors, generate YAML component config
         if sensor_type == "s3":
             config = {

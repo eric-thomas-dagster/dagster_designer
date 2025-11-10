@@ -56,9 +56,10 @@ class JobRequest(BaseModel):
 
 class SensorRequest(BaseModel):
     """Request to generate a sensor."""
+    model_config = {"extra": "allow"}  # Allow extra fields for community sensors
 
     sensor_name: str
-    sensor_type: Literal["file", "run_status", "custom", "s3", "email", "filesystem", "database", "webhook"]
+    sensor_type: str  # Changed from Literal to accept community sensor IDs
     job_name: str
     description: str = ""
     file_path: str = ""
@@ -317,6 +318,9 @@ async def generate_sensor(request: SensorRequest):
         Generated Python code
     """
     try:
+        # Get all fields from request, including extra fields for community sensors
+        request_dict = request.model_dump()
+
         code = template_service.generate_sensor(
             sensor_name=request.sensor_name,
             sensor_type=request.sensor_type,
@@ -357,6 +361,17 @@ async def generate_sensor(request: SensorRequest):
             validate_signature=request.validate_signature,
             signature_header=request.signature_header,
             secret_key=request.secret_key,
+            # Pass all extra fields for community sensors
+            **{k: v for k, v in request_dict.items() if k not in {
+                'sensor_name', 'sensor_type', 'job_name', 'description', 'file_path',
+                'minimum_interval_seconds', 'bucket_name', 'prefix', 'pattern', 'aws_region',
+                'since_key', 'imap_host', 'imap_port', 'email_user', 'email_password',
+                'mailbox', 'subject_pattern', 'from_pattern', 'mark_as_read', 'directory_path',
+                'file_pattern', 'recursive', 'move_after_processing', 'archive_directory',
+                'connection_string', 'table_name', 'timestamp_column', 'query_condition',
+                'batch_size', 'webhook_path', 'auth_token', 'validate_signature',
+                'signature_header', 'secret_key'
+            }}
         )
         return {"code": code, "sensor_name": request.sensor_name}
     except Exception as e:

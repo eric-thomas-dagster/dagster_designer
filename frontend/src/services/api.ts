@@ -398,10 +398,11 @@ export interface JobParams {
 
 export interface SensorParams {
   sensor_name: string;
-  sensor_type: 'file' | 'run_status' | 'custom' | 's3' | 'email' | 'filesystem' | 'database' | 'webhook';
+  sensor_type: 'file' | 'run_status' | 'asset' | 'custom' | 's3' | 'email' | 'filesystem' | 'database' | 'webhook';
   job_name: string;
   description?: string;
   file_path?: string;
+  asset_key?: string;
   monitored_job_name?: string;
   run_status?: 'SUCCESS' | 'FAILURE' | 'CANCELED';
   minimum_interval_seconds?: number;
@@ -577,7 +578,58 @@ export const templatesApi = {
     );
     return response.data;
   },
+
+  // Get installed community components
+  getInstalled: async (projectId: string): Promise<{ components: InstalledComponent[] }> => {
+    const response = await api.get<{ components: InstalledComponent[] }>(
+      `/templates/installed/${projectId}`
+    );
+    return response.data;
+  },
+
+  // Get schema for an installed community component
+  getInstalledComponentSchema: async (projectId: string, componentId: string): Promise<ComponentSchema> => {
+    const response = await api.get<ComponentSchema>(
+      `/templates/installed/${projectId}/${componentId}/schema`
+    );
+    return response.data;
+  },
 };
+
+// Installed Community Component types
+export interface InstalledComponent {
+  id: string;
+  name: string;
+  description: string;
+  component_type: string;
+  category: string;
+  version: string;
+}
+
+export interface ComponentSchema {
+  type: string;
+  name: string;
+  category: string;
+  description: string;
+  version?: string;
+  attributes: Record<string, ComponentAttribute>;
+  outputs?: any[];
+  dependencies?: any;
+  tags?: string[];
+}
+
+export interface ComponentAttribute {
+  type: 'string' | 'number' | 'boolean' | 'select';
+  required: boolean;
+  label: string;
+  description: string;
+  default?: any;
+  placeholder?: string;
+  sensitive?: boolean;
+  enum?: string[];
+  min?: number;
+  max?: number;
+}
 
 // Primitives API
 export type PrimitiveCategory = 'schedule' | 'job' | 'sensor' | 'asset_check';
