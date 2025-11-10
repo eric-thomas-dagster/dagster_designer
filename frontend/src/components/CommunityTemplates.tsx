@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { useQuery, useMutation } from '@tanstack/react-query';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Search, Download, ExternalLink, Tag, X, ChevronRight, Package } from 'lucide-react';
 import { useProjectStore } from '@/hooks/useProject';
 
@@ -39,6 +39,7 @@ interface ComponentDetails {
 
 export function CommunityTemplates() {
   const { currentProject, loadProject } = useProjectStore();
+  const queryClient = useQueryClient();
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedCategory, setSelectedCategory] = useState<string>('all');
   const [selectedComponent, setSelectedComponent] = useState<ComponentTemplate | null>(null);
@@ -90,8 +91,9 @@ export function CommunityTemplates() {
     onSuccess: (data) => {
       alert(`Component installed successfully!\n\nComponent: ${data.component_type}\nInstance: ${data.instance_name}\n\nFiles:\n${data.files_created.join('\n')}`);
       setSelectedComponent(null);
-      // Reload project to pick up new component
+      // Invalidate installed components cache to refresh dropdowns
       if (currentProject) {
+        queryClient.invalidateQueries({ queryKey: ['installed-components', currentProject.id] });
         loadProject(currentProject.id);
       }
     },

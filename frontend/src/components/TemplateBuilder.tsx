@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { useMutation, useQuery } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import Editor from '@monaco-editor/react';
 import * as Tabs from '@radix-ui/react-tabs';
 import {
@@ -31,7 +31,8 @@ import {
 import { useProjectStore } from '@/hooks/useProject';
 
 export function TemplateBuilder() {
-  const { currentProject } = useProjectStore();
+  const { currentProject, loadProject } = useProjectStore();
+  const queryClient = useQueryClient();
   const [activeTab, setActiveTab] = useState('python_asset');
   const [generatedCode, setGeneratedCode] = useState('');
   const [pendingTab, setPendingTab] = useState<string | null>(null);
@@ -373,8 +374,9 @@ ${generateYamlAttributes(communityAssetCheckAttributes, 1)}`;
     onSuccess: (data) => {
       if (selectedCommunityAssetCheck) {
         alert(`Component configured successfully!\n\nYAML file: ${data.yaml_file}`);
-        // Reload project to pick up new configuration
+        // Invalidate installed components cache and reload project
         if (currentProject) {
+          queryClient.invalidateQueries({ queryKey: ['installed-components', currentProject.id] });
           loadProject(currentProject.id);
         }
       } else {
