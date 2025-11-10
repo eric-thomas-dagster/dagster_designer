@@ -271,6 +271,14 @@ class FileService:
                 f"Command not allowed. Allowed commands: {', '.join(allowed_commands)}"
             )
 
+        # Use project's virtual environment for dg/dagster/python commands
+        venv_path = project_path / ".venv"
+        if venv_path.exists() and command_parts[0] in ["dg", "dagster", "python", "pip"]:
+            # Replace command with venv version
+            venv_cmd = venv_path / "bin" / command_parts[0]
+            if venv_cmd.exists():
+                command = str(venv_cmd) + " " + " ".join(command_parts[1:])
+
         try:
             result = subprocess.run(
                 command,
