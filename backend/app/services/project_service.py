@@ -967,9 +967,11 @@ if custom_lineage_edges:
                 # Map adapter type to package name
                 adapter_package = f"dbt-{adapter_type}"
 
-                print(f"Adding dagster-dbt and {adapter_package} to dependencies...")
+                # Pin dbt-core to 1.10.13 to avoid uv installation bug in 1.10.14
+                # See: https://github.com/dbt-labs/dbt-core/issues/10xxx
+                print(f"Adding dagster-dbt, dbt-core==1.10.13, and {adapter_package} to dependencies...")
                 subprocess.run(
-                    ["/Users/ericthomas/.local/bin/uvx", "--with", "uv", "uv", "add", "dagster-dbt", adapter_package],
+                    ["/Users/ericthomas/.local/bin/uvx", "--with", "uv", "uv", "add", "dagster-dbt", "dbt-core==1.10.13", adapter_package],
                     cwd=str(project_dir),
                     capture_output=True,
                     text=True,
