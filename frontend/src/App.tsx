@@ -15,8 +15,8 @@ import { ResourcesManager } from './components/ResourcesManager';
 import { PipelineBuilder } from './components/PipelineBuilder';
 import { DagsterStartupModal } from './components/DagsterStartupModal';
 import { useProjectStore } from './hooks/useProject';
-import { Network, FileCode, Wand2, Zap, Package, ExternalLink, Settings, Workflow, ChevronDown, Skull, FileText, GitBranch, Wrench } from 'lucide-react';
-import { dagsterUIApi, projectsApi, filesApi } from './services/api';
+import { Network, FileCode, Wand2, Zap, Package, ExternalLink, Settings, Workflow, ChevronDown, Skull } from 'lucide-react';
+import { dagsterUIApi, projectsApi } from './services/api';
 import type { ComponentInstance } from './types';
 
 function App() {
@@ -232,35 +232,6 @@ function App() {
     }
   };
 
-  const handleScaffoldBuildArtifacts = async () => {
-    if (!currentProject) return;
-
-    try {
-      const result = await filesApi.execute(currentProject.id, 'dg scaffold build-artifacts', 60);
-
-      if (result.success) {
-        alert('Successfully generated Dockerfile!\n\nCheck the project root directory for the generated Dockerfile.');
-      } else {
-        throw new Error(result.stderr || 'Failed to scaffold build artifacts');
-      }
-    } catch (error) {
-      console.error('Failed to scaffold build artifacts:', error);
-      alert('Failed to generate Dockerfile. Check console for details.');
-    }
-  };
-
-  const handleScaffoldGithubActions = () => {
-    alert(
-      'GitHub Actions Scaffolding\n\n' +
-      'The "dg scaffold github-actions" command requires interactive input:\n' +
-      '  • Dagster Plus organization name\n' +
-      '  • Default deployment name\n' +
-      '  • Deployment agent type (serverless/hybrid)\n\n' +
-      'Please use the Terminal tab to run this command interactively:\n' +
-      '  dg scaffold github-actions'
-    );
-  };
-
   return (
     <div className="h-screen flex flex-col bg-gray-50">
       {/* Header */}
@@ -275,76 +246,41 @@ function App() {
         </div>
         <div className="flex items-center space-x-3">
           {currentProject && (
-            <>
-              <DropdownMenu.Root>
-                <DropdownMenu.Trigger asChild>
-                  <button
-                    className="flex items-center space-x-2 px-4 py-2 border border-gray-300 rounded-md hover:bg-gray-100 transition-colors"
-                  >
-                    <Wrench className="w-4 h-4" />
-                    <span>Actions</span>
-                    <ChevronDown className="w-4 h-4 ml-1" />
-                  </button>
-                </DropdownMenu.Trigger>
-                <DropdownMenu.Portal>
-                  <DropdownMenu.Content
-                    className="min-w-[220px] bg-white rounded-md shadow-lg border border-gray-200 p-1"
-                    sideOffset={5}
-                    align="end"
-                  >
-                    <DropdownMenu.Item
-                      className="flex items-center space-x-2 px-3 py-2 text-sm text-gray-700 hover:bg-gray-100 rounded cursor-pointer outline-none"
-                      onSelect={handleScaffoldBuildArtifacts}
-                    >
-                      <FileText className="w-4 h-4" />
-                      <span>Generate Dockerfile</span>
-                    </DropdownMenu.Item>
-                    <DropdownMenu.Item
-                      className="flex items-center space-x-2 px-3 py-2 text-sm text-gray-700 hover:bg-gray-100 rounded cursor-pointer outline-none"
-                      onSelect={handleScaffoldGithubActions}
-                    >
-                      <GitBranch className="w-4 h-4" />
-                      <span>Generate GitHub Actions</span>
-                    </DropdownMenu.Item>
-                    <DropdownMenu.Separator className="h-px bg-gray-200 my-1" />
-                    <DropdownMenu.Item
-                      className="flex items-center space-x-2 px-3 py-2 text-sm text-red-600 hover:bg-red-50 rounded cursor-pointer outline-none"
-                      onSelect={handleKillAllDagsterProcesses}
-                    >
-                      <Skull className="w-4 h-4" />
-                      <span>Kill All Dagster Processes</span>
-                    </DropdownMenu.Item>
-                  </DropdownMenu.Content>
-                </DropdownMenu.Portal>
-              </DropdownMenu.Root>
-              <DropdownMenu.Root>
-                <DropdownMenu.Trigger asChild>
-                  <button
-                    disabled={dagsterUILoading}
-                    className="flex items-center space-x-2 px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+            <DropdownMenu.Root>
+              <DropdownMenu.Trigger asChild>
+                <button
+                  disabled={dagsterUILoading}
+                  className="flex items-center space-x-2 px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                >
+                  <ExternalLink className="w-4 h-4" />
+                  <span>{dagsterUILoading ? 'Starting...' : 'Open Dagster UI'}</span>
+                  <ChevronDown className="w-4 h-4 ml-1" />
+                </button>
+              </DropdownMenu.Trigger>
+              <DropdownMenu.Portal>
+                <DropdownMenu.Content
+                  className="min-w-[200px] bg-white rounded-md shadow-lg border border-gray-200 p-1"
+                  sideOffset={5}
+                  align="end"
+                >
+                  <DropdownMenu.Item
+                    className="flex items-center space-x-2 px-3 py-2 text-sm text-gray-700 hover:bg-gray-100 rounded cursor-pointer outline-none"
+                    onSelect={handleOpenDagsterUI}
                   >
                     <ExternalLink className="w-4 h-4" />
-                    <span>{dagsterUILoading ? 'Starting...' : 'Open Dagster UI'}</span>
-                    <ChevronDown className="w-4 h-4 ml-1" />
-                  </button>
-                </DropdownMenu.Trigger>
-                <DropdownMenu.Portal>
-                  <DropdownMenu.Content
-                    className="min-w-[200px] bg-white rounded-md shadow-lg border border-gray-200 p-1"
-                    sideOffset={5}
-                    align="end"
+                    <span>Open Dagster UI</span>
+                  </DropdownMenu.Item>
+                  <DropdownMenu.Separator className="h-px bg-gray-200 my-1" />
+                  <DropdownMenu.Item
+                    className="flex items-center space-x-2 px-3 py-2 text-sm text-red-600 hover:bg-red-50 rounded cursor-pointer outline-none"
+                    onSelect={handleKillAllDagsterProcesses}
                   >
-                    <DropdownMenu.Item
-                      className="flex items-center space-x-2 px-3 py-2 text-sm text-gray-700 hover:bg-gray-100 rounded cursor-pointer outline-none"
-                      onSelect={handleOpenDagsterUI}
-                    >
-                      <ExternalLink className="w-4 h-4" />
-                      <span>Open Dagster UI</span>
-                    </DropdownMenu.Item>
-                  </DropdownMenu.Content>
-                </DropdownMenu.Portal>
-              </DropdownMenu.Root>
-            </>
+                    <Skull className="w-4 h-4" />
+                    <span>Kill All Dagster Processes</span>
+                  </DropdownMenu.Item>
+                </DropdownMenu.Content>
+              </DropdownMenu.Portal>
+            </DropdownMenu.Root>
           )}
           <ProjectManager />
         </div>

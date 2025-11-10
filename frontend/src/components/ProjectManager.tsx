@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useProjectStore } from '@/hooks/useProject';
-import { codegenApi, projectsApi } from '@/services/api';
+import { codegenApi, projectsApi, filesApi } from '@/services/api';
 import {
   FolderOpen,
   Plus,
@@ -14,6 +14,8 @@ import {
   RefreshCw,
   Trash2,
   CheckCircle,
+  FileText,
+  GitBranch,
 } from 'lucide-react';
 
 export function ProjectManager() {
@@ -226,6 +228,35 @@ export function ProjectManager() {
     }
   };
 
+  const handleScaffoldBuildArtifacts = async () => {
+    if (!currentProject) return;
+
+    try {
+      const result = await filesApi.execute(currentProject.id, 'dg scaffold build-artifacts', 60);
+
+      if (result.success) {
+        alert('Successfully generated Dockerfile!\n\nCheck the project root directory for the generated Dockerfile.');
+      } else {
+        throw new Error(result.stderr || 'Failed to scaffold build artifacts');
+      }
+    } catch (error) {
+      console.error('Failed to scaffold build artifacts:', error);
+      alert('Failed to generate Dockerfile. Check console for details.');
+    }
+  };
+
+  const handleScaffoldGithubActions = () => {
+    alert(
+      'GitHub Actions Scaffolding\n\n' +
+      'The "dg scaffold github-actions" command requires interactive input:\n' +
+      '  • Dagster Plus organization name\n' +
+      '  • Default deployment name\n' +
+      '  • Deployment agent type (serverless/hybrid)\n\n' +
+      'Please use the Terminal tab to run this command interactively:\n' +
+      '  dg scaffold github-actions'
+    );
+  };
+
   return (
     <>
       <div className="flex items-center space-x-2">
@@ -359,6 +390,26 @@ export function ProjectManager() {
                   >
                     <CheckCircle className="w-4 h-4" />
                     <span>{isValidating ? 'Validating...' : 'Validate Project'}</span>
+                  </button>
+                  <button
+                    onClick={() => {
+                      handleScaffoldBuildArtifacts();
+                      setShowActionsMenu(false);
+                    }}
+                    className="w-full flex items-center space-x-2 px-4 py-2 text-sm text-gray-700 hover:bg-gray-50"
+                  >
+                    <FileText className="w-4 h-4" />
+                    <span>Generate Dockerfile</span>
+                  </button>
+                  <button
+                    onClick={() => {
+                      handleScaffoldGithubActions();
+                      setShowActionsMenu(false);
+                    }}
+                    className="w-full flex items-center space-x-2 px-4 py-2 text-sm text-gray-700 hover:bg-gray-50"
+                  >
+                    <GitBranch className="w-4 h-4" />
+                    <span>Generate GitHub Actions</span>
                   </button>
                   <div className="border-t border-gray-200 my-1" />
                   <button
