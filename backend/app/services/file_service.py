@@ -272,18 +272,18 @@ class FileService:
             )
 
         # Use project's virtual environment for dg/dagster/python commands
-        venv_path = project_path / ".venv"
-        if venv_path.exists() and command_parts[0] in ["dg", "dagster", "python", "pip"]:
-            # Replace command with venv version
-            venv_cmd = venv_path / "bin" / command_parts[0]
+        # Build command as list for subprocess, not shell string
+        cmd_list = command_parts.copy()
+        if command_parts[0] in ["dg", "dagster", "python", "pip"]:
+            venv_cmd = project_path / ".venv" / "bin" / command_parts[0]
             if venv_cmd.exists():
-                command = str(venv_cmd) + " " + " ".join(command_parts[1:])
+                # Use absolute path to venv command
+                cmd_list = [str(venv_cmd.absolute())] + command_parts[1:]
 
         try:
             result = subprocess.run(
-                command,
-                shell=True,
-                cwd=project_path,
+                cmd_list,
+                cwd=str(project_path.absolute()),
                 capture_output=True,
                 text=True,
                 timeout=timeout,
@@ -291,7 +291,7 @@ class FileService:
 
             return {
                 "project_id": project_id,
-                "command": command,
+                "command": " ".join(cmd_list),
                 "stdout": result.stdout,
                 "stderr": result.stderr,
                 "return_code": result.returncode,
