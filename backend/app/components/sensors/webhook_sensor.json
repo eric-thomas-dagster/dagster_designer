@@ -1,0 +1,64 @@
+{
+  "type": "dagster_designer_components.WebhookSensorComponent",
+  "name": "Webhook Sensor",
+  "category": "sensors",
+  "description": "Listens for HTTP webhook callbacks and triggers jobs",
+  "attributes": {
+    "sensor_name": {
+      "type": "string",
+      "required": true,
+      "label": "Sensor Name",
+      "description": "Name for the sensor",
+      "default": "my_webhook_sensor"
+    },
+    "webhook_path": {
+      "type": "string",
+      "required": true,
+      "label": "Webhook Path",
+      "description": "URL path for the webhook endpoint",
+      "placeholder": "/webhooks/my-webhook"
+    },
+    "job_name": {
+      "type": "string",
+      "required": true,
+      "label": "Job to Trigger",
+      "description": "The job to run when webhook is called",
+      "placeholder": "webhook_processing_job"
+    },
+    "auth_token": {
+      "type": "string",
+      "required": false,
+      "label": "Auth Token",
+      "description": "Optional bearer token for authentication (use env var)",
+      "placeholder": "${WEBHOOK_TOKEN}",
+      "sensitive": true
+    },
+    "validate_signature": {
+      "type": "boolean",
+      "required": false,
+      "label": "Validate Signature",
+      "description": "Validate webhook signature (GitHub style)",
+      "default": false
+    },
+    "signature_header": {
+      "type": "string",
+      "required": false,
+      "label": "Signature Header",
+      "description": "HTTP header containing the signature",
+      "placeholder": "X-Hub-Signature-256"
+    },
+    "secret_key": {
+      "type": "string",
+      "required": false,
+      "label": "Secret Key",
+      "description": "Secret key for signature validation (use env var)",
+      "placeholder": "${WEBHOOK_SECRET}",
+      "sensitive": true
+    }
+  },
+  "outputs": [],
+  "dependencies": {
+    "pip": []
+  },
+  "tags": ["sensor", "webhook", "http", "api"]
+}

@@ -1,0 +1,69 @@
+{
+  "type": "dagster_designer_components.S3SensorComponent",
+  "name": "S3 Bucket Sensor",
+  "category": "sensors",
+  "description": "Monitors an S3 bucket for new or modified objects matching a pattern",
+  "attributes": {
+    "sensor_name": {
+      "type": "string",
+      "required": true,
+      "label": "Sensor Name",
+      "description": "Name for the sensor",
+      "default": "my_s3_sensor"
+    },
+    "bucket_name": {
+      "type": "string",
+      "required": true,
+      "label": "S3 Bucket Name",
+      "description": "The S3 bucket to monitor",
+      "placeholder": "my-bucket"
+    },
+    "prefix": {
+      "type": "string",
+      "required": false,
+      "label": "Object Prefix",
+      "description": "Filter objects by prefix (e.g., 'data/raw/')",
+      "placeholder": "data/raw/"
+    },
+    "pattern": {
+      "type": "string",
+      "required": false,
+      "label": "Pattern Match",
+      "description": "Regex pattern to match object keys (e.g., '.*\\.csv$' for CSV files)",
+      "placeholder": ".*\\.csv$"
+    },
+    "job_name": {
+      "type": "string",
+      "required": true,
+      "label": "Job to Trigger",
+      "description": "The job to run when new objects are detected",
+      "placeholder": "my_processing_job"
+    },
+    "minimum_interval_seconds": {
+      "type": "number",
+      "required": false,
+      "label": "Check Interval (seconds)",
+      "description": "How often to check for new files",
+      "default": 30
+    },
+    "aws_region": {
+      "type": "string",
+      "required": false,
+      "label": "AWS Region",
+      "description": "AWS region (defaults to environment variable)",
+      "placeholder": "us-east-1"
+    },
+    "since_key": {
+      "type": "string",
+      "required": false,
+      "label": "Start After Key",
+      "description": "Only process objects lexicographically after this key",
+      "placeholder": "data/2024-01-01/file.csv"
+    }
+  },
+  "outputs": [],
+  "dependencies": {
+    "pip": ["boto3"]
+  },
+  "tags": ["sensor", "s3", "aws", "storage"]
+}

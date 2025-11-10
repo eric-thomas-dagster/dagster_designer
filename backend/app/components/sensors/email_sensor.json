@@ -1,0 +1,91 @@
+{
+  "type": "dagster_designer_components.EmailSensorComponent",
+  "name": "Email Inbox Sensor",
+  "category": "sensors",
+  "description": "Monitors an email inbox (IMAP) for new emails matching criteria",
+  "attributes": {
+    "sensor_name": {
+      "type": "string",
+      "required": true,
+      "label": "Sensor Name",
+      "description": "Name for the sensor",
+      "default": "my_email_sensor"
+    },
+    "imap_host": {
+      "type": "string",
+      "required": true,
+      "label": "IMAP Host",
+      "description": "IMAP server hostname",
+      "placeholder": "imap.gmail.com"
+    },
+    "imap_port": {
+      "type": "number",
+      "required": false,
+      "label": "IMAP Port",
+      "description": "IMAP server port",
+      "default": 993
+    },
+    "email_user": {
+      "type": "string",
+      "required": true,
+      "label": "Email Username",
+      "description": "Username for IMAP authentication (use env var)",
+      "placeholder": "${EMAIL_USER}"
+    },
+    "email_password": {
+      "type": "string",
+      "required": true,
+      "label": "Email Password",
+      "description": "Password for IMAP authentication (use env var)",
+      "placeholder": "${EMAIL_PASSWORD}",
+      "sensitive": true
+    },
+    "mailbox": {
+      "type": "string",
+      "required": false,
+      "label": "Mailbox/Folder",
+      "description": "Which mailbox folder to monitor",
+      "default": "INBOX"
+    },
+    "subject_pattern": {
+      "type": "string",
+      "required": false,
+      "label": "Subject Pattern",
+      "description": "Regex pattern to match email subjects",
+      "placeholder": "^\\[Alert\\].*"
+    },
+    "from_pattern": {
+      "type": "string",
+      "required": false,
+      "label": "From Address Pattern",
+      "description": "Regex pattern to match sender email addresses",
+      "placeholder": ".*@company\\.com$"
+    },
+    "job_name": {
+      "type": "string",
+      "required": true,
+      "label": "Job to Trigger",
+      "description": "The job to run when matching emails are found",
+      "placeholder": "process_email_job"
+    },
+    "minimum_interval_seconds": {
+      "type": "number",
+      "required": false,
+      "label": "Check Interval (seconds)",
+      "description": "How often to check for new emails",
+      "default": 60
+    },
+    "mark_as_read": {
+      "type": "boolean",
+      "required": false,
+      "label": "Mark as Read",
+      "description": "Mark processed emails as read",
+      "default": true
+    }
+  },
+  "outputs": [],
+  "dependencies": {
+    "pip": ["imapclient"]
+  },
+  "tags": ["sensor", "email", "imap", "notification"]
+}

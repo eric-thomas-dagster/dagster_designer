@@ -1,0 +1,69 @@
+{
+  "type": "dagster_designer_components.FileSystemSensorComponent",
+  "name": "File System Sensor",
+  "category": "sensors",
+  "description": "Monitors a local or network file system directory for new files",
+  "attributes": {
+    "sensor_name": {
+      "type": "string",
+      "required": true,
+      "label": "Sensor Name",
+      "description": "Name for the sensor",
+      "default": "my_filesystem_sensor"
+    },
+    "directory_path": {
+      "type": "string",
+      "required": true,
+      "label": "Directory Path",
+      "description": "Path to the directory to monitor",
+      "placeholder": "/data/incoming"
+    },
+    "file_pattern": {
+      "type": "string",
+      "required": false,
+      "label": "File Pattern",
+      "description": "Glob pattern to match files (e.g., '*.csv', '*.json')",
+      "placeholder": "*.csv"
+    },
+    "recursive": {
+      "type": "boolean",
+      "required": false,
+      "label": "Recursive",
+      "description": "Monitor subdirectories recursively",
+      "default": false
+    },
+    "job_name": {
+      "type": "string",
+      "required": true,
+      "label": "Job to Trigger",
+      "description": "The job to run when new files are detected",
+      "placeholder": "file_processing_job"
+    },
+    "minimum_interval_seconds": {
+      "type": "number",
+      "required": false,
+      "label": "Check Interval (seconds)",
+      "description": "How often to check for new files",
+      "default": 30
+    },
+    "move_after_processing": {
+      "type": "boolean",
+      "required": false,
+      "label": "Move After Processing",
+      "description": "Move files to archive directory after processing",
+      "default": false
+    },
+    "archive_directory": {
+      "type": "string",
+      "required": false,
+      "label": "Archive Directory",
+      "description": "Directory to move processed files to",
+      "placeholder": "/data/archive"
+    }
+  },
+  "outputs": [],
+  "dependencies": {
+    "pip": []
+  },
+  "tags": ["sensor", "filesystem", "files", "local"]
+}

@@ -1,0 +1,1634 @@
+"""Service for managing pipeline projects."""
+
+import json
+import uuid
+import subprocess
+import toml
+import sys
+import venv
+import yaml
+from pathlib import Path
+from datetime import datetime
+
+from ..core.config import settings
+from ..models.project import Project, ProjectCreate, ProjectUpdate
+from .component_registry import component_registry
+
+
+class ProjectService:
+    """Service for project CRUD operations."""
+
+    def __init__(self):
+        self.projects_dir = settings.projects_dir
+
+    def _get_project_file(self, project_id: str) -> Path:
+        """Get the file path for a project."""
+        return self.projects_dir / f"{project_id}.json"
+
+    def _get_project_dir(self, project: Project) -> Path:
+        """Get the directory path for a project.
+
+        Uses the sanitized directory_name if available, otherwise falls back to project.id
+        for backwards compatibility with old projects.
+        """
+        if project.directory_name:
+            return self.projects_dir / project.directory_name
+        return self.projects_dir / project.id
+
+    def create_project(self, project_create: ProjectCreate) -> Project:
+        """Create a new project."""
+        print(f"\n{'='*60}")
+        print(f"🚀 Creating new project: {project_create.name}")
+        print(f"{'='*60}")
+
+        project_id = str(uuid.uuid4())
+        print(f"📋 Generated project ID: {project_id}")
+
+        project = Project(
+            id=project_id,
+            name=project_create.name,
+            description=project_create.description,
+            git_repo=project_create.git_repo,
+            git_branch=project_create.git_branch,
+            is_imported=bool(project_create.git_repo),  # Mark as imported if created from git repo
+        )
+
+        # If a git repo is specified, automatically add a dbt component to components list
+        if project_create.git_repo:
+            from ..models.component import ComponentInstance
+            repo_name = self._extract_repo_name(project_create.git_repo)
+            dbt_component = ComponentInstance(
+                id=f"dbt-{uuid.uuid4().hex[:8]}",
+                component_type="dagster_dbt.DbtProjectComponent",
+                label=f"{project.name} dbt",
+                attributes={
+                    "project_path": repo_name,
+                },
+                is_asset_factory=True,
+            )
+            project.components.append(dbt_component)
+
+        print(f"🏗️  Scaffolding project structure with create-dagster...")
+        self._scaffold_project_with_create_dagster(project)
+
+        # Save project metadata AFTER scaffolding so directory_name is set
+        print(f"💾 Saving project metadata...")
+        self._save_project(project)
+
+        # Clone git repository if specified
+        if project.git_repo:
+            print(f"📦 Cloning git repository...")
+            result = self._clone_git_repo(project)
+            if result:
+                repo_dir, repo_name = result
+                print(f"Successfully cloned repository to {repo_dir}")
+                # Create minimal profiles.yml for dbt
+                self._create_dbt_profiles(repo_dir)
+
+        # Install dependencies BEFORE scaffolding components so dg is available
+        print(f"📥 Installing project dependencies...")
+        self._install_dependencies_with_uv(project)
+
+        # Add components using dg scaffold (must come AFTER dependency installation)
+        if project.components:
+            print(f"📦 Scaffolding {len(project.components)} components...")
+            self._scaffold_components(project)
+
+        print(f"✅ Project {project.name} created successfully!")
+        print(f"{'='*60}\n")
+        return project
+
+    def import_project(self, project_path: str) -> Project:
+        """Import an existing Dagster project from disk.
+
+        Args:
+            project_path: Absolute path to the existing Dagster project directory
+
+        Returns:
+            Project object for the imported project
+
+        Raises:
+            ValueError: If the path is invalid or not a valid Dagster project
+        """
+        import shutil
+
+        print(f"\n{'='*60}")
+        print(f"📦 Importing existing Dagster project from: {project_path}")
+        print(f"{'='*60}")
+
+        # Validate path
+        source_path = Path(project_path).resolve()
+        if not source_path.exists():
+            raise ValueError(f"Path does not exist: {project_path}")
+
+        if not source_path.is_dir():
+            raise ValueError(f"Path is not a directory: {project_path}")
+
+        # Check if it's a valid Dagster project by looking for pyproject.toml
+        pyproject_file = source_path / "pyproject.toml"
+        if not pyproject_file.exists():
+            raise ValueError(f"Not a valid Dagster project (missing pyproject.toml): {project_path}")
+
+        # Try to read pyproject.toml to extract project name
+        try:
+            with open(pyproject_file, "r") as f:
+                pyproject_data = toml.load(f)
+            project_name = pyproject_data.get("project", {}).get("name", source_path.name)
+        except Exception as e:
+            print(f"⚠️  Warning: Could not read pyproject.toml: {e}")
+            project_name = source_path.name
+
+        # Generate new project ID
+        project_id = str(uuid.uuid4())
+        print(f"📋 Generated project ID: {project_id}")
+
+        # Sanitize project name for directory
+        module_name = project_name.lower().replace(" ", "_").replace("-", "_")
+        if module_name and module_name[0].isdigit():
+            module_name = f"project_{module_name}"
+
+        # Create directory name
+        dir_name = f"project_{project_id.split('-')[0]}_{module_name}"
+
+        # Create project object
+        project = Project(
+            id=project_id,
+            name=project_name,
+            description=f"Imported from {project_path}",
+            directory_name=dir_name,
+            is_imported=True,  # Mark as imported
+        )
+
+        # Copy project to projects directory
+        dest_path = self._get_project_dir(project)
+        print(f"📁 Copying project to: {dest_path}")
+
+        try:
+            # Copy the entire project directory
+            shutil.copytree(source_path, dest_path, symlinks=False, ignore=shutil.ignore_patterns('.git', '__pycache__', '*.pyc'))
+            print(f"✅ Project files copied")
+        except Exception as e:
+            raise ValueError(f"Failed to copy project: {e}")
+
+        # Check if virtualenv exists in the copied project
+        venv_dir = dest_path / ".venv"
+        if venv_dir.exists():
+            print(f"🔄 Removing existing virtual environment...")
+            shutil.rmtree(venv_dir)
+
+        # Install dependencies with uv
+        print(f"📥 Installing project dependencies with uv...")
+        self._install_dependencies_with_uv(project)
+
+        # Inject custom lineage loading logic into definitions.py
+        print(f"🔧 Injecting custom lineage support into definitions.py...")
+        self._inject_custom_lineage_logic(project)
+
+        # Discover existing components in the project
+        print(f"🔍 Discovering components in imported project...")
+        self._discover_components(project)
+
+        # Save project metadata
+        print(f"💾 Saving project metadata...")
+        self._save_project(project)
+
+        print(f"✅ Project {project.name} imported successfully!")
+        print(f"{'='*60}\n")
+        return project
+
+    def get_project(self, project_id: str) -> Project | None:
+        """Get a project by ID."""
+        project_file = self._get_project_file(project_id)
+
+        if not project_file.exists():
+            return None
+
+        with open(project_file, "r") as f:
+            data = json.load(f)
+            return Project(**data)
+
+    def list_projects(self) -> list[Project]:
+        """List all projects."""
+        projects = []
+
+        for project_file in self.projects_dir.glob("*.json"):
+            try:
+                with open(project_file, "r") as f:
+                    data = json.load(f)
+                    projects.append(Project(**data))
+            except Exception:
+                # Skip invalid project files
+                continue
+
+        # Sort by updated_at descending
+        projects.sort(key=lambda p: p.updated_at, reverse=True)
+        return projects
+
+    def update_project(self, project_id: str, project_update: ProjectUpdate) -> Project | None:
+        """Update a project."""
+        import sys
+        from ..models.component import ComponentInstance
+        from ..models.graph import PipelineGraph
+
+        print(f"\n[update_project] ====== START ======", flush=True)
+        print(f"[update_project] project_id: {project_id}", flush=True)
+        sys.stdout.flush()
+
+        project = self.get_project(project_id)
+        if not project:
+            print(f"[update_project] Project not found!", flush=True)
+            return None
+
+        # Update fields
+        update_data = project_update.model_dump(exclude_unset=True)
+        print(f"[update_project] update_data keys: {list(update_data.keys())}", flush=True)
+        print(f"[update_project] 'components' in update_data: {'components' in update_data}", flush=True)
+        print(f"[update_project] 'graph' in update_data: {'graph' in update_data}", flush=True)
+
+        if "components" in update_data:
+            print(f"[update_project] Number of components: {len(update_data['components'])}", flush=True)
+        if "graph" in update_data:
+            print(f"[update_project] Graph has {len(update_data['graph'].get('nodes', []))} nodes", flush=True)
+        sys.stdout.flush()
+
+        # Convert dicts to proper Pydantic models before setting
+        for field, value in update_data.items():
+            if field == "components" and isinstance(value, list):
+                # Reconstruct ComponentInstance objects
+                reconstructed_components = []
+                for comp in value:
+                    if isinstance(comp, dict):
+                        reconstructed_components.append(ComponentInstance(**comp))
+                    else:
+                        reconstructed_components.append(comp)
+                setattr(project, field, reconstructed_components)
+                print(f"[update_project] Reconstructed {len(reconstructed_components)} components", flush=True)
+            elif field == "graph" and isinstance(value, dict):
+                # Reconstruct PipelineGraph object
+                reconstructed_graph = PipelineGraph(**value)
+                setattr(project, field, reconstructed_graph)
+                print(f"[update_project] Reconstructed graph with {len(reconstructed_graph.nodes)} nodes", flush=True)
+            elif field == "custom_lineage" and isinstance(value, list):
+                # Reconstruct CustomLineageEdge objects
+                from ..models.project import CustomLineageEdge
+                reconstructed_lineage = []
+                for edge in value:
+                    if isinstance(edge, dict):
+                        reconstructed_lineage.append(CustomLineageEdge(**edge))
+                    else:
+                        reconstructed_lineage.append(edge)
+                setattr(project, field, reconstructed_lineage)
+                print(f"[update_project] Reconstructed {len(reconstructed_lineage)} custom lineage edges", flush=True)
+            else:
+                setattr(project, field, value)
+
+        # If components were updated, inject dependencies and reinstall
+        if "components" in update_data:
+            print(f"[update_project] Components updated! Calling YAML generation...", flush=True)
+            sys.stdout.flush()
+            self._update_project_dependencies(project)
+            self._install_project_dependencies(project)
+            # Generate YAML files for primitive components (job, schedule, sensor, asset_check)
+            self._generate_component_yaml_files(project)
+            # Generate definitions.py with asset customizations
+            self._generate_definitions_with_asset_customizations(project)
+            print(f"[update_project] YAML generation and definitions completed", flush=True)
+        else:
+            print(f"[update_project] Components NOT in update_data, skipping YAML generation", flush=True)
+
+        project.updated_at = datetime.now()
+        self._save_project(project)
+        print(f"[update_project] ====== END ======\n", flush=True)
+        sys.stdout.flush()
+        return project
+
+    def discover_components_for_project(self, project_id: str) -> Project | None:
+        """Discover components from YAML files in an existing project.
+
+        This is useful for imported projects or when components are manually added.
+
+        Args:
+            project_id: The project ID
+
+        Returns:
+            Updated project with discovered components, or None if project not found
+        """
+        project = self.get_project(project_id)
+        if not project:
+            return None
+
+        print(f"\n{'='*60}")
+        print(f"🔍 Discovering components for project: {project.name}")
+        print(f"{'='*60}")
+
+        # Clear existing components before discovery
+        original_count = len(project.components)
+        project.components = []
+        print(f"Cleared {original_count} existing components")
+
+        # Discover components
+        self._discover_components(project)
+
+        # Save the updated project
+        project.updated_at = datetime.now()
+        self._save_project(project)
+
+        print(f"✅ Component discovery complete! Found {len(project.components)} components")
+        print(f"{'='*60}\n")
+
+        return project
+
+    def delete_project(self, project_id: str) -> bool:
+        """Delete a project and its associated files."""
+        import shutil
+
+        project_file = self._get_project_file(project_id)
+
+        if not project_file.exists():
+            return False
+
+        # Get project to find its directory
+        project = self.get_project(project_id)
+
+        # Delete project directory if it exists
+        if project:
+            project_dir = self._get_project_dir(project)
+            if project_dir.exists():
+                print(f"🗑️  Deleting project directory: {project_dir}")
+                shutil.rmtree(project_dir)
+                print(f"✅ Project directory deleted")
+
+        # Delete project JSON file
+        project_file.unlink()
+        print(f"✅ Project metadata deleted")
+
+        return True
+
+    def clone_repo_for_project(self, project_id: str, git_repo: str, git_branch: str = "main") -> tuple[Project, str] | None:
+        """Clone a git repository for an existing project.
+
+        Returns:
+            Tuple of (updated project, repo directory name) or None if project not found.
+        """
+        project = self.get_project(project_id)
+        if not project:
+            return None
+
+        # Update project with git info
+        project.git_repo = git_repo
+        project.git_branch = git_branch
+        project.updated_at = datetime.now()
+
+        # Clone the repository
+        result = self._clone_git_repo(project)
+        repo_name = ""
+        if result:
+            repo_dir, repo_name = result
+            print(f"Successfully cloned repository to {repo_dir}")
+
+        self._save_project(project)
+        return project, repo_name
+
+    def _save_project(self, project: Project):
+        """Save a project to disk."""
+        project_file = self._get_project_file(project.id)
+
+        with open(project_file, "w") as f:
+            json.dump(project.model_dump(mode="json"), f, indent=2, default=str)
+
+        # NOTE: We no longer write a root defs.yaml file because we use the modern
+        # subdirectory structure where each component has its own defs.yaml in a subdirectory.
+        # Writing both causes conflicts with Dagster's load_from_defs_folder.
+        # self._write_defs_yaml(project)
+
+        # Write custom lineage to JSON file for Dagster to load
+        self._write_custom_lineage_file(project)
+
+    def _write_defs_yaml(self, project: Project):
+        """Write all components to a defs.yaml file in the project directory.
+
+        This creates a version-controllable YAML file that can be used as the source of truth.
+        The file contains all components in multi-document YAML format (separated by ---).
+        """
+        import yaml
+
+        project_dir = self._get_project_dir(project)
+
+        # Find the defs directory (handles both src/module/defs and module/defs structures)
+        defs_dir = None
+
+        # First, try src/<module>/defs (scaffolded projects)
+        if (project_dir / "src").exists():
+            module_name = project.directory_name.replace("-", "_")
+            candidate = project_dir / "src" / module_name / "defs"
+            if candidate.exists():
+                defs_dir = candidate
+
+        # Then try <module>/defs at project root (imported projects)
+        if not defs_dir:
+            for item in project_dir.iterdir():
+                if item.is_dir() and not item.name.startswith('.') and item.name not in ['src', 'tests', 'dbt_project', '.venv', '__pycache__']:
+                    candidate = item / "defs"
+                    if candidate.exists():
+                        defs_dir = candidate
+                        break
+
+        if not defs_dir or not defs_dir.exists():
+            print(f"[_write_defs_yaml] Could not find defs directory for project {project.name}")
+            return
+
+        # Generate YAML documents for each component
+        yaml_docs = []
+
+        for component in project.components:
+            doc = {
+                'type': component.component_type,
+                'attributes': component.attributes
+            }
+
+            # Add optional fields if present (but not label - it's not valid in Dagster's schema)
+            # ComponentInstance doesn't have description attribute
+            # if needed in the future, add it to the model
+            if component.translation:
+                doc['translation'] = component.translation
+            if component.post_processing:
+                doc['post_processing'] = component.post_processing
+
+            # Convert to YAML string
+            yaml_str = yaml.dump(doc, default_flow_style=False, sort_keys=False)
+            yaml_docs.append(yaml_str)
+
+        # Combine with --- separators
+        yaml_content = "---\n\n".join(yaml_docs)
+
+        # Write to defs.yaml
+        defs_yaml_file = defs_dir / "defs.yaml"
+
+        with open(defs_yaml_file, "w") as f:
+            f.write(yaml_content)
+
+        print(f"[_write_defs_yaml] Wrote {len(project.components)} components to {defs_yaml_file}")
+
+    def _write_custom_lineage_file(self, project: Project):
+        """Write custom lineage to a JSON file in the project directory.
+
+        This file is read by definitions.py to inject custom dependencies.
+        Merges edges from both project.custom_lineage and DependencyGraphComponent.
+        """
+        project_dir = self._get_project_dir(project)
+
+        # Find the defs directory (handles both src/ and imported project structures)
+        defs_dir = None
+
+        # First, try <module>/defs at project root (imported projects)
+        for item in project_dir.iterdir():
+            if item.is_dir() and not item.name.startswith('.') and item.name not in ['src', 'tests', 'dbt_project', '.venv', '__pycache__']:
+                potential_defs_dir = item / "defs"
+                if potential_defs_dir.exists() and (potential_defs_dir / "__init__.py").exists():
+                    defs_dir = potential_defs_dir
+                    break
+
+        # If not found, check for standard structure (src/module/defs)
+        if not defs_dir:
+            src_dir = project_dir / "src"
+            if src_dir.exists() and src_dir.is_dir():
+                for item in src_dir.iterdir():
+                    if item.is_dir() and not item.name.startswith('.'):
+                        potential_defs_dir = item / "defs"
+                        if potential_defs_dir.exists():
+                            defs_dir = potential_defs_dir
+                            break
+
+        if not defs_dir:
+            print(f"⚠️  Could not find defs directory for custom_lineage.json", flush=True)
+            return
+
+        custom_lineage_file = defs_dir / "custom_lineage.json"
+
+        # Create parent directories if they don't exist
+        custom_lineage_file.parent.mkdir(parents=True, exist_ok=True)
+
+        # Collect all edges from multiple sources
+        all_edges = []
+
+        # 1. Add edges from project.custom_lineage (legacy/UI-drawn edges)
+        for edge in project.custom_lineage:
+            all_edges.append({"source": edge.source, "target": edge.target})
+
+        # 2. Add edges from DependencyGraphComponent (YAML-based dependencies)
+        dep_graph_component = next(
+            (comp for comp in project.components
+             if comp.component_type == 'dagster_component_templates.DependencyGraphComponent'),
+            None
+        )
+
+        component_edges = []
+        if dep_graph_component:
+            component_edges = dep_graph_component.attributes.get('edges', [])
+            for edge in component_edges:
+                if isinstance(edge, dict) and 'source' in edge and 'target' in edge:
+                    all_edges.append({"source": edge['source'], "target": edge['target']})
+
+        # Deduplicate edges and filter out self-loops
+        unique_edges = []
+        seen = set()
+        for edge in all_edges:
+            # Skip self-loops (asset depending on itself)
+            if edge['source'] == edge['target']:
+                print(f"⚠️  Skipping self-loop: {edge['source']} -> {edge['target']}", flush=True)
+                continue
+
+            edge_tuple = (edge['source'], edge['target'])
+            if edge_tuple not in seen:
+                seen.add(edge_tuple)
+                unique_edges.append(edge)
+
+        # Write to file
+        lineage_data = {"edges": unique_edges}
+
+        with open(custom_lineage_file, "w") as f:
+            json.dump(lineage_data, f, indent=2)
+
+        print(f"✅ Written custom_lineage.json with {len(unique_edges)} edges "
+              f"({len(project.custom_lineage)} from UI, "
+              f"{len(component_edges)} from DependencyGraphComponent)",
+              flush=True)
+
+    def _inject_custom_lineage_logic(self, project: Project):
+        """Inject custom lineage loading logic into an imported project's definitions.py.
+
+        This ensures that DependencyGraphComponent edges are applied to asset specs
+        at runtime via map_asset_specs().
+        """
+        project_dir = self._get_project_dir(project)
+
+        # Find the definitions.py file (handles both src/ and imported project structures)
+        definitions_file = None
+
+        # Try standard structure first (src/module/__init__.py)
+        src_dir = project_dir / "src"
+        if src_dir.exists():
+            for item in src_dir.iterdir():
+                if item.is_dir() and not item.name.startswith('.'):
+                    candidate = item / "definitions.py"
+                    if candidate.exists():
+                        definitions_file = candidate
+                        break
+
+        # Try imported project structure (module/__init__.py at root)
+        if not definitions_file:
+            for item in project_dir.iterdir():
+                if item.is_dir() and not item.name.startswith('.') and item.name not in ['src', 'tests', 'dbt_project', '.venv', '__pycache__']:
+                    candidate = item / "definitions.py"
+                    if candidate.exists():
+                        definitions_file = candidate
+                        break
+
+        if not definitions_file:
+            print(f"⚠️  Could not find definitions.py to inject custom lineage logic", flush=True)
+            return
+
+        # Read the existing definitions.py content
+        with open(definitions_file, "r") as f:
+            content = f.read()
+
+        # Check if custom lineage logic already exists
+        if "custom_lineage" in content and "inject_custom_dependencies" in content:
+            print(f"✅ Custom lineage logic already exists in definitions.py", flush=True)
+            return
+
+        # Prepare the custom lineage code to inject
+        custom_lineage_code = '''
+# Load custom lineage from JSON file (if it exists)
+custom_lineage_file = Path(__file__).parent / "defs" / "custom_lineage.json"
+custom_lineage_edges = []
+if custom_lineage_file.exists():
+    try:
+        with open(custom_lineage_file, "r") as f:
+            custom_lineage_data = json.load(f)
+            custom_lineage_edges = custom_lineage_data.get("edges", [])
+            if custom_lineage_edges:
+                print(f"✅ Loaded {len(custom_lineage_edges)} custom lineage edge(s)")
+    except Exception as e:
+        print(f"⚠️  Failed to load custom_lineage.json: {e}")
+'''
+
+        inject_code = '''
+# Apply custom lineage by injecting dependencies into asset specs
+if custom_lineage_edges:
+    print(f"⚠️  Custom lineage injection temporarily disabled due to API compatibility issues")
+    print(f"    Custom lineage is tracked in the UI but does not affect Dagster runtime dependencies")
+    # TODO: Fix custom lineage injection for Dagster 1.11+
+    # The challenge is properly merging AssetDep objects with existing deps
+'''
+
+        # Check if we need to add imports
+        needs_json = "import json" not in content
+        needs_pathlib = "from pathlib import Path" not in content and "import pathlib" not in content
+
+        # Build the injection
+        lines = content.split('\n')
+
+        # Find where to inject imports (after existing imports)
+        import_section_end = 0
+        for i, line in enumerate(lines):
+            if line.startswith('import ') or line.startswith('from '):
+                import_section_end = i + 1
+
+        # Add missing imports
+        if needs_json or needs_pathlib:
+            new_imports = []
+            if needs_json:
+                new_imports.append("import json")
+            if needs_pathlib:
+                new_imports.append("from pathlib import Path")
+
+            # Insert after last import
+            for imp in reversed(new_imports):
+                lines.insert(import_section_end, imp)
+            import_section_end += len(new_imports)
+
+        # Find where to inject custom lineage loading (before defs creation)
+        # Look for common patterns like "defs = " or "Definitions("
+        defs_line_idx = None
+        for i, line in enumerate(lines):
+            if 'defs = ' in line and 'Definitions' in line:
+                defs_line_idx = i
+                break
+
+        if defs_line_idx is None:
+            print(f"⚠️  Could not find 'defs = Definitions' pattern in definitions.py", flush=True)
+            return
+
+        # Insert custom lineage loading code before defs creation
+        custom_lineage_lines = custom_lineage_code.strip().split('\n')
+        for j, cl_line in enumerate(custom_lineage_lines):
+            lines.insert(defs_line_idx + j, cl_line)
+
+        # Find the end of defs creation (after the defs variable is assigned)
+        # We'll insert the injection code after all defs operations
+        inject_idx = None
+        for i in range(defs_line_idx + len(custom_lineage_lines), len(lines)):
+            line = lines[i].strip()
+            # Look for the last line that modifies defs
+            if line.startswith('defs = ') or (line and not line.startswith('#') and i > defs_line_idx + len(custom_lineage_lines) + 10):
+                inject_idx = i + 1
+
+        if inject_idx is None:
+            # Default to end of file
+            inject_idx = len(lines)
+
+        # Insert injection code
+        inject_lines = inject_code.strip().split('\n')
+        for j, inj_line in enumerate(inject_lines):
+            lines.insert(inject_idx + j, inj_line)
+
+        # Write back
+        new_content = '\n'.join(lines)
+        with open(definitions_file, "w") as f:
+            f.write(new_content)
+
+        print(f"✅ Injected custom lineage logic into {definitions_file.relative_to(project_dir)}", flush=True)
+
+    def _extract_repo_name(self, git_repo: str) -> str:
+        """Extract repository name from git URL.
+
+        Examples:
+            https://github.com/dbt-labs/jaffle-shop-classic.git -> jaffle-shop-classic
+            git@github.com:user/my-repo.git -> my-repo
+            https://github.com/user/repo -> repo
+        """
+        # Remove trailing .git if present
+        repo_url = git_repo.rstrip('/')
+        if repo_url.endswith('.git'):
+            repo_url = repo_url[:-4]
+
+        # Extract the last part of the path
+        repo_name = repo_url.split('/')[-1]
+
+        # Remove any query parameters or fragments
+        repo_name = repo_name.split('?')[0].split('#')[0]
+
+        return repo_name
+
+    def _clone_git_repo(self, project: Project) -> tuple[Path, str] | None:
+        """Clone a git repository for the project.
+
+        Returns:
+            Tuple of (path to cloned repository, directory name) or None if cloning failed.
+        """
+        if not project.git_repo:
+            return None
+
+        project_dir = self._get_project_dir(project)
+        repo_name = self._extract_repo_name(project.git_repo)
+        repo_dir = project_dir / repo_name
+
+        try:
+            # Clone the repository
+            subprocess.run(
+                ["git", "clone", "--depth", "1", "-b", project.git_branch, project.git_repo, str(repo_dir)],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            return repo_dir, repo_name
+        except subprocess.CalledProcessError as e:
+            print(f"Failed to clone repository: {e.stderr}")
+            return None
+
+    def _update_project_dependencies(self, project: Project):
+        """Update pyproject.toml with dependencies for all project components."""
+        project_dir = self._get_project_dir(project)
+        pyproject_path = project_dir / "pyproject.toml"
+
+        if not pyproject_path.exists():
+            return
+
+        try:
+            # Read current pyproject.toml
+            with open(pyproject_path, "r") as f:
+                pyproject_data = toml.load(f)
+
+            # Get current dependencies
+            current_deps = set(pyproject_data.get("project", {}).get("dependencies", []))
+
+            # Collect all required dependencies from components
+            for component in project.components:
+                component_deps = component_registry.get_dependencies(component.component_type)
+                for dep in component_deps:
+                    # Extract package name (before >= or ==)
+                    pkg_name = dep.split(">=")[0].split("==")[0].strip()
+
+                    # Remove any existing version of this package
+                    current_deps = {d for d in current_deps if not d.startswith(pkg_name)}
+
+                    # Add the new version
+                    current_deps.add(dep)
+
+            # Update dependencies in pyproject data
+            if "project" not in pyproject_data:
+                pyproject_data["project"] = {}
+            pyproject_data["project"]["dependencies"] = sorted(list(current_deps))
+
+            # Write back to file
+            with open(pyproject_path, "w") as f:
+                toml.dump(pyproject_data, f)
+
+            print(f"Updated dependencies for project {project.id}: {sorted(current_deps)}")
+
+        except Exception as e:
+            print(f"Failed to update dependencies for project {project.id}: {e}")
+
+    def _create_project_virtualenv(self, project: Project):
+        """Create a virtualenv for the project."""
+        project_dir = self._get_project_dir(project).resolve()
+        venv_dir = project_dir / ".venv"
+
+        if venv_dir.exists():
+            print(f"Virtualenv already exists for project {project.id}")
+            return
+
+        try:
+            print(f"Creating virtualenv for project {project.id}...")
+            venv.create(str(venv_dir), with_pip=True)
+            print(f"Created virtualenv at {venv_dir}")
+        except Exception as e:
+            print(f"Failed to create virtualenv for project {project.id}: {e}")
+
+    def _install_project_dependencies(self, project: Project):
+        """Install dependencies into the project's virtualenv."""
+        project_dir = self._get_project_dir(project).resolve()
+        venv_dir = project_dir / ".venv"
+
+        # Get the path to pip in the venv
+        if sys.platform == "win32":
+            pip_path = venv_dir / "Scripts" / "pip.exe"
+        else:
+            pip_path = venv_dir / "bin" / "pip"
+
+        if not pip_path.exists():
+            print(f"Pip not found in virtualenv for project {project.id} at {pip_path}")
+            return
+
+        try:
+            print(f"Installing dependencies for project {project.id}...")
+            # Install the project in editable mode (which installs dependencies from pyproject.toml)
+            result = subprocess.run(
+                [str(pip_path.resolve()), "install", "-e", ".", "--quiet"],
+                cwd=str(project_dir),
+                capture_output=True,
+                text=True,
+                timeout=300,  # 5 minute timeout
+            )
+
+            if result.returncode == 0:
+                print(f"Successfully installed dependencies for project {project.id}")
+            else:
+                print(f"Failed to install dependencies for project {project.id}: {result.stderr}")
+        except subprocess.TimeoutExpired:
+            print(f"Timeout installing dependencies for project {project.id}")
+        except Exception as e:
+            print(f"Error installing dependencies for project {project.id}: {e}")
+
+    def _get_project_python_path(self, project: Project) -> Path:
+        """Get the path to python executable in the project's virtualenv."""
+        project_dir = self._get_project_dir(project)
+        venv_dir = project_dir / ".venv"
+
+        if sys.platform == "win32":
+            return venv_dir / "Scripts" / "python.exe"
+        else:
+            return venv_dir / "bin" / "python"
+
+    def _get_project_dg_path(self, project: Project) -> Path:
+        """Get the path to dg executable in the project's virtualenv."""
+        project_dir = self._get_project_dir(project)
+        venv_dir = project_dir / ".venv"
+
+        if sys.platform == "win32":
+            return venv_dir / "Scripts" / "dg.exe"
+        else:
+            return venv_dir / "bin" / "dg"
+
+    def _scaffold_project_with_create_dagster(self, project: Project):
+        """Scaffold project using create-dagster command."""
+        # Sanitize project name for Python module (must start with letter/underscore)
+        module_name = project.name.lower().replace(" ", "_").replace("-", "_")
+        # Ensure module name starts with a letter or underscore
+        if module_name and module_name[0].isdigit():
+            module_name = f"project_{module_name}"
+
+        # Use project_<id>_<name> as directory to ensure uniqueness and valid Python identifier
+        dir_name = f"project_{project.id.split('-')[0]}_{module_name}"
+
+        # Store the directory name in the project
+        project.directory_name = dir_name
+        project_dir = self._get_project_dir(project)
+
+        try:
+            # Run create-dagster project command
+            result = subprocess.run(
+                ["/Users/ericthomas/.local/bin/uvx", "create-dagster", "project", str(project_dir), "--no-uv-sync", "--verbose"],
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+
+            if result.returncode != 0:
+                print(f"Failed to create project with create-dagster: {result.stderr}")
+                raise Exception(f"create-dagster failed: {result.stderr}")
+
+            print(f"Successfully scaffolded project at {project_dir}")
+
+        except subprocess.TimeoutExpired:
+            print(f"Timeout running create-dagster")
+            raise
+        except Exception as e:
+            print(f"Error running create-dagster: {e}")
+            raise
+
+    def _scaffold_components(self, project: Project):
+        """Scaffold components using dg scaffold defs commands."""
+        project_dir = self._get_project_dir(project)
+        venv_dir = project_dir / ".venv"
+
+        # Get the path to dg in the project's virtualenv
+        if sys.platform == "win32":
+            dg_path = venv_dir / "Scripts" / "dg.exe"
+        else:
+            dg_path = venv_dir / "bin" / "dg"
+
+        if not dg_path.exists():
+            print(f"dg not found in virtualenv at {dg_path}")
+            return
+
+        for component in project.components:
+            try:
+                # Build the scaffold command based on component type
+                if component.component_type == "dagster_dbt.DbtProjectComponent":
+                    project_path = component.attributes.get("project_path", "dbt")
+                    folder_name = component.id
+
+                    cmd = f"source {str(venv_dir.resolve())}/bin/activate && {str(dg_path.resolve())} scaffold defs dagster_dbt.DbtProjectComponent {folder_name} --project-path '{project_path}'"
+
+                    result = subprocess.run(
+                        ["bash", "-c", cmd],
+                        cwd=str(project_dir.resolve()),
+                        capture_output=True,
+                        text=True,
+                        timeout=60,
+                    )
+
+                    if result.returncode == 0:
+                        print(f"Successfully scaffolded component {component.id}")
+                    else:
+                        print(f"Failed to scaffold component {component.id}: {result.stderr}")
+
+            except Exception as e:
+                print(f"Error scaffolding component {component.id}: {e}")
+
+    def _install_dependencies_with_uv(self, project: Project):
+        """Install dependencies using uv."""
+        project_dir = self._get_project_dir(project)
+
+        try:
+            # First install dagster-dbt and the detected dbt adapter if we have dbt components
+            has_dbt = any(c.component_type == "dagster_dbt.DbtProjectComponent" for c in project.components)
+
+            if has_dbt:
+                # Detect the adapter from the cloned repo
+                repo_dir = None
+                if project.git_repo:
+                    # Find the cloned repo directory
+                    for item in project_dir.iterdir():
+                        if item.is_dir() and not item.name.startswith('.') and item.name not in ['src', 'tests']:
+                            repo_dir = item
+                            break
+
+                # Detect adapter type
+                adapter_type = 'duckdb'  # default
+                if repo_dir:
+                    adapter_type = self._detect_dbt_adapter(repo_dir)
+
+                # Map adapter type to package name
+                adapter_package = f"dbt-{adapter_type}"
+
+                print(f"Adding dagster-dbt and {adapter_package} to dependencies...")
+                subprocess.run(
+                    ["/Users/ericthomas/.local/bin/uvx", "--with", "uv", "uv", "add", "dagster-dbt", adapter_package],
+                    cwd=str(project_dir),
+                    capture_output=True,
+                    text=True,
+                    timeout=300,
+                    check=True,
+                )
+
+            # Install all dependencies including dev dependencies (which includes dagster-dg-cli)
+            print("Installing all dependencies including dev dependencies...")
+            subprocess.run(
+                ["/Users/ericthomas/.local/bin/uvx", "--with", "uv", "uv", "sync", "--all-groups"],
+                cwd=str(project_dir),
+                capture_output=True,
+                text=True,
+                timeout=300,
+                check=True,
+            )
+
+            print("Dependencies installed successfully")
+
+            # For imported projects, install dagster-webserver and project in editable mode
+            # Check if this is an imported project (has module at root, not src/)
+            src_dir = project_dir / "src"
+            is_imported = False
+            if not src_dir.exists() or not src_dir.is_dir():
+                # Check for module directory at root
+                for item in project_dir.iterdir():
+                    if item.is_dir() and not item.name.startswith('.') and item.name not in ['src', 'tests', 'dbt_project', '.venv', '__pycache__']:
+                        potential_defs_dir = item / "defs"
+                        if potential_defs_dir.exists():
+                            is_imported = True
+                            break
+
+            if is_imported:
+                print("Installing dagster-webserver for imported project...")
+
+                # Detect the installed dagster version to install matching webserver
+                detect_version_cmd = ["bash", "-c", f"UV_PROJECT_ENVIRONMENT=.venv /Users/ericthomas/.local/bin/uvx --with uv uv pip list | grep '^dagster ' | awk '{{print $2}}'"]
+                version_result = subprocess.run(
+                    detect_version_cmd,
+                    cwd=str(project_dir),
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+
+                dagster_version = version_result.stdout.strip() if version_result.returncode == 0 else ""
+
+                if dagster_version:
+                    print(f"Detected Dagster version {dagster_version}, installing matching webserver...")
+                    webserver_package = f"dagster-webserver=={dagster_version}"
+                    graphql_package = f"dagster-graphql=={dagster_version}"
+                else:
+                    print("Could not detect Dagster version, installing latest webserver...")
+                    webserver_package = "dagster-webserver"
+                    graphql_package = "dagster-graphql"
+
+                subprocess.run(
+                    ["bash", "-c", f"UV_PROJECT_ENVIRONMENT=.venv /Users/ericthomas/.local/bin/uvx --with uv uv pip install {webserver_package} {graphql_package}"],
+                    cwd=str(project_dir),
+                    capture_output=True,
+                    text=True,
+                    timeout=120,
+                    check=True,
+                )
+
+                print("Installing project in editable mode...")
+                subprocess.run(
+                    ["bash", "-c", f"UV_PROJECT_ENVIRONMENT=.venv /Users/ericthomas/.local/bin/uvx --with uv uv pip install -e ."],
+                    cwd=str(project_dir),
+                    capture_output=True,
+                    text=True,
+                    timeout=120,
+                    check=True,
+                )
+                print("Imported project setup complete")
+
+        except subprocess.TimeoutExpired:
+            print("Timeout installing dependencies")
+        except Exception as e:
+            print(f"Error installing dependencies: {e}")
+
+    def _discover_components(self, project: Project):
+        """Discover existing components from defs.yaml files in the project."""
+        from ..models.component import ComponentInstance
+
+        project_dir = self._get_project_dir(project)
+
+        # Find the defs directory - could be in multiple locations:
+        # 1. Projects created by tool: src/<project_module>/defs
+        # 2. Imported projects: <project_module>/defs
+        defs_dir = None
+
+        # First try src/<module>/defs (created by this tool)
+        src_dir = project_dir / "src"
+        if src_dir.exists():
+            for item in src_dir.iterdir():
+                if item.is_dir():
+                    potential_defs_dir = item / "defs"
+                    if potential_defs_dir.exists():
+                        # Check if this defs dir actually has component YAML files
+                        yaml_files = list(potential_defs_dir.glob("*/defs.yaml"))
+                        if yaml_files:
+                            defs_dir = potential_defs_dir
+                            break
+
+        # If not found, try <module>/defs (imported projects)
+        if not defs_dir:
+            for item in project_dir.iterdir():
+                if item.is_dir() and not item.name.startswith('.') and item.name not in ['src', 'tests', 'dbt_project']:
+                    potential_defs_dir = item / "defs"
+                    if potential_defs_dir.exists() and potential_defs_dir.is_dir():
+                        # Check if this defs dir actually has component YAML files
+                        yaml_files = list(potential_defs_dir.glob("*/defs.yaml"))
+                        if yaml_files:
+                            defs_dir = potential_defs_dir
+                            break
+
+        if not defs_dir:
+            print(f"No defs directory found in project")
+            return
+
+        print(f"Scanning for components in: {defs_dir}")
+
+        # Find all defs.yaml files
+        yaml_files = list(defs_dir.glob("*/defs.yaml"))
+        print(f"Found {len(yaml_files)} component YAML files")
+
+        for yaml_file in yaml_files:
+            try:
+                component_id = yaml_file.parent.name
+                print(f"  Processing component: {component_id}")
+
+                # Parse the YAML file
+                with open(yaml_file, 'r') as f:
+                    yaml_content = yaml.safe_load(f)
+
+                if not yaml_content or 'type' not in yaml_content:
+                    print(f"  ⚠️  Skipping {component_id}: missing 'type' field")
+                    continue
+
+                component_type = yaml_content['type']
+                attributes = yaml_content.get('attributes', {}).copy()  # Make a copy to modify
+
+                # Translation can be either at top level or nested under attributes
+                translation = yaml_content.get('translation')
+                if not translation and 'translation' in attributes:
+                    translation = attributes.pop('translation')  # Remove from attributes
+
+                # Store original template values before resolution
+                original_attributes = {}
+
+                # Resolve {{ project_root }} template variable to actual path
+                for key, value in attributes.items():
+                    if isinstance(value, str) and '{{ project_root }}' in value:
+                        # Store the original template for display
+                        original_attributes[f'{key}_display'] = value
+                        # Replace {{ project_root }} with the absolute project directory path
+                        resolved_path = value.replace('{{ project_root }}', str(project_dir.resolve()))
+                        attributes[key] = resolved_path
+                        print(f"    Resolved template: {key} = {resolved_path}")
+
+                # Merge original templates into attributes for display
+                attributes.update(original_attributes)
+
+                # Keep dbt component attributes as-is (no conversion needed)
+                # DbtProjectComponent now uses 'project' field directly
+
+                # Create a label from the component ID or attributes
+                label = component_id.replace('_', ' ').title()
+
+                # Create ComponentInstance
+                component = ComponentInstance(
+                    id=component_id,
+                    component_type=component_type,
+                    label=label,
+                    attributes=attributes,
+                    translation=translation,
+                    is_asset_factory=True,
+                )
+
+                project.components.append(component)
+                print(f"  ✅ Added component: {component_type} ({component_id})")
+
+            except Exception as e:
+                print(f"  ⚠️  Failed to parse {yaml_file}: {e}")
+
+        print(f"Discovered {len(project.components)} components")
+
+    def _copy_component_classes_to_project(self, project: Project):
+        """Copy dagster_designer_components to the project so they can be imported."""
+        import shutil
+
+        project_dir = self._get_project_dir(project)
+        module_name = project.directory_name.replace("project_", "").replace("-", "_")
+        project_src_dir = project_dir / "src" / module_name
+
+        if not project_src_dir.exists():
+            print(f"Project src directory not found: {project_src_dir}")
+            return
+
+        # Source: backend/dagster_designer_components
+        components_source = Path(__file__).parent.parent.parent / "dagster_designer_components"
+
+        # Destination: project/src/<module_name>/dagster_designer_components
+        components_dest = project_src_dir / "dagster_designer_components"
+
+        try:
+            # Remove existing if present
+            if components_dest.exists():
+                shutil.rmtree(components_dest)
+
+            # Copy the entire directory
+            shutil.copytree(components_source, components_dest)
+            print(f"Copied component classes to {components_dest}")
+        except Exception as e:
+            print(f"Error copying component classes: {e}")
+
+    def _generate_component_yaml_files(self, project: Project):
+        """Generate YAML files for primitive components (job, schedule, sensor, asset_check).
+
+        These components use custom Dagster component classes and are instantiated from YAML.
+        """
+        import yaml
+        import sys
+        from ..models.component import ComponentInstance
+
+        print(f"\n[_generate_component_yaml_files] ====== START ======", flush=True)
+        sys.stdout.flush()
+
+        # First ensure component classes are available
+        self._copy_component_classes_to_project(project)
+
+        project_dir = self._get_project_dir(project)
+
+        # Determine the module name from the directory (keep the full name, just replace dashes)
+        module_name = project.directory_name.replace("-", "_")
+        defs_dir = project_dir / "src" / module_name / "defs"
+
+        print(f"[YAML Generation] project_dir: {project_dir}", flush=True)
+        print(f"[YAML Generation] module_name: {module_name}", flush=True)
+        print(f"[YAML Generation] defs_dir: {defs_dir}", flush=True)
+        print(f"[YAML Generation] defs_dir.exists(): {defs_dir.exists()}", flush=True)
+        sys.stdout.flush()
+
+        if not defs_dir.exists():
+            print(f"❌ Defs directory not found: {defs_dir}", flush=True)
+            return
+
+        # Map component types to their fully qualified Python class names
+        # Use the project-local copy of the components (module_name already includes 'project_' prefix)
+        component_type_map = {
+            "job": f"{module_name}.dagster_designer_components.JobComponent",
+            "schedule": f"{module_name}.dagster_designer_components.ScheduleComponent",
+            "sensor": f"{module_name}.dagster_designer_components.SensorComponent",
+            "asset_check": f"{module_name}.dagster_designer_components.AssetCheckComponent",
+            "python_asset": f"{module_name}.dagster_designer_components.PythonAssetComponent",
+            "sql_asset": f"{module_name}.dagster_designer_components.SQLAssetComponent",
+            # Built-in Dagster components
+            "dagster.PythonScriptComponent": "dagster.PythonScriptComponent",
+            "dagster.TemplatedSqlComponent": "dagster.TemplatedSqlComponent",
+            # External library components - use their original type (no project prefix needed)
+            "dagster_dbt.DbtProjectComponent": "dagster_dbt.DbtProjectComponent",
+            "dagster_fivetran.FivetranConnector": "dagster_fivetran.FivetranConnector",
+            "dagster_sling.SlingReplication": "dagster_sling.SlingReplication",
+            "dagster_dlt.DltPipeline": "dagster_dlt.DltPipeline",
+        }
+
+        print(f"[YAML Generation] Processing {len(project.components)} components", flush=True)
+        sys.stdout.flush()
+
+        # Convert dicts to ComponentInstance objects if needed
+        # This handles the case where components were deserialized as dicts from ProjectUpdate
+        components = []
+        for comp in project.components:
+            if isinstance(comp, dict):
+                print(f"[YAML Generation] Converting dict to ComponentInstance: {comp.get('id')}", flush=True)
+                components.append(ComponentInstance(**comp))
+            else:
+                components.append(comp)
+        sys.stdout.flush()
+
+        # Group dbt components by project_path to consolidate them
+        from collections import defaultdict
+        dbt_components_by_project = defaultdict(list)
+        non_dbt_components = []
+
+        for component in components:
+            if component.component_type.startswith("dagster_dbt"):
+                # Use 'project' field (the new standard) or fall back to legacy 'project_path'
+                project_path = component.attributes.get("project") or component.attributes.get("project_path", "")
+                if project_path:
+                    dbt_components_by_project[project_path].append(component)
+                else:
+                    non_dbt_components.append(component)
+            else:
+                non_dbt_components.append(component)
+
+        # Create base dbt components (one per project_path)
+        # Use the existing component IDs if they're reasonable, don't generate from paths
+        base_dbt_components = []
+        base_dbt_ids = set()
+        for project_path, dbt_comps in dbt_components_by_project.items():
+            # Use the first component if it has a reasonable ID (not path-based)
+            first_comp = dbt_comps[0]
+            # Check if the ID looks like it was generated from a path (contains many underscores or dots)
+            if '..' in first_comp.id or first_comp.id.count('_') > 10:
+                # Bad ID - generate a simple one from the last part of the path
+                from pathlib import Path
+                project_name = Path(project_path).name
+                base_id = f"dbt_{project_name.replace('-', '_')}"
+                label = f"DBT {project_name.replace('_', ' ').title()}"
+            else:
+                # Good ID - use it
+                base_id = first_comp.id
+                label = first_comp.label
+
+            base_dbt_ids.add(base_id)
+            base_comp = ComponentInstance(
+                id=base_id,
+                component_type="dagster_dbt.DbtProjectComponent",
+                label=label,
+                attributes=first_comp.attributes,
+                translation=first_comp.translation,
+                post_processing=first_comp.post_processing,
+                is_asset_factory=True
+            )
+            base_dbt_components.append(base_comp)
+            print(f"[YAML Generation] Using dbt component: {base_id} for project_path: {project_path}", flush=True)
+
+        # Clean up old dbt component directories that are no longer needed
+        import shutil
+        existing_dirs = [d for d in defs_dir.iterdir() if d.is_dir() and not d.name.startswith('.')]
+        for existing_dir in existing_dirs:
+            # Check if this is a dbt component directory
+            defs_yaml = existing_dir / "defs.yaml"
+            if defs_yaml.exists():
+                try:
+                    import yaml
+                    with open(defs_yaml) as f:
+                        yaml_content = yaml.safe_load(f)
+                    # If it's a dbt component and not in our base list, remove it
+                    if yaml_content and yaml_content.get("type") == "dagster_dbt.DbtProjectComponent":
+                        if existing_dir.name not in base_dbt_ids and existing_dir.name not in [c.id for c in non_dbt_components]:
+                            print(f"[YAML Generation] Removing obsolete dbt component directory: {existing_dir}", flush=True)
+                            shutil.rmtree(existing_dir)
+                except Exception as e:
+                    print(f"[YAML Generation] Error checking/removing directory {existing_dir}: {e}", flush=True)
+
+        # Process all components (base dbt + non-dbt)
+        all_components_to_process = base_dbt_components + non_dbt_components
+
+        for component in all_components_to_process:
+            component_type = component.component_type
+            print(f"[YAML Generation] Component {component.id}: type={component_type}", flush=True)
+
+            # Only generate YAML for components in the type map
+            if component_type not in component_type_map:
+                print(f"[YAML Generation] Skipping {component_type} - not in type map", flush=True)
+                continue
+
+            # Components are stored in subdirectories with defs.yaml inside
+            component_dir = defs_dir / component.id
+            yaml_file = component_dir / "defs.yaml"
+
+            print(f"[YAML Generation] Will write to: {yaml_file}", flush=True)
+
+            # Create component directory if it doesn't exist
+            if not component_dir.exists():
+                component_dir.mkdir(parents=True, exist_ok=True)
+                print(f"[YAML Generation] Created directory: {component_dir}", flush=True)
+
+            # Use 'attributes' for dbt components (they use a different format)
+            # Use 'params' for other components
+            params_key = "attributes" if component_type.startswith("dagster_dbt") else "params"
+
+            # For dbt components, handle special field mappings and nesting translation
+            if component_type.startswith("dagster_dbt"):
+                # Create a copy of attributes
+                dbt_attributes = dict(component.attributes)
+
+                # Ensure 'project' path is relative (it should already be stored as relative)
+                # No conversion needed - DbtProjectComponent now uses 'project' field directly
+
+                # Add translation if present
+                if hasattr(component, 'translation') and component.translation:
+                    dbt_attributes["translation"] = component.translation
+                    print(f"[YAML Generation] Adding translation inside attributes for {component.id}: {component.translation}", flush=True)
+
+                yaml_data = {
+                    "type": component_type_map[component_type],
+                    params_key: dbt_attributes,
+                }
+            else:
+                # For built-in Dagster components (Python, SQL, etc.), filter out UI-only fields
+                # that are not valid component parameters
+                filtered_attributes = dict(component.attributes)
+
+                # Remove UI/metadata fields that shouldn't be in the YAML
+                ui_only_fields = [
+                    'deps',  # Dependencies are handled by Dagster, not component params
+                    'label',  # UI display name
+                    'componentType',  # Duplicate of component_type
+                    'component_type',  # Duplicate of component_type
+                    'attributes',  # Nested attributes from buggy saves
+                    'description',  # This goes in translation, not params
+                ]
+
+                for field in ui_only_fields:
+                    filtered_attributes.pop(field, None)
+
+                # Note: translation is NOT added for non-dbt components as they don't support it
+                # Descriptions for Python/SQL components should be set in code, not component YAML
+
+                yaml_data = {
+                    "type": component_type_map[component_type],
+                    params_key: filtered_attributes,
+                }
+
+            try:
+                with open(yaml_file, 'w') as f:
+                    yaml.dump(yaml_data, f, default_flow_style=False, sort_keys=False)
+                print(f"✅ Generated YAML for {component_type} component: {yaml_file}", flush=True)
+            except Exception as e:
+                print(f"❌ Error generating YAML for component {component.id}: {e}", flush=True)
+
+            sys.stdout.flush()
+
+        print(f"[_generate_component_yaml_files] ====== END ======\n", flush=True)
+        sys.stdout.flush()
+
+    def _generate_definitions_with_asset_customizations(self, project: Project):
+        """Generate definitions.py with asset customization support for dbt components."""
+        import json
+        from pathlib import Path
+        from collections import defaultdict
+
+        project_dir = self._get_project_dir(project)
+        module_name = project.directory_name.replace("-", "_")
+        module_dir = project_dir / "src" / module_name
+        definitions_file = module_dir / "definitions.py"
+        customizations_file = module_dir / "asset_customizations.json"
+
+        # Group dbt components by project path to find customizations
+        dbt_components_by_project = defaultdict(list)
+        for component in project.components:
+            if component.component_type.startswith("dagster_dbt"):
+                # Use 'project' field (the new standard) or fall back to legacy 'project_path'
+                project_path = component.attributes.get("project") or component.attributes.get("project_path", "")
+                if project_path:
+                    dbt_components_by_project[project_path].append(component)
+
+        # Collect asset customizations from dbt components
+        asset_customizations = {}
+        for project_path, components in dbt_components_by_project.items():
+            for component in components:
+                # If component has select attribute, it's targeting specific assets
+                select = component.attributes.get("select")
+                if select and component.translation:
+                    # The select value is the asset key
+                    asset_key = select
+                    customizations = {}
+                    if component.translation.get("group_name"):
+                        customizations["group_name"] = component.translation["group_name"]
+                    if component.translation.get("description"):
+                        customizations["description"] = component.translation["description"]
+                    if customizations:
+                        asset_customizations[asset_key] = customizations
+
+        # Write asset_customizations.json
+        if asset_customizations:
+            with open(customizations_file, 'w') as f:
+                json.dump(asset_customizations, f, indent=2)
+            print(f"✅ Generated asset_customizations.json with {len(asset_customizations)} customizations")
+
+        # Generate definitions.py
+        definitions_content = '''from pathlib import Path
+import json
+import dagster as dg
+
+# Import custom components to register them with Dagster
+# The @component_type decorator registers them when imported
+from .lib.dagster_designer_components import (
+    JobComponent,
+    ScheduleComponent,
+    SensorComponent,
+    AssetCheckComponent,
+)
+
+# Load base definitions from components
+defs = dg.load_from_defs_folder(path_within_project=Path(__file__).parent)
+
+# Load custom lineage from JSON file (if it exists)
+custom_lineage_file = Path(__file__).parent / "defs" / "custom_lineage.json"
+custom_lineage_edges = []
+if custom_lineage_file.exists():
+    try:
+        with open(custom_lineage_file, "r") as f:
+            custom_lineage_data = json.load(f)
+            custom_lineage_edges = custom_lineage_data.get("edges", [])
+            if custom_lineage_edges:
+                print(f"✅ Loaded {len(custom_lineage_edges)} custom lineage edge(s)")
+    except Exception as e:
+        print(f"⚠️  Failed to load custom_lineage.json: {e}")
+
+# Apply custom lineage by injecting dependencies using map_resolved_asset_specs with selection
+# This approach works for both Python assets and dbt assets (dbt models are skipped)
+if custom_lineage_edges:
+    # First, get all asset specs to check which ones are from dbt
+    all_specs = list(defs.get_all_asset_specs())
+    dbt_asset_keys = set()
+
+    # Identify dbt assets by checking if they have dbt metadata
+    for spec in all_specs:
+        # dbt assets have metadata with 'dagster-dbt/asset_type' or come from dbt component
+        metadata = spec.metadata or {}
+        if any('dbt' in str(key).lower() for key in metadata.keys()):
+            dbt_asset_keys.add(spec.key.to_user_string())
+
+    # Build a map of which assets need custom deps
+    target_to_sources = {}
+    dbt_targets = []
+
+    for edge in custom_lineage_edges:
+        target = edge.get("target")
+        source = edge.get("source")
+        if target and source:
+            # Check if target is a dbt asset dynamically
+            if target in dbt_asset_keys:
+                dbt_targets.append(target)
+                continue
+
+            if target not in target_to_sources:
+                target_to_sources[target] = []
+            target_to_sources[target].append(dg.AssetKey([source]))
+
+    # Apply custom deps to each target asset using selection
+    for target_asset, source_keys in target_to_sources.items():
+        try:
+            defs = defs.map_resolved_asset_specs(
+                func=lambda spec: spec.merge_attributes(deps=source_keys),
+                selection=target_asset  # Only modify this specific asset
+            )
+            print(f"✅ Applied custom lineage to {target_asset}: depends on {[str(key) for key in source_keys]}")
+        except Exception as e:
+            print(f"⚠️  Could not inject custom lineage for {target_asset}: {e}")
+
+    if dbt_targets:
+        print(f"⚠️  Cannot add dependencies to dbt models (define in dbt schema.yml): {', '.join(set(dbt_targets))}")
+
+# Load asset customizations (for group_name, description overrides)
+customizations_path = Path(__file__).parent / "asset_customizations.json"
+if customizations_path.exists():
+    try:
+        with open(customizations_path) as f:
+            customizations = json.load(f)
+
+        # Apply customizations using map_asset_specs
+        def apply_customizations(spec):
+            asset_key_str = spec.key.to_user_string()
+            if asset_key_str in customizations:
+                custom = customizations[asset_key_str]
+                kwargs = {}
+                if "group_name" in custom:
+                    kwargs["group_name"] = custom["group_name"]
+                if "description" in custom:
+                    kwargs["description"] = custom["description"]
+                if kwargs:
+                    return spec.replace_attributes(**kwargs)
+            return spec
+
+        defs = defs.map_asset_specs(func=apply_customizations)
+        print(f"✅ Applied {len(customizations)} asset customizations")
+    except Exception as e:
+        print(f"⚠️  Failed to load asset_customizations.json: {e}")
+'''
+
+        with open(definitions_file, 'w') as f:
+            f.write(definitions_content)
+        print(f"✅ Generated definitions.py with asset customization support")
+
+    def _detect_dbt_adapter(self, repo_dir: Path) -> str:
+        """Detect the dbt adapter type from the cloned repo.
+
+        Checks in order:
+        1. requirements.txt for dbt-* packages
+        2. packages.yml for dbt adapter packages
+        3. existing profiles.yml
+        4. Falls back to duckdb
+        """
+        # Check requirements.txt
+        requirements_file = repo_dir / "requirements.txt"
+        if requirements_file.exists():
+            try:
+                requirements = requirements_file.read_text()
+                # Common dbt adapters
+                adapters = {
+                    'dbt-snowflake': 'snowflake',
+                    'dbt-bigquery': 'bigquery',
+                    'dbt-redshift': 'redshift',
+                    'dbt-postgres': 'postgres',
+                    'dbt-duckdb': 'duckdb',
+                    'dbt-databricks': 'databricks',
+                    'dbt-spark': 'spark',
+                }
+                for package, adapter in adapters.items():
+                    if package in requirements:
+                        print(f"Detected dbt adapter '{adapter}' from requirements.txt")
+                        return adapter
+            except:
+                pass
+
+        # Check existing profiles.yml
+        profiles_file = repo_dir / "profiles.yml"
+        if profiles_file.exists():
+            try:
+                import yaml
+                with open(profiles_file, 'r') as f:
+                    profiles = yaml.safe_load(f)
+                    # Try to find adapter type in profiles
+                    for profile_name, profile_config in profiles.items():
+                        if isinstance(profile_config, dict):
+                            outputs = profile_config.get('outputs', {})
+                            for output_name, output_config in outputs.items():
+                                if isinstance(output_config, dict):
+                                    adapter_type = output_config.get('type')
+                                    if adapter_type:
+                                        print(f"Detected dbt adapter '{adapter_type}' from existing profiles.yml")
+                                        return adapter_type
+            except:
+                pass
+
+        # Default to duckdb
+        print("No adapter detected, defaulting to duckdb")
+        return 'duckdb'
+
+    def _create_dbt_profiles(self, repo_dir: Path):
+        """Create a minimal profiles.yml for dbt introspection."""
+        profiles_file = repo_dir / "profiles.yml"
+
+        if profiles_file.exists():
+            return
+
+        # Extract project name from dbt_project.yml if it exists
+        dbt_project_file = repo_dir / "dbt_project.yml"
+        project_name = "default"
+
+        if dbt_project_file.exists():
+            try:
+                import yaml
+                with open(dbt_project_file, 'r') as f:
+                    dbt_config = yaml.safe_load(f)
+                    project_name = dbt_config.get('name', 'default')
+            except:
+                pass
+
+        # Detect the adapter type
+        adapter_type = self._detect_dbt_adapter(repo_dir)
+
+        # Create minimal profiles.yml with detected adapter
+        # Note: path is relative to the dbt project directory (repo_dir)
+        # The data.duckdb file is in the parent directory (Dagster project root)
+        profiles_content = f"""{project_name}:
+  target: dev
+  outputs:
+    dev:
+      type: {adapter_type}
+      path: ../data.duckdb
+"""
+        profiles_file.write_text(profiles_content)
+        print(f"Created profiles.yml at {profiles_file} with adapter: {adapter_type}")
+
+
+# Global service instance
+project_service = ProjectService()

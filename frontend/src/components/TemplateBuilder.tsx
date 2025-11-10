@@ -1,0 +1,1657 @@
+import { useState, useEffect } from 'react';
+import { useMutation, useQuery } from '@tanstack/react-query';
+import Editor from '@monaco-editor/react';
+import * as Tabs from '@radix-ui/react-tabs';
+import {
+  Code,
+  Database,
+  Clock,
+  Play,
+  Radar,
+  CheckCircle,
+  Save,
+  FileCode,
+  Plus,
+  Users,
+} from 'lucide-react';
+import { primitivesApi } from '@/services/api';
+import { CommunityTemplates } from './CommunityTemplates';
+import { CronBuilder } from './CronBuilder';
+import {
+  templatesApi,
+  type PythonAssetParams,
+  type SQLAssetParams,
+  type ScheduleParams,
+  type JobParams,
+  type SensorParams,
+  type AssetCheckParams,
+} from '@/services/api';
+import { useProjectStore } from '@/hooks/useProject';
+
+export function TemplateBuilder() {
+  const { currentProject } = useProjectStore();
+  const [activeTab, setActiveTab] = useState('python_asset');
+  const [generatedCode, setGeneratedCode] = useState('');
+  const [pendingTab, setPendingTab] = useState<string | null>(null);
+  const [scheduleType, setScheduleType] = useState<'job' | 'assets'>('job');
+
+  // Fetch available jobs - only when needed (for schedules and sensors)
+  const needsPrimitives = activeTab === 'schedule' || activeTab === 'sensor';
+  const { data: primitivesData } = useQuery({
+    queryKey: ['primitives', currentProject?.id],
+    queryFn: () => currentProject ? primitivesApi.listAll(currentProject.id) : Promise.reject('No project'),
+    enabled: !!currentProject && needsPrimitives,
+  });
+
+  // Python Asset Form State
+  const [pythonAsset, setPythonAsset] = useState<PythonAssetParams>({
+    asset_name: 'my_asset',
+    group_name: '',
+    description: '',
+    compute_kind: 'python',
+    code: '',
+    deps: [],
+    owners: [],
+    tags: {},
+  });
+
+  // SQL Asset Form State
+  const [sqlAsset, setSqlAsset] = useState<SQLAssetParams>({
+    asset_name: 'my_sql_asset',
+    query: 'SELECT * FROM table',
+    group_name: '',
+    description: '',
+    io_manager_key: 'db_io_manager',
+    deps: [],
+  });
+
+  // Schedule Form State
+  const [schedule, setSchedule] = useState<ScheduleParams>({
+    schedule_name: 'my_schedule',
+    cron_expression: '0 0 * * *',
+    job_name: 'my_job',
+    description: '',
+    timezone: 'UTC',
+  });
+
+  // Job Form State
+  const [job, setJob] = useState<JobParams>({
+    job_name: 'my_job',
+    asset_selection: [],
+    description: '',
+    tags: {},
+  });
+
+  // Selection mode state
+  const [jobSelectionMode, setJobSelectionMode] = useState<'select' | 'filter'>('select');
+  const [pythonAssetSelectionMode, setPythonAssetSelectionMode] = useState<'select' | 'filter'>('select');
+  const [scheduleSelectionMode, setScheduleSelectionMode] = useState<'select' | 'filter'>('select');
+
+  // Sensor Form State
+  const [sensor, setSensor] = useState<SensorParams>({
+    sensor_name: 'my_sensor',
+    sensor_type: 'custom',
+    job_name: 'my_job',
+    description: '',
+    file_path: '',
+    monitored_job_name: '',
+    run_status: 'SUCCESS',
+    minimum_interval_seconds: 30,
+  });
+
+  // Asset Check Form State
+  const [assetCheck, setAssetCheck] = useState<AssetCheckParams>({
+    check_name: 'my_check',
+    asset_name: 'my_asset',
+    check_type: 'row_count',
+    description: '',
+    threshold: 0,
+    max_age_hours: 24,
+  });
+
+  // Handle URL parameters for pre-selecting values
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.hash.split('?')[1]);
+    const type = params.get('type');
+    const asset = params.get('asset');
+
+    if (type === 'asset_check' && asset) {
+      setActiveTab('asset_check');
+      setAssetCheck(prev => ({
+        ...prev,
+        asset_name: decodeURIComponent(asset),
+        check_name: `check_${decodeURIComponent(asset).replace(/\//g, '_')}`,
+      }));
+    }
+  }, []);
+
+  // Generate mutations
+  const generatePythonAssetMutation = useMutation({
+    mutationFn: () => templatesApi.generatePythonAsset(pythonAsset),
+    onSuccess: (data) => setGeneratedCode(data.code),
+  });
+
+  const generateSQLAssetMutation = useMutation({
+    mutationFn: () => templatesApi.generateSQLAsset(sqlAsset),
+    onSuccess: (data) => setGeneratedCode(data.code),
+  });
+
+  const generateScheduleMutation = useMutation({
+    mutationFn: () => {
+      // Prepare schedule params based on scheduleType
+      const params: any = {
+        schedule_name: schedule.schedule_name,
+        cron_expression: schedule.cron_expression,
+        description: schedule.description,
+        timezone: schedule.timezone,
+      };
+
+      if (scheduleType === 'job') {
+        params.job_name = schedule.job_name;
+      } else {
+        // Parse comma-separated asset names
+        const assets = schedule.job_name
+          .split(',')
+          .map(s => s.trim())
+          .filter(s => s.length > 0);
+        params.asset_selection = assets;
+      }
+
+      return templatesApi.generateSchedule(params);
+    },
+    onSuccess: (data) => setGeneratedCode(data.code),
+  });
+
+  const generateJobMutation = useMutation({
+    mutationFn: () => templatesApi.generateJob(job),
+    onSuccess: (data) => setGeneratedCode(data.code),
+  });
+
+  const generateSensorMutation = useMutation({
+    mutationFn: () => templatesApi.generateSensor(sensor),
+    onSuccess: (data) => setGeneratedCode(data.code),
+  });
+
+  const generateAssetCheckMutation = useMutation({
+    mutationFn: () => templatesApi.generateAssetCheck(assetCheck),
+    onSuccess: (data) => setGeneratedCode(data.code),
+  });
+
+  const handleTabChange = (newTab: string) => {
+    if (generatedCode && newTab !== activeTab) {
+      if (confirm('You have unsaved generated code. Do you want to discard it and switch tabs?')) {
+        setGeneratedCode('');
+        setActiveTab(newTab);
+      }
+    } else {
+      setActiveTab(newTab);
+    }
+  };
+
+  // Save mutation
+  const saveMutation = useMutation({
+    mutationFn: () => {
+      if (!currentProject) throw new Error('No project selected');
+
+      const primitiveTypeMap: Record<string, string> = {
+        python_asset: pythonAsset.asset_name,
+        sql_asset: sqlAsset.asset_name,
+        schedule: schedule.schedule_name,
+        job: job.job_name,
+        sensor: sensor.sensor_name,
+        asset_check: assetCheck.check_name,
+      };
+
+      return templatesApi.save({
+        project_id: currentProject.id,
+        primitive_type: activeTab as any,
+        name: primitiveTypeMap[activeTab],
+        code: generatedCode,
+      });
+    },
+    onSuccess: (data) => {
+      alert(`Saved to ${data.file_path}`);
+    },
+  });
+
+  const handleGenerate = () => {
+    switch (activeTab) {
+      case 'python_asset':
+        generatePythonAssetMutation.mutate();
+        break;
+      case 'sql_asset':
+        generateSQLAssetMutation.mutate();
+        break;
+      case 'schedule':
+        generateScheduleMutation.mutate();
+        break;
+      case 'job':
+        generateJobMutation.mutate();
+        break;
+      case 'sensor':
+        generateSensorMutation.mutate();
+        break;
+      case 'asset_check':
+        generateAssetCheckMutation.mutate();
+        break;
+    }
+  };
+
+  const handleSave = () => {
+    if (!generatedCode) {
+      alert('Generate code first');
+      return;
+    }
+    saveMutation.mutate();
+  };
+
+  return (
+    <div className="h-full flex bg-white">
+      {/* Left Panel - Form */}
+      <div className={`${activeTab === 'community' ? 'w-full' : 'w-1/2 border-r border-gray-200'} flex flex-col`}>
+        <Tabs.Root value={activeTab} onValueChange={handleTabChange} className="flex-1 min-h-0 flex flex-col">
+          {/* Tab List */}
+          <Tabs.List className="flex flex-shrink-0 border-b border-gray-200 overflow-x-auto">
+            <Tabs.Trigger
+              value="python_asset"
+              className="flex items-center space-x-2 px-4 py-3 text-sm text-gray-600 hover:text-gray-900 border-b-2 border-transparent data-[state=active]:border-blue-600 data-[state=active]:text-blue-600"
+            >
+              <Code className="w-4 h-4" />
+              <span>Python Asset</span>
+            </Tabs.Trigger>
+            <Tabs.Trigger
+              value="sql_asset"
+              className="flex items-center space-x-2 px-4 py-3 text-sm text-gray-600 hover:text-gray-900 border-b-2 border-transparent data-[state=active]:border-blue-600 data-[state=active]:text-blue-600"
+            >
+              <Database className="w-4 h-4" />
+              <span>SQL Asset</span>
+            </Tabs.Trigger>
+            <Tabs.Trigger
+              value="schedule"
+              className="flex items-center space-x-2 px-4 py-3 text-sm text-gray-600 hover:text-gray-900 border-b-2 border-transparent data-[state=active]:border-blue-600 data-[state=active]:text-blue-600"
+            >
+              <Clock className="w-4 h-4" />
+              <span>Schedule</span>
+            </Tabs.Trigger>
+            <Tabs.Trigger
+              value="job"
+              className="flex items-center space-x-2 px-4 py-3 text-sm text-gray-600 hover:text-gray-900 border-b-2 border-transparent data-[state=active]:border-blue-600 data-[state=active]:text-blue-600"
+            >
+              <Play className="w-4 h-4" />
+              <span>Job</span>
+            </Tabs.Trigger>
+            <Tabs.Trigger
+              value="sensor"
+              className="flex items-center space-x-2 px-4 py-3 text-sm text-gray-600 hover:text-gray-900 border-b-2 border-transparent data-[state=active]:border-blue-600 data-[state=active]:text-blue-600"
+            >
+              <Radar className="w-4 h-4" />
+              <span>Sensor</span>
+            </Tabs.Trigger>
+            <Tabs.Trigger
+              value="asset_check"
+              className="flex items-center space-x-2 px-4 py-3 text-sm text-gray-600 hover:text-gray-900 border-b-2 border-transparent data-[state=active]:border-blue-600 data-[state=active]:text-blue-600"
+            >
+              <CheckCircle className="w-4 h-4" />
+              <span>Asset Check</span>
+            </Tabs.Trigger>
+            <Tabs.Trigger
+              value="community"
+              className="flex items-center space-x-2 px-4 py-3 text-sm text-gray-600 hover:text-gray-900 border-b-2 border-transparent data-[state=active]:border-blue-600 data-[state=active]:text-blue-600"
+            >
+              <Users className="w-4 h-4" />
+              <span>Community</span>
+            </Tabs.Trigger>
+          </Tabs.List>
+
+          {/* Python Asset Tab */}
+          <Tabs.Content value="python_asset" className="flex-1 overflow-y-auto p-4 space-y-4">
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                Asset Name <span className="text-red-500">*</span>
+              </label>
+              <input
+                type="text"
+                value={pythonAsset.asset_name}
+                onChange={(e) => setPythonAsset({ ...pythonAsset, asset_name: e.target.value })}
+                className="w-full px-3 py-2 border border-gray-300 rounded-md"
+                placeholder="my_asset"
+              />
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Group Name</label>
+              <input
+                type="text"
+                value={pythonAsset.group_name}
+                onChange={(e) => setPythonAsset({ ...pythonAsset, group_name: e.target.value })}
+                className="w-full px-3 py-2 border border-gray-300 rounded-md"
+                placeholder="analytics"
+              />
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Description</label>
+              <input
+                type="text"
+                value={pythonAsset.description}
+                onChange={(e) => setPythonAsset({ ...pythonAsset, description: e.target.value })}
+                className="w-full px-3 py-2 border border-gray-300 rounded-md"
+                placeholder="A Python asset that..."
+              />
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Compute Kind</label>
+              <input
+                type="text"
+                value={pythonAsset.compute_kind}
+                onChange={(e) => setPythonAsset({ ...pythonAsset, compute_kind: e.target.value })}
+                className="w-full px-3 py-2 border border-gray-300 rounded-md"
+                placeholder="python"
+              />
+            </div>
+
+            <div>
+              <div className="flex items-center justify-between mb-2">
+                <label className="block text-sm font-medium text-gray-700">
+                  Dependencies
+                </label>
+                <div className="flex rounded-md border border-gray-300 overflow-hidden">
+                  <button
+                    type="button"
+                    onClick={() => setPythonAssetSelectionMode('select')}
+                    className={`px-3 py-1 text-xs font-medium ${
+                      pythonAssetSelectionMode === 'select'
+                        ? 'bg-blue-600 text-white'
+                        : 'bg-white text-gray-700 hover:bg-gray-50'
+                    }`}
+                  >
+                    Select Assets
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setPythonAssetSelectionMode('filter')}
+                    className={`px-3 py-1 text-xs font-medium border-l border-gray-300 ${
+                      pythonAssetSelectionMode === 'filter'
+                        ? 'bg-blue-600 text-white'
+                        : 'bg-white text-gray-700 hover:bg-gray-50'
+                    }`}
+                  >
+                    Filter Expression
+                  </button>
+                </div>
+              </div>
+
+              {pythonAssetSelectionMode === 'select' ? (
+                /* Multi-select dropdown mode */
+                (() => {
+                  const availableAssets = currentProject?.graph.nodes
+                    .filter((node: any) => node.node_kind === 'asset')
+                    .map((node: any) => node.data.asset_key || node.id) || [];
+
+                  return availableAssets.length > 0 ? (
+                    <div className="space-y-2">
+                      <select
+                        multiple
+                        value={pythonAsset.deps || []}
+                        onChange={(e) => {
+                          const selected = Array.from(e.target.selectedOptions, (option) => option.value);
+                          setPythonAsset({ ...pythonAsset, deps: selected });
+                        }}
+                        className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        size={Math.min(5, Math.max(3, availableAssets.length))}
+                      >
+                        {availableAssets.map((assetKey: string) => (
+                          <option key={assetKey} value={assetKey}>
+                            {assetKey}
+                          </option>
+                        ))}
+                      </select>
+                      <p className="text-xs text-gray-500">
+                        Hold Cmd/Ctrl to select multiple assets
+                      </p>
+                      {pythonAsset.deps && pythonAsset.deps.length > 0 && (
+                        <div className="flex flex-wrap gap-1">
+                          {pythonAsset.deps.map((dep: string) => (
+                            <span
+                              key={dep}
+                              className="inline-flex items-center gap-1 px-2 py-0.5 text-xs bg-blue-50 border border-blue-200 rounded text-blue-700"
+                            >
+                              {dep}
+                              <button
+                                onClick={() => {
+                                  setPythonAsset({
+                                    ...pythonAsset,
+                                    deps: pythonAsset.deps?.filter((d: string) => d !== dep),
+                                  });
+                                }}
+                                className="hover:text-blue-900"
+                              >
+                                ×
+                              </button>
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="text-sm text-amber-600 bg-amber-50 border border-amber-200 rounded-md p-3">
+                      No assets found. Use Filter Expression mode or load assets first.
+                    </div>
+                  );
+                })()
+              ) : (
+                /* Filter expression mode */
+                <div className="space-y-2">
+                  <input
+                    type="text"
+                    value={pythonAsset.deps?.join(', ') || ''}
+                    onChange={(e) =>
+                      setPythonAsset({
+                        ...pythonAsset,
+                        deps: e.target.value.split(',').map((s) => s.trim()).filter(Boolean),
+                      })
+                    }
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md font-mono text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    placeholder="* or tag:team=marketing or +upstream_asset"
+                  />
+                  <p className="text-xs text-gray-500">
+                    Use Dagster asset selection syntax. Examples: <code className="bg-gray-100 px-1 rounded">*</code>, <code className="bg-gray-100 px-1 rounded">tag:team=data</code>, <code className="bg-gray-100 px-1 rounded">+my_asset</code>
+                  </p>
+                </div>
+              )}
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                Owners (comma-separated emails)
+              </label>
+              <input
+                type="text"
+                value={pythonAsset.owners?.join(', ')}
+                onChange={(e) =>
+                  setPythonAsset({
+                    ...pythonAsset,
+                    owners: e.target.value.split(',').map((s) => s.trim()).filter(Boolean),
+                  })
+                }
+                className="w-full px-3 py-2 border border-gray-300 rounded-md"
+                placeholder="team@company.com"
+              />
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                Asset Code (function body)
+              </label>
+              <textarea
+                value={pythonAsset.code}
+                onChange={(e) => setPythonAsset({ ...pythonAsset, code: e.target.value })}
+                className="w-full px-3 py-2 border border-gray-300 rounded-md font-mono text-sm"
+                rows={6}
+                placeholder="# Your asset logic here&#10;return {}"
+              />
+            </div>
+
+            <button
+              onClick={handleGenerate}
+              disabled={generatePythonAssetMutation.isPending}
+              className="w-full flex items-center justify-center space-x-2 px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-50"
+            >
+              <FileCode className="w-4 h-4" />
+              <span>Generate Code</span>
+            </button>
+          </Tabs.Content>
+
+          {/* SQL Asset Tab */}
+          <Tabs.Content value="sql_asset" className="flex-1 overflow-y-auto p-4 space-y-4">
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                Asset Name <span className="text-red-500">*</span>
+              </label>
+              <input
+                type="text"
+                value={sqlAsset.asset_name}
+                onChange={(e) => setSqlAsset({ ...sqlAsset, asset_name: e.target.value })}
+                className="w-full px-3 py-2 border border-gray-300 rounded-md"
+                placeholder="my_sql_asset"
+              />
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                SQL Query <span className="text-red-500">*</span>
+              </label>
+              <textarea
+                value={sqlAsset.query}
+                onChange={(e) => setSqlAsset({ ...sqlAsset, query: e.target.value })}
+                className="w-full px-3 py-2 border border-gray-300 rounded-md font-mono text-sm"
+                rows={8}
+                placeholder="SELECT * FROM table"
+              />
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Group Name</label>
+              <input
+                type="text"
+                value={sqlAsset.group_name}
+                onChange={(e) => setSqlAsset({ ...sqlAsset, group_name: e.target.value })}
+                className="w-full px-3 py-2 border border-gray-300 rounded-md"
+                placeholder="analytics"
+              />
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Description</label>
+              <input
+                type="text"
+                value={sqlAsset.description}
+                onChange={(e) => setSqlAsset({ ...sqlAsset, description: e.target.value })}
+                className="w-full px-3 py-2 border border-gray-300 rounded-md"
+                placeholder="A SQL asset that..."
+              />
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">IO Manager Key</label>
+              <input
+                type="text"
+                value={sqlAsset.io_manager_key}
+                onChange={(e) => setSqlAsset({ ...sqlAsset, io_manager_key: e.target.value })}
+                className="w-full px-3 py-2 border border-gray-300 rounded-md"
+                placeholder="db_io_manager"
+              />
+            </div>
+
+            <button
+              onClick={handleGenerate}
+              disabled={generateSQLAssetMutation.isPending}
+              className="w-full flex items-center justify-center space-x-2 px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-50"
+            >
+              <FileCode className="w-4 h-4" />
+              <span>Generate Code</span>
+            </button>
+          </Tabs.Content>
+
+          {/* Schedule Tab */}
+          <Tabs.Content value="schedule" className="flex-1 overflow-y-auto p-4 space-y-4">
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                Schedule Name <span className="text-red-500">*</span>
+              </label>
+              <input
+                type="text"
+                value={schedule.schedule_name}
+                onChange={(e) => setSchedule({ ...schedule, schedule_name: e.target.value })}
+                className="w-full px-3 py-2 border border-gray-300 rounded-md"
+                placeholder="my_schedule"
+              />
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Cron Expression <span className="text-red-500">*</span>
+              </label>
+              <CronBuilder
+                value={schedule.cron_expression}
+                onChange={(cron) => setSchedule({ ...schedule, cron_expression: cron })}
+              />
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Schedule Type <span className="text-red-500">*</span>
+              </label>
+              <div className="flex space-x-4 mb-4">
+                <label className="flex items-center">
+                  <input
+                    type="radio"
+                    value="job"
+                    checked={scheduleType === 'job'}
+                    onChange={(e) => setScheduleType(e.target.value as 'job' | 'assets')}
+                    className="mr-2"
+                  />
+                  <span className="text-sm text-gray-700">Schedule a Job</span>
+                </label>
+                <label className="flex items-center">
+                  <input
+                    type="radio"
+                    value="assets"
+                    checked={scheduleType === 'assets'}
+                    onChange={(e) => setScheduleType(e.target.value as 'job' | 'assets')}
+                    className="mr-2"
+                  />
+                  <span className="text-sm text-gray-700">Schedule Assets</span>
+                </label>
+              </div>
+            </div>
+
+            {scheduleType === 'job' ? (
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Job Name <span className="text-red-500">*</span>
+                </label>
+                {primitivesData && primitivesData.primitives.jobs.length > 0 ? (
+                  <select
+                    value={schedule.job_name}
+                    onChange={(e) => setSchedule({ ...schedule, job_name: e.target.value })}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md"
+                  >
+                    <option value="">Select a job...</option>
+                    {primitivesData.primitives.jobs.map((job) => (
+                      <option key={job.name} value={job.name}>
+                        {job.name}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <>
+                    <input
+                      type="text"
+                      value={schedule.job_name}
+                      onChange={(e) => setSchedule({ ...schedule, job_name: e.target.value })}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md"
+                      placeholder="my_job"
+                    />
+                    <p className="text-xs text-amber-600 mt-1 flex items-center">
+                      <Plus className="w-3 h-3 mr-1" />
+                      No jobs found. Create a job first or enter a job name manually.
+                    </p>
+                  </>
+                )}
+              </div>
+            ) : (
+              <div>
+                <div className="flex items-center justify-between mb-2">
+                  <label className="block text-sm font-medium text-gray-700">
+                    Asset Selection <span className="text-red-500">*</span>
+                  </label>
+                  <div className="flex rounded-md border border-gray-300 overflow-hidden">
+                    <button
+                      type="button"
+                      onClick={() => setScheduleSelectionMode('select')}
+                      className={`px-3 py-1 text-xs font-medium ${
+                        scheduleSelectionMode === 'select'
+                          ? 'bg-blue-600 text-white'
+                          : 'bg-white text-gray-700 hover:bg-gray-50'
+                      }`}
+                    >
+                      Select Assets
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setScheduleSelectionMode('filter')}
+                      className={`px-3 py-1 text-xs font-medium border-l border-gray-300 ${
+                        scheduleSelectionMode === 'filter'
+                          ? 'bg-blue-600 text-white'
+                          : 'bg-white text-gray-700 hover:bg-gray-50'
+                      }`}
+                    >
+                      Filter Expression
+                    </button>
+                  </div>
+                </div>
+
+                {scheduleSelectionMode === 'select' ? (
+                  /* Multi-select dropdown mode */
+                  (() => {
+                    const availableAssets = currentProject?.graph.nodes
+                      .filter((node: any) => node.node_kind === 'asset')
+                      .map((node: any) => node.data.asset_key || node.id) || [];
+
+                    // Parse current comma-separated value into array
+                    const selectedAssets = schedule.job_name
+                      .split(',')
+                      .map(s => s.trim())
+                      .filter(s => s.length > 0);
+
+                    return availableAssets.length > 0 ? (
+                      <div className="space-y-2">
+                        <select
+                          multiple
+                          value={selectedAssets}
+                          onChange={(e) => {
+                            const selected = Array.from(e.target.selectedOptions, (option) => option.value);
+                            setSchedule({ ...schedule, job_name: selected.join(', ') });
+                          }}
+                          className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                          size={Math.min(6, Math.max(3, availableAssets.length))}
+                        >
+                          {availableAssets.map((assetKey: string) => (
+                            <option key={assetKey} value={assetKey}>
+                              {assetKey}
+                            </option>
+                          ))}
+                        </select>
+                        <p className="text-xs text-gray-500">
+                          Hold Cmd/Ctrl to select multiple assets
+                        </p>
+                        {selectedAssets.length > 0 && (
+                          <div className="flex flex-wrap gap-1">
+                            {selectedAssets.map((asset: string) => (
+                              <span
+                                key={asset}
+                                className="inline-flex items-center gap-1 px-2 py-0.5 text-xs bg-blue-50 border border-blue-200 rounded text-blue-700"
+                              >
+                                {asset}
+                                <button
+                                  onClick={() => {
+                                    const filtered = selectedAssets.filter((a: string) => a !== asset);
+                                    setSchedule({ ...schedule, job_name: filtered.join(', ') });
+                                  }}
+                                  className="hover:text-blue-900"
+                                >
+                                  ×
+                                </button>
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    ) : (
+                      <div className="text-sm text-amber-600 bg-amber-50 border border-amber-200 rounded-md p-3">
+                        No assets found. Use Filter Expression mode or load assets first.
+                      </div>
+                    );
+                  })()
+                ) : (
+                  /* Filter expression mode */
+                  <div className="space-y-2">
+                    <input
+                      type="text"
+                      value={schedule.job_name}
+                      onChange={(e) => setSchedule({ ...schedule, job_name: e.target.value })}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md font-mono text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      placeholder="* or tag:team=marketing or group:analytics"
+                    />
+                    <p className="text-xs text-gray-500">
+                      Use Dagster asset selection syntax. Examples: <code className="bg-gray-100 px-1 rounded">*</code>, <code className="bg-gray-100 px-1 rounded">tag:team=data</code>, <code className="bg-gray-100 px-1 rounded">group:analytics</code>
+                    </p>
+                  </div>
+                )}
+              </div>
+            )}
+
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Description</label>
+              <input
+                type="text"
+                value={schedule.description}
+                onChange={(e) => setSchedule({ ...schedule, description: e.target.value })}
+                className="w-full px-3 py-2 border border-gray-300 rounded-md"
+                placeholder="Schedule to run..."
+              />
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Timezone</label>
+              <input
+                type="text"
+                value={schedule.timezone}
+                onChange={(e) => setSchedule({ ...schedule, timezone: e.target.value })}
+                className="w-full px-3 py-2 border border-gray-300 rounded-md"
+                placeholder="UTC"
+              />
+            </div>
+
+            <button
+              onClick={handleGenerate}
+              disabled={generateScheduleMutation.isPending}
+              className="w-full flex items-center justify-center space-x-2 px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-50"
+            >
+              <FileCode className="w-4 h-4" />
+              <span>Generate Code</span>
+            </button>
+          </Tabs.Content>
+
+          {/* Job Tab */}
+          <Tabs.Content value="job" className="flex-1 overflow-y-auto p-4 space-y-4">
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                Job Name <span className="text-red-500">*</span>
+              </label>
+              <input
+                type="text"
+                value={job.job_name}
+                onChange={(e) => setJob({ ...job, job_name: e.target.value })}
+                className="w-full px-3 py-2 border border-gray-300 rounded-md"
+                placeholder="my_job"
+              />
+            </div>
+
+            <div>
+              <div className="flex items-center justify-between mb-2">
+                <label className="block text-sm font-medium text-gray-700">
+                  Asset Selection <span className="text-red-500">*</span>
+                </label>
+                <div className="flex rounded-md border border-gray-300 overflow-hidden">
+                  <button
+                    type="button"
+                    onClick={() => setJobSelectionMode('select')}
+                    className={`px-3 py-1 text-xs font-medium ${
+                      jobSelectionMode === 'select'
+                        ? 'bg-blue-600 text-white'
+                        : 'bg-white text-gray-700 hover:bg-gray-50'
+                    }`}
+                  >
+                    Select Assets
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setJobSelectionMode('filter')}
+                    className={`px-3 py-1 text-xs font-medium border-l border-gray-300 ${
+                      jobSelectionMode === 'filter'
+                        ? 'bg-blue-600 text-white'
+                        : 'bg-white text-gray-700 hover:bg-gray-50'
+                    }`}
+                  >
+                    Filter Expression
+                  </button>
+                </div>
+              </div>
+
+              {jobSelectionMode === 'select' ? (
+                /* Multi-select dropdown mode */
+                (() => {
+                  const availableAssets = currentProject?.graph.nodes
+                    .filter((node: any) => node.node_kind === 'asset')
+                    .map((node: any) => node.data.asset_key || node.id) || [];
+
+                  return availableAssets.length > 0 ? (
+                    <div className="space-y-2">
+                      <select
+                        multiple
+                        value={job.asset_selection}
+                        onChange={(e) => {
+                          const selected = Array.from(e.target.selectedOptions, (option) => option.value);
+                          setJob({ ...job, asset_selection: selected });
+                        }}
+                        className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        size={Math.min(6, Math.max(3, availableAssets.length))}
+                      >
+                        {availableAssets.map((assetKey: string) => (
+                          <option key={assetKey} value={assetKey}>
+                            {assetKey}
+                          </option>
+                        ))}
+                      </select>
+                      <p className="text-xs text-gray-500">
+                        Hold Cmd/Ctrl to select multiple assets
+                      </p>
+                      {job.asset_selection.length > 0 && (
+                        <div className="flex flex-wrap gap-1">
+                          {job.asset_selection.map((asset: string) => (
+                            <span
+                              key={asset}
+                              className="inline-flex items-center gap-1 px-2 py-0.5 text-xs bg-blue-50 border border-blue-200 rounded text-blue-700"
+                            >
+                              {asset}
+                              <button
+                                onClick={() => {
+                                  setJob({
+                                    ...job,
+                                    asset_selection: job.asset_selection.filter((a: string) => a !== asset),
+                                  });
+                                }}
+                                className="hover:text-blue-900"
+                              >
+                                ×
+                              </button>
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="text-sm text-amber-600 bg-amber-50 border border-amber-200 rounded-md p-3">
+                      No assets found. Use Filter Expression mode or load assets first.
+                    </div>
+                  );
+                })()
+              ) : (
+                /* Filter expression mode */
+                <div className="space-y-2">
+                  <input
+                    type="text"
+                    value={job.asset_selection.join(', ')}
+                    onChange={(e) =>
+                      setJob({
+                        ...job,
+                        asset_selection: e.target.value.split(',').map((s) => s.trim()).filter(Boolean),
+                      })
+                    }
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md font-mono text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    placeholder="* or tag:team=marketing or owner:user@company.com"
+                  />
+                  <div className="text-xs text-gray-600 bg-gray-50 border border-gray-200 rounded-md p-2">
+                    <strong>Examples:</strong>
+                    <ul className="mt-1 space-y-0.5 ml-4 list-disc">
+                      <li><code className="bg-white px-1 rounded">*</code> - All assets</li>
+                      <li><code className="bg-white px-1 rounded">tag:team=marketing</code> - Assets with tag</li>
+                      <li><code className="bg-white px-1 rounded">owner:user@company.com</code> - Assets by owner</li>
+                      <li><code className="bg-white px-1 rounded">group:analytics</code> - Assets in group</li>
+                      <li><code className="bg-white px-1 rounded">+my_asset</code> - Asset + downstream</li>
+                      <li><code className="bg-white px-1 rounded">my_asset+</code> - Asset + upstream</li>
+                    </ul>
+                    <p className="mt-1">
+                      <a
+                        href="https://docs.dagster.io/guides/build/assets/asset-selection-syntax/reference"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-blue-600 hover:underline"
+                      >
+                        View full syntax →
+                      </a>
+                    </p>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Description</label>
+              <input
+                type="text"
+                value={job.description}
+                onChange={(e) => setJob({ ...job, description: e.target.value })}
+                className="w-full px-3 py-2 border border-gray-300 rounded-md"
+                placeholder="Job to materialize..."
+              />
+            </div>
+
+            <button
+              onClick={handleGenerate}
+              disabled={generateJobMutation.isPending}
+              className="w-full flex items-center justify-center space-x-2 px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-50"
+            >
+              <FileCode className="w-4 h-4" />
+              <span>Generate Code</span>
+            </button>
+          </Tabs.Content>
+
+          {/* Sensor Tab */}
+          <Tabs.Content value="sensor" className="flex-1 overflow-y-auto p-4 space-y-4">
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                Sensor Name <span className="text-red-500">*</span>
+              </label>
+              <input
+                type="text"
+                value={sensor.sensor_name}
+                onChange={(e) => setSensor({ ...sensor, sensor_name: e.target.value })}
+                className="w-full px-3 py-2 border border-gray-300 rounded-md"
+                placeholder="my_sensor"
+              />
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                Sensor Type <span className="text-red-500">*</span>
+              </label>
+              <select
+                value={sensor.sensor_type}
+                onChange={(e) =>
+                  setSensor({ ...sensor, sensor_type: e.target.value as any })
+                }
+                className="w-full px-3 py-2 border border-gray-300 rounded-md"
+              >
+                <optgroup label="Basic Sensors">
+                  <option value="custom">Custom</option>
+                  <option value="file">File Sensor</option>
+                  <option value="run_status">Run Status Sensor</option>
+                </optgroup>
+                <optgroup label="Convenience Sensors">
+                  <option value="s3">S3 Bucket Sensor</option>
+                  <option value="email">Email Inbox Sensor</option>
+                  <option value="filesystem">File System Sensor</option>
+                  <option value="database">Database Table Sensor</option>
+                  <option value="webhook">Webhook Sensor</option>
+                </optgroup>
+              </select>
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                {sensor.sensor_type === 'run_status' ? 'Job to Trigger' : 'Job Name'} <span className="text-red-500">*</span>
+              </label>
+              {primitivesData && primitivesData.primitives.jobs.length > 0 ? (
+                <select
+                  value={sensor.job_name}
+                  onChange={(e) => setSensor({ ...sensor, job_name: e.target.value })}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-md"
+                >
+                  <option value="">Select a job...</option>
+                  {primitivesData.primitives.jobs.map((job) => (
+                    <option key={job.name} value={job.name}>
+                      {job.name}
+                    </option>
+                  ))}
+                </select>
+              ) : (
+                <>
+                  <input
+                    type="text"
+                    value={sensor.job_name}
+                    onChange={(e) => setSensor({ ...sensor, job_name: e.target.value })}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md"
+                    placeholder="my_job"
+                  />
+                  <p className="text-xs text-amber-600 mt-1 flex items-center">
+                    <Plus className="w-3 h-3 mr-1" />
+                    No jobs found. Create a job first or enter a job name manually.
+                  </p>
+                </>
+              )}
+              {sensor.sensor_type === 'run_status' && (
+                <p className="text-xs text-gray-500 mt-1">
+                  The job to run when the monitored job reaches the specified status
+                </p>
+              )}
+            </div>
+
+            {sensor.sensor_type === 'file' && (
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">File Path</label>
+                <input
+                  type="text"
+                  value={sensor.file_path}
+                  onChange={(e) => setSensor({ ...sensor, file_path: e.target.value })}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-md"
+                  placeholder="/path/to/file"
+                />
+              </div>
+            )}
+
+            {sensor.sensor_type === 'run_status' && (
+              <>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Monitored Job Name <span className="text-red-500">*</span>
+                  </label>
+                  {primitivesData && primitivesData.primitives.jobs.length > 0 ? (
+                    <select
+                      value={sensor.monitored_job_name}
+                      onChange={(e) => setSensor({ ...sensor, monitored_job_name: e.target.value })}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md"
+                    >
+                      <option value="">Select a job to monitor...</option>
+                      {primitivesData.primitives.jobs.map((job) => (
+                        <option key={job.name} value={job.name}>
+                          {job.name}
+                        </option>
+                      ))}
+                    </select>
+                  ) : (
+                    <>
+                      <input
+                        type="text"
+                        value={sensor.monitored_job_name}
+                        onChange={(e) => setSensor({ ...sensor, monitored_job_name: e.target.value })}
+                        className="w-full px-3 py-2 border border-gray-300 rounded-md"
+                        placeholder="upstream_job"
+                      />
+                      <p className="text-xs text-amber-600 mt-1 flex items-center">
+                        <Plus className="w-3 h-3 mr-1" />
+                        No jobs found. Create a job first or enter a job name manually.
+                      </p>
+                    </>
+                  )}
+                  <p className="text-xs text-gray-500 mt-1">
+                    The job whose run status to monitor
+                  </p>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Run Status to Monitor
+                  </label>
+                  <select
+                    value={sensor.run_status}
+                    onChange={(e) => setSensor({ ...sensor, run_status: e.target.value as any })}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md"
+                  >
+                    <option value="SUCCESS">SUCCESS</option>
+                    <option value="FAILURE">FAILURE</option>
+                    <option value="CANCELED">CANCELED</option>
+                  </select>
+                  <p className="text-xs text-gray-500 mt-1">
+                    Trigger when monitored job reaches this status
+                  </p>
+                </div>
+              </>
+            )}
+
+            {/* S3 Sensor Fields */}
+            {sensor.sensor_type === 's3' && (
+              <>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    S3 Bucket Name <span className="text-red-500">*</span>
+                  </label>
+                  <input
+                    type="text"
+                    value={sensor.bucket_name || ''}
+                    onChange={(e) => setSensor({ ...sensor, bucket_name: e.target.value })}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md"
+                    placeholder="my-data-bucket"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Object Prefix</label>
+                  <input
+                    type="text"
+                    value={sensor.prefix || ''}
+                    onChange={(e) => setSensor({ ...sensor, prefix: e.target.value })}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md"
+                    placeholder="data/incoming/"
+                  />
+                  <p className="text-xs text-gray-500 mt-1">Filter objects by prefix</p>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Pattern Match (Regex)</label>
+                  <input
+                    type="text"
+                    value={sensor.pattern || ''}
+                    onChange={(e) => setSensor({ ...sensor, pattern: e.target.value })}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md"
+                    placeholder=".*\.csv$"
+                  />
+                  <p className="text-xs text-gray-500 mt-1">Regex pattern to match object keys</p>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">AWS Region</label>
+                  <input
+                    type="text"
+                    value={sensor.aws_region || ''}
+                    onChange={(e) => setSensor({ ...sensor, aws_region: e.target.value })}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md"
+                    placeholder="us-east-1"
+                  />
+                </div>
+              </>
+            )}
+
+            {/* Email Sensor Fields */}
+            {sensor.sensor_type === 'email' && (
+              <>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    IMAP Host <span className="text-red-500">*</span>
+                  </label>
+                  <input
+                    type="text"
+                    value={sensor.imap_host || ''}
+                    onChange={(e) => setSensor({ ...sensor, imap_host: e.target.value })}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md"
+                    placeholder="imap.gmail.com"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">IMAP Port</label>
+                  <input
+                    type="number"
+                    value={sensor.imap_port || 993}
+                    onChange={(e) => setSensor({ ...sensor, imap_port: parseInt(e.target.value) })}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md"
+                    placeholder="993"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Email Username <span className="text-red-500">*</span>
+                  </label>
+                  <input
+                    type="text"
+                    value={sensor.email_user || ''}
+                    onChange={(e) => setSensor({ ...sensor, email_user: e.target.value })}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md"
+                    placeholder="${EMAIL_USER}"
+                  />
+                  <p className="text-xs text-gray-500 mt-1">Use $&#123;VAR&#125; for environment variables</p>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Email Password <span className="text-red-500">*</span>
+                  </label>
+                  <input
+                    type="password"
+                    value={sensor.email_password || ''}
+                    onChange={(e) => setSensor({ ...sensor, email_password: e.target.value })}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md"
+                    placeholder="${EMAIL_PASSWORD}"
+                  />
+                  <p className="text-xs text-gray-500 mt-1">Use $&#123;VAR&#125; for environment variables</p>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Subject Pattern (Regex)</label>
+                  <input
+                    type="text"
+                    value={sensor.subject_pattern || ''}
+                    onChange={(e) => setSensor({ ...sensor, subject_pattern: e.target.value })}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md"
+                    placeholder="^\\[Alert\\].*"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">From Pattern (Regex)</label>
+                  <input
+                    type="text"
+                    value={sensor.from_pattern || ''}
+                    onChange={(e) => setSensor({ ...sensor, from_pattern: e.target.value })}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md"
+                    placeholder=".*@company\\.com$"
+                  />
+                </div>
+                <div className="flex items-center">
+                  <input
+                    type="checkbox"
+                    id="mark_as_read"
+                    checked={sensor.mark_as_read ?? true}
+                    onChange={(e) => setSensor({ ...sensor, mark_as_read: e.target.checked })}
+                    className="mr-2"
+                  />
+                  <label htmlFor="mark_as_read" className="text-sm text-gray-700">
+                    Mark emails as read after processing
+                  </label>
+                </div>
+              </>
+            )}
+
+            {/* Filesystem Sensor Fields */}
+            {sensor.sensor_type === 'filesystem' && (
+              <>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Directory Path <span className="text-red-500">*</span>
+                  </label>
+                  <input
+                    type="text"
+                    value={sensor.directory_path || ''}
+                    onChange={(e) => setSensor({ ...sensor, directory_path: e.target.value })}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md"
+                    placeholder="/data/incoming"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">File Pattern</label>
+                  <input
+                    type="text"
+                    value={sensor.file_pattern || '*'}
+                    onChange={(e) => setSensor({ ...sensor, file_pattern: e.target.value })}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md"
+                    placeholder="*.csv"
+                  />
+                  <p className="text-xs text-gray-500 mt-1">Glob pattern to match files</p>
+                </div>
+                <div className="flex items-center">
+                  <input
+                    type="checkbox"
+                    id="recursive"
+                    checked={sensor.recursive ?? false}
+                    onChange={(e) => setSensor({ ...sensor, recursive: e.target.checked })}
+                    className="mr-2"
+                  />
+                  <label htmlFor="recursive" className="text-sm text-gray-700">
+                    Monitor subdirectories recursively
+                  </label>
+                </div>
+                <div className="flex items-center">
+                  <input
+                    type="checkbox"
+                    id="move_after_processing"
+                    checked={sensor.move_after_processing ?? false}
+                    onChange={(e) => setSensor({ ...sensor, move_after_processing: e.target.checked })}
+                    className="mr-2"
+                  />
+                  <label htmlFor="move_after_processing" className="text-sm text-gray-700">
+                    Move files after processing
+                  </label>
+                </div>
+                {sensor.move_after_processing && (
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Archive Directory</label>
+                    <input
+                      type="text"
+                      value={sensor.archive_directory || ''}
+                      onChange={(e) => setSensor({ ...sensor, archive_directory: e.target.value })}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md"
+                      placeholder="/data/archive"
+                    />
+                  </div>
+                )}
+              </>
+            )}
+
+            {/* Database Sensor Fields */}
+            {sensor.sensor_type === 'database' && (
+              <>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Connection String <span className="text-red-500">*</span>
+                  </label>
+                  <input
+                    type="text"
+                    value={sensor.connection_string || ''}
+                    onChange={(e) => setSensor({ ...sensor, connection_string: e.target.value })}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md"
+                    placeholder="${DATABASE_URL}"
+                  />
+                  <p className="text-xs text-gray-500 mt-1">SQLAlchemy connection string</p>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Table Name <span className="text-red-500">*</span>
+                  </label>
+                  <input
+                    type="text"
+                    value={sensor.table_name || ''}
+                    onChange={(e) => setSensor({ ...sensor, table_name: e.target.value })}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md"
+                    placeholder="incoming_data"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Timestamp Column <span className="text-red-500">*</span>
+                  </label>
+                  <input
+                    type="text"
+                    value={sensor.timestamp_column || ''}
+                    onChange={(e) => setSensor({ ...sensor, timestamp_column: e.target.value })}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md"
+                    placeholder="created_at"
+                  />
+                  <p className="text-xs text-gray-500 mt-1">Column for tracking new rows</p>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Query Condition</label>
+                  <input
+                    type="text"
+                    value={sensor.query_condition || ''}
+                    onChange={(e) => setSensor({ ...sensor, query_condition: e.target.value })}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md"
+                    placeholder="status = 'pending'"
+                  />
+                  <p className="text-xs text-gray-500 mt-1">Additional SQL WHERE condition</p>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Batch Size</label>
+                  <input
+                    type="number"
+                    value={sensor.batch_size || 100}
+                    onChange={(e) => setSensor({ ...sensor, batch_size: parseInt(e.target.value) })}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md"
+                    placeholder="100"
+                  />
+                  <p className="text-xs text-gray-500 mt-1">Maximum rows to process per run</p>
+                </div>
+              </>
+            )}
+
+            {/* Webhook Sensor Fields */}
+            {sensor.sensor_type === 'webhook' && (
+              <>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Webhook Path <span className="text-red-500">*</span>
+                  </label>
+                  <input
+                    type="text"
+                    value={sensor.webhook_path || ''}
+                    onChange={(e) => setSensor({ ...sensor, webhook_path: e.target.value })}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md"
+                    placeholder="/webhooks/my-webhook"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Auth Token</label>
+                  <input
+                    type="password"
+                    value={sensor.auth_token || ''}
+                    onChange={(e) => setSensor({ ...sensor, auth_token: e.target.value })}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md"
+                    placeholder="${WEBHOOK_TOKEN}"
+                  />
+                  <p className="text-xs text-gray-500 mt-1">Optional bearer token for authentication</p>
+                </div>
+                <div className="flex items-center">
+                  <input
+                    type="checkbox"
+                    id="validate_signature"
+                    checked={sensor.validate_signature ?? false}
+                    onChange={(e) => setSensor({ ...sensor, validate_signature: e.target.checked })}
+                    className="mr-2"
+                  />
+                  <label htmlFor="validate_signature" className="text-sm text-gray-700">
+                    Validate webhook signature (GitHub style)
+                  </label>
+                </div>
+                {sensor.validate_signature && (
+                  <>
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">Signature Header</label>
+                      <input
+                        type="text"
+                        value={sensor.signature_header || 'X-Hub-Signature-256'}
+                        onChange={(e) => setSensor({ ...sensor, signature_header: e.target.value })}
+                        className="w-full px-3 py-2 border border-gray-300 rounded-md"
+                        placeholder="X-Hub-Signature-256"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">Secret Key</label>
+                      <input
+                        type="password"
+                        value={sensor.secret_key || ''}
+                        onChange={(e) => setSensor({ ...sensor, secret_key: e.target.value })}
+                        className="w-full px-3 py-2 border border-gray-300 rounded-md"
+                        placeholder="${WEBHOOK_SECRET}"
+                      />
+                    </div>
+                  </>
+                )}
+              </>
+            )}
+
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Description</label>
+              <input
+                type="text"
+                value={sensor.description}
+                onChange={(e) => setSensor({ ...sensor, description: e.target.value })}
+                className="w-full px-3 py-2 border border-gray-300 rounded-md"
+                placeholder="Sensor to trigger..."
+              />
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                Minimum Interval (seconds)
+              </label>
+              <input
+                type="number"
+                value={sensor.minimum_interval_seconds}
+                onChange={(e) =>
+                  setSensor({ ...sensor, minimum_interval_seconds: parseInt(e.target.value) })
+                }
+                className="w-full px-3 py-2 border border-gray-300 rounded-md"
+                placeholder="30"
+              />
+            </div>
+
+            <button
+              onClick={handleGenerate}
+              disabled={generateSensorMutation.isPending}
+              className="w-full flex items-center justify-center space-x-2 px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-50"
+            >
+              <FileCode className="w-4 h-4" />
+              <span>Generate Code</span>
+            </button>
+          </Tabs.Content>
+
+          {/* Asset Check Tab */}
+          <Tabs.Content value="asset_check" className="flex-1 overflow-y-auto p-4 space-y-4">
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                Check Name <span className="text-red-500">*</span>
+              </label>
+              <input
+                type="text"
+                value={assetCheck.check_name}
+                onChange={(e) => setAssetCheck({ ...assetCheck, check_name: e.target.value })}
+                className="w-full px-3 py-2 border border-gray-300 rounded-md"
+                placeholder="my_check"
+              />
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                Asset Name <span className="text-red-500">*</span>
+              </label>
+              <select
+                value={assetCheck.asset_name}
+                onChange={(e) => setAssetCheck({ ...assetCheck, asset_name: e.target.value })}
+                className="w-full px-3 py-2 border border-gray-300 rounded-md"
+              >
+                <option value="">Select an asset...</option>
+                {currentProject?.graph.nodes
+                  .filter((node: any) => node.node_kind === 'asset' || node.type === 'asset')
+                  .map((node: any) => (
+                    <option key={node.id} value={node.data.asset_key || node.id}>
+                      {node.data.asset_key || node.data.label || node.id}
+                    </option>
+                  ))}
+              </select>
+              <p className="text-xs text-gray-500 mt-1">
+                Select an asset to add a quality check to
+              </p>
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                Check Type <span className="text-red-500">*</span>
+              </label>
+              <select
+                value={assetCheck.check_type}
+                onChange={(e) =>
+                  setAssetCheck({ ...assetCheck, check_type: e.target.value as any })
+                }
+                className="w-full px-3 py-2 border border-gray-300 rounded-md"
+              >
+                <option value="row_count">Row Count</option>
+                <option value="freshness">Freshness</option>
+                <option value="schema">Schema</option>
+                <option value="custom">Custom</option>
+              </select>
+            </div>
+
+            {assetCheck.check_type === 'row_count' && (
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Minimum Row Count
+                </label>
+                <input
+                  type="number"
+                  value={assetCheck.threshold}
+                  onChange={(e) =>
+                    setAssetCheck({ ...assetCheck, threshold: parseInt(e.target.value) })
+                  }
+                  className="w-full px-3 py-2 border border-gray-300 rounded-md"
+                  placeholder="0"
+                />
+              </div>
+            )}
+
+            {assetCheck.check_type === 'freshness' && (
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Max Age (hours)
+                </label>
+                <input
+                  type="number"
+                  value={assetCheck.max_age_hours}
+                  onChange={(e) =>
+                    setAssetCheck({ ...assetCheck, max_age_hours: parseInt(e.target.value) })
+                  }
+                  className="w-full px-3 py-2 border border-gray-300 rounded-md"
+                  placeholder="24"
+                />
+              </div>
+            )}
+
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Description</label>
+              <input
+                type="text"
+                value={assetCheck.description}
+                onChange={(e) => setAssetCheck({ ...assetCheck, description: e.target.value })}
+                className="w-full px-3 py-2 border border-gray-300 rounded-md"
+                placeholder="Check that..."
+              />
+            </div>
+
+            <button
+              onClick={handleGenerate}
+              disabled={generateAssetCheckMutation.isPending}
+              className="w-full flex items-center justify-center space-x-2 px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-50"
+            >
+              <FileCode className="w-4 h-4" />
+              <span>Generate Code</span>
+            </button>
+          </Tabs.Content>
+
+          {/* Community Tab */}
+          <Tabs.Content value="community" className="flex-1 min-h-0 overflow-hidden flex flex-col">
+            <CommunityTemplates />
+          </Tabs.Content>
+        </Tabs.Root>
+      </div>
+
+      {/* Right Panel - Code Preview */}
+      {activeTab !== 'community' && (
+      <div className="w-1/2 flex flex-col">
+        <div className="p-4 border-b border-gray-200 flex items-center justify-between">
+          <h3 className="text-sm font-semibold text-gray-900">Generated Code</h3>
+          {generatedCode && (
+            <button
+              onClick={handleSave}
+              disabled={saveMutation.isPending || !currentProject}
+              className="flex items-center space-x-1 px-3 py-1.5 text-sm bg-green-600 text-white rounded-md hover:bg-green-700 disabled:opacity-50"
+            >
+              <Save className="w-3 h-3" />
+              <span>Save to Project</span>
+            </button>
+          )}
+        </div>
+
+        <div className="flex-1">
+          {generatedCode ? (
+            <Editor
+              height="100%"
+              language="python"
+              value={generatedCode}
+              onChange={(value) => setGeneratedCode(value || '')}
+              theme="vs-light"
+              options={{
+                minimap: { enabled: false },
+                fontSize: 13,
+                lineNumbers: 'on',
+                scrollBeyondLastLine: false,
+                automaticLayout: true,
+              }}
+            />
+          ) : (
+            <div className="flex items-center justify-center h-full text-gray-500">
+              <div className="text-center">
+                <FileCode className="w-12 h-12 mx-auto mb-2 text-gray-400" />
+                <p className="text-sm">Fill in the form and click Generate Code</p>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+      )}
+    </div>
+  );
+}

@@ -1,0 +1,70 @@
+{
+  "type": "dagster_designer_components.DatabaseSensorComponent",
+  "name": "Database Sensor",
+  "category": "sensors",
+  "description": "Monitors a database table for new rows or changes",
+  "attributes": {
+    "sensor_name": {
+      "type": "string",
+      "required": true,
+      "label": "Sensor Name",
+      "description": "Name for the sensor",
+      "default": "my_database_sensor"
+    },
+    "connection_string": {
+      "type": "string",
+      "required": true,
+      "label": "Database Connection String",
+      "description": "SQLAlchemy connection string (use env var)",
+      "placeholder": "${DATABASE_URL}",
+      "sensitive": true
+    },
+    "table_name": {
+      "type": "string",
+      "required": true,
+      "label": "Table Name",
+      "description": "Name of the table to monitor",
+      "placeholder": "incoming_data"
+    },
+    "timestamp_column": {
+      "type": "string",
+      "required": true,
+      "label": "Timestamp Column",
+      "description": "Column name for tracking new rows (e.g., 'created_at')",
+      "placeholder": "created_at"
+    },
+    "query_condition": {
+      "type": "string",
+      "required": false,
+      "label": "Query Condition",
+      "description": "Additional SQL WHERE condition",
+      "placeholder": "status = 'pending'"
+    },
+    "job_name": {
+      "type": "string",
+      "required": true,
+      "label": "Job to Trigger",
+      "description": "The job to run when new rows are detected",
+      "placeholder": "process_new_data_job"
+    },
+    "minimum_interval_seconds": {
+      "type": "number",
+      "required": false,
+      "label": "Check Interval (seconds)",
+      "description": "How often to check for new rows",
+      "default": 60
+    },
+    "batch_size": {
+      "type": "number",
+      "required": false,
+      "label": "Batch Size",
+      "description": "Maximum number of rows to process per run",
+      "default": 100
+    }
+  },
+  "outputs": [],
+  "dependencies": {
+    "pip": ["sqlalchemy"]
+  },
+  "tags": ["sensor", "database", "sql", "monitoring"]
+}
