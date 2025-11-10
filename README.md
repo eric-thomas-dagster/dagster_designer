@@ -2,14 +2,93 @@
 
 A visual pipeline designer for Dagster with drag-and-drop component editing, inspired by Kestra, Flowable, and dbt Cloud.
 
+**Build Dagster pipelines visually** - Design data pipelines with a drag-and-drop interface, manage assets with custom lineage, and deploy with full Dagster CLI integration.
+
 ## Features
 
-- **Visual Graph Editor**: Drag-and-drop interface powered by React Flow
-- **Component Library**: Built-in support for Dagster components (dbt, Fivetran, Sling, dlt)
-- **Dynamic Property Editor**: Auto-generated forms based on Pydantic schemas
-- **Code Generation**: Export projects as Dagster YAML component files
-- **Git Integration**: Clone, commit, and push to GitHub repositories
-- **Local & Cloud Ready**: Run locally or deploy to cloud infrastructure
+### 🎨 Visual Design & Editing
+- **Drag-and-Drop Graph Editor**: Visual pipeline designer powered by React Flow
+- **Dual View Modes**:
+  - **Component View**: Design component orchestration
+  - **Asset View**: Visualize the full asset lineage graph with custom lineage support
+- **Smart Arrange Groups**: Auto-organize assets by groups in a grid layout
+- **Custom Lineage**: Draw dependencies between any assets to inject custom lineage at runtime
+- **Interactive Nodes**: Click to edit, drag to reposition, connect with handles
+- **Node Selection**: Multi-select assets with CMD/CTRL+click for bulk operations
+
+### 🏭 Component Management
+- **Built-in Component Library**: Support for all major Dagster components:
+  - dbt (DbtProjectComponent)
+  - Fivetran (FivetranAccountComponent)
+  - Sling (SlingReplicationCollectionComponent)
+  - dlt (DltLoadCollectionComponent)
+  - Snowflake SQL, Python assets, and more
+- **Custom Components**: Create your own components with visual templates
+- **Component Discovery**: Automatic schema introspection from Pydantic models
+- **Dynamic Forms**: Auto-generated configuration UI based on component schemas
+
+### 💻 Code Editor & Primitives
+- **Integrated Code Editor**: Built-in Monaco Editor (VS Code) for editing:
+  - Python assets with syntax highlighting
+  - SQL queries
+  - Component YAML definitions
+  - Any project file
+- **Primitives Manager**: Visual UI for creating and managing:
+  - Jobs (asset selection, schedules, execution)
+  - Schedules (cron expressions with visual builder)
+  - Sensors (filesystem, webhook, database, S3, email)
+  - Asset Checks (data quality validation)
+- **Python Asset Creator**: Quick-create Python assets with templates
+
+### 🔄 Project Import & Export
+- **Import Existing Projects**: Automatically discover and import existing Dagster projects
+  - Scans for defs folders and components
+  - Preserves existing structure
+  - Generates visual graph from definitions.py
+- **Export as ZIP**: Download complete Dagster project ready to deploy
+- **Live Preview**: See generated YAML and Python code in real-time
+- **File Browser**: Navigate and edit project files directly in the UI
+
+### ⚙️ Dagster CLI Integration
+- **Embedded Dagster Web UI**: Launch and manage Dagster dev server from the designer
+- **Asset Introspection**: Automatic discovery of assets and their dependencies from running projects
+- **Component Validation**: `dg check` and `dg list defs` integration
+- **Asset Materialization**: Trigger materializations from the UI with multi-select support
+- **Real-time Status**: See which assets are materialized/stale
+
+### 🔗 Custom Lineage & Dependencies
+- **Visual Dependency Editing**: Draw edges between assets to create custom lineage
+- **Dynamic Injection**: Dependencies are injected at runtime via `map_resolved_asset_specs()`
+- **Cross-Component Dependencies**: Link assets from different components (dbt, Python, etc.)
+- **Self-loop Prevention**: Automatic validation to prevent invalid dependencies
+- **dbt Model Support**: Smart detection to avoid conflicts with dbt's native dependencies
+
+### 🌐 Environment & Resources
+- **Environment Variables Manager**:
+  - Create and edit .env files
+  - Secure credential storage
+  - Use `{{ env.VAR_NAME }}` templates in configs
+- **Resource Configuration**: Configure database connections, API keys, and other resources
+- **Multi-Environment Support**: Separate configs for dev/staging/prod
+
+### 🔌 Git Integration
+- **Repository Operations**: Clone, commit, and push to GitHub
+- **Commit Workflow**: Visual diff, commit message, and push
+- **Branch Management**: Create and switch branches
+- **Personal Access Token**: Secure authentication with GitHub
+
+### 📊 Asset Visualization
+- **Asset Metadata Display**: View descriptions, groups, owners, tags, and checks
+- **Dependency Graph**: Interactive visualization of asset dependencies
+- **Source Component Badges**: See which component generated each asset
+- **Group Organization**: Color-coded groups with visual indicators
+- **IO Type Indicators**: Show DataFrames and other output types
+
+### 🎯 Code Generation
+- **YAML Components**: Generate Dagster component YAML files
+- **definitions.py**: Auto-generate with custom lineage support
+- **Asset Customizations**: Override group names and descriptions
+- **Custom Component Registration**: Automatic import of designer components
 
 ## Understanding Components vs Assets
 
@@ -46,6 +125,54 @@ The actual **asset lineage graph** is much more detailed and is computed by Dags
 - Explicit asset key dependencies in `post_processing` rules
 
 For a complete explanation, see [COMPONENT_ASSET_MODEL.md](COMPONENT_ASSET_MODEL.md).
+
+## Technical Highlights
+
+### Custom Lineage Injection
+Custom lineage is injected at runtime using Dagster's `map_resolved_asset_specs()` API:
+
+```python
+# Generated in definitions.py
+defs = defs.map_resolved_asset_specs(
+    func=lambda spec: spec.merge_attributes(deps=source_keys),
+    selection=target_asset  # Only modify specific assets
+)
+```
+
+This allows you to:
+- Add dependencies between any assets (Python, dbt, etc.)
+- Preserve dbt's native dependencies
+- Avoid conflicts with component-generated assets
+
+### Component Auto-Discovery
+The component registry automatically discovers Dagster components:
+
+```python
+# Scans installed packages
+self._scan_module("dagster_dbt", "dbt")
+self._scan_module("dagster_fivetran", "fivetran")
+
+# Introspects Pydantic schemas
+schema = component_type.get_schema()
+# Generates UI forms automatically
+```
+
+### Project Import Intelligence
+When importing projects:
+1. Scans for `defs/` folders and component YAML files
+2. Introspects `definitions.py` for existing components
+3. Runs `dg list defs` to discover all assets
+4. Builds dependency graph from asset specs
+5. Preserves custom lineage from `custom_lineage.json`
+
+### State-Backed Components
+Custom components (Jobs, Schedules, Sensors) are "state-backed":
+- Stored in project JSON, not YAML
+- Generate component YAML at codegen time
+- Full UI for configuration
+- No manual YAML editing required
+
+See [STATE_BACKED_COMPONENTS.md](STATE_BACKED_COMPONENTS.md) for details.
 
 ## Architecture
 
@@ -102,6 +229,76 @@ npm run dev
 ```
 
 The frontend will be available at `http://localhost:5173`
+
+## Key Workflows
+
+### 🚀 Quickstart: Creating Your First Pipeline
+
+1. **Launch the App**
+   - Start backend: `./start-backend.sh` (or `.bat` on Windows)
+   - Start frontend: `./start-frontend.sh` (or `.bat` on Windows)
+   - Open `http://localhost:5173`
+
+2. **Create a New Project**
+   - Click "New Project"
+   - Enter a name and click "Create"
+
+3. **Add Components**
+   - Switch to "Component View" in the top-right
+   - Drag a dbt component from the palette
+   - Configure your dbt project path
+   - Add other components (Fivetran, Sling, etc.)
+
+4. **View Asset Lineage**
+   - Switch to "Asset View"
+   - Click "Regenerate Assets" to discover all assets
+   - See the full asset dependency graph
+
+5. **Add Custom Lineage**
+   - In Asset View, drag from one asset to another
+   - Custom dependencies are injected at runtime
+
+6. **Launch Dagster**
+   - Click the Dagster icon in the top bar
+   - Start the dev server
+   - Open Dagster UI to materialize assets
+
+### 📥 Import Existing Dagster Project
+
+1. **Click "Import Project"**
+2. **Browse to your Dagster project directory**
+   - Must have a `dg.toml` or `pyproject.toml`
+   - Must have a `defs/` folder or definitions.py
+3. **Designer automatically**:
+   - Scans for components
+   - Discovers assets and dependencies
+   - Generates visual graph
+   - Preserves your existing code
+
+### ✏️ Create Custom Components
+
+1. **Click "Templates" in the sidebar**
+2. **Create New Component**
+   - Choose a base type (Python, SQL, etc.)
+   - Configure inputs/outputs
+   - Add custom logic
+3. **Use in Projects**
+   - Drag from "Custom Components" section
+   - Configure like any other component
+
+### 🎯 Manage Primitives
+
+1. **Click "Primitives" in the sidebar**
+2. **Create Jobs**
+   - Select assets to include
+   - Configure execution settings
+   - Add schedules or sensors
+3. **Create Schedules**
+   - Use the visual cron builder
+   - Link to jobs or asset selections
+4. **Create Sensors**
+   - Choose sensor type (filesystem, webhook, etc.)
+   - Configure trigger conditions
 
 ## Usage
 
@@ -326,16 +523,33 @@ The property panel automatically generates form fields based on Pydantic schemas
 - Verify the backend API is running
 - Check backend logs for save errors
 
+## What's Included
+
+✅ **Component orchestration** - Visual design of Dagster components
+✅ **Asset lineage visualization** - Full asset graph with custom lineage
+✅ **Code editor** - Built-in Monaco editor for Python/SQL/YAML
+✅ **Primitives manager** - Jobs, schedules, sensors, asset checks
+✅ **Project import** - Discover and import existing Dagster projects
+✅ **Dagster CLI integration** - Embedded webserver, materialization, validation
+✅ **Environment variables** - Secure credential management
+✅ **Git integration** - Clone, commit, push to GitHub
+✅ **Custom components** - Create your own component templates
+✅ **Custom lineage injection** - Runtime dependency modification
+✅ **Multi-select operations** - Bulk asset materialization
+✅ **Group management** - Organize and arrange asset groups
+
 ## Roadmap
 
-- [ ] Add more Dagster component libraries (Airbyte, etc.)
-- [ ] Implement asset dependency validation
-- [ ] Add collaboration features (multi-user editing)
-- [ ] Integrate with Dagster Cloud deployment
-- [ ] Add pipeline testing/validation
-- [ ] Support for custom Python components
-- [ ] Version control integration (branch management)
-- [ ] Real-time collaboration
+- [ ] **Docker deployment** - Containerized setup with docker-compose
+- [ ] **More component libraries** - Airbyte, Meltano, etc.
+- [ ] **Dagster Cloud integration** - Deploy directly to Dagster Cloud
+- [ ] **Real-time collaboration** - Multi-user editing with presence indicators
+- [ ] **Version history** - Time-travel and rollback for projects
+- [ ] **Testing framework** - Built-in asset testing and validation
+- [ ] **Template marketplace** - Share and discover component templates
+- [ ] **Advanced scheduling** - Visual scheduling with calendar view
+- [ ] **Observability** - Built-in monitoring and alerting
+- [ ] **Data catalog** - Browse and search assets across projects
 
 ## Contributing
 
