@@ -259,8 +259,8 @@ async def install_component(request: InstallComponentRequest):
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
 
-    # Get the Dagster project path
-    dagster_project_path = dagster_cli_service.projects_dir / project.name
+    # Get the Dagster project path using the correct method
+    dagster_project_path = project_service._get_project_dir(project)
 
     if not dagster_project_path.exists():
         raise HTTPException(
@@ -348,8 +348,8 @@ async def list_installed_components(project_id: str):
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
 
-    # Get the Dagster project path
-    dagster_project_path = dagster_cli_service.projects_dir / project.name
+    # Get the Dagster project path using the correct method
+    dagster_project_path = project_service._get_project_dir(project)
 
     if not dagster_project_path.exists():
         return {
@@ -382,8 +382,8 @@ async def check_component_installed(project_id: str, component_type: str):
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
 
-    # Get the Dagster project path
-    dagster_project_path = dagster_cli_service.projects_dir / project.name
+    # Get the Dagster project path using the correct method
+    dagster_project_path = project_service._get_project_dir(project)
 
     if not dagster_project_path.exists():
         return {"installed": False}

@@ -402,28 +402,48 @@ async def install_component(
             with open(manifest_file, 'w') as f:
                 yaml.dump(basic_manifest, f, default_flow_style=False, sort_keys=False)
 
-        # 3. Install requirements.txt dependencies
-        venv_python = project_dir / ".venv" / "bin" / "python"
-        print(f"[Install] Looking for venv python at: {venv_python}")
-        print(f"[Install] Venv python exists: {venv_python.exists()}")
-
-        if requirements_txt and venv_python.exists():
+        # 3. Install requirements.txt dependencies using uv add
+        # This ensures dependencies are added to pyproject.toml
+        if requirements_txt:
             requirements_file = component_dir / "requirements.txt"
             print(f"[Install] Installing requirements from: {requirements_file}")
-            try:
-                result = subprocess.run(
-                    [str(venv_python), "-m", "pip", "install", "-r", str(requirements_file)],
-                    check=True,
-                    capture_output=True,
-                    cwd=str(project_dir),
-                    text=True
-                )
-                print(f"[Install] Requirements installed successfully")
-                print(f"[Install] stdout: {result.stdout}")
-            except subprocess.CalledProcessError as e:
-                print(f"Warning: Failed to install requirements: {e.stderr}")
-        elif requirements_txt and not venv_python.exists():
-            print(f"[Install] Skipping requirements installation - venv not found at {venv_python}")
+
+            # Parse requirements.txt line by line
+            requirements_lines = requirements_txt.strip().split('\n')
+            packages_to_install = []
+
+            for line in requirements_lines:
+                line = line.strip()
+                # Skip empty lines and comments
+                if not line or line.startswith('#'):
+                    continue
+                # Handle lines with comments
+                if '#' in line:
+                    line = line.split('#')[0].strip()
+                if line:
+                    packages_to_install.append(line)
+
+            if packages_to_install:
+                print(f"[Install] Installing {len(packages_to_install)} packages: {packages_to_install}")
+                try:
+                    # Use uv add to install all packages at once
+                    # This will update pyproject.toml automatically
+                    result = subprocess.run(
+                        ["uv", "add"] + packages_to_install,
+                        check=True,
+                        capture_output=True,
+                        cwd=str(project_dir),
+                        text=True,
+                        timeout=300
+                    )
+                    print(f"[Install] Requirements installed successfully and added to pyproject.toml")
+                    print(f"[Install] stdout: {result.stdout}")
+                except subprocess.CalledProcessError as e:
+                    print(f"Warning: Failed to install requirements: {e.stderr}")
+                except subprocess.TimeoutExpired:
+                    print(f"Warning: Requirements installation timed out")
+            else:
+                print(f"[Install] No valid packages found in requirements.txt")
 
         # 4. Register component instance
         # Strategy: Use dg scaffold defs for newly created projects (is_imported=False)
