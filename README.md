@@ -198,37 +198,53 @@ See [STATE_BACKED_COMPONENTS.md](STATE_BACKED_COMPONENTS.md) for details.
 
 ## Quick Start
 
-### 1. Backend Setup
+### 1. First Time Setup
 
+**Backend:**
 ```bash
 cd backend
-
-# Create virtual environment
 python -m venv venv
 source venv/bin/activate  # On Windows: venv\Scripts\activate
-
-# Install dependencies
 pip install -r requirements.txt
+```
 
-# Run the server
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+**Frontend:**
+```bash
+cd frontend
+npm install
+```
+
+### 2. Start the Application
+
+**Using Start Scripts (Recommended):**
+
+```bash
+# Start backend (from project root)
+./start-backend.sh      # On macOS/Linux
+start-backend.bat       # On Windows
+
+# Start frontend (from project root)
+./start-frontend.sh     # On macOS/Linux
+start-frontend.bat      # On Windows
 ```
 
 The backend API will be available at `http://localhost:8000`
+The frontend will be available at `http://localhost:5173`
 
-### 2. Frontend Setup
+**Alternative - Manual Start:**
 
+Backend:
 ```bash
-cd frontend
-
-# Install dependencies
-npm install
-
-# Run the dev server
-npm run dev
+cd backend
+source venv/bin/activate  # On Windows: venv\Scripts\activate
+uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-The frontend will be available at `http://localhost:5173`
+Frontend:
+```bash
+cd frontend
+npm run dev
+```
 
 ## Key Workflows
 
@@ -529,6 +545,14 @@ The property panel automatically generates form fields based on Pydantic schemas
 
 ## Roadmap
 
+### High Priority
+- [ ] **Partitioned Assets** - Support for time-based and static partitioned assets with partition mapping
+- [ ] **Job Submission UI** - Submit and trigger job runs directly from the designer with parameter configuration
+- [ ] **Run Config Editor** - Visual editor for setting run configuration, tags, and operational parameters
+- [ ] **Type-Aware Lineage** - Smart dependency validation based on input/output types (e.g., DataFrame → DataFrame connections only)
+- [ ] **Asset Sensors & Automation Conditions** - Support for asset sensors and declarative automation conditions for asset-driven orchestration
+
+### Features
 - [ ] **Git UI** - Visual commit/push dialog, branch management, diff viewer
 - [ ] **Docker deployment** - Containerized setup with docker-compose
 - [ ] **More component libraries** - Airbyte, Meltano, etc.
