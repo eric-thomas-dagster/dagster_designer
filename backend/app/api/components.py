@@ -67,8 +67,37 @@ async def get_component(component_type: str, project_id: str | None = None):
                     if idx + 1 < len(parts):
                         component_id = parts[idx + 1]
                         component_dir = components_dir / component_id
-                        manifest_file = component_dir / "manifest.yaml"
 
+                        # First check if schema.json exists (from installed community component)
+                        schema_file = component_dir / "schema.json"
+                        if schema_file.exists():
+                            try:
+                                import json
+                                with open(schema_file, 'r') as f:
+                                    schema_data = json.load(f)
+
+                                # Also get manifest data if available
+                                manifest_file = component_dir / "manifest.yaml"
+                                manifest_data = {}
+                                if manifest_file.exists():
+                                    with open(manifest_file, 'r') as f:
+                                        manifest_data = yaml.safe_load(f)
+
+                                from ..models.component import ComponentSchema
+                                return ComponentSchema(
+                                    name=manifest_data.get('name', component_id),
+                                    type=component_type,
+                                    category=manifest_data.get('category', 'unknown'),
+                                    module='community',
+                                    description=manifest_data.get('description', ''),
+                                    icon='package',
+                                    schema=schema_data
+                                )
+                            except Exception as e:
+                                print(f"Error loading schema.json for {component_id}: {e}")
+                                # Fall through to AST parsing
+
+                        manifest_file = component_dir / "manifest.yaml"
                         if manifest_file.exists():
                             try:
                                 with open(manifest_file, 'r') as f:
