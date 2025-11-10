@@ -18,6 +18,7 @@ import {
 import { primitivesApi } from '@/services/api';
 import { CommunityTemplates } from './CommunityTemplates';
 import { CronBuilder } from './CronBuilder';
+import { EnhancedDataQualityChecksBuilder } from './EnhancedDataQualityChecksBuilder';
 import {
   templatesApi,
   type PythonAssetParams,
@@ -44,16 +45,21 @@ export function TemplateBuilder() {
     enabled: !!currentProject && needsPrimitives,
   });
 
-  // Fetch installed community components for sensors
+  // Fetch installed community components - always fetch when project is loaded for instant availability
   const { data: installedComponents } = useQuery({
     queryKey: ['installed-components', currentProject?.id],
     queryFn: () => currentProject ? templatesApi.getInstalled(currentProject.id) : Promise.reject('No project'),
-    enabled: !!currentProject && activeTab === 'sensor',
+    enabled: !!currentProject,
   });
 
   // Filter for sensor components only
   const communitySensors = installedComponents?.components.filter(
     (component) => component.category === 'sensors'
+  ) || [];
+
+  // Filter for asset check components only
+  const communityAssetChecks = installedComponents?.components.filter(
+    (component) => component.category === 'asset_checks'
   ) || [];
 
   // Fetch schema for selected community sensor
@@ -89,6 +95,33 @@ export function TemplateBuilder() {
     console.log('Schema loading:', schemaLoading);
     console.log('Schema data:', communitySensorSchema);
   }, [selectedCommunitySensor, schemaLoading, communitySensorSchema]);
+
+  // State management for community asset checks
+  const [selectedCommunityAssetCheck, setSelectedCommunityAssetCheck] = useState<string | null>(null);
+  const [communityAssetCheckAttributes, setCommunityAssetCheckAttributes] = useState<Record<string, any>>({});
+
+  const { data: communityAssetCheckSchema, isLoading: assetCheckSchemaLoading } = useQuery({
+    queryKey: ['component-schema-asset-check', currentProject?.id, selectedCommunityAssetCheck],
+    queryFn: () =>
+      currentProject && selectedCommunityAssetCheck
+        ? templatesApi.getInstalledComponentSchema(currentProject.id, selectedCommunityAssetCheck)
+        : Promise.reject('No component selected'),
+    enabled: !!currentProject && !!selectedCommunityAssetCheck,
+  });
+
+  // Initialize community asset check attributes with defaults when schema loads
+  useEffect(() => {
+    if (communityAssetCheckSchema?.attributes) {
+      console.log('Community asset check schema loaded:', communityAssetCheckSchema);
+      const defaults: Record<string, any> = {};
+      Object.entries(communityAssetCheckSchema.attributes).forEach(([key, attr]) => {
+        if (attr.default !== undefined) {
+          defaults[key] = attr.default;
+        }
+      });
+      setCommunityAssetCheckAttributes(defaults);
+    }
+  }, [communityAssetCheckSchema]);
 
   // Python Asset Form State
   const [pythonAsset, setPythonAsset] = useState<PythonAssetParams>({
@@ -232,9 +265,58 @@ export function TemplateBuilder() {
   });
 
   const generateAssetCheckMutation = useMutation({
-    mutationFn: () => templatesApi.generateAssetCheck(assetCheck),
+    mutationFn: () => {
+      // For community asset checks, generate component YAML
+      if (selectedCommunityAssetCheck) {
+        // Generate YAML for the component
+        const yaml = `type: ${selectedCommunityAssetCheck === 'enhanced_data_quality_checks'
+          ? 'dagster_component_templates.EnhancedDataQualityChecksComponent'
+          : communityAssetCheckSchema?.type || selectedCommunityAssetCheck}
+attributes:
+${generateYamlAttributes(communityAssetCheckAttributes, 1)}`;
+
+        return Promise.resolve({
+          code: yaml,
+          check_name: selectedCommunityAssetCheck
+        });
+      }
+
+      // For basic asset checks, use the standard API
+      return templatesApi.generateAssetCheck(assetCheck);
+    },
     onSuccess: (data) => setGeneratedCode(data.code),
   });
+
+  // Helper function to convert attributes to YAML format
+  const generateYamlAttributes = (attrs: Record<string, any>, indentLevel: number): string => {
+    const indent = '  '.repeat(indentLevel);
+    let yaml = '';
+
+    for (const [key, value] of Object.entries(attrs)) {
+      if (value === undefined || value === null) continue;
+
+      if (typeof value === 'object' && !Array.isArray(value)) {
+        yaml += `${indent}${key}:\n`;
+        yaml += generateYamlAttributes(value, indentLevel + 1);
+      } else if (Array.isArray(value)) {
+        yaml += `${indent}${key}:\n`;
+        value.forEach((item) => {
+          if (typeof item === 'object') {
+            yaml += `${indent}  -\n`;
+            yaml += generateYamlAttributes(item, indentLevel + 2);
+          } else {
+            yaml += `${indent}  - ${JSON.stringify(item)}\n`;
+          }
+        });
+      } else if (typeof value === 'string') {
+        yaml += `${indent}${key}: "${value}"\n`;
+      } else {
+        yaml += `${indent}${key}: ${value}\n`;
+      }
+    }
+
+    return yaml;
+  };
 
   const handleTabChange = (newTab: string) => {
     if (generatedCode && newTab !== activeTab) {
@@ -1733,57 +1815,86 @@ export function TemplateBuilder() {
           <Tabs.Content value="asset_check" className="flex-1 overflow-y-auto p-4 space-y-4">
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">
-                Check Name <span className="text-red-500">*</span>
-              </label>
-              <input
-                type="text"
-                value={assetCheck.check_name}
-                onChange={(e) => setAssetCheck({ ...assetCheck, check_name: e.target.value })}
-                className="w-full px-3 py-2 border border-gray-300 rounded-md"
-                placeholder="my_check"
-              />
-            </div>
-
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">
-                Asset Name <span className="text-red-500">*</span>
-              </label>
-              <select
-                value={assetCheck.asset_name}
-                onChange={(e) => setAssetCheck({ ...assetCheck, asset_name: e.target.value })}
-                className="w-full px-3 py-2 border border-gray-300 rounded-md"
-              >
-                <option value="">Select an asset...</option>
-                {currentProject?.graph.nodes
-                  .filter((node: any) => node.node_kind === 'asset' || node.type === 'asset')
-                  .map((node: any) => (
-                    <option key={node.id} value={node.data.asset_key || node.id}>
-                      {node.data.asset_key || node.data.label || node.id}
-                    </option>
-                  ))}
-              </select>
-              <p className="text-xs text-gray-500 mt-1">
-                Select an asset to add a quality check to
-              </p>
-            </div>
-
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">
                 Check Type <span className="text-red-500">*</span>
               </label>
               <select
-                value={assetCheck.check_type}
-                onChange={(e) =>
-                  setAssetCheck({ ...assetCheck, check_type: e.target.value as any })
-                }
+                value={selectedCommunityAssetCheck || assetCheck.check_type}
+                onChange={(e) => {
+                  const value = e.target.value;
+                  const isCommunity = communityAssetChecks.some(c => c.id === value);
+
+                  if (isCommunity) {
+                    setSelectedCommunityAssetCheck(value);
+                    setAssetCheck({ ...assetCheck, check_type: 'community' as any });
+                  } else {
+                    setSelectedCommunityAssetCheck(null);
+                    setAssetCheck({ ...assetCheck, check_type: value as any });
+                  }
+                }}
                 className="w-full px-3 py-2 border border-gray-300 rounded-md"
               >
-                <option value="row_count">Row Count</option>
-                <option value="freshness">Freshness</option>
-                <option value="schema">Schema</option>
-                <option value="custom">Custom</option>
+                <option value="">Select check type...</option>
+
+                <optgroup label="Basic Checks">
+                  <option value="row_count">Row Count</option>
+                  <option value="freshness">Freshness</option>
+                  <option value="schema">Schema</option>
+                  <option value="custom">Custom</option>
+                </optgroup>
+
+                {communityAssetChecks.length > 0 && (
+                  <optgroup label="Community Asset Checks">
+                    {communityAssetChecks.map((component) => (
+                      <option key={component.id} value={component.id}>
+                        {component.name}
+                      </option>
+                    ))}
+                  </optgroup>
+                )}
               </select>
             </div>
+
+            {/* Hide Check Name field for Enhanced Data Quality Checks (each check has its own name) */}
+            {selectedCommunityAssetCheck !== 'enhanced_data_quality_checks' && (
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Check Name <span className="text-red-500">*</span>
+                </label>
+                <input
+                  type="text"
+                  value={assetCheck.check_name}
+                  onChange={(e) => setAssetCheck({ ...assetCheck, check_name: e.target.value })}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-md"
+                  placeholder="my_check"
+                />
+              </div>
+            )}
+
+            {/* Hide Asset Name field for Enhanced Data Quality Checks (it has its own asset selection) */}
+            {selectedCommunityAssetCheck !== 'enhanced_data_quality_checks' && (
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Asset Name <span className="text-red-500">*</span>
+                </label>
+                <select
+                  value={assetCheck.asset_name}
+                  onChange={(e) => setAssetCheck({ ...assetCheck, asset_name: e.target.value })}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-md"
+                >
+                  <option value="">Select an asset...</option>
+                  {currentProject?.graph.nodes
+                    .filter((node: any) => node.node_kind === 'asset' || node.type === 'asset')
+                    .map((node: any) => (
+                      <option key={node.id} value={node.data.asset_key || node.id}>
+                        {node.data.asset_key || node.data.label || node.id}
+                      </option>
+                    ))}
+                </select>
+                <p className="text-xs text-gray-500 mt-1">
+                  Select an asset to add a quality check to
+                </p>
+              </div>
+            )}
 
             {assetCheck.check_type === 'row_count' && (
               <div>
@@ -1819,16 +1930,129 @@ export function TemplateBuilder() {
               </div>
             )}
 
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Description</label>
-              <input
-                type="text"
-                value={assetCheck.description}
-                onChange={(e) => setAssetCheck({ ...assetCheck, description: e.target.value })}
-                className="w-full px-3 py-2 border border-gray-300 rounded-md"
-                placeholder="Check that..."
-              />
-            </div>
+            {/* Community Asset Check Configuration */}
+            {selectedCommunityAssetCheck && (
+              <>
+                {/* Special handling for Enhanced Data Quality Checks */}
+                {selectedCommunityAssetCheck === 'enhanced_data_quality_checks' ? (
+                  <div className="pt-2 border-t border-gray-200">
+                    <EnhancedDataQualityChecksBuilder
+                      assets={currentProject?.graph.nodes
+                        .filter((node: any) => node.node_kind === 'asset' || node.type === 'asset')
+                        .map((node: any) => node.data.asset_key || node.id) || []}
+                      onConfigChange={(config) => setCommunityAssetCheckAttributes(config)}
+                    />
+                  </div>
+                ) : (
+                  <>
+                    {assetCheckSchemaLoading ? (
+                      <div className="bg-gray-50 border border-gray-200 rounded-md p-4 text-center">
+                        <p className="text-sm text-gray-600">Loading check configuration...</p>
+                      </div>
+                    ) : communityAssetCheckSchema ? (
+                      <div className="space-y-3 pt-2 border-t border-gray-200">
+                        <p className="text-sm font-medium text-gray-700">Configuration</p>
+                        {Object.entries(communityAssetCheckSchema.attributes).map(([key, attr]: [string, any]) => (
+                          <div key={key}>
+                            <label className="block text-sm font-medium text-gray-700 mb-1">
+                              {attr.label} {attr.required && <span className="text-red-500">*</span>}
+                            </label>
+
+                            {attr.type === 'select' || attr.enum ? (
+                              <select
+                                value={communityAssetCheckAttributes[key] || ''}
+                                onChange={(e) =>
+                                  setCommunityAssetCheckAttributes({ ...communityAssetCheckAttributes, [key]: e.target.value })
+                                }
+                                className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                              >
+                                <option value="">Select...</option>
+                                {attr.enum?.map((option: string) => (
+                                  <option key={option} value={option}>
+                                    {option}
+                                  </option>
+                                ))}
+                              </select>
+                            ) : attr.type === 'number' ? (
+                              <input
+                                type="number"
+                                value={communityAssetCheckAttributes[key] ?? ''}
+                                onChange={(e) =>
+                                  setCommunityAssetCheckAttributes({
+                                    ...communityAssetCheckAttributes,
+                                    [key]: e.target.value ? Number(e.target.value) : undefined,
+                                  })
+                                }
+                                min={attr.min}
+                                max={attr.max}
+                                className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                placeholder={attr.placeholder}
+                              />
+                            ) : attr.type === 'boolean' ? (
+                              <input
+                                type="checkbox"
+                                checked={communityAssetCheckAttributes[key] || false}
+                                onChange={(e) =>
+                                  setCommunityAssetCheckAttributes({ ...communityAssetCheckAttributes, [key]: e.target.checked })
+                                }
+                                className="h-4 w-4 text-blue-600 border-gray-300 rounded"
+                              />
+                            ) : attr.type === 'object' ? (
+                              <textarea
+                                value={typeof communityAssetCheckAttributes[key] === 'object' ? JSON.stringify(communityAssetCheckAttributes[key], null, 2) : communityAssetCheckAttributes[key] || ''}
+                                onChange={(e) => {
+                                  try {
+                                    const parsed = JSON.parse(e.target.value);
+                                    setCommunityAssetCheckAttributes({ ...communityAssetCheckAttributes, [key]: parsed });
+                                  } catch {
+                                    setCommunityAssetCheckAttributes({ ...communityAssetCheckAttributes, [key]: e.target.value });
+                                  }
+                                }}
+                                className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono text-sm"
+                                placeholder={attr.placeholder}
+                                rows={4}
+                              />
+                            ) : (
+                              <input
+                                type={attr.sensitive ? 'password' : 'text'}
+                                value={communityAssetCheckAttributes[key] || ''}
+                                onChange={(e) =>
+                                  setCommunityAssetCheckAttributes({ ...communityAssetCheckAttributes, [key]: e.target.value })
+                                }
+                                className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                placeholder={attr.placeholder}
+                              />
+                            )}
+
+                            {attr.description && (
+                              <p className="mt-1 text-xs text-gray-500">{attr.description}</p>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="bg-red-50 border border-red-200 rounded-md p-4 text-center">
+                        <p className="text-sm text-red-600">Failed to load check configuration</p>
+                      </div>
+                    )}
+                  </>
+                )}
+              </>
+            )}
+
+            {/* Hide Description field for Enhanced Data Quality Checks (not needed) */}
+            {selectedCommunityAssetCheck !== 'enhanced_data_quality_checks' && (
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Description</label>
+                <input
+                  type="text"
+                  value={assetCheck.description}
+                  onChange={(e) => setAssetCheck({ ...assetCheck, description: e.target.value })}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-md"
+                  placeholder="Check that..."
+                />
+              </div>
+            )}
 
             <button
               onClick={handleGenerate}

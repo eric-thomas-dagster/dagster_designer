@@ -101,7 +101,10 @@ export function CommunityTemplates() {
     },
   });
 
-  const categories = ['all', 'sensors', 'assets', 'resources', 'factories'];
+  // Dynamically extract unique categories from manifest
+  const categories = ['all', ...(manifest?.components
+    ? Array.from(new Set(manifest.components.map(c => c.category))).sort()
+    : [])];
 
   const filteredComponents = manifest?.components.filter((c) => {
     const matchesSearch =
@@ -165,7 +168,9 @@ export function CommunityTemplates() {
                   : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
               }`}
             >
-              {cat.charAt(0).toUpperCase() + cat.slice(1)}
+              {cat === 'asset_checks'
+                ? 'Asset Checks'
+                : cat.split('_').map(word => word.charAt(0).toUpperCase() + word.slice(1)).join(' ')}
             </button>
           ))}
         </div>
@@ -234,10 +239,10 @@ export function CommunityTemplates() {
 
       {/* Component Detail Modal */}
       {selectedComponent && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50 overflow-y-auto">
-          <div className="bg-white rounded-lg max-w-4xl w-full my-8 flex flex-col">
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+          <div className="bg-white rounded-lg max-w-4xl w-full max-h-[90vh] flex flex-col">
             {/* Modal Header */}
-            <div className="p-6 border-b">
+            <div className="p-6 border-b flex-shrink-0">
               <div className="flex items-start justify-between">
                 <div>
                   <div className="flex items-center gap-2 mb-2">
@@ -262,7 +267,7 @@ export function CommunityTemplates() {
             </div>
 
             {/* Modal Body */}
-            <div className="flex-1 overflow-y-auto p-6">
+            <div className="flex-1 overflow-y-auto p-6 min-h-0">
               {isLoadingDetails ? (
                 <div className="text-center py-8">
                   <div className="animate-pulse">Loading details...</div>
@@ -345,7 +350,7 @@ export function CommunityTemplates() {
             </div>
 
             {/* Modal Footer */}
-            <div className="p-6 border-t flex justify-end gap-3 bg-gray-50">
+            <div className="p-6 border-t flex justify-end gap-3 bg-gray-50 flex-shrink-0">
               <button
                 onClick={() => setSelectedComponent(null)}
                 className="px-4 py-2 border border-gray-300 rounded-md hover:bg-gray-50 transition-colors"
