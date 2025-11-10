@@ -62,3 +62,7 @@ frontend/.env
 *.log
 backend/*.log
 frontend/*.log
+
+# Documentation (keep locally, not in repo)
+*.md
+!README.md
