@@ -671,10 +671,10 @@ export function CodeEditor({ projectId, fileToOpen, onFileOpened }: CodeEditorPr
 
         {/* Terminal */}
         {terminalOpen && (
-          <div className="border-t border-gray-200 flex flex-col flex-shrink-0" style={{ height: '40vh', minHeight: '300px', maxHeight: '50vh' }}>
-            <div className="flex items-center space-x-2 px-4 py-2 bg-gray-900 border-b border-gray-700">
-              <TerminalIcon className="w-4 h-4 text-gray-300" />
-              <span className="text-xs font-semibold text-gray-300">Terminal</span>
+          <div className="border-t border-border flex flex-col flex-shrink-0" style={{ height: '40vh', minHeight: '300px', maxHeight: '50vh' }}>
+            <div className="flex items-center space-x-2 px-4 py-2 bg-[#121926] border-b border-[#4B5565]">
+              <TerminalIcon className="w-4 h-4 text-[#4F43DD]" />
+              <span className="text-xs font-semibold text-[#F7F7FF]">Terminal</span>
             </div>
             <div className="flex-1 min-h-0">
               <Terminal projectId={projectId} />

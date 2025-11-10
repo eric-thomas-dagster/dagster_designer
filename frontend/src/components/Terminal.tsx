@@ -30,31 +30,31 @@ export function Terminal({ projectId }: TerminalProps) {
       if (rect.width > 0 && rect.height > 0 && !xtermRef.current) {
         console.log('Initializing xterm terminal with dimensions...');
 
-        // Create terminal instance
+        // Create terminal instance with Dagster brand colors
         const term = new XTerm({
           cursorBlink: true,
           fontSize: 14,
           fontFamily: 'Menlo, Monaco, "Courier New", monospace',
           theme: {
-            background: '#1e1e1e',
-            foreground: '#d4d4d4',
-            cursor: '#d4d4d4',
-            black: '#000000',
+            background: '#121926', // Dagster Gray 900
+            foreground: '#F7F7FF', // Dagster White
+            cursor: '#4F43DD', // Blurple cursor
+            black: '#1B0130', // Dagster Black
             red: '#cd3131',
             green: '#0dbc79',
             yellow: '#e5e510',
-            blue: '#2472c8',
-            magenta: '#bc3fbc',
+            blue: '#4F43DD', // Blurple
+            magenta: '#A7A0F8', // Light Blurple
             cyan: '#11a8cd',
-            white: '#e5e5e5',
-            brightBlack: '#666666',
+            white: '#CDD5DF', // Gray 300
+            brightBlack: '#4B5565', // Gray 600
             brightRed: '#f14c4c',
             brightGreen: '#23d18b',
             brightYellow: '#f5f543',
-            brightBlue: '#3b8eea',
-            brightMagenta: '#d670d6',
+            brightBlue: '#A7A0F8', // Light Blurple
+            brightMagenta: '#332AA6', // Deep Blurple
             brightCyan: '#29b8db',
-            brightWhite: '#ffffff',
+            brightWhite: '#F7F7FF', // Dagster White
           },
           scrollback: 1000,
           convertEol: true,
@@ -177,7 +177,7 @@ export function Terminal({ projectId }: TerminalProps) {
   useEffect(() => {
     if (!isReady) return;
 
-    let resizeTimeout: NodeJS.Timeout;
+    let resizeTimeout: number;
 
     const resizeObserver = new ResizeObserver((entries) => {
       clearTimeout(resizeTimeout);

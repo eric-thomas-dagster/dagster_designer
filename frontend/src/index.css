@@ -1,3 +1,5 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
@@ -9,17 +11,33 @@
 
 @layer base {
   :root {
-    --background: 0 0% 100%;
-    --foreground: 222.2 84% 4.9%;
-    --muted: 210 40% 96.1%;
-    --muted-foreground: 215.4 16.3% 46.9%;
-    --border: 214.3 31.8% 91.4%;
-    --primary: 222.2 47.4% 11.2%;
-    --primary-foreground: 210 40% 98%;
-    --secondary: 210 40% 96.1%;
-    --secondary-foreground: 222.2 47.4% 11.2%;
-    --accent: 210 40% 96.1%;
-    --accent-foreground: 222.2 47.4% 11.2%;
+    /* Dagster Brand Colors */
+    --background: 240 100% 98%; /* Dagster White #F7F7FF */
+    --foreground: 274 98% 10%; /* Dagster Black #1B0130 */
+
+    --muted: 213 24% 84%; /* Gray 300 #CDD5DF */
+    --muted-foreground: 217 17% 35%; /* Gray 600 #4B5565 */
+
+    --border: 213 24% 84%; /* Gray 300 #CDD5DF */
+
+    --primary: 246 68% 56%; /* Blurple #4F43DD */
+    --primary-foreground: 240 100% 98%; /* Dagster White */
+
+    --secondary: 246 87% 79%; /* Light Blurple #A7A0F8 */
+    --secondary-foreground: 274 98% 10%; /* Dagster Black */
+
+    --accent: 246 60% 41%; /* Deep Blurple #332AA6 */
+    --accent-foreground: 240 100% 98%; /* Dagster White */
+
+    /* Additional Dagster colors */
+    --blurple: 246 68% 56%;
+    --deep-blurple: 246 60% 41%;
+    --light-blurple: 246 87% 79%;
+    --dagster-white: 240 100% 98%;
+    --dagster-black: 274 98% 10%;
+    --gray-900: 216 34% 12%;
+    --gray-600: 217 17% 35%;
+    --gray-300: 213 24% 84%;
   }
 }
 
@@ -29,7 +47,8 @@
   }
   body {
     @apply bg-background text-foreground;
-    font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    /* Using Inter as fallback until we can integrate Geist properly */
+    font-family: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
   }
 }
 

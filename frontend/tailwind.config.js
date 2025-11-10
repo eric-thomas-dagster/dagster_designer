@@ -26,6 +26,13 @@ export default {
           DEFAULT: "hsl(var(--accent))",
           foreground: "hsl(var(--accent-foreground))",
         },
+        // Override blue color palette with Dagster Blurple
+        blue: {
+          400: "hsl(var(--light-blurple))", // #A7A0F8
+          500: "hsl(var(--blurple))",       // #4F43DD
+          600: "hsl(var(--blurple))",       // #4F43DD
+          700: "hsl(var(--deep-blurple))",  // #332AA6
+        },
       },
     },
   },
