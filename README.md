@@ -71,11 +71,11 @@ A visual pipeline designer for Dagster with drag-and-drop component editing, ins
 - **Resource Configuration**: Configure database connections, API keys, and other resources
 - **Multi-Environment Support**: Separate configs for dev/staging/prod
 
-### 🔌 Git Integration
-- **Repository Operations**: Clone, commit, and push to GitHub
-- **Commit Workflow**: Visual diff, commit message, and push
-- **Branch Management**: Create and switch branches
-- **Personal Access Token**: Secure authentication with GitHub
+### 🔌 Git Integration (Basic)
+- **Clone on Create**: Import projects from Git repositories when creating new projects
+- **API Endpoints**: Backend support for clone, commit, push, pull, and status operations
+- **Example Templates**: Pre-configured Git URLs for common projects (Jaffle Shop, etc.)
+- **Note**: Full visual Git UI (commit dialog, branch management) is planned for future release
 
 ### 📊 Asset Visualization
 - **Asset Metadata Display**: View descriptions, groups, owners, tags, and checks
@@ -342,17 +342,6 @@ The designer supports these Dagster component libraries:
 - **Snowflake SQL**: `dagster_snowflake.SnowflakeSQLComponent` - Creates specific table asset
 - Other custom SQL or Python components
 
-### Git Integration
-
-To use Git features:
-
-1. Create a GitHub Personal Access Token with `repo` scope
-2. In your project, configure the Git repository URL
-3. Use the Git operations API or UI to:
-   - Clone a repository
-   - Commit generated files
-   - Push changes to GitHub
-
 ## Project Structure
 
 ```
@@ -532,7 +521,7 @@ The property panel automatically generates form fields based on Pydantic schemas
 ✅ **Project import** - Discover and import existing Dagster projects
 ✅ **Dagster CLI integration** - Embedded webserver, materialization, validation
 ✅ **Environment variables** - Secure credential management
-✅ **Git integration** - Clone, commit, push to GitHub
+✅ **Git clone support** - Import projects from Git repositories
 ✅ **Custom components** - Create your own component templates
 ✅ **Custom lineage injection** - Runtime dependency modification
 ✅ **Multi-select operations** - Bulk asset materialization
@@ -540,6 +529,7 @@ The property panel automatically generates form fields based on Pydantic schemas
 
 ## Roadmap
 
+- [ ] **Git UI** - Visual commit/push dialog, branch management, diff viewer
 - [ ] **Docker deployment** - Containerized setup with docker-compose
 - [ ] **More component libraries** - Airbyte, Meltano, etc.
 - [ ] **Dagster Cloud integration** - Deploy directly to Dagster Cloud
