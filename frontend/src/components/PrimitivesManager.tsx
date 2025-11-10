@@ -83,10 +83,21 @@ export function PrimitivesManager({ onNavigateToTemplates, onOpenFile }: Primiti
     }
   };
 
-  // Search for a discovered primitive's source file
-  const handleSearchAndOpen = async (primitiveType: string, name: string) => {
+  // Search for a discovered primitive's source file or open YAML file directly
+  const handleSearchAndOpen = async (primitiveType: string, name: string, filePath?: string) => {
     if (!currentProject) return;
 
+    // If the primitive is defined in a YAML file (e.g., defs.yaml), open it directly
+    // The file path from dg list defs is relative to the project directory
+    if (filePath && (filePath.includes('.yaml') || filePath.includes('.yml'))) {
+      if (onOpenFile) {
+        // Pass relative path to onOpenFile - the backend will resolve it
+        onOpenFile(filePath);
+      }
+      return;
+    }
+
+    // For Python-based primitives, search for the definition
     try {
       const result = await primitivesApi.searchPrimitiveDefinition(
         currentProject.id,
@@ -96,10 +107,10 @@ export function PrimitivesManager({ onNavigateToTemplates, onOpenFile }: Primiti
 
       if (result.found && result.file_path && onOpenFile) {
         // Include line number if available
-        const filePath = result.line_number
+        const fullFilePath = result.line_number
           ? `${result.file_path}:${result.line_number}`
           : result.file_path;
-        onOpenFile(filePath);
+        onOpenFile(fullFilePath);
       } else {
         alert(`Could not find source code for ${name}`);
       }
@@ -218,7 +229,8 @@ export function PrimitivesManager({ onNavigateToTemplates, onOpenFile }: Primiti
                   <button
                     onClick={() => handleSearchAndOpen(
                       category === 'schedule' ? 'schedule' : category === 'job' ? 'job' : category === 'sensor' ? 'sensor' : 'asset_check',
-                      primitive.name
+                      primitive.name,
+                      primitive.file !== 'N/A' ? primitive.file : undefined
                     )}
                     className="p-1.5 text-blue-600 hover:bg-blue-50 rounded"
                     title="Find and open source code"

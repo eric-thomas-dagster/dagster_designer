@@ -209,6 +209,46 @@ def _search_primitive_definition_internal(project_id: str, primitive_type: str, 
                 f"def {name}\\(",  # Function definition
             ]
         elif primitive_type == "asset_check":
+            # First, check if this is a community component check defined in defs.yaml
+            # Search for "name: {check_name}" in defs.yaml files
+            find_result = subprocess.run(
+                ["find", ".", "-name", "defs.yaml", "-type", "f", "-not", "-path", "*/.venv/*"],
+                cwd=str(project_path),
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+
+            if find_result.returncode == 0 and find_result.stdout:
+                yaml_files = find_result.stdout.strip().split('\n')
+
+                for yaml_file in yaml_files:
+                    if not yaml_file:
+                        continue
+
+                    # Search for "name: {check_name}" in the YAML file
+                    grep_result = subprocess.run(
+                        ["grep", "-n", "--", f"name: {name}", yaml_file],
+                        cwd=str(project_path),
+                        capture_output=True,
+                        text=True,
+                        timeout=5,
+                    )
+
+                    if grep_result.returncode == 0:
+                        # Found the check in this file
+                        line_match = grep_result.stdout.strip().split(':')
+                        if len(line_match) >= 1:
+                            line_number = int(line_match[0])
+                            yaml_path = yaml_file.lstrip('./')
+                            return {
+                                "found": True,
+                                "file_path": yaml_path,
+                                "line_number": line_number,
+                                "primitive_type": primitive_type,
+                                "name": name,
+                            }
+
             # Special handling for dbt tests
             # dbt test names follow patterns like:
             # - not_null_customer_metrics_total_orders
@@ -431,19 +471,22 @@ async def list_all_definitions(project_id: str):
         # Parse JSON output
         defs = json.loads(result.stdout)
 
-        # Resolve dbt test sources to actual file locations
+        # Resolve sources to actual file locations for checks that point to defs.yaml
+        # This includes both dbt tests and community component checks
         asset_checks = defs.get("asset_checks", [])
         for check in asset_checks:
             source = check.get("source", "")
-            # Check if this is a dbt test (source points to defs.yaml)
-            if source and "defs.yaml" in source and "dbt" in source.lower():
-                # Try to find the actual test definition
+            # Check if source points to defs.yaml (could be dbt test or community component)
+            if source and "defs.yaml" in source:
+                # Try to find the actual definition file
                 try:
+                    # For dbt tests, search for the .sql test file
+                    # For community components, find the defs.yaml with full path
                     search_result = _search_primitive_definition_internal(
                         project_id, "asset_check", check["name"]
                     )
                     if search_result["found"] and search_result.get("file_path"):
-                        # Update source to point to actual file
+                        # Update source to point to actual file (either .sql for dbt or full path to defs.yaml)
                         line_number = search_result.get("line_number", "")
                         check["source"] = f"{search_result['file_path']}" + (f":{line_number}" if line_number else "")
                 except Exception as e:
