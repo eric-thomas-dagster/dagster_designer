@@ -46,11 +46,13 @@ async def get_component(component_type: str, project_id: str | None = None):
         project = project_service.get_project(project_id)
         if project:
             project_dir = project_service._get_project_dir(project)
-            project_name_sanitized = project.name.replace(" ", "_").replace("-", "_")
+            # Use the actual directory name from the project, not just the sanitized name
+            # The directory name includes the project ID prefix (e.g., project_acaa97f2_my_test_project)
+            directory_name = project.directory_name
 
             # Try both flat and src layouts
-            flat_components_dir = project_dir / project_name_sanitized / "components"
-            src_components_dir = project_dir / "src" / project_name_sanitized / "components"
+            flat_components_dir = project_dir / directory_name / "components"
+            src_components_dir = project_dir / "src" / directory_name / "components"
 
             components_dir = None
             if flat_components_dir.exists():
@@ -95,6 +97,8 @@ async def get_component(component_type: str, project_id: str | None = None):
                                 )
                             except Exception as e:
                                 print(f"Error loading schema.json for {component_id}: {e}")
+                                import traceback
+                                traceback.print_exc()
                                 # Fall through to AST parsing
 
                         manifest_file = component_dir / "manifest.yaml"
