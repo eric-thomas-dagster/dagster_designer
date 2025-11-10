@@ -17,6 +17,64 @@ router = APIRouter(prefix="/templates", tags=["templates"])
 MANIFEST_URL = "https://raw.githubusercontent.com/eric-thomas-dagster/dagster-component-templates/main/manifest.json"
 
 
+def detect_project_structure(project_dir: Path, project_name_sanitized: str):
+    """
+    Detect the actual project structure and return paths to key directories.
+
+    Returns:
+        tuple: (base_dir, actual_module_name, use_src_layout, defs_dir, components_dir)
+    """
+    use_src_layout = False
+    base_dir = None
+    actual_module_name = None
+
+    # First, check for src/ layout (preferred for dg-scaffolded projects)
+    src_root = project_dir / "src"
+    if src_root.exists() and src_root.is_dir():
+        # Find Python modules in src/ (directories with __init__.py and definitions.py)
+        for item in src_root.iterdir():
+            if item.is_dir() and not item.name.startswith('.') and not item.name.startswith('__'):
+                init_file = item / "__init__.py"
+                defs_file = item / "definitions.py"
+                defs_dir = item / "defs"
+
+                # This is a valid Dagster module if it has __init__.py and either definitions.py or defs/ directory
+                if init_file.exists() and (defs_file.exists() or defs_dir.exists()):
+                    base_dir = item
+                    actual_module_name = item.name
+                    use_src_layout = True
+                    break
+
+    # If no src/ layout found, check for flat layout
+    if not base_dir:
+        # Try the sanitized project name first
+        flat_dir = project_dir / project_name_sanitized
+        if flat_dir.exists() and (flat_dir / "defs").exists():
+            base_dir = flat_dir
+            actual_module_name = project_name_sanitized
+            use_src_layout = False
+        else:
+            # Scan project root for any directory with defs/ subdirectory
+            for item in project_dir.iterdir():
+                if item.is_dir() and not item.name.startswith('.') and item.name not in ['src', 'tests', '.venv', '__pycache__']:
+                    defs_dir = item / "defs"
+                    init_file = item / "__init__.py"
+                    if defs_dir.exists() and init_file.exists():
+                        base_dir = item
+                        actual_module_name = item.name
+                        use_src_layout = False
+                        break
+
+    # If still no base directory found, raise an error
+    if not base_dir or not actual_module_name:
+        raise ValueError(f"Could not detect project structure in {project_dir}")
+
+    defs_dir = base_dir / "defs"
+    components_dir = base_dir / "components"
+
+    return base_dir, actual_module_name, use_src_layout, defs_dir, components_dir
+
+
 class ComponentTemplate(BaseModel):
     """Community component template metadata."""
     id: str
@@ -65,22 +123,13 @@ async def configure_component(
         project_dir = project_service._get_project_dir(project)
         project_name_sanitized = project.name.replace(" ", "_").replace("-", "_")
 
-        # Determine defs directory
-        flat_defs_dir = project_dir / project_name_sanitized / "defs"
-        src_defs_dir = project_dir / "src" / project_name_sanitized / "defs"
-
-        defs_dir = None
-        if flat_defs_dir.exists():
-            defs_dir = flat_defs_dir
-        elif src_defs_dir.exists():
-            defs_dir = src_defs_dir
-        else:
-            raise HTTPException(status_code=404, detail="Defs directory not found")
-
-        # Get component manifest to determine component_type
-        components_dir = (project_dir / project_name_sanitized / "components"
-                         if (project_dir / project_name_sanitized / "components").exists()
-                         else project_dir / "src" / project_name_sanitized / "components")
+        # Detect project structure
+        try:
+            base_dir, actual_module_name, use_src_layout, defs_dir, components_dir = detect_project_structure(
+                project_dir, project_name_sanitized
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=404, detail=str(e))
 
         component_dir = components_dir / component_id
         manifest_file = component_dir / "manifest.yaml"
@@ -145,18 +194,13 @@ async def get_installed_components(project_id: str):
         project_dir = project_service._get_project_dir(project)
         project_name_sanitized = project.name.replace(" ", "_").replace("-", "_")
 
-        # Check for components directory
-        # Try both flat and src layouts
-        flat_components_dir = project_dir / project_name_sanitized / "components"
-        src_components_dir = project_dir / "src" / project_name_sanitized / "components"
-
-        components_dir = None
-        if flat_components_dir.exists():
-            components_dir = flat_components_dir
-        elif src_components_dir.exists():
-            components_dir = src_components_dir
-
-        if not components_dir or not components_dir.exists():
+        # Detect project structure
+        try:
+            base_dir, actual_module_name, use_src_layout, defs_dir, components_dir = detect_project_structure(
+                project_dir, project_name_sanitized
+            )
+        except ValueError:
+            # No valid project structure found, return empty list
             return {"components": []}
 
         # Scan for installed components
@@ -210,18 +254,13 @@ async def get_installed_component_schema(project_id: str, component_id: str):
         project_dir = project_service._get_project_dir(project)
         project_name_sanitized = project.name.replace(" ", "_").replace("-", "_")
 
-        # Find components directory
-        flat_components_dir = project_dir / project_name_sanitized / "components"
-        src_components_dir = project_dir / "src" / project_name_sanitized / "components"
-
-        components_dir = None
-        if flat_components_dir.exists():
-            components_dir = flat_components_dir
-        elif src_components_dir.exists():
-            components_dir = src_components_dir
-
-        if not components_dir or not components_dir.exists():
-            raise HTTPException(status_code=404, detail="Components directory not found")
+        # Detect project structure
+        try:
+            base_dir, actual_module_name, use_src_layout, defs_dir, components_dir = detect_project_structure(
+                project_dir, project_name_sanitized
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=404, detail=str(e))
 
         # Find the component
         component_dir = components_dir / component_id
@@ -388,42 +427,33 @@ async def install_component(
                 except Exception as e:
                     print(f"Warning: Could not download schema.json: {e}")
 
-        # Parse component code to find the class name
+        # Parse component code to find the component class name
+        # Look for class that inherits from dg.Component (not just any class, which could be enums, helpers, etc.)
         import re
-        class_match = re.search(r'class\s+(\w+)\s*\(', component_code)
+        class_match = re.search(r'class\s+(\w+)\s*\([^)]*dg\.Component', component_code)
+        if not class_match:
+            # Fallback: try to find any class with "Component" in the name
+            class_match = re.search(r'class\s+(\w+Component[s]?)\s*\(', component_code)
         if not class_match:
             raise HTTPException(
                 status_code=500,
-                detail="Could not find class definition in component code"
+                detail="Could not find component class definition in component code"
             )
         class_name = class_match.group(1)
 
-        # 1. Create component directory in project's {project_name}/components/
-        # Check if project uses src/ layout or flat layout by checking which exists
-        flat_dir = project_dir / project_name_sanitized
-        src_dir = project_dir / "src" / project_name_sanitized
-
-        use_src_layout = False
-
-        if flat_dir.exists() and (flat_dir / "defs").exists():
-            base_dir = flat_dir
-            use_src_layout = False
-            print(f"[Install] Using flat layout: {base_dir}")
-        elif src_dir.exists() and (src_dir / "defs").exists():
-            base_dir = src_dir
-            use_src_layout = True
-            print(f"[Install] Using src/ layout: {base_dir}")
-        elif flat_dir.exists():
-            base_dir = flat_dir
-            use_src_layout = False
-            print(f"[Install] Using flat layout (defs not found, using flat): {base_dir}")
-        elif src_dir.exists():
-            base_dir = src_dir
-            use_src_layout = True
-            print(f"[Install] Using src/ layout (defs not found, using src): {base_dir}")
-        else:
-            # Default to flat layout if neither exists (match most Dagster projects)
-            base_dir = flat_dir
+        # 1. Detect actual project layout by discovering the real module directory
+        try:
+            base_dir, actual_module_name, use_src_layout, _, _ = detect_project_structure(
+                project_dir, project_name_sanitized
+            )
+            print(f"[Install] Detected project structure:")
+            print(f"[Install]   - Module name: {actual_module_name}")
+            print(f"[Install]   - Base directory: {base_dir}")
+            print(f"[Install]   - Uses src/ layout: {use_src_layout}")
+        except ValueError:
+            # No existing structure found, create a new one (fallback for brand new projects)
+            base_dir = project_dir / project_name_sanitized
+            actual_module_name = project_name_sanitized
             base_dir.mkdir(parents=True, exist_ok=True)
             use_src_layout = False
             print(f"[Install] Created new flat layout: {base_dir}")
@@ -460,7 +490,7 @@ async def install_component(
                 "description": component.description,
                 "version": component.version,
                 "category": component.category,
-                "component_type": f"{project_name_sanitized}.components.{component_id}.{class_name}" if not use_src_layout else f"src.{project_name_sanitized}.components.{component_id}.{class_name}",
+                "component_type": f"{actual_module_name}.components.{component_id}.{class_name}" if not use_src_layout else f"src.{actual_module_name}.components.{component_id}.{class_name}",
             }
             with open(manifest_file, 'w') as f:
                 yaml.dump(basic_manifest, f, default_flow_style=False, sort_keys=False)
@@ -530,11 +560,11 @@ async def install_component(
             project_service.update_project(request.project_id, ProjectUpdate(is_imported=True))
 
         if use_src_layout:
-            component_type = f"src.{project_name_sanitized}.components.{component_id}.{class_name}"
-            defs_dir = project_dir / "src" / project_name_sanitized / "defs"
+            component_type = f"src.{actual_module_name}.components.{component_id}.{class_name}"
+            defs_dir = base_dir / "defs"
         else:
-            component_type = f"{project_name_sanitized}.components.{component_id}.{class_name}"
-            defs_dir = project_dir / project_name_sanitized / "defs"
+            component_type = f"{actual_module_name}.components.{component_id}.{class_name}"
+            defs_dir = base_dir / "defs"
 
         instance_name = request.config.get('name', component_id)
 

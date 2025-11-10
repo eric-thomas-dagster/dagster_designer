@@ -331,9 +331,29 @@ ${generateYamlAttributes(communityAssetCheckAttributes, 1)}`;
 
   // Save mutation
   const saveMutation = useMutation({
-    mutationFn: () => {
+    mutationFn: async () => {
       if (!currentProject) throw new Error('No project selected');
 
+      // For community asset checks, use configure endpoint
+      if (selectedCommunityAssetCheck) {
+        const response = await fetch(`/api/v1/templates/configure/${selectedCommunityAssetCheck}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            project_id: currentProject.id,
+            config: communityAssetCheckAttributes,
+          }),
+        });
+
+        if (!response.ok) {
+          const error = await response.json().catch(() => ({ detail: 'Unknown error' }));
+          throw new Error(error.detail || 'Failed to configure component');
+        }
+
+        return response.json();
+      }
+
+      // For regular templates, save as code files
       const primitiveTypeMap: Record<string, string> = {
         python_asset: pythonAsset.asset_name,
         sql_asset: sqlAsset.asset_name,
@@ -351,7 +371,15 @@ ${generateYamlAttributes(communityAssetCheckAttributes, 1)}`;
       });
     },
     onSuccess: (data) => {
-      alert(`Saved to ${data.file_path}`);
+      if (selectedCommunityAssetCheck) {
+        alert(`Component configured successfully!\n\nYAML file: ${data.yaml_file}`);
+        // Reload project to pick up new configuration
+        if (currentProject) {
+          loadProject(currentProject.id);
+        }
+      } else {
+        alert(`Saved to ${data.file_path}`);
+      }
     },
   });
 
