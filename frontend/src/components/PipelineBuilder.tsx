@@ -94,13 +94,24 @@ export function PipelineBuilder() {
     enabled: !!currentProject && needsDefinitions,
   });
 
-  // Only fetch sensor types when actually configuring a new sensor trigger
-  const needsSensorTypes = isCreating && sidePanelMode === 'trigger' && selectedTrigger?.type === 'sensor' && !selectedTrigger.isExisting;
+  // Always fetch sensor types when project is loaded (cached and instant)
   const { data: sensorTypesData } = useQuery({
     queryKey: ['sensor-types', currentProject?.id],
     queryFn: () => currentProject ? pipelinesApi.getSensorTypes(currentProject.id) : Promise.reject('No project'),
-    enabled: !!currentProject && needsSensorTypes,
+    enabled: !!currentProject,
   });
+
+  // Always fetch installed community components when project is loaded (cached and instant)
+  const { data: installedComponents } = useQuery({
+    queryKey: ['installed-components', currentProject?.id],
+    queryFn: () => currentProject ? templatesApi.getInstalled(currentProject.id) : Promise.reject('No project'),
+    enabled: !!currentProject,
+  });
+
+  // Filter for sensor components only
+  const communitySensors = installedComponents?.components.filter(
+    (component) => component.category === 'sensors'
+  ) || [];
 
   const pipelines = pipelinesData?.pipelines || [];
   const sensorTypes = sensorTypesData?.sensor_types || [];
@@ -114,6 +125,45 @@ export function PipelineBuilder() {
   // Sensor configuration state
   const [selectedSensorType, setSelectedSensorType] = useState<any>(null);
   const [sensorConfig, setSensorConfig] = useState<any>({});
+
+  // Community sensor state
+  const [selectedCommunitySensor, setSelectedCommunitySensor] = useState<string | null>(null);
+  const [communitySensorAttributes, setCommunitySensorAttributes] = useState<Record<string, any>>({});
+
+  // Fetch schema for selected community sensor
+  const { data: communitySensorSchema, isLoading: schemaLoading } = useQuery({
+    queryKey: ['component-schema-pipeline', currentProject?.id, selectedCommunitySensor],
+    queryFn: () =>
+      currentProject && selectedCommunitySensor
+        ? templatesApi.getInstalledComponentSchema(currentProject.id, selectedCommunitySensor)
+        : Promise.reject('No component selected'),
+    enabled: !!currentProject && !!selectedCommunitySensor,
+  });
+
+  // Initialize community sensor attributes with defaults when schema loads
+  useEffect(() => {
+    if (communitySensorSchema?.attributes) {
+      const defaults: Record<string, any> = {};
+      Object.entries(communitySensorSchema.attributes).forEach(([key, attr]: [string, any]) => {
+        if (attr.default !== undefined) {
+          defaults[key] = attr.default;
+        }
+      });
+      setCommunitySensorAttributes(defaults);
+    }
+  }, [communitySensorSchema]);
+
+  // Update sensorConfig when community sensor attributes change
+  useEffect(() => {
+    if (selectedCommunitySensor && selectedTrigger) {
+      const mergedConfig = {
+        ...sensorConfig,
+        ...communitySensorAttributes,
+        component_type_full: communitySensorSchema?.type,
+      };
+      handleUpdateTrigger(selectedTrigger.id, { sensorConfig: mergedConfig });
+    }
+  }, [communitySensorAttributes, selectedCommunitySensor]);
 
   // Get all assets from the project graph
   const allAssets = useMemo(() => {
@@ -1304,31 +1354,156 @@ export function PipelineBuilder() {
                           Sensor Type
                         </label>
                         <select
-                          value={selectedSensorType?.id || ''}
+                          value={selectedSensorType?.id || selectedCommunitySensor || ''}
                           onChange={(e) => {
-                            const sensorType = sensorTypes.find((st: any) => st.id === e.target.value);
-                            setSelectedSensorType(sensorType);
-                            setSensorConfig({
-                              component_type: sensorType?.type === 'component' ? 'component' : 'primitive',
-                              sensor_type: sensorType?.sensor_type,
-                              component_id: sensorType?.id,
-                              component_type_full: sensorType?.component_type,
-                            });
+                            const value = e.target.value;
+
+                            // Check if this is a community sensor
+                            const isCommunity = communitySensors.some(c => c.id === value);
+
+                            if (isCommunity) {
+                              setSelectedCommunitySensor(value);
+                              setSelectedSensorType(null);
+                              setSensorConfig({
+                                component_type: 'component',
+                                component_id: value,
+                              });
+                            } else {
+                              setSelectedCommunitySensor(null);
+                              const sensorType = sensorTypes.find((st: any) => st.id === value);
+                              setSelectedSensorType(sensorType);
+                              setSensorConfig({
+                                component_type: sensorType?.type === 'component' ? 'component' : 'primitive',
+                                sensor_type: sensorType?.sensor_type,
+                                component_id: sensorType?.id,
+                                component_type_full: sensorType?.component_type,
+                              });
+                            }
                           }}
                           className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
                         >
                           <option value="">Select sensor type...</option>
-                          {sensorTypes.map((sensorType: any) => (
-                            <option key={sensorType.id} value={sensorType.id}>
-                              {sensorType.name}
-                            </option>
-                          ))}
+
+                          <optgroup label="Basic Sensors">
+                            {sensorTypes.filter((st: any) =>
+                              ['file', 'run_status', 'asset', 'custom'].includes(st.sensor_type)
+                            ).map((sensorType: any) => (
+                              <option key={sensorType.id} value={sensorType.id}>
+                                {sensorType.name}
+                              </option>
+                            ))}
+                          </optgroup>
+
+                          <optgroup label="Convenience Sensors">
+                            {sensorTypes.filter((st: any) =>
+                              ['s3', 'email', 'filesystem', 'database', 'webhook'].includes(st.sensor_type)
+                            ).map((sensorType: any) => (
+                              <option key={sensorType.id} value={sensorType.id}>
+                                {sensorType.name}
+                              </option>
+                            ))}
+                          </optgroup>
+
+                          {communitySensors.length > 0 && (
+                            <optgroup label="Installed Community Sensors">
+                              {communitySensors.map((component) => (
+                                <option key={component.id} value={component.id}>
+                                  {component.name}
+                                </option>
+                              ))}
+                            </optgroup>
+                          )}
                         </select>
                         {selectedSensorType && (
                           <p className="mt-1 text-xs text-gray-500">{selectedSensorType.description}</p>
                         )}
+                        {selectedCommunitySensor && communitySensorSchema && (
+                          <p className="mt-1 text-xs text-gray-500">{communitySensorSchema.description}</p>
+                        )}
                       </div>
 
+                      {/* Community Sensor Dynamic Form */}
+                      {selectedCommunitySensor && (
+                        <>
+                          {schemaLoading ? (
+                            <div className="bg-gray-50 border border-gray-200 rounded-md p-4 text-center">
+                              <p className="text-sm text-gray-600">Loading sensor configuration...</p>
+                            </div>
+                          ) : communitySensorSchema ? (
+                            <div className="space-y-3 pt-2 border-t border-gray-200">
+                              <p className="text-sm font-medium text-gray-700">Configuration</p>
+                              {Object.entries(communitySensorSchema.attributes).map(([key, attr]: [string, any]) => (
+                                <div key={key}>
+                                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                                    {attr.label} {attr.required && <span className="text-red-500">*</span>}
+                                  </label>
+
+                                  {attr.type === 'select' || attr.enum ? (
+                                    <select
+                                      value={communitySensorAttributes[key] || ''}
+                                      onChange={(e) =>
+                                        setCommunitySensorAttributes({ ...communitySensorAttributes, [key]: e.target.value })
+                                      }
+                                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                    >
+                                      <option value="">Select...</option>
+                                      {attr.enum?.map((option: string) => (
+                                        <option key={option} value={option}>
+                                          {option}
+                                        </option>
+                                      ))}
+                                    </select>
+                                  ) : attr.type === 'number' ? (
+                                    <input
+                                      type="number"
+                                      value={communitySensorAttributes[key] ?? ''}
+                                      onChange={(e) =>
+                                        setCommunitySensorAttributes({
+                                          ...communitySensorAttributes,
+                                          [key]: e.target.value ? Number(e.target.value) : undefined,
+                                        })
+                                      }
+                                      min={attr.min}
+                                      max={attr.max}
+                                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                      placeholder={attr.placeholder}
+                                    />
+                                  ) : attr.type === 'boolean' ? (
+                                    <input
+                                      type="checkbox"
+                                      checked={communitySensorAttributes[key] || false}
+                                      onChange={(e) =>
+                                        setCommunitySensorAttributes({ ...communitySensorAttributes, [key]: e.target.checked })
+                                      }
+                                      className="h-4 w-4 text-blue-600 border-gray-300 rounded"
+                                    />
+                                  ) : (
+                                    <input
+                                      type={attr.sensitive ? 'password' : 'text'}
+                                      value={communitySensorAttributes[key] || ''}
+                                      onChange={(e) =>
+                                        setCommunitySensorAttributes({ ...communitySensorAttributes, [key]: e.target.value })
+                                      }
+                                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                      placeholder={attr.placeholder}
+                                    />
+                                  )}
+
+                                  {attr.description && (
+                                    <p className="mt-1 text-xs text-gray-500">{attr.description}</p>
+                                  )}
+                                </div>
+                              ))}
+                            </div>
+                          ) : (
+                            <div className="bg-red-50 border border-red-200 rounded-md p-4 text-center">
+                              <p className="text-sm text-red-600">Failed to load sensor configuration</p>
+                            </div>
+                          )}
+                        </>
+                      )}
+
+                      {/* Built-in Sensor Configuration */}
                       {selectedSensorType && selectedSensorType.config_schema && Object.keys(selectedSensorType.config_schema).length > 0 && (
                         <div className="space-y-3 pt-2 border-t border-gray-200">
                           <p className="text-sm font-medium text-gray-700">Configuration</p>
