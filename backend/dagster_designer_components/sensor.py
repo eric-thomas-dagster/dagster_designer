@@ -10,10 +10,11 @@ class SensorComponent(dg.Component, dg.Model, dg.Resolvable):
     """Component for creating sensors from YAML configuration."""
 
     sensor_name: str
-    sensor_type: Literal["file", "run_status", "custom"]
+    sensor_type: Literal["file", "run_status", "asset", "custom"]
     job_name: str
     description: Optional[str] = None
     file_path: Optional[str] = None
+    asset_key: Optional[str] = None  # For asset sensors
     minimum_interval_seconds: int = 30
     default_status: str = "RUNNING"
 
@@ -24,6 +25,8 @@ class SensorComponent(dg.Component, dg.Model, dg.Resolvable):
             sensor_def = self._create_file_sensor()
         elif self.sensor_type == "run_status":
             sensor_def = self._create_run_status_sensor()
+        elif self.sensor_type == "asset":
+            sensor_def = self._create_asset_sensor()
         else:
             sensor_def = self._create_custom_sensor()
 
@@ -72,6 +75,34 @@ class SensorComponent(dg.Component, dg.Model, dg.Resolvable):
             return dg.RunRequest(run_key=f"status_{context.dagster_run.run_id}")
 
         return status_sensor
+
+    def _create_asset_sensor(self):
+        """Create an asset sensor that monitors asset materializations."""
+        # Parse asset key (handle both simple keys and path-like keys)
+        # e.g., "my_asset" or "path/to/asset"
+        asset_key_parts = self.asset_key.split("/") if self.asset_key else ["unknown"]
+        monitored_asset_key = dg.AssetKey(asset_key_parts)
+
+        @dg.asset_sensor(
+            name=self.sensor_name,
+            asset_key=monitored_asset_key,
+            job_name=self.job_name,
+            minimum_interval_seconds=self.minimum_interval_seconds,
+            description=self.description or f"Monitor asset: {self.asset_key}",
+            default_status=(
+                dg.DefaultSensorStatus.RUNNING
+                if self.default_status == "RUNNING"
+                else dg.DefaultSensorStatus.STOPPED
+            ),
+        )
+        def asset_sensor_fn(context: dg.SensorEvaluationContext, asset_event: dg.EventLogEntry):
+            """Sensor that triggers when the monitored asset is materialized."""
+            yield dg.RunRequest(
+                run_key=f"{self.sensor_name}_{asset_event.run_id}",
+                run_config={},
+            )
+
+        return asset_sensor_fn
 
     def _create_custom_sensor(self):
         """Create a custom sensor."""

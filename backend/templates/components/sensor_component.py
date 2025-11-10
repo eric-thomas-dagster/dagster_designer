@@ -13,6 +13,9 @@ from dagster import (
     DefaultSensorStatus,
     run_status_sensor,
     DagsterRunStatus,
+    asset_sensor,
+    AssetKey,
+    EventLogEntry,
 )
 from pydantic import BaseModel, Field
 
@@ -21,10 +24,11 @@ class SensorComponent(Component, Resolvable, BaseModel):
     """Component that creates a Dagster sensor for triggering jobs based on events."""
 
     sensor_name: str = Field(description="Name of the sensor")
-    sensor_type: str = Field(description="Type of sensor: 'file', 'run_status', or 'custom'")
+    sensor_type: str = Field(description="Type of sensor: 'file', 'run_status', 'asset', or 'custom'")
     job_name: str = Field(description="Name of the job to trigger")
     description: Optional[str] = Field(default=None, description="Sensor description")
     file_path: Optional[str] = Field(default=None, description="File path to monitor (for file sensors)")
+    asset_key: Optional[str] = Field(default=None, description="Asset key to monitor (for asset sensors)")
     monitored_job_name: Optional[str] = Field(default=None, description="Name of the job to monitor (for run_status sensors)")
     run_status: Optional[str] = Field(default="SUCCESS", description="Run status to monitor: SUCCESS, FAILURE, or CANCELED (for run_status sensors)")
     minimum_interval_seconds: int = Field(default=30, description="Minimum interval between sensor evaluations in seconds")
@@ -74,6 +78,33 @@ class SensorComponent(Component, Resolvable, BaseModel):
             def sensor_fn(context):
                 # Trigger the job when the monitored job reaches the specified status
                 yield RunRequest(run_key=context.dagster_run.run_id)
+
+            sensor = sensor_fn
+
+        elif self.sensor_type == "asset":
+            # Asset sensor implementation
+            if not self.asset_key:
+                raise ValueError("asset_key is required for asset sensors")
+
+            # Parse asset key (handle both simple keys and path-like keys)
+            # e.g., "my_asset" or "path/to/asset"
+            asset_key_parts = self.asset_key.split("/")
+            monitored_asset_key = AssetKey(asset_key_parts)
+
+            @asset_sensor(
+                name=self.sensor_name,
+                asset_key=monitored_asset_key,
+                job_name=self.job_name,
+                description=self.description or f"Monitor asset: {self.asset_key}",
+                minimum_interval_seconds=self.minimum_interval_seconds,
+                default_status=DefaultSensorStatus.RUNNING if self.default_status == "RUNNING" else DefaultSensorStatus.STOPPED,
+            )
+            def sensor_fn(context: SensorEvaluationContext, asset_event: EventLogEntry):
+                # Trigger the job when the monitored asset is materialized
+                yield RunRequest(
+                    run_key=f"{self.sensor_name}_{asset_event.run_id}",
+                    run_config={},
+                )
 
             sensor = sensor_fn
 

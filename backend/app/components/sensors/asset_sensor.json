@@ -1,0 +1,64 @@
+{
+  "type": "dagster_designer_components.SensorComponent",
+  "name": "Asset Sensor",
+  "category": "sensors",
+  "description": "Monitors an asset for materializations and triggers a job when the asset is updated",
+  "attributes": {
+    "sensor_name": {
+      "type": "string",
+      "required": true,
+      "label": "Sensor Name",
+      "description": "Name for the sensor",
+      "default": "my_asset_sensor"
+    },
+    "sensor_type": {
+      "type": "hidden",
+      "required": true,
+      "default": "asset"
+    },
+    "asset_key": {
+      "type": "string",
+      "required": true,
+      "label": "Asset Key",
+      "description": "Asset key to monitor (e.g., 'my_asset' or 'path/to/asset'). Can reference assets in other Dagster projects.",
+      "placeholder": "my_asset"
+    },
+    "job_name": {
+      "type": "string",
+      "required": true,
+      "label": "Job to Trigger",
+      "description": "The job to run when the asset is materialized",
+      "placeholder": "downstream_processing_job"
+    },
+    "description": {
+      "type": "string",
+      "required": false,
+      "label": "Description",
+      "description": "Description of what this sensor does",
+      "placeholder": "Triggers downstream processing when upstream asset is updated"
+    },
+    "minimum_interval_seconds": {
+      "type": "number",
+      "required": false,
+      "label": "Check Interval (seconds)",
+      "description": "How often to check for asset materializations",
+      "default": 30
+    },
+    "default_status": {
+      "type": "select",
+      "required": false,
+      "label": "Default Status",
+      "description": "Whether the sensor starts running or stopped",
+      "default": "RUNNING",
+      "options": [
+        {"value": "RUNNING", "label": "Running"},
+        {"value": "STOPPED", "label": "Stopped"}
+      ]
+    }
+  },
+  "outputs": [],
+  "dependencies": {
+    "pip": []
+  },
+  "tags": ["sensor", "asset", "materialization", "cross-project"]
+}
