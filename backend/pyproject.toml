@@ -15,7 +15,7 @@ dependencies = [
     "uvicorn[standard]>=0.32.0",
     "pydantic>=2.9.2",
     "pydantic-settings>=2.6.0",
-    "dagster>=1.9.0",
+    "dagster==1.12.1",
     "dagster-dbt>=0.25.0",
     "dagster-fivetran>=0.25.0",
     "dagster-sling>=0.25.0",
