@@ -19,6 +19,7 @@ import {
 } from 'lucide-react';
 import { filesApi, type FileTreeNode } from '@/services/api';
 import { useProjectStore } from '@/hooks/useProject';
+import { Terminal } from './Terminal';
 
 interface CodeEditorProps {
   projectId: string;
@@ -37,8 +38,6 @@ export function CodeEditor({ projectId, fileToOpen, onFileOpened }: CodeEditorPr
   const [activeFilePath, setActiveFilePath] = useState<string | null>(null);
   const [expandedDirs, setExpandedDirs] = useState<Set<string>>(new Set(['/']));
   const [terminalOpen, setTerminalOpen] = useState(false);
-  const [commandInput, setCommandInput] = useState('');
-  const [commandHistory, setCommandHistory] = useState<Array<{ command: string; output: string }>>([]);
   const [showNewFileModal, setShowNewFileModal] = useState(false);
   const [showNewFolderModal, setShowNewFolderModal] = useState(false);
   const [newFileName, setNewFileName] = useState('');
@@ -211,24 +210,6 @@ export function CodeEditor({ projectId, fileToOpen, onFileOpened }: CodeEditorPr
     }
   }, [fileToOpen, projectId, editorInstance]);
 
-  // Execute command mutation
-  const executeCommandMutation = useMutation({
-    mutationFn: ({ projectId, command }: { projectId: string; command: string }) =>
-      filesApi.execute(projectId, command),
-    onSuccess: (data) => {
-      const output = data.success
-        ? data.stdout || 'Command completed successfully'
-        : data.stderr || 'Command failed';
-
-      setCommandHistory((prev) => [
-        ...prev,
-        {
-          command: data.command,
-          output,
-        },
-      ]);
-    },
-  });
 
   // Create file mutation
   const createFileMutation = useMutation({
@@ -321,17 +302,6 @@ export function CodeEditor({ projectId, fileToOpen, onFileOpened }: CodeEditorPr
       const remainingFiles = openFiles.filter((f) => f.path !== filePath);
       setActiveFilePath(remainingFiles.length > 0 ? remainingFiles[0].path : null);
     }
-  };
-
-  const handleExecuteCommand = () => {
-    if (!commandInput.trim()) return;
-
-    executeCommandMutation.mutate({
-      projectId,
-      command: commandInput,
-    });
-
-    setCommandInput('');
   };
 
   const handleCreateFile = () => {
@@ -701,43 +671,14 @@ export function CodeEditor({ projectId, fileToOpen, onFileOpened }: CodeEditorPr
 
         {/* Terminal */}
         {terminalOpen && (
-          <div className="border-t border-gray-200 bg-gray-900 text-white flex flex-col flex-shrink-0" style={{ height: '40vh', minHeight: '300px', maxHeight: '50vh' }}>
-            <div className="flex items-center space-x-2 p-4 pb-2">
-              <TerminalIcon className="w-4 h-4" />
-              <span className="text-xs font-semibold">Terminal</span>
+          <div className="border-t border-gray-200 flex flex-col flex-shrink-0" style={{ height: '40vh', minHeight: '300px', maxHeight: '50vh' }}>
+            <div className="flex items-center space-x-2 px-4 py-2 bg-gray-900 border-b border-gray-700">
+              <TerminalIcon className="w-4 h-4 text-gray-300" />
+              <span className="text-xs font-semibold text-gray-300">Terminal</span>
             </div>
-
-            {/* Command History */}
-            <div className="flex-1 overflow-y-auto px-4 space-y-2 mb-4 font-mono text-xs">
-              {commandHistory.map((item, index) => (
-                <div key={index}>
-                  <div className="text-green-400">$ {item.command}</div>
-                  <div className="text-gray-300 whitespace-pre-wrap">{item.output}</div>
-                </div>
-              ))}
+            <div className="flex-1 min-h-0">
+              <Terminal projectId={projectId} />
             </div>
-
-            {/* Command Input */}
-            <div className="flex items-center space-x-2 px-4 pb-4">
-              <span className="text-green-400">$</span>
-              <input
-                type="text"
-                value={commandInput}
-                onChange={(e) => setCommandInput(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') {
-                    handleExecuteCommand();
-                  }
-                }}
-                className="flex-1 bg-transparent border-none outline-none text-white font-mono text-xs"
-                placeholder="Enter command (e.g., dg list components)"
-                disabled={executeCommandMutation.isPending}
-              />
-            </div>
-
-            {executeCommandMutation.isPending && (
-              <div className="text-yellow-400 text-xs px-4 pb-2">Executing...</div>
-            )}
           </div>
         )}
       </div>
