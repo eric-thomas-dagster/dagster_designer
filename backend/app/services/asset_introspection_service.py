@@ -281,6 +281,27 @@ class AssetIntrospectionService:
                         source_component = comp_id
                         break
 
+                # Check for community components by matching source path
+                # Community components create assets in defs/<component_id>/defs.yaml
+                # Example: src/project_name/defs/synthetic_data_generator/defs.yaml
+                if not source_component and asset_source:
+                    for comp_id, comp in component_map.items():
+                        # Check if this is a community component (has .components. in the type)
+                        if ".components." in comp.component_type:
+                            # Extract component_id from type
+                            # e.g., "project_name.components.synthetic_data_generator.SyntheticDataGenerator" -> "synthetic_data_generator"
+                            parts = comp.component_type.split('.')
+                            if 'components' in parts:
+                                idx = parts.index('components')
+                                if idx + 1 < len(parts):
+                                    component_id = parts[idx + 1]
+                                    # Check if asset source contains this component_id in the path
+                                    # e.g., "src/project_name/defs/synthetic_data_generator/defs.yaml"
+                                    if f"/defs/{component_id}/" in asset_source or f"\\defs\\{component_id}\\" in asset_source:
+                                        source_component = comp_id
+                                        print(f"[Asset Introspection] Matched community component: {component_id} for asset: {asset_key}", flush=True)
+                                        break
+
                 if source_component:
                     print(f"[Asset Introspection] Assigned source_component: {source_component} for asset: {asset_key}", flush=True)
                 else:
