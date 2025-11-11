@@ -92,6 +92,7 @@ class ComponentTemplate(BaseModel):
     example_url: str
     requirements_url: Optional[str] = None
     manifest_url: Optional[str] = None
+    icon: Optional[str] = "Package"  # Lucide icon name for visual identification
 
 
 class TemplateManifest(BaseModel):
@@ -495,6 +496,7 @@ async def install_component(
                 "description": component.description,
                 "version": component.version,
                 "category": component.category,
+                "icon": component.icon or "Package",
                 "component_type": f"{actual_module_name}.components.{component_id}.{class_name}",
             }
             with open(manifest_file, 'w') as f:
