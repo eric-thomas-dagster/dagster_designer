@@ -1,11 +1,19 @@
 import { useState, useEffect } from 'react';
 import { useProjectStore } from '@/hooks/useProject';
 import { useComponent } from '@/hooks/useComponentRegistry';
-import { X, Save, Settings, Play, Trash2, Plus } from 'lucide-react';
+import { X, Save, Settings, Play, Trash2, Plus, Wand2, Database, Search, Package } from 'lucide-react';
 import { AssetPreview } from './AssetPreview';
 import { TranslationEditor } from './TranslationEditor';
 import { projectsApi, primitivesApi } from '@/services/api';
 import type { ComponentInstance } from '@/types';
+
+// Icon mapping for component icons
+const iconMap: Record<string, any> = {
+  'Wand2': Wand2,
+  'Database': Database,
+  'Search': Search,
+  'Package': Package,
+};
 
 interface PropertyPanelProps {
   nodeId: string;
@@ -21,9 +29,47 @@ export function PropertyPanel({ nodeId, onConfigureComponent, onOpenFile }: Prop
   const nodeKind = (node as any)?.node_kind || node?.data?.node_kind;
   const sourceComponentId = (node as any)?.source_component || node?.data?.source_component;
   const isAssetNode = nodeKind === 'asset';
-  const sourceComponent = isAssetNode && sourceComponentId
-    ? currentProject?.components.find((c) => c.id === sourceComponentId)
-    : null;
+
+  // Handle both regular components and community components
+  const [sourceComponent, setSourceComponent] = useState<ComponentInstance | null>(null);
+  const [loadingCommunityComponent, setLoadingCommunityComponent] = useState(false);
+
+  // Load source component (regular or community)
+  useEffect(() => {
+    if (!isAssetNode || !sourceComponentId) {
+      setSourceComponent(null);
+      return;
+    }
+
+    if (sourceComponentId.startsWith('community_')) {
+      // Community component - load from backend
+      const componentName = sourceComponentId.replace('community_', '');
+      setLoadingCommunityComponent(true);
+
+      fetch(`/api/v1/projects/${currentProject?.id}/community-component/${componentName}`)
+        .then(res => res.json())
+        .then(data => {
+          setSourceComponent({
+            id: sourceComponentId,
+            component_type: data.component_type,
+            label: node.data.label || componentName,
+            attributes: data.attributes || {},
+          });
+        })
+        .catch(err => {
+          console.error(`[PropertyPanel] Failed to load community component ${componentName}:`, err);
+          setSourceComponent(null);
+        })
+        .finally(() => {
+          setLoadingCommunityComponent(false);
+        });
+    } else {
+      // Regular component from project.components
+      const comp = currentProject?.components.find((c) => c.id === sourceComponentId) || null;
+      setSourceComponent(comp);
+    }
+  }, [isAssetNode, sourceComponentId, currentProject?.id, node?.data.label, nodeId]);
+
   const { data: componentSchema } = useComponent(node?.data.component_type || '');
 
   const [formData, setFormData] = useState<Record<string, any>>({});
@@ -284,11 +330,20 @@ export function PropertyPanel({ nodeId, onConfigureComponent, onOpenFile }: Prop
       }
     };
 
+    // Get component icon from node data
+    const componentIconName = node.data.component_icon;
+    const ComponentIcon = componentIconName ? iconMap[componentIconName] || Package : Package;
+
     return (
       <div className="h-full flex flex-col">
         <div className="p-4 border-b border-gray-200">
           <div className="flex items-center justify-between mb-2">
-            <h2 className="text-lg font-semibold text-gray-900">Asset Details</h2>
+            <div className="flex items-center space-x-2">
+              {componentIconName && <ComponentIcon className="w-5 h-5 text-purple-600" />}
+              <h2 className="text-lg font-semibold text-gray-900">
+                {sourceComponent ? `${sourceComponent.label} Asset` : 'Asset Details'}
+              </h2>
+            </div>
             <div className="flex items-center space-x-2">
               <button
                 onClick={handleMaterialize}
@@ -415,26 +470,34 @@ export function PropertyPanel({ nodeId, onConfigureComponent, onOpenFile }: Prop
           )}
 
           {/* Source Component (Read-only) */}
-          {sourceComponent && (
+          {(sourceComponent || loadingCommunityComponent) && (
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">
                 Source Component
               </label>
-              <div className="px-3 py-2 text-sm bg-gray-50 border border-gray-200 rounded-md text-gray-900 mb-2">
-                {sourceComponent.label}
-              </div>
-              {onConfigureComponent && (
-                <button
-                  onClick={() => onConfigureComponent(sourceComponent)}
-                  className="w-full flex items-center justify-center space-x-1 px-3 py-2 text-sm bg-purple-600 text-white rounded-md hover:bg-purple-700"
-                >
-                  <Settings className="w-4 h-4" />
-                  <span>Configure Component</span>
-                </button>
-              )}
-              <p className="text-xs text-gray-500 mt-1">
-                Edit component configuration to update this asset
-              </p>
+              {loadingCommunityComponent ? (
+                <div className="px-3 py-2 text-sm bg-gray-50 border border-gray-200 rounded-md text-gray-500 italic">
+                  Loading component...
+                </div>
+              ) : sourceComponent ? (
+                <>
+                  <div className="px-3 py-2 text-sm bg-gray-50 border border-gray-200 rounded-md text-gray-900 mb-2">
+                    {sourceComponent.label}
+                  </div>
+                  {onConfigureComponent && (
+                    <button
+                      onClick={() => onConfigureComponent(sourceComponent)}
+                      className="w-full flex items-center justify-center space-x-1 px-3 py-2 text-sm bg-purple-600 text-white rounded-md hover:bg-purple-700"
+                    >
+                      <Settings className="w-4 h-4" />
+                      <span>Configure Component</span>
+                    </button>
+                  )}
+                  <p className="text-xs text-gray-500 mt-1">
+                    Edit component configuration to update this asset
+                  </p>
+                </>
+              ) : null}
             </div>
           )}
 

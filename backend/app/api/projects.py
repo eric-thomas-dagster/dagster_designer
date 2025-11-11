@@ -713,3 +713,78 @@ async def import_project_yaml(project_id: str, request: YAMLImportRequest):
             status_code=500,
             detail=f"Failed to import YAML: {str(e)}"
         )
+
+
+@router.get("/{project_id}/community-component/{component_id}")
+async def get_community_component_config(project_id: str, component_id: str):
+    """Get the configuration of an installed community component.
+
+    Args:
+        project_id: Project ID
+        component_id: Component folder name (e.g., "duckdb_table_writer")
+
+    Returns:
+        Component configuration from defs.yaml
+    """
+    import yaml
+    from pathlib import Path
+
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    project_dir = project_service._get_project_dir(project)
+    directory_name = project.directory_name
+
+    # Try both flat and src layouts
+    flat_defs_dir = project_dir / directory_name / "defs" / component_id
+    src_defs_dir = project_dir / "src" / directory_name / "defs" / component_id
+
+    defs_yaml_path = None
+    if flat_defs_dir.exists():
+        defs_yaml_path = flat_defs_dir / "defs.yaml"
+    elif src_defs_dir.exists():
+        defs_yaml_path = src_defs_dir / "defs.yaml"
+
+    if not defs_yaml_path or not defs_yaml_path.exists():
+        raise HTTPException(
+            status_code=404,
+            detail=f"Community component '{component_id}' not found or not configured"
+        )
+
+    try:
+        with open(defs_yaml_path, 'r') as f:
+            defs_data = yaml.safe_load(f)
+
+        # Also try to get manifest data for icon and category
+        component_type = defs_data.get('type', '')
+        component_dir = defs_yaml_path.parent.parent.parent / "components" / component_id
+        manifest_path = component_dir / "manifest.yaml"
+
+        icon = "package"  # Default icon
+        category = "unknown"
+        display_name = component_id.replace('_', ' ').title()
+
+        if manifest_path.exists():
+            try:
+                with open(manifest_path, 'r') as f:
+                    manifest_data = yaml.safe_load(f)
+                    icon = manifest_data.get('icon', icon)
+                    category = manifest_data.get('category', category)
+                    display_name = manifest_data.get('name', display_name)
+            except Exception as e:
+                print(f"Failed to read manifest for {component_id}: {e}", flush=True)
+
+        return {
+            "component_id": component_id,
+            "component_type": component_type,
+            "attributes": defs_data.get('attributes', {}),
+            "icon": icon,
+            "category": category,
+            "display_name": display_name,
+        }
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to read component configuration: {str(e)}"
+        )

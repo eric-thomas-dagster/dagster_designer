@@ -1,6 +1,14 @@
 import { memo } from 'react';
 import { Handle, Position, NodeProps } from 'reactflow';
-import { Layers, Database, Tag, Users, CheckCircle, X } from 'lucide-react';
+import { Layers, Database, Tag, Users, CheckCircle, X, Wand2, Search, Package } from 'lucide-react';
+
+// Icon mapping for component icons
+const componentIconMap: Record<string, any> = {
+  'Wand2': Wand2,
+  'Database': Database,
+  'Search': Search,
+  'Package': Package,
+};
 
 export const AssetNode = memo(({ data, selected, id }: NodeProps) => {
   // Dagster uses a purple/blue color scheme for assets
@@ -22,10 +30,10 @@ export const AssetNode = memo(({ data, selected, id }: NodeProps) => {
 
   // Handle styles - make them visible and connectable always
   const handleStyle = {
-    width: '14px',
-    height: '14px',
+    width: '10px',
+    height: '10px',
     borderRadius: '50%',
-    border: '2px solid #6366f1',
+    border: '1.5px solid #6366f1',
     background: '#ffffff',
     cursor: 'crosshair',
     opacity: data.onDelete ? 0 : 1, // Hidden visually in pipeline builder but still connectable
@@ -33,10 +41,10 @@ export const AssetNode = memo(({ data, selected, id }: NodeProps) => {
 
   return (
     <div
-      className={`relative shadow-lg rounded-lg bg-gradient-to-br from-purple-50 to-blue-50 min-w-[200px] max-w-[280px] ${
+      className={`relative shadow-md rounded-md bg-gradient-to-br from-purple-50 to-blue-50 min-w-[140px] max-w-[200px] ${
         isSelected
-          ? 'border-4 border-green-500 ring-4 ring-green-200'
-          : 'border-2 border-purple-400'
+          ? 'border-2 border-green-500 ring-2 ring-green-200'
+          : 'border border-purple-400'
       }`}
       title={hasDescription ? data.description : ''}
     >
@@ -47,10 +55,10 @@ export const AssetNode = memo(({ data, selected, id }: NodeProps) => {
             e.stopPropagation();
             data.onDelete(id);
           }}
-          className="absolute -top-2 -right-2 z-10 w-6 h-6 bg-red-500 hover:bg-red-600 rounded-full flex items-center justify-center shadow-lg transition-colors"
+          className="absolute -top-1.5 -right-1.5 z-10 w-5 h-5 bg-red-500 hover:bg-red-600 rounded-full flex items-center justify-center shadow-md transition-colors"
           title="Remove asset from pipeline"
         >
-          <X className="w-4 h-4 text-white" />
+          <X className="w-3 h-3 text-white" />
         </button>
       )}
 
@@ -81,13 +89,13 @@ export const AssetNode = memo(({ data, selected, id }: NodeProps) => {
       />
 
       {/* Header with asset icon and key */}
-      <div className="px-3 py-2 bg-gradient-to-r from-purple-500 to-blue-500 rounded-t-md">
-        <div className="flex items-center space-x-2">
+      <div className="px-2 py-1.5 bg-gradient-to-r from-purple-500 to-blue-500 rounded-t-md">
+        <div className="flex items-center space-x-1.5">
           <div className="flex-shrink-0">
-            <Layers className="w-4 h-4 text-white" />
+            <Layers className="w-3.5 h-3.5 text-white" />
           </div>
           <div className="flex-1 min-w-0">
-            <div className="text-sm font-semibold text-white truncate">
+            <div className="text-xs font-semibold text-white truncate">
               {data.asset_key || data.label}
             </div>
           </div>
@@ -95,10 +103,10 @@ export const AssetNode = memo(({ data, selected, id }: NodeProps) => {
       </div>
 
       {/* Body with metadata facets */}
-      <div className="px-3 py-2 space-y-2">
+      <div className="px-2 py-1.5 space-y-1">
         {/* Label if different from asset key */}
         {data.label && data.label !== data.asset_key && (
-          <div className="text-xs text-gray-700 font-medium truncate">
+          <div className="text-[10px] text-gray-700 font-medium truncate leading-tight">
             {data.label}
           </div>
         )}
@@ -106,7 +114,7 @@ export const AssetNode = memo(({ data, selected, id }: NodeProps) => {
         {/* Description - truncated with tooltip on hover */}
         {hasDescription && (
           <div
-            className="text-xs text-gray-600 line-clamp-2 cursor-help"
+            className="text-[10px] text-gray-600 line-clamp-1 cursor-help leading-tight"
             title={data.description}
           >
             {truncatedDescription}
@@ -114,44 +122,53 @@ export const AssetNode = memo(({ data, selected, id }: NodeProps) => {
         )}
 
         {/* Metadata badges (facets) */}
-        <div className="flex flex-wrap gap-1.5 pt-1">
-          {/* Group badge */}
-          {hasGroup && (
+        <div className="flex flex-wrap gap-1 pt-0.5">
+          {/* Group badge - only show if not "default" */}
+          {hasGroup && data.group_name !== 'default' && (
             <div
-              className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-700 border border-blue-300"
+              className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-medium bg-blue-100 text-blue-700 border border-blue-300"
               title={`Group: ${data.group_name}`}
             >
-              <Database className="w-3 h-3" />
-              <span className="truncate max-w-[100px]">{data.group_name}</span>
+              <Database className="w-2.5 h-2.5" />
+              <span className="truncate max-w-[80px]">{data.group_name}</span>
             </div>
           )}
 
           {/* Owners badge */}
           {hasOwners && (
             <div
-              className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-purple-100 text-purple-700 border border-purple-300"
+              className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-medium bg-purple-100 text-purple-700 border border-purple-300"
               title={`Owners: ${data.owners.join(', ')}`}
             >
-              <Users className="w-3 h-3" />
+              <Users className="w-2.5 h-2.5" />
               <span>{data.owners.length}</span>
             </div>
           )}
 
-          {/* Source component badge */}
-          {data.source_component && (
-            <div className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-700 border border-green-300">
-              <Tag className="w-3 h-3" />
-              <span>Generated</span>
-            </div>
-          )}
+          {/* Source component badge with icon */}
+          {data.source_component && (() => {
+            const componentIconName = data.component_icon;
+            const ComponentIcon = componentIconName ? componentIconMap[componentIconName] || Package : Package;
+            const componentName = data.source_component.replace('community_', '').replace(/_/g, ' ');
+
+            return (
+              <div
+                className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-medium bg-purple-100 text-purple-700 border border-purple-300"
+                title={`Generated by: ${componentName}`}
+              >
+                <ComponentIcon className="w-2.5 h-2.5" />
+                <span className="truncate max-w-[80px]">{componentName}</span>
+              </div>
+            );
+          })()}
 
           {/* Asset checks badge */}
           {hasChecks && (
             <div
-              className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-orange-100 text-orange-700 border border-orange-300 cursor-pointer hover:bg-orange-200"
+              className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-medium bg-orange-100 text-orange-700 border border-orange-300 cursor-pointer hover:bg-orange-200"
               title={`${data.checks.length} check${data.checks.length !== 1 ? 's' : ''}`}
             >
-              <CheckCircle className="w-3 h-3" />
+              <CheckCircle className="w-2.5 h-2.5" />
               <span>{data.checks.length}</span>
             </div>
           )}
@@ -159,10 +176,10 @@ export const AssetNode = memo(({ data, selected, id }: NodeProps) => {
           {/* DataFrame badge */}
           {producesDataFrame && (
             <div
-              className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-cyan-100 text-cyan-700 border border-cyan-300"
+              className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-medium bg-cyan-100 text-cyan-700 border border-cyan-300"
               title="Produces DataFrame output"
             >
-              <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 20 20">
+              <svg className="w-2.5 h-2.5" fill="currentColor" viewBox="0 0 20 20">
                 <path d="M3 4a1 1 0 011-1h12a1 1 0 011 1v2a1 1 0 01-1 1H4a1 1 0 01-1-1V4zM3 10a1 1 0 011-1h12a1 1 0 011 1v6a1 1 0 01-1 1H4a1 1 0 01-1-1v-6z" />
               </svg>
               <span>DataFrame</span>

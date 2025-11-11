@@ -196,6 +196,72 @@ class AssetIntrospectionService:
         # Create a mapping of component ID to component for source attribution
         component_map = {comp.id: comp for comp in project.components}
 
+        # Create a mapping of component ID to icon
+        component_icons = {}
+
+        # Also scan defs/ folder for community component instances
+        # Community components create defs.yaml files in defs/<component_id>/
+        # Try both flat and src layouts
+        directory_name = project.directory_name
+        flat_defs_dir = project_dir / directory_name / "defs"
+        src_defs_dir = project_dir / "src" / directory_name / "defs"
+
+        # Determine which layout is being used
+        defs_dir = None
+        components_dir = None
+        if flat_defs_dir.exists():
+            defs_dir = flat_defs_dir
+            components_dir = project_dir / directory_name / "components"
+            print(f"[Asset Introspection] Using flat layout defs at: {flat_defs_dir}", flush=True)
+        elif src_defs_dir.exists():
+            defs_dir = src_defs_dir
+            components_dir = project_dir / "src" / directory_name / "components"
+            print(f"[Asset Introspection] Using src layout defs at: {src_defs_dir}", flush=True)
+
+        if defs_dir and defs_dir.exists():
+            import yaml
+            for component_folder in defs_dir.iterdir():
+                if component_folder.is_dir():
+                    defs_yaml = component_folder / "defs.yaml"
+                    if defs_yaml.exists():
+                        try:
+                            with open(defs_yaml, 'r') as f:
+                                defs_data = yaml.safe_load(f)
+
+                            if defs_data and 'type' in defs_data:
+                                # Create a pseudo-component object for matching
+                                component_id = component_folder.name
+                                from ..models.component import ComponentInstance
+                                pseudo_comp = ComponentInstance(
+                                    id=f"community_{component_id}",
+                                    component_type=defs_data['type'],
+                                    label=defs_data.get('attributes', {}).get('asset_name', component_id),
+                                    attributes=defs_data.get('attributes', {}),
+                                )
+                                component_map[pseudo_comp.id] = pseudo_comp
+
+                                # Try to load icon from manifest
+                                if components_dir:
+                                    manifest_path = components_dir / component_id / "manifest.yaml"
+                                    if manifest_path.exists():
+                                        try:
+                                            with open(manifest_path, 'r') as f:
+                                                manifest_data = yaml.safe_load(f)
+                                                icon = manifest_data.get('icon', 'package')
+                                                component_icons[pseudo_comp.id] = icon
+                                                print(f"[Asset Introspection] Loaded icon '{icon}' for {component_id}", flush=True)
+                                        except Exception as e:
+                                            print(f"[Asset Introspection] Failed to load manifest for {component_id}: {e}", flush=True)
+                                            component_icons[pseudo_comp.id] = 'package'
+                                    else:
+                                        component_icons[pseudo_comp.id] = 'package'
+
+                                print(f"[Asset Introspection] Loaded community component from defs: {component_id} -> {defs_data['type']}", flush=True)
+                        except Exception as e:
+                            print(f"[Asset Introspection] Failed to load defs.yaml from {component_folder}: {e}", flush=True)
+        else:
+            print(f"[Asset Introspection] No defs directory found at {flat_defs_dir} or {src_defs_dir}", flush=True)
+
         # Build dependency graph for layout calculation
         asset_map = {asset.get("key"): asset for asset in assets}
 
@@ -285,7 +351,10 @@ class AssetIntrospectionService:
                 # Community components create assets in defs/<component_id>/defs.yaml
                 # Example: src/project_name/defs/synthetic_data_generator/defs.yaml
                 if not source_component and asset_source:
+                    print(f"[Asset Introspection] Checking community components for asset {asset_key}, source: {asset_source}", flush=True)
+                    print(f"[Asset Introspection] Available components: {list(component_map.keys())}", flush=True)
                     for comp_id, comp in component_map.items():
+                        print(f"[Asset Introspection] Checking component {comp_id}: {comp.component_type}", flush=True)
                         # Check if this is a community component (has .components. in the type)
                         if ".components." in comp.component_type:
                             # Extract component_id from type
@@ -320,6 +389,9 @@ class AssetIntrospectionService:
                 # Get checks for this asset
                 asset_checks_list = checks_by_asset.get(asset_key, [])
 
+                # Get component icon if available
+                component_icon = component_icons.get(source_component) if source_component else None
+
                 # Create asset node with comprehensive data
                 node = GraphNode(
                     id=asset_id,
@@ -341,6 +413,7 @@ class AssetIntrospectionService:
                         "automation_condition": asset.get("automation_condition"),
                         "deps": asset.get("deps", []),  # Include dependencies
                         "checks": asset_checks_list,  # Include asset checks
+                        "component_icon": component_icon,  # Add component icon for visual identification
                     }
                 )
                 nodes.append(node)
