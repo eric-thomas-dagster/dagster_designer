@@ -420,9 +420,21 @@ export function PropertyPanel({ nodeId, onConfigureComponent, onOpenFile }: Prop
               <label className="block text-sm font-medium text-gray-700 mb-1">
                 Source Component
               </label>
-              <div className="px-3 py-2 text-sm bg-gray-50 border border-gray-200 rounded-md text-gray-900">
+              <div className="px-3 py-2 text-sm bg-gray-50 border border-gray-200 rounded-md text-gray-900 mb-2">
                 {sourceComponent.label}
               </div>
+              {onConfigureComponent && (
+                <button
+                  onClick={() => onConfigureComponent(sourceComponent)}
+                  className="w-full flex items-center justify-center space-x-1 px-3 py-2 text-sm bg-purple-600 text-white rounded-md hover:bg-purple-700"
+                >
+                  <Settings className="w-4 h-4" />
+                  <span>Configure Component</span>
+                </button>
+              )}
+              <p className="text-xs text-gray-500 mt-1">
+                Edit component configuration to update this asset
+              </p>
             </div>
           )}
 
