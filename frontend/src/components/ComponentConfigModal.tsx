@@ -182,9 +182,19 @@ export function ComponentConfigModal({
 
         const result = await response.json();
 
-        // Reload the project to pick up the new asset
-        console.log('[ComponentConfigModal] Reloading project after configuring community component');
+        // Reload the project and regenerate lineage to pick up the new asset
+        console.log('[ComponentConfigModal] Reloading project and regenerating lineage after configuring community component');
         await loadProject(currentProject.id);
+
+        // Automatically regenerate lineage so the new asset appears immediately
+        try {
+          const { projectsApi } = await import('@/services/api');
+          await projectsApi.regenerateAssets(currentProject.id, true);
+          console.log('[ComponentConfigModal] Lineage regenerated successfully');
+        } catch (error) {
+          console.error('[ComponentConfigModal] Failed to regenerate lineage:', error);
+          // Don't fail the whole operation if regeneration fails
+        }
 
         alert(`Component configured successfully!\n\nYAML file: ${result.yaml_file}\n\nThe asset has been added to your project.`);
         onClose();
