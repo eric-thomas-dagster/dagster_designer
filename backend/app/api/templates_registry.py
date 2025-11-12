@@ -134,8 +134,12 @@ def validate_component_config(component_dir: Path, attributes: dict) -> tuple[di
         return attributes, [f"Failed to load schema: {str(e)}"]
 
     # Get properties and required fields from schema
-    properties = schema.get('properties', {})
+    # Support both JSON Schema format ('properties') and custom format ('attributes')
+    properties = schema.get('properties', schema.get('attributes', {}))
     required_fields = schema.get('required', [])
+
+    print(f"[Validation] Found {len(properties)} properties in schema")
+    print(f"[Validation] Validating {len(attributes)} attributes")
 
     # Check if attributes is empty when component has required fields
     if required_fields and not attributes:
@@ -146,11 +150,13 @@ def validate_component_config(component_dir: Path, attributes: dict) -> tuple[di
     for key, value in attributes.items():
         if key not in properties:
             # Unknown field - include it but warn
+            print(f"[Validation] Unknown field '{key}' - including as-is")
             cleaned_attributes[key] = value
             continue
 
         prop = properties[key]
         prop_type = prop.get('type')
+        print(f"[Validation] Validating field '{key}' of type '{prop_type}'")
 
         # Handle empty string values based on type
         if value == '' or value is None:
@@ -229,6 +235,10 @@ def validate_component_config(component_dir: Path, attributes: dict) -> tuple[di
     for required_field in required_fields:
         if required_field not in cleaned_attributes:
             validation_errors.append(f"Required field '{required_field}' is missing")
+
+    print(f"[Validation] Returning {len(cleaned_attributes)} cleaned attributes")
+    if cleaned_attributes:
+        print(f"[Validation] Cleaned attribute keys: {list(cleaned_attributes.keys())}")
 
     return cleaned_attributes, validation_errors
 
@@ -318,10 +328,16 @@ async def configure_component(
         # Extract attributes (excluding 'name')
         raw_attributes = {k: v for k, v in request.config.items() if k != 'name'}
 
+        print(f"[Configure] Instance name: {instance_name}")
+        print(f"[Configure] Raw attributes: {json.dumps(raw_attributes, indent=2)[:500]}")
+
         # Validate component configuration against schema
         validated_attributes, validation_errors = validate_component_config(
             component_dir, raw_attributes
         )
+
+        print(f"[Configure] Validated attributes: {json.dumps(validated_attributes, indent=2)[:500]}")
+        print(f"[Configure] Validation errors: {validation_errors}")
 
         if validation_errors:
             error_message = "Configuration validation failed:\n" + "\n".join(f"  - {err}" for err in validation_errors)
