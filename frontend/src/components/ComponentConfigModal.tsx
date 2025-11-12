@@ -117,6 +117,12 @@ export function ComponentConfigModal({
   const validateRequiredFields = (): { valid: boolean; missing: string[] } => {
     const missing: string[] = [];
     const required = componentSchema.schema.required || [];
+    const isCommunityComponent = type.includes('.components.');
+
+    // For community components, instance name (label) is required
+    if (isCommunityComponent && (!label || label.trim() === '')) {
+      missing.push('Instance Name');
+    }
 
     for (const fieldName of required) {
       const fieldValue = formData[fieldName];
@@ -588,18 +594,27 @@ export function ComponentConfigModal({
 
         {/* Body */}
         <div className="flex-1 overflow-y-auto p-6 space-y-4">
-          {/* Component Label */}
+          {/* Component Label / Instance Name */}
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">
-              Label
+              {type.includes('.components.') ? 'Instance Name' : 'Label'}
+              {type.includes('.components.') && <span className="text-red-500 ml-1">*</span>}
             </label>
             <input
               type="text"
               value={label}
               onChange={(e) => setLabel(e.target.value)}
               className="w-full px-3 py-2 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-              placeholder={`${componentSchema.name} Component`}
+              placeholder={type.includes('.components.') ?
+                `Enter unique name (e.g., ${componentSchema.name.toLowerCase().replace(/\s+/g, '_')}_1)` :
+                `${componentSchema.name} Component`}
+              required={type.includes('.components.')}
             />
+            {type.includes('.components.') && (
+              <p className="text-xs text-gray-500 mt-1">
+                Each instance needs a unique name to avoid overwriting previous configurations
+              </p>
+            )}
           </div>
 
           {/* Component Description */}
