@@ -112,25 +112,28 @@ class AssetIntrospectionService:
                 # Run with venv activated using bash -c (use absolute paths for both)
                 dg_abs_path = str(dg_path.resolve())
                 cmd = f"source {str(venv_dir.resolve())}/bin/activate && {dg_abs_path} list defs --json"
+                print(f"[Asset Introspection] Running dg list defs for project {project.id}...", flush=True)
                 result = subprocess.run(
                     ["bash", "-c", cmd],
                     cwd=str(project_dir.resolve()),
                     capture_output=True,
                     text=True,
                     check=True,
-                    timeout=30,
+                    timeout=15,  # Reduced from 30 to 15 seconds
                 )
-                print(f"✅ Successfully ran dg list defs for project")
+                print(f"[Asset Introspection] Command completed successfully", flush=True)
             else:
                 # Fallback to system dg (already in PATH)
+                print(f"[Asset Introspection] Running dg list defs for project {project.id}...", flush=True)
                 result = subprocess.run(
                     [dg_cmd, "list", "defs", "--json"],
                     cwd=project_dir,
                     capture_output=True,
                     text=True,
                     check=True,
-                    timeout=30,
+                    timeout=15,  # Reduced from 30 to 15 seconds
                 )
+                print(f"[Asset Introspection] Command completed successfully", flush=True)
 
             return json.loads(result.stdout)
 
