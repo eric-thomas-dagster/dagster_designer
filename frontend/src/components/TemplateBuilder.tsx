@@ -423,7 +423,7 @@ ${generateYamlAttributes(communityAssetCheckAttributes, 1)}`;
         code: generatedCode,
       });
     },
-    onSuccess: (data) => {
+    onSuccess: async (data) => {
       if (selectedCommunityAssetCheck) {
         alert(`Component configured successfully!\n\nYAML file: ${data.yaml_file}`);
         // Invalidate installed components cache and reload project
