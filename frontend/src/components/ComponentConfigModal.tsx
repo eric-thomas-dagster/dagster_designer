@@ -88,26 +88,25 @@ export function ComponentConfigModal({
     fetchAdapterStatus();
   }, [isDbtComponent, currentProject]);
 
-  if (!componentSchema) {
-    return null;
-  }
-
   // Check if this is a single-asset component (has asset_name field)
-  const hasSingleAssetField = componentSchema.schema?.properties?.asset_name !== undefined;
+  // Must calculate before using in hooks
+  const hasSingleAssetField = componentSchema?.schema?.properties?.asset_name !== undefined;
   const isCommunityComponent = type.includes('.components.');
 
   // Auto-sync label with asset_name for single-asset community components
   useEffect(() => {
+    if (!componentSchema) return;
     if (isCommunityComponent && hasSingleAssetField && formData.asset_name) {
       // Only auto-set if label is empty or matches the old asset_name
       if (!label || label === component?.attributes?.asset_name) {
         setLabel(formData.asset_name);
       }
     }
-  }, [formData.asset_name, hasSingleAssetField, isCommunityComponent]);
+  }, [componentSchema, formData.asset_name, hasSingleAssetField, isCommunityComponent, label, component]);
 
   // Auto-suggest instance name for new multi-check components
   useEffect(() => {
+    if (!componentSchema) return;
     console.log('[ComponentConfigModal] Instance name auto-generation check:', {
       isNew,
       isCommunityComponent,
@@ -133,6 +132,11 @@ export function ComponentConfigModal({
       }
     }
   }, [isNew, isCommunityComponent, hasSingleAssetField, componentSchema, type, label]);
+
+  // Early return after all hooks have been called
+  if (!componentSchema) {
+    return null;
+  }
 
   const handleInstallAdapter = async (adapterType: string) => {
     if (!currentProject) return;
