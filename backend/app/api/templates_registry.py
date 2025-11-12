@@ -233,6 +233,49 @@ def validate_component_config(component_dir: Path, attributes: dict) -> tuple[di
     return cleaned_attributes, validation_errors
 
 
+@router.get("/check-instance/{project_id}/{component_id}/{instance_name}")
+async def check_instance_exists(
+    project_id: str,
+    component_id: str,
+    instance_name: str
+):
+    """Check if a component instance with the given name already exists."""
+    try:
+        # Get project
+        project = project_service.get_project(project_id)
+        if not project:
+            raise HTTPException(status_code=404, detail="Project not found")
+
+        project_dir = project_service._get_project_dir(project)
+        project_name_sanitized = project.name.replace(" ", "_").replace("-", "_")
+
+        # Detect project structure
+        try:
+            base_dir, actual_module_name, use_src_layout, defs_dir, components_dir = detect_project_structure(
+                project_dir, project_name_sanitized
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+
+        # Check if instance directory exists
+        instance_dir = defs_dir / instance_name
+        exists = instance_dir.exists()
+
+        return {
+            "exists": exists,
+            "instance_name": instance_name,
+            "component_id": component_id
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to check instance: {str(e)}"
+        )
+
+
 @router.post("/configure/{component_id}")
 async def configure_component(
     component_id: str,

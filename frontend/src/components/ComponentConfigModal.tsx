@@ -38,6 +38,7 @@ export function ComponentConfigModal({
   const [description, setDescription] = useState(component?.description || '');
   const [translation, setTranslation] = useState<Record<string, any>>(component?.translation || {});
   const [sqlMode, setSqlMode] = useState<'inline' | 'file'>('inline');
+  const [instanceNameError, setInstanceNameError] = useState<string | null>(null);
 
   // DBT adapter state
   const [adapterInfo, setAdapterInfo] = useState<AdapterInfo[]>([]);
@@ -104,6 +105,22 @@ export function ComponentConfigModal({
     }
   }, [formData.asset_name, hasSingleAssetField, isCommunityComponent]);
 
+  // Auto-suggest instance name for new multi-check components
+  useEffect(() => {
+    if (isNew && isCommunityComponent && !hasSingleAssetField && !label && componentSchema) {
+      // Extract component_id from type for default name suggestion
+      const parts = type.split('.');
+      const componentsIndex = parts.indexOf('components');
+      if (componentsIndex !== -1 && componentsIndex + 1 < parts.length) {
+        const componentId = parts[componentsIndex + 1];
+        // Suggest name with timestamp for uniqueness
+        const timestamp = new Date().getTime().toString().slice(-6);
+        const suggestedName = `${componentId}_${timestamp}`;
+        setLabel(suggestedName);
+      }
+    }
+  }, [isNew, isCommunityComponent, hasSingleAssetField, componentSchema, type]);
+
   const handleInstallAdapter = async (adapterType: string) => {
     if (!currentProject) return;
 
@@ -152,7 +169,65 @@ export function ComponentConfigModal({
       }
     }
 
+    // Special validation for assets field (enhanced data quality checks)
+    // Check that all check configurations have a 'name' field
+    if (formData.assets && typeof formData.assets === 'object') {
+      for (const [assetKey, assetConfig] of Object.entries(formData.assets)) {
+        if (typeof assetConfig === 'object' && assetConfig !== null) {
+          // Check each check type (row_count_check, null_check, etc.)
+          for (const [checkType, checks] of Object.entries(assetConfig)) {
+            if (Array.isArray(checks)) {
+              for (let i = 0; i < checks.length; i++) {
+                const check = checks[i];
+                if (typeof check === 'object' && (!check.name || check.name.trim() === '')) {
+                  missing.push(`"${checkType}" check #${i + 1} for asset "${assetKey}" is missing a name`);
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+
     return { valid: missing.length === 0, missing };
+  };
+
+  // Validate instance name doesn't conflict with existing instances
+  const validateInstanceName = async (instanceName: string): Promise<boolean> => {
+    if (!currentProject || !instanceName) {
+      return true; // Skip validation if no project or empty name
+    }
+
+    try {
+      const parts = type.split('.');
+      const componentsIndex = parts.indexOf('components');
+      if (componentsIndex === -1 || componentsIndex + 1 >= parts.length) {
+        return true; // Can't extract component_id, skip check
+      }
+      const componentId = parts[componentsIndex + 1];
+
+      // Check if a folder with this instance name already exists
+      const response = await fetch(
+        `/api/v1/templates/check-instance/${currentProject.id}/${componentId}/${instanceName}`
+      );
+
+      if (response.ok) {
+        const data = await response.json();
+        if (data.exists && data.instance_name !== component?.label) {
+          // Folder exists and it's not the current component being edited
+          setInstanceNameError(`Instance "${instanceName}" already exists. Please choose a unique name.`);
+          return false;
+        }
+      }
+
+      setInstanceNameError(null);
+      return true;
+    } catch (error) {
+      console.error('Failed to validate instance name:', error);
+      // Don't block saving if validation fails
+      setInstanceNameError(null);
+      return true;
+    }
   };
 
   const handleSave = async () => {
@@ -172,6 +247,13 @@ export function ComponentConfigModal({
     const isCommunityComponent = type.includes('.components.');
 
     if (isCommunityComponent && currentProject) {
+      // Validate instance name doesn't conflict with existing instances
+      if (isNew && !hasSingleAssetField) {
+        const isValidName = await validateInstanceName(label);
+        if (!isValidName) {
+          return; // Validation failed, error message is already shown
+        }
+      }
       // For community components, update the YAML file via API
       try {
         // Extract component_id from type
@@ -564,20 +646,40 @@ export function ComponentConfigModal({
       }
 
       // Fallback to JSON textarea for objects without defined properties
+      // Special handling for assets field to provide better placeholder
+      const isAssetsField = fieldName === 'assets';
+      const assetsPlaceholder = `{
+  "asset_key_1": {
+    "row_count_check": [
+      {
+        "name": "check_row_count",
+        "min_rows": 1
+      }
+    ]
+  }
+}`;
+
       return (
-        <textarea
-          value={typeof value === 'object' ? JSON.stringify(value, null, 2) : ''}
-          onChange={(e) => {
-            try {
-              handleFieldChange(fieldName, JSON.parse(e.target.value));
-            } catch {
-              // Invalid JSON, ignore
-            }
-          }}
-          className="w-full px-3 py-2 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono"
-          placeholder="{}"
-          rows={6}
-        />
+        <div className="space-y-2">
+          <textarea
+            value={typeof value === 'object' ? JSON.stringify(value, null, 2) : ''}
+            onChange={(e) => {
+              try {
+                handleFieldChange(fieldName, JSON.parse(e.target.value));
+              } catch {
+                // Invalid JSON, ignore
+              }
+            }}
+            className="w-full px-3 py-2 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono"
+            placeholder={isAssetsField ? assetsPlaceholder : "{}"}
+            rows={isAssetsField ? 12 : 6}
+          />
+          {isAssetsField && (
+            <p className="text-xs text-orange-600 bg-orange-50 border border-orange-200 rounded px-2 py-1">
+              <strong>Important:</strong> Each check MUST have a unique "name" field. Empty names will cause issues.
+            </p>
+          )}
+        </div>
       );
     }
 
@@ -618,15 +720,36 @@ export function ComponentConfigModal({
             <input
               type="text"
               value={label}
-              onChange={(e) => setLabel(e.target.value)}
-              className="w-full px-3 py-2 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+              onChange={(e) => {
+                setLabel(e.target.value);
+                // Clear error when user types
+                if (instanceNameError) {
+                  setInstanceNameError(null);
+                }
+              }}
+              onBlur={(e) => {
+                // Validate on blur for multi-check components
+                if (isNew && isCommunityComponent && !hasSingleAssetField && e.target.value) {
+                  validateInstanceName(e.target.value);
+                }
+              }}
+              className={`w-full px-3 py-2 text-sm border rounded-md focus:outline-none focus:ring-2 ${
+                instanceNameError
+                  ? 'border-red-500 focus:ring-red-500'
+                  : 'border-gray-300 focus:ring-blue-500'
+              }`}
               placeholder={isCommunityComponent ?
                 (hasSingleAssetField ? 'Will use asset name' : `Enter unique name (e.g., ${componentSchema.name.toLowerCase().replace(/\s+/g, '_')}_1)`) :
                 `${componentSchema.name} Component`}
               required={isCommunityComponent && !hasSingleAssetField}
               disabled={isCommunityComponent && hasSingleAssetField}
             />
-            {isCommunityComponent && !hasSingleAssetField && (
+            {instanceNameError && (
+              <p className="text-xs text-red-600 mt-1 flex items-center">
+                <span className="font-semibold mr-1">⚠</span> {instanceNameError}
+              </p>
+            )}
+            {!instanceNameError && isCommunityComponent && !hasSingleAssetField && (
               <p className="text-xs text-gray-500 mt-1">
                 Each instance needs a unique name to avoid overwriting previous configurations
               </p>
