@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { X, Save, Download, CheckCircle, XCircle, Loader } from 'lucide-react';
 import { useComponent } from '@/hooks/useComponentRegistry';
 import { TranslationEditor } from './TranslationEditor';
+import { EnhancedDataQualityChecksBuilder } from './EnhancedDataQualityChecksBuilder';
 import { useProjectStore } from '@/hooks/useProject';
 import { dbtAdaptersApi, type AdapterInfo } from '@/services/api';
 import type { ComponentInstance, ComponentSchema } from '@/types';
@@ -886,11 +887,23 @@ export function ComponentConfigModal({
           <div className="space-y-4">
             <h3 className="text-sm font-semibold text-gray-900">Configuration</h3>
 
-            {Object.keys(properties).length === 0 && (
-              <p className="text-sm text-gray-500">No configuration fields available</p>
-            )}
+            {/* Special handling for Enhanced Data Quality Checks */}
+            {type.includes('EnhancedDataQualityChecks') ? (
+              <div className="pt-2 border-t border-gray-200">
+                <EnhancedDataQualityChecksBuilder
+                  assets={currentProject?.graph.nodes
+                    .filter((node: any) => node.node_kind === 'asset' || node.type === 'asset')
+                    .map((node: any) => node.data.asset_key || node.id) || []}
+                  onConfigChange={(config) => setFormData({ ...formData, ...config })}
+                />
+              </div>
+            ) : (
+              <>
+                {Object.keys(properties).length === 0 && (
+                  <p className="text-sm text-gray-500">No configuration fields available</p>
+                )}
 
-            {Object.entries(properties).map(([fieldName, fieldSchema]: [string, any]) => (
+                {Object.entries(properties).map(([fieldName, fieldSchema]: [string, any]) => (
               <div key={fieldName}>
                 <label className="block text-sm font-medium text-gray-700 mb-1">
                   {fieldName}
@@ -904,6 +917,8 @@ export function ComponentConfigModal({
                 {renderField(fieldName, fieldSchema)}
               </div>
             ))}
+              </>
+            )}
           </div>
 
           {/* Translation Section */}
