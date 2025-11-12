@@ -33,6 +33,11 @@ function App() {
   const { currentProject, updateComponents} = useProjectStore();
   const queryClient = useQueryClient();
 
+  // Debug: Log when addingComponentType changes
+  useEffect(() => {
+    console.log('[App] addingComponentType changed:', addingComponentType, 'currentProject:', currentProject?.id);
+  }, [addingComponentType, currentProject]);
+
   // Handler to navigate to code tab and open a file
   const handleOpenFile = (filePath: string) => {
     setActiveMainTab('code');
@@ -489,7 +494,7 @@ function App() {
       )}
 
       {/* Component Config Modal */}
-      {(editingComponent || addingComponentType) && (
+      {(editingComponent || addingComponentType) && currentProject && (
         <ComponentConfigModal
           component={editingComponent}
           componentType={addingComponentType || undefined}

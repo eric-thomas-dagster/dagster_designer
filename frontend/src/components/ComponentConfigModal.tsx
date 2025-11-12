@@ -30,7 +30,8 @@ export function ComponentConfigModal({
     hasComponent: !!component,
     hasComponentType: !!componentType,
     hasSchema: !!componentSchema,
-    componentAttributes: component?.attributes
+    componentAttributes: component?.attributes,
+    currentProjectId: currentProject?.id,
   });
 
   const [formData, setFormData] = useState<Record<string, any>>(component?.attributes || {});

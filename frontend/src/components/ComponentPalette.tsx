@@ -164,7 +164,10 @@ export function ComponentPalette({ onComponentClick }: ComponentPaletteProps) {
             {filteredInstalledComponents.map((comp) => (
               <button
                 key={comp.id}
-                onClick={() => onComponentClick(comp.component_type)}
+                onClick={() => {
+                  console.log('[ComponentPalette] Clicking installed component:', comp.name, 'type:', comp.component_type);
+                  onComponentClick(comp.component_type);
+                }}
                 className="w-full flex items-center space-x-2 px-2.5 py-2 bg-gradient-to-br from-purple-50 to-pink-50 border border-purple-200 rounded-md hover:border-purple-400 transition-all group"
               >
                 <Package className="w-4 h-4 text-purple-600" />
