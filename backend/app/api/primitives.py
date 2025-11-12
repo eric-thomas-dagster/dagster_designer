@@ -453,16 +453,22 @@ async def list_all_definitions(project_id: str):
         project_venv_bin = str(project_path / ".venv" / "bin")
         env['PATH'] = f"{project_venv_bin}:{env.get('PATH', '')}"
 
+        import sys
+        print(f"[Definitions] Running dg list defs for project {project_id}...", file=sys.stderr, flush=True)
+
         result = subprocess.run(
             [str(venv_dg), "list", "defs", "--json"],
             cwd=str(project_path),
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=15,  # Reduced from 30 to 15 seconds
             env=env,
         )
 
+        print(f"[Definitions] Command completed with return code {result.returncode}", file=sys.stderr, flush=True)
+
         if result.returncode != 0:
+            print(f"[Definitions] Error output: {result.stderr}", file=sys.stderr, flush=True)
             raise HTTPException(
                 status_code=500,
                 detail=f"Failed to list definitions: {result.stderr}"
