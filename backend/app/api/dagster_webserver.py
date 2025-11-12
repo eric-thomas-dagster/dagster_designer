@@ -16,6 +16,9 @@ router = APIRouter(prefix="/dagster-ui", tags=["dagster-ui"])
 # In-memory cache of project_id -> (port, pid) for the session
 _project_ports: dict[str, tuple[int, int]] = {}
 
+# Track projects currently being started to prevent duplicate starts
+_starting_projects: set[str] = set()
+
 
 class DagsterUIStatus(BaseModel):
     """Status of the Dagster UI webserver."""
@@ -182,139 +185,177 @@ async def start_dagster_ui(project_id: str):
     Returns:
         Status and URL of the started webserver
     """
-    # Get project path (resolve to absolute path)
-    project_file = (settings.projects_dir / f"{project_id}.json").resolve()
-    if not project_file.exists():
-        raise HTTPException(status_code=404, detail=f"Project {project_id} not found")
+    import sys
+    print(f"[START DAGSTER UI] Called for project: {project_id}", flush=True)
+    sys.stdout.flush()
 
-    # Read project metadata to get directory name
-    import json
-    with open(project_file, 'r') as f:
-        project_data = json.load(f)
+    # Check if this project is already being started by another request
+    if project_id in _starting_projects:
+        print(f"[START DAGSTER UI] Project {project_id} is already being started, waiting...", flush=True)
+        # Wait up to 5 seconds for the other start to complete
+        wait_time = 0
+        while project_id in _starting_projects and wait_time < 5:
+            time.sleep(0.5)
+            wait_time += 0.5
 
-    directory_name = project_data.get("directory_name", project_id)
-    project_path = (settings.projects_dir / directory_name).resolve()
+        # If still starting after 5 seconds, return error
+        if project_id in _starting_projects:
+            raise HTTPException(
+                status_code=409,
+                detail="Another request is already starting Dagster UI for this project. Please wait and try again."
+            )
 
-    if not project_path.exists():
-        raise HTTPException(status_code=404, detail=f"Project directory not found")
-
-    # Check if already running for this specific project
-    is_running, pid, port_found = check_dagster_webserver(project_path=project_path)
-    if is_running and port_found:
-        return {
-            "message": "Dagster UI is already running",
-            "url": f"http://localhost:{port_found}",
-            "port": port_found,
-            "pid": pid,
-        }
-
-    # Find an available port
-    try:
-        port = find_available_port(start_port=3000)
-    except RuntimeError as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-    # Get venv python path for uv run
-    venv_python = project_path / ".venv" / "bin" / "python"
-    if not venv_python.exists():
-        raise HTTPException(
-            status_code=500,
-            detail="Project virtual environment not found. Please reinstall dependencies."
-        )
-
-    try:
-        # Use 'uv run' to handle environment properly
-        # Try 'dg dev' first (works for both tool-created and imported projects)
-        # Fall back to 'dagster dev' if dg not available
-
-        # Check if dg is available in the project
-        venv_dg = project_path / ".venv" / "bin" / "dg"
-
-        if venv_dg.exists():
-            # Use dg dev via uv run
-            cmd = ["uv", "run", "dg", "dev", "--port", str(port), "--host", "0.0.0.0"]
-        else:
-            # Fall back to dagster dev via uv run
-            cmd = ["uv", "run", "dagster", "dev", "-p", str(port), "-h", "0.0.0.0"]
-
-        process = subprocess.Popen(
-            cmd,
-            cwd=str(project_path),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,
-            text=True,
-            bufsize=1,
-        )
-
-        # Wait for dg dev to output the port (usually happens within a few seconds)
-        # Parse output like: "Serving Dagster UI on http://0.0.0.0:3001"
-        actual_port = port  # Default to what we requested
-        start_time = time.time()
-        timeout = 30  # Wait up to 30 seconds for startup
-        startup_log = []  # Capture startup output
-
-        while time.time() - start_time < timeout:
-            line = process.stdout.readline()
-            if not line:
-                # Check if process is still running
-                if process.poll() is not None:
-                    # Process exited - capture any remaining output
-                    remaining_output = process.stdout.read()
-                    if remaining_output:
-                        startup_log.append(remaining_output)
-
-                    error_msg = f"Dagster process exited unexpectedly with code {process.returncode}"
-                    raise HTTPException(
-                        status_code=500,
-                        detail={
-                            "message": error_msg,
-                            "error": error_msg,
-                            "command": " ".join(cmd),
-                            "startup_log": startup_log[-50:],  # Last 50 lines
-                            "returncode": process.returncode,
-                        }
-                    )
-                time.sleep(0.1)
-                continue
-
-            # Capture the line for logging
-            startup_log.append(line.rstrip())
-
-            # Look for the serving message
-            match = re.search(r'Serving.*?(?:http://|on)\s*(?:\S+:)?(\d+)', line, re.IGNORECASE)
-            if match:
-                actual_port = int(match.group(1))
-                break
-
-        # Cache the port and PID for this project
-        _project_ports[project_id] = (actual_port, process.pid)
-
-        return {
-            "message": "Dagster UI started successfully",
-            "url": f"http://localhost:{actual_port}",
-            "port": actual_port,
-            "pid": process.pid,
-            "command": " ".join(cmd),
-            "startup_log": startup_log[-20:],  # Return last 20 lines
-        }
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        import traceback
-        tb = traceback.format_exc()
-        print(f"ERROR starting Dagster UI: {str(e)}")
-        print(f"Traceback:\n{tb}")
-        raise HTTPException(
-            status_code=500,
-            detail={
-                "message": f"Failed to start Dagster UI: {str(e)}",
-                "error": str(e),
-                "traceback": tb,
-                "error_type": type(e).__name__,
+        # Check if the other request succeeded in starting it
+        if project_id in _project_ports:
+            cached_port, cached_pid = _project_ports[project_id]
+            return {
+                "message": "Dagster UI was started by another request",
+                "url": f"http://localhost:{cached_port}",
+                "port": cached_port,
+                "pid": cached_pid,
             }
-        )
+
+    # Mark this project as being started
+    _starting_projects.add(project_id)
+
+    try:  # Outer try to ensure cleanup
+        # Get project path (resolve to absolute path)
+        project_file = (settings.projects_dir / f"{project_id}.json").resolve()
+        if not project_file.exists():
+            raise HTTPException(status_code=404, detail=f"Project {project_id} not found")
+
+        # Read project metadata to get directory name
+        import json
+        with open(project_file, 'r') as f:
+            project_data = json.load(f)
+
+        directory_name = project_data.get("directory_name", project_id)
+        project_path = (settings.projects_dir / directory_name).resolve()
+
+        if not project_path.exists():
+            raise HTTPException(status_code=404, detail=f"Project directory not found")
+
+        # Check if already running for this specific project
+        is_running, pid, port_found = check_dagster_webserver(project_path=project_path)
+        if is_running and port_found:
+            return {
+                "message": "Dagster UI is already running",
+                "url": f"http://localhost:{port_found}",
+                "port": port_found,
+                "pid": pid,
+            }
+
+        # Find an available port
+        try:
+            port = find_available_port(start_port=3000)
+        except RuntimeError as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+        # Get venv python path for uv run
+        venv_python = project_path / ".venv" / "bin" / "python"
+        if not venv_python.exists():
+            raise HTTPException(
+                status_code=500,
+                detail="Project virtual environment not found. Please reinstall dependencies."
+            )
+
+        try:
+            # Use 'uv run' to handle environment properly
+            # Try 'dg dev' first (works for both tool-created and imported projects)
+            # Fall back to 'dagster dev' if dg not available
+
+            # Check if dg is available in the project
+            venv_dg = project_path / ".venv" / "bin" / "dg"
+
+            if venv_dg.exists():
+                # Use dg dev via uv run
+                cmd = ["uv", "run", "dg", "dev", "--port", str(port), "--host", "0.0.0.0"]
+            else:
+                # Fall back to dagster dev via uv run
+                cmd = ["uv", "run", "dagster", "dev", "-p", str(port), "-h", "0.0.0.0"]
+
+            process = subprocess.Popen(
+                cmd,
+                cwd=str(project_path),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+                text=True,
+                bufsize=1,
+            )
+
+            # Wait for dg dev to output the port (usually happens within a few seconds)
+            # Parse output like: "Serving Dagster UI on http://0.0.0.0:3001"
+            actual_port = port  # Default to what we requested
+            start_time = time.time()
+            timeout = 30  # Wait up to 30 seconds for startup
+            startup_log = []  # Capture startup output
+
+            while time.time() - start_time < timeout:
+                line = process.stdout.readline()
+                if not line:
+                    # Check if process is still running
+                    if process.poll() is not None:
+                        # Process exited - capture any remaining output
+                        remaining_output = process.stdout.read()
+                        if remaining_output:
+                            startup_log.append(remaining_output)
+
+                        error_msg = f"Dagster process exited unexpectedly with code {process.returncode}"
+                        raise HTTPException(
+                            status_code=500,
+                            detail={
+                                "message": error_msg,
+                                "error": error_msg,
+                                "command": " ".join(cmd),
+                                "startup_log": startup_log[-50:],  # Last 50 lines
+                                "returncode": process.returncode,
+                            }
+                        )
+                    time.sleep(0.1)
+                    continue
+
+                # Capture the line for logging
+                startup_log.append(line.rstrip())
+
+                # Look for the serving message
+                match = re.search(r'Serving.*?(?:http://|on)\s*(?:\S+:)?(\d+)', line, re.IGNORECASE)
+                if match:
+                    actual_port = int(match.group(1))
+                    break
+
+            # Cache the port and PID for this project
+            _project_ports[project_id] = (actual_port, process.pid)
+
+            return {
+                "message": "Dagster UI started successfully",
+                "url": f"http://localhost:{actual_port}",
+                "port": actual_port,
+                "pid": process.pid,
+                "command": " ".join(cmd),
+                "startup_log": startup_log[-20:],  # Return last 20 lines
+            }
+
+        except HTTPException:
+            raise
+        except Exception as e:
+            import traceback
+            tb = traceback.format_exc()
+            print(f"ERROR starting Dagster UI: {str(e)}")
+            print(f"Traceback:\n{tb}")
+            raise HTTPException(
+                status_code=500,
+                detail={
+                    "message": f"Failed to start Dagster UI: {str(e)}",
+                    "error": str(e),
+                    "traceback": tb,
+                    "error_type": type(e).__name__,
+                }
+            )
+    finally:
+        # Always remove from starting set when done
+        _starting_projects.discard(project_id)
+        print(f"[START DAGSTER UI] Completed for project: {project_id}", flush=True)
 
 
 @router.post("/stop/{project_id}")

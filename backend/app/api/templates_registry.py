@@ -109,6 +109,130 @@ class InstallComponentRequest(BaseModel):
     config: dict = {}
 
 
+def validate_component_config(component_dir: Path, attributes: dict) -> tuple[dict, list[str]]:
+    """Validate component configuration against its schema.
+
+    Args:
+        component_dir: Path to the component directory containing schema.json
+        attributes: Dictionary of attribute values to validate
+
+    Returns:
+        Tuple of (cleaned_attributes, validation_errors)
+    """
+    schema_file = component_dir / "schema.json"
+    validation_errors = []
+    cleaned_attributes = {}
+
+    # If no schema file exists, return attributes as-is
+    if not schema_file.exists():
+        return attributes, []
+
+    try:
+        with open(schema_file, 'r') as f:
+            schema = json.load(f)
+    except Exception as e:
+        return attributes, [f"Failed to load schema: {str(e)}"]
+
+    # Get properties and required fields from schema
+    properties = schema.get('properties', {})
+    required_fields = schema.get('required', [])
+
+    # Check if attributes is empty when component has required fields
+    if required_fields and not attributes:
+        validation_errors.append(f"Component requires configuration for fields: {', '.join(required_fields)}")
+        return cleaned_attributes, validation_errors
+
+    # Validate each attribute
+    for key, value in attributes.items():
+        if key not in properties:
+            # Unknown field - include it but warn
+            cleaned_attributes[key] = value
+            continue
+
+        prop = properties[key]
+        prop_type = prop.get('type')
+
+        # Handle empty string values based on type
+        if value == '' or value is None:
+            # Check if field is required
+            if key in required_fields:
+                validation_errors.append(f"Required field '{key}' cannot be empty")
+                continue
+
+            # For optional fields, check if there's a default
+            if 'default' in prop:
+                # Skip field to use default value
+                continue
+
+            # For optional fields without defaults, skip empty values
+            continue
+
+        # Type validation
+        if prop_type == 'integer':
+            if isinstance(value, str):
+                try:
+                    cleaned_attributes[key] = int(value)
+                except ValueError:
+                    validation_errors.append(f"Field '{key}' must be an integer, got: '{value}'")
+                    continue
+            elif isinstance(value, int):
+                cleaned_attributes[key] = value
+            else:
+                validation_errors.append(f"Field '{key}' must be an integer, got type: {type(value).__name__}")
+                continue
+
+        elif prop_type == 'number':
+            if isinstance(value, str):
+                try:
+                    cleaned_attributes[key] = float(value)
+                except ValueError:
+                    validation_errors.append(f"Field '{key}' must be a number, got: '{value}'")
+                    continue
+            elif isinstance(value, (int, float)):
+                cleaned_attributes[key] = value
+            else:
+                validation_errors.append(f"Field '{key}' must be a number, got type: {type(value).__name__}")
+                continue
+
+        elif prop_type == 'boolean':
+            if isinstance(value, str):
+                if value.lower() in ('true', '1', 'yes'):
+                    cleaned_attributes[key] = True
+                elif value.lower() in ('false', '0', 'no'):
+                    cleaned_attributes[key] = False
+                else:
+                    validation_errors.append(f"Field '{key}' must be a boolean, got: '{value}'")
+                    continue
+            elif isinstance(value, bool):
+                cleaned_attributes[key] = value
+            else:
+                validation_errors.append(f"Field '{key}' must be a boolean, got type: {type(value).__name__}")
+                continue
+
+        elif prop_type == 'array':
+            if not isinstance(value, list):
+                validation_errors.append(f"Field '{key}' must be an array, got type: {type(value).__name__}")
+                continue
+            cleaned_attributes[key] = value
+
+        elif prop_type == 'object':
+            if not isinstance(value, dict):
+                validation_errors.append(f"Field '{key}' must be an object, got type: {type(value).__name__}")
+                continue
+            cleaned_attributes[key] = value
+
+        else:
+            # String or other types - accept as-is
+            cleaned_attributes[key] = value
+
+    # Check for missing required fields
+    for required_field in required_fields:
+        if required_field not in cleaned_attributes:
+            validation_errors.append(f"Required field '{required_field}' is missing")
+
+    return cleaned_attributes, validation_errors
+
+
 @router.post("/configure/{component_id}")
 async def configure_component(
     component_id: str,
@@ -148,6 +272,22 @@ async def configure_component(
         # Create/update YAML config file
         instance_name = request.config.get('name', component_id)
 
+        # Extract attributes (excluding 'name')
+        raw_attributes = {k: v for k, v in request.config.items() if k != 'name'}
+
+        # Validate component configuration against schema
+        validated_attributes, validation_errors = validate_component_config(
+            component_dir, raw_attributes
+        )
+
+        if validation_errors:
+            error_message = "Configuration validation failed:\n" + "\n".join(f"  - {err}" for err in validation_errors)
+            print(f"[Configure] Validation errors: {error_message}")
+            raise HTTPException(
+                status_code=400,
+                detail=error_message
+            )
+
         # Create subdirectory for the component instance
         instance_dir = defs_dir / instance_name
         instance_dir.mkdir(parents=True, exist_ok=True)
@@ -156,7 +296,7 @@ async def configure_component(
         # Use correct YAML format: type + attributes
         yaml_config = {
             "type": component_type,
-            "attributes": {k: v for k, v in request.config.items() if k != 'name'}
+            "attributes": validated_attributes
         }
 
         with open(yaml_file, 'w') as f:
@@ -165,10 +305,33 @@ async def configure_component(
         print(f"[Configure] Updated component configuration: {yaml_file}")
         print(f"[Configure] Config: {yaml_config}")
 
+        # Auto-regenerate assets so the new component appears immediately
+        try:
+            from ..services.asset_introspection_service import AssetIntrospectionService
+            asset_introspection_service = AssetIntrospectionService()
+
+            print(f"[Configure] Auto-regenerating assets for project {project.id}...")
+            asset_nodes, asset_edges = asset_introspection_service.get_assets_for_project(project)
+
+            # Update project graph with new assets
+            project.graph.nodes = asset_nodes
+            project.graph.edges = asset_edges
+
+            # Save the updated project
+            project_service._save_project(project)
+
+            print(f"[Configure] Successfully regenerated {len(asset_nodes)} assets")
+        except Exception as e:
+            print(f"[Configure] Warning: Failed to auto-regenerate assets: {e}")
+            # Don't fail the request if regeneration fails - user can manually regenerate
+            import traceback
+            traceback.print_exc()
+
         return {
             "success": True,
             "message": f"Component {instance_name} configured successfully",
-            "yaml_file": str(yaml_file.relative_to(project_dir))
+            "yaml_file": str(yaml_file.relative_to(project_dir)),
+            "assets_regenerated": True
         }
 
     except HTTPException:
@@ -667,6 +830,29 @@ async def install_component(
                 )
 
         print(f"[Install] Installation complete!")
+
+        # Auto-regenerate assets so the new component appears immediately
+        try:
+            from ..services.asset_introspection_service import AssetIntrospectionService
+            asset_introspection_service = AssetIntrospectionService()
+
+            print(f"[Install] Auto-regenerating assets for project {project.id}...")
+            asset_nodes, asset_edges = asset_introspection_service.get_assets_for_project(project)
+
+            # Update project graph with new assets
+            project.graph.nodes = asset_nodes
+            project.graph.edges = asset_edges
+
+            # Save the updated project
+            project_service._save_project(project)
+
+            print(f"[Install] Successfully regenerated {len(asset_nodes)} assets")
+        except Exception as e:
+            print(f"[Install] Warning: Failed to auto-regenerate assets: {e}")
+            # Don't fail the request if regeneration fails - user can manually regenerate
+            import traceback
+            traceback.print_exc()
+
         return {
             "success": True,
             "message": f"Component {component.name} installed successfully",
@@ -676,7 +862,8 @@ async def install_component(
             "files_created": [
                 str(component_file_path.relative_to(project_dir)),
                 str(init_file.relative_to(project_dir)),
-            ]
+            ],
+            "assets_regenerated": True
         }
 
     except HTTPException:

@@ -13,8 +13,21 @@ export function DagsterStartupModal({ projectId, onClose, onSuccess }: DagsterSt
   const [output, setOutput] = useState<string[]>([]);
   const [error, setError] = useState<string>('');
   const outputEndRef = useRef<HTMLDivElement>(null);
+  const hasStartedRef = useRef(false);
+  const currentProjectIdRef = useRef<string | null>(null);
 
   useEffect(() => {
+    // Reset the flag only if projectId actually changed
+    if (currentProjectIdRef.current !== projectId) {
+      hasStartedRef.current = false;
+      currentProjectIdRef.current = projectId;
+    }
+
+    // Prevent duplicate calls in React StrictMode
+    if (hasStartedRef.current) {
+      return;
+    }
+    hasStartedRef.current = true;
     startDagster();
   }, [projectId]);
 

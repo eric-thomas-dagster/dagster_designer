@@ -218,6 +218,9 @@ class AssetIntrospectionService:
             components_dir = project_dir / "src" / directory_name / "components"
             print(f"[Asset Introspection] Using src layout defs at: {src_defs_dir}", flush=True)
 
+        # Create a mapping to track component_id (folder name) for each pseudo-component
+        component_id_map = {}
+
         if defs_dir and defs_dir.exists():
             import yaml
             for component_folder in defs_dir.iterdir():
@@ -239,6 +242,7 @@ class AssetIntrospectionService:
                                     attributes=defs_data.get('attributes', {}),
                                 )
                                 component_map[pseudo_comp.id] = pseudo_comp
+                                component_id_map[pseudo_comp.id] = component_id
 
                                 # Try to load icon from manifest
                                 if components_dir:
@@ -293,10 +297,10 @@ class AssetIntrospectionService:
                 print(f"[Asset Introspection] Processing asset: {asset_key}, kinds: {kinds}, source: {asset_source}", flush=True)
                 sys.stdout.flush()
 
-                # If source is null and this is a Python asset, try to find the Python file
-                # (but NOT for dbt assets - they have their SQL source from dbt)
-                is_python_asset = "python" in kinds and "dbt" not in kinds
-                if not asset_source and is_python_asset:
+                # If source is null and this is NOT a dbt asset, try to find the Python file
+                # Search for Python assets when source is missing (could be manually defined @asset)
+                is_dbt_asset = "dbt" in kinds
+                if not asset_source and not is_dbt_asset:
                     # Search for Python files in defs/ directory
                     python_file = self._find_python_asset_file(project_dir, asset_key)
                     if python_file:
@@ -392,6 +396,20 @@ class AssetIntrospectionService:
                 # Get component icon if available
                 component_icon = component_icons.get(source_component) if source_component else None
 
+                # Get component attributes and type if this asset has a source component
+                component_attributes = None
+                component_type = None
+                actual_component_id = None
+                if source_component and source_component in component_map:
+                    source_comp = component_map[source_component]
+                    component_attributes = source_comp.attributes
+                    component_type = source_comp.component_type
+                    # Get the actual folder name (component_id) for community components
+                    actual_component_id = component_id_map.get(source_component)
+                    print(f"[Asset Introspection] Including component attributes for {asset_key}: {component_attributes}", flush=True)
+                    if actual_component_id:
+                        print(f"[Asset Introspection] Component folder name: {actual_component_id}", flush=True)
+
                 # Create asset node with comprehensive data
                 node = GraphNode(
                     id=asset_id,
@@ -414,6 +432,9 @@ class AssetIntrospectionService:
                         "deps": asset.get("deps", []),  # Include dependencies
                         "checks": asset_checks_list,  # Include asset checks
                         "component_icon": component_icon,  # Add component icon for visual identification
+                        "component_attributes": component_attributes,  # Include component configuration
+                        "component_type": component_type,  # Include component type for frontend
+                        "component_id": actual_component_id,  # Actual folder name for fetching configuration
                     }
                 )
                 nodes.append(node)

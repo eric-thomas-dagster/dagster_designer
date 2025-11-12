@@ -1423,9 +1423,48 @@ if custom_lineage_edges:
                 }
 
             try:
-                with open(yaml_file, 'w') as f:
-                    yaml.dump(yaml_data, f, default_flow_style=False, sort_keys=False)
-                print(f"✅ Generated YAML for {component_type} component: {yaml_file}", flush=True)
+                # Validate configuration before writing
+                if component_type not in component_type_map or component_type.startswith("dagster_dbt"):
+                    # Skip validation for dbt components and unmapped types
+                    with open(yaml_file, 'w') as f:
+                        yaml.dump(yaml_data, f, default_flow_style=False, sort_keys=False)
+                    print(f"✅ Generated YAML for {component_type} component: {yaml_file}", flush=True)
+                else:
+                    # For community components, check if schema exists and validate
+                    from ..api.templates_registry import validate_component_config
+
+                    # Try to find component directory with schema
+                    # Look in lib/dagster_designer_components or components subdirectories
+                    potential_schema_dirs = [
+                        defs_dir.parent / "lib" / "dagster_designer_components" / component.id,
+                        defs_dir.parent / "components" / component.id,
+                    ]
+
+                    schema_dir = None
+                    for potential_dir in potential_schema_dirs:
+                        if potential_dir.exists() and (potential_dir / "schema.json").exists():
+                            schema_dir = potential_dir
+                            break
+
+                    if schema_dir:
+                        # Validate against schema
+                        validated_attrs, validation_errors = validate_component_config(
+                            schema_dir, yaml_data[params_key]
+                        )
+
+                        if validation_errors:
+                            error_msg = f"Validation failed for {component.id}:\n" + "\n".join(f"  - {err}" for err in validation_errors)
+                            print(f"❌ {error_msg}", flush=True)
+                            # Don't write invalid YAML - skip this component
+                            continue
+
+                        # Use validated attributes
+                        yaml_data[params_key] = validated_attrs
+
+                    # Write validated YAML
+                    with open(yaml_file, 'w') as f:
+                        yaml.dump(yaml_data, f, default_flow_style=False, sort_keys=False)
+                    print(f"✅ Generated YAML for {component_type} component: {yaml_file}", flush=True)
             except Exception as e:
                 print(f"❌ Error generating YAML for component {component.id}: {e}", flush=True)
 
