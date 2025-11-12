@@ -107,19 +107,31 @@ export function ComponentConfigModal({
 
   // Auto-suggest instance name for new multi-check components
   useEffect(() => {
+    console.log('[ComponentConfigModal] Instance name auto-generation check:', {
+      isNew,
+      isCommunityComponent,
+      hasSingleAssetField,
+      hasLabel: !!label,
+      hasSchema: !!componentSchema,
+      type
+    });
+
     if (isNew && isCommunityComponent && !hasSingleAssetField && !label && componentSchema) {
       // Extract component_id from type for default name suggestion
       const parts = type.split('.');
       const componentsIndex = parts.indexOf('components');
+      console.log('[ComponentConfigModal] Extracting component_id:', { parts, componentsIndex });
+
       if (componentsIndex !== -1 && componentsIndex + 1 < parts.length) {
         const componentId = parts[componentsIndex + 1];
         // Suggest name with timestamp for uniqueness
         const timestamp = new Date().getTime().toString().slice(-6);
         const suggestedName = `${componentId}_${timestamp}`;
+        console.log('[ComponentConfigModal] Setting auto-generated instance name:', suggestedName);
         setLabel(suggestedName);
       }
     }
-  }, [isNew, isCommunityComponent, hasSingleAssetField, componentSchema, type]);
+  }, [isNew, isCommunityComponent, hasSingleAssetField, componentSchema, type, label]);
 
   const handleInstallAdapter = async (adapterType: string) => {
     if (!currentProject) return;

@@ -2,14 +2,21 @@
 
 import subprocess
 import json
+import time
 from pathlib import Path
 from fastapi import APIRouter, HTTPException
+from typing import Dict, Tuple, Any
 
 from app.services.primitives_service import PrimitivesService, PrimitiveCategory
 from app.core.config import settings
 
 router = APIRouter(prefix="/primitives", tags=["primitives"])
 primitives_service = PrimitivesService(str(settings.projects_dir))
+
+# Simple in-memory cache for definitions to avoid re-running slow dg list defs
+# Cache structure: {project_id: (timestamp, definitions_data)}
+_definitions_cache: Dict[str, Tuple[float, Dict[str, Any]]] = {}
+CACHE_TTL_SECONDS = 10  # Cache results for 10 seconds
 
 
 @router.get("/list/{project_id}/{category}")
@@ -403,6 +410,18 @@ async def search_primitive_definition(project_id: str, primitive_type: str, name
     return _search_primitive_definition_internal(project_id, primitive_type, name)
 
 
+@router.delete("/definitions/cache/{project_id}")
+async def clear_definitions_cache(project_id: str):
+    """
+    Clear the definitions cache for a specific project.
+    Use this to force a fresh fetch on the next request.
+    """
+    if project_id in _definitions_cache:
+        del _definitions_cache[project_id]
+        return {"message": f"Cache cleared for project {project_id}"}
+    return {"message": f"No cache found for project {project_id}"}
+
+
 @router.get("/definitions/{project_id}")
 async def list_all_definitions(project_id: str):
     """
@@ -411,6 +430,8 @@ async def list_all_definitions(project_id: str):
     This endpoint discovers ALL primitives in the project, not just those created
     through the template system.
 
+    Results are cached for 10 seconds to improve performance.
+
     Args:
         project_id: Project ID
 
@@ -418,6 +439,16 @@ async def list_all_definitions(project_id: str):
         All definitions discovered in the project
     """
     try:
+        # Check cache first
+        current_time = time.time()
+        if project_id in _definitions_cache:
+            cache_time, cached_data = _definitions_cache[project_id]
+            age = current_time - cache_time
+            if age < CACHE_TTL_SECONDS:
+                import sys
+                print(f"[Definitions] Returning cached data for project {project_id} (age: {age:.1f}s)", file=sys.stderr, flush=True)
+                return cached_data
+
         # Get project path
         project_file = (settings.projects_dir / f"{project_id}.json").resolve()
         if not project_file.exists():
@@ -499,13 +530,19 @@ async def list_all_definitions(project_id: str):
                     # If search fails, keep original source
                     pass
 
-        return {
+        result_data = {
             "project_id": project_id,
             "jobs": defs.get("jobs", []),
             "schedules": defs.get("schedules", []),
             "sensors": defs.get("sensors", []),
             "asset_checks": asset_checks,
         }
+
+        # Cache the results
+        _definitions_cache[project_id] = (time.time(), result_data)
+        print(f"[Definitions] Cached results for project {project_id}", file=sys.stderr, flush=True)
+
+        return result_data
 
     except subprocess.TimeoutExpired:
         raise HTTPException(
