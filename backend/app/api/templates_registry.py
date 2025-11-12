@@ -714,156 +714,26 @@ async def install_component(
             else:
                 print(f"[Install] No valid packages found in requirements.txt")
 
-        # 4. Register component instance
-        # Strategy: Use dg scaffold defs for newly created projects (is_imported=False)
-        # Use manual YAML creation for imported projects (is_imported=True) to avoid structure detection issues
-        is_imported_project = project.is_imported
-
-        # Fallback detection for projects imported before is_imported field was added
-        # Check if project has git_repo or was imported from disk
-        if not is_imported_project and (project.git_repo or "Imported from" in (project.description or "")):
-            print(f"[Install] Detected legacy imported project (no is_imported flag)")
-            is_imported_project = True
-            # Update project metadata for future operations
-            project.is_imported = True
-            from ..models.project import ProjectUpdate
-            project_service.update_project(request.project_id, ProjectUpdate(is_imported=True))
-
         # Component type is always just the module path, regardless of src/ layout
         # The src/ directory is in sys.path, so imports are module_name.components.X
         component_type = f"{actual_module_name}.components.{component_id}.{class_name}"
-        defs_dir = base_dir / "defs"
-
-        instance_name = request.config.get('name', component_id)
 
         print(f"[Install] Component type: {component_type}")
-        print(f"[Install] Instance name: {instance_name}")
-        print(f"[Install] Defs directory: {defs_dir}")
-        print(f"[Install] Is imported project: {is_imported_project}")
-
-        if is_imported_project:
-            # Imported project: Use manual YAML creation (more reliable for non-standard structures)
-            print(f"[Install] Using manual YAML creation for imported project")
-
-            # Ensure defs directory exists
-            if not defs_dir.exists():
-                print(f"[Install] WARNING: Defs directory does not exist: {defs_dir}")
-                defs_dir.mkdir(parents=True, exist_ok=True)
-                print(f"[Install] Created defs directory")
-
-            # Create subdirectory for the component instance
-            instance_dir = defs_dir / instance_name
-            instance_dir.mkdir(parents=True, exist_ok=True)
-            yaml_file = instance_dir / "defs.yaml"
-            print(f"[Install] Creating YAML config at: {yaml_file}")
-
-            # Build YAML configuration with correct format: type + attributes
-            yaml_config = {
-                "type": component_type,
-                "attributes": {k: v for k, v in request.config.items() if k != 'name'}
-            }
-
-            # Write YAML file
-            with open(yaml_file, 'w') as f:
-                yaml.dump(yaml_config, f, default_flow_style=False, sort_keys=False)
-
-            print(f"[Install] YAML config created successfully")
-
-            # Verify the file was created
-            if yaml_file.exists():
-                print(f"[Install] Verified YAML file exists: {yaml_file}")
-                with open(yaml_file, 'r') as f:
-                    print(f"[Install] YAML content:\n{f.read()}")
-            else:
-                print(f"[Install] ERROR: YAML file was not created!")
-        else:
-            # Newly created project: Use dg scaffold defs (follows our scaffolding patterns)
-            print(f"[Install] Using dg scaffold defs for newly created project")
-
-            dg_bin = project_dir / ".venv" / "bin" / "dg"
-            if not dg_bin.exists():
-                raise HTTPException(
-                    status_code=500,
-                    detail=f"dg command not found at {dg_bin}. Ensure the project has a virtual environment with dagster installed."
-                )
-
-            # Build params string from config (excluding 'name')
-            params = []
-            for key, value in request.config.items():
-                if key != 'name':
-                    params.append(f"--param")
-                    params.append(f"{key}={value}")
-
-            cmd = [
-                str(dg_bin),
-                "scaffold",
-                "defs",
-                component_type,
-                instance_name,
-                *params
-            ]
-
-            print(f"[Install] Running dg scaffold command: {' '.join(cmd)}")
-
-            try:
-                env = {
-                    **os.environ,
-                    "VIRTUAL_ENV": str(project_dir / ".venv"),
-                    "PATH": f"{project_dir / '.venv' / 'bin'}:{os.environ.get('PATH', '')}",
-                }
-
-                result = subprocess.run(
-                    cmd,
-                    check=True,
-                    capture_output=True,
-                    cwd=str(project_dir),
-                    text=True,
-                    env=env
-                )
-                print(f"[Install] dg scaffold completed successfully")
-                print(f"[Install] stdout: {result.stdout}")
-            except subprocess.CalledProcessError as e:
-                print(f"[Install] dg scaffold failed: {e.stderr}")
-                raise HTTPException(
-                    status_code=500,
-                    detail=f"Failed to register component: {e.stderr}"
-                )
+        print(f"[Install] Component installed successfully (no defs.yaml created yet)")
+        print(f"[Install] User must configure component to create instance")
 
         print(f"[Install] Installation complete!")
-
-        # Auto-regenerate assets so the new component appears immediately
-        try:
-            from ..services.asset_introspection_service import AssetIntrospectionService
-            asset_introspection_service = AssetIntrospectionService()
-
-            print(f"[Install] Auto-regenerating assets for project {project.id}...")
-            asset_nodes, asset_edges = asset_introspection_service.get_assets_for_project(project)
-
-            # Update project graph with new assets
-            project.graph.nodes = asset_nodes
-            project.graph.edges = asset_edges
-
-            # Save the updated project
-            project_service._save_project(project)
-
-            print(f"[Install] Successfully regenerated {len(asset_nodes)} assets")
-        except Exception as e:
-            print(f"[Install] Warning: Failed to auto-regenerate assets: {e}")
-            # Don't fail the request if regeneration fails - user can manually regenerate
-            import traceback
-            traceback.print_exc()
+        print(f"[Install] No assets created yet - user must configure component to create instances")
 
         return {
             "success": True,
-            "message": f"Component {component.name} installed successfully",
+            "message": f"Component {component.name} installed successfully. Configure it to create an instance.",
             "component_type": component_type,
-            "instance_name": instance_name,
             "component_dir": str(component_dir.relative_to(project_dir)),
             "files_created": [
                 str(component_file_path.relative_to(project_dir)),
                 str(init_file.relative_to(project_dir)),
             ],
-            "assets_regenerated": True
         }
 
     except HTTPException:
