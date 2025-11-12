@@ -46,6 +46,30 @@ export function TemplateBuilder() {
     enabled: !!currentProject && needsPrimitives,
   });
 
+  // Fetch all definitions (from dg list defs - includes all jobs, not just template-created)
+  const { data: allDefinitions } = useQuery({
+    queryKey: ['definitions', currentProject?.id],
+    queryFn: () => currentProject ? primitivesApi.getAllDefinitions(currentProject.id) : Promise.reject('No project'),
+    enabled: !!currentProject && needsPrimitives,
+  });
+
+  // Merge template-created jobs with discovered jobs from definitions
+  const getAvailableJobs = () => {
+    const templateJobs = primitivesData?.primitives.jobs || [];
+    const definitionJobs = allDefinitions?.jobs || [];
+
+    // Mark template jobs
+    const jobs = templateJobs.map(j => ({ name: j.name, isManaged: true }));
+
+    // Add discovered jobs that aren't already in template jobs
+    const managedNames = new Set(jobs.map(j => j.name));
+    const discovered = definitionJobs
+      .filter(d => !managedNames.has(d.name))
+      .map(d => ({ name: d.name, isManaged: false }));
+
+    return [...jobs, ...discovered];
+  };
+
   // Fetch installed community components - always fetch when project is loaded for instant availability
   const { data: installedComponents } = useQuery({
     queryKey: ['installed-components', currentProject?.id],
@@ -803,34 +827,37 @@ ${generateYamlAttributes(communityAssetCheckAttributes, 1)}`;
                 <label className="block text-sm font-medium text-gray-700 mb-1">
                   Job Name <span className="text-red-500">*</span>
                 </label>
-                {primitivesData && primitivesData.primitives.jobs.length > 0 ? (
-                  <select
-                    value={schedule.job_name}
-                    onChange={(e) => setSchedule({ ...schedule, job_name: e.target.value })}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-md"
-                  >
-                    <option value="">Select a job...</option>
-                    {primitivesData.primitives.jobs.map((job) => (
-                      <option key={job.name} value={job.name}>
-                        {job.name}
-                      </option>
-                    ))}
-                  </select>
-                ) : (
-                  <>
-                    <input
-                      type="text"
+                {(() => {
+                  const availableJobs = getAvailableJobs();
+                  return availableJobs.length > 0 ? (
+                    <select
                       value={schedule.job_name}
                       onChange={(e) => setSchedule({ ...schedule, job_name: e.target.value })}
                       className="w-full px-3 py-2 border border-gray-300 rounded-md"
-                      placeholder="my_job"
-                    />
-                    <p className="text-xs text-amber-600 mt-1 flex items-center">
-                      <Plus className="w-3 h-3 mr-1" />
-                      No jobs found. Create a job first or enter a job name manually.
-                    </p>
-                  </>
-                )}
+                    >
+                      <option value="">Select a job...</option>
+                      {availableJobs.map((job) => (
+                        <option key={job.name} value={job.name}>
+                          {job.name}
+                        </option>
+                      ))}
+                    </select>
+                  ) : (
+                    <>
+                      <input
+                        type="text"
+                        value={schedule.job_name}
+                        onChange={(e) => setSchedule({ ...schedule, job_name: e.target.value })}
+                        className="w-full px-3 py-2 border border-gray-300 rounded-md"
+                        placeholder="my_job"
+                      />
+                      <p className="text-xs text-amber-600 mt-1 flex items-center">
+                        <Plus className="w-3 h-3 mr-1" />
+                        No jobs found. Create a job first or enter a job name manually.
+                      </p>
+                    </>
+                  );
+                })()}
               </div>
             ) : (
               <div>
@@ -1204,34 +1231,37 @@ ${generateYamlAttributes(communityAssetCheckAttributes, 1)}`;
               <label className="block text-sm font-medium text-gray-700 mb-1">
                 {sensor.sensor_type === 'run_status' ? 'Job to Trigger' : 'Job Name'} <span className="text-red-500">*</span>
               </label>
-              {primitivesData && primitivesData.primitives.jobs.length > 0 ? (
-                <select
-                  value={sensor.job_name}
-                  onChange={(e) => setSensor({ ...sensor, job_name: e.target.value })}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-md"
-                >
-                  <option value="">Select a job...</option>
-                  {primitivesData.primitives.jobs.map((job) => (
-                    <option key={job.name} value={job.name}>
-                      {job.name}
-                    </option>
-                  ))}
-                </select>
-              ) : (
-                <>
-                  <input
-                    type="text"
+              {(() => {
+                const availableJobs = getAvailableJobs();
+                return availableJobs.length > 0 ? (
+                  <select
                     value={sensor.job_name}
                     onChange={(e) => setSensor({ ...sensor, job_name: e.target.value })}
                     className="w-full px-3 py-2 border border-gray-300 rounded-md"
-                    placeholder="my_job"
-                  />
-                  <p className="text-xs text-amber-600 mt-1 flex items-center">
-                    <Plus className="w-3 h-3 mr-1" />
-                    No jobs found. Create a job first or enter a job name manually.
-                  </p>
-                </>
-              )}
+                  >
+                    <option value="">Select a job...</option>
+                    {availableJobs.map((job) => (
+                      <option key={job.name} value={job.name}>
+                        {job.name}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <>
+                    <input
+                      type="text"
+                      value={sensor.job_name}
+                      onChange={(e) => setSensor({ ...sensor, job_name: e.target.value })}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md"
+                      placeholder="my_job"
+                    />
+                    <p className="text-xs text-amber-600 mt-1 flex items-center">
+                      <Plus className="w-3 h-3 mr-1" />
+                      No jobs found. Create a job first or enter a job name manually.
+                    </p>
+                  </>
+                );
+              })()}
               {sensor.sensor_type === 'run_status' && (
                 <p className="text-xs text-gray-500 mt-1">
                   The job to run when the monitored job reaches the specified status
@@ -1258,34 +1288,37 @@ ${generateYamlAttributes(communityAssetCheckAttributes, 1)}`;
                   <label className="block text-sm font-medium text-gray-700 mb-1">
                     Monitored Job Name <span className="text-red-500">*</span>
                   </label>
-                  {primitivesData && primitivesData.primitives.jobs.length > 0 ? (
-                    <select
-                      value={sensor.monitored_job_name}
-                      onChange={(e) => setSensor({ ...sensor, monitored_job_name: e.target.value })}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-md"
-                    >
-                      <option value="">Select a job to monitor...</option>
-                      {primitivesData.primitives.jobs.map((job) => (
-                        <option key={job.name} value={job.name}>
-                          {job.name}
-                        </option>
-                      ))}
-                    </select>
-                  ) : (
-                    <>
-                      <input
-                        type="text"
+                  {(() => {
+                    const availableJobs = getAvailableJobs();
+                    return availableJobs.length > 0 ? (
+                      <select
                         value={sensor.monitored_job_name}
                         onChange={(e) => setSensor({ ...sensor, monitored_job_name: e.target.value })}
                         className="w-full px-3 py-2 border border-gray-300 rounded-md"
-                        placeholder="upstream_job"
-                      />
-                      <p className="text-xs text-amber-600 mt-1 flex items-center">
-                        <Plus className="w-3 h-3 mr-1" />
-                        No jobs found. Create a job first or enter a job name manually.
-                      </p>
-                    </>
-                  )}
+                      >
+                        <option value="">Select a job to monitor...</option>
+                        {availableJobs.map((job) => (
+                          <option key={job.name} value={job.name}>
+                            {job.name}
+                          </option>
+                        ))}
+                      </select>
+                    ) : (
+                      <>
+                        <input
+                          type="text"
+                          value={sensor.monitored_job_name}
+                          onChange={(e) => setSensor({ ...sensor, monitored_job_name: e.target.value })}
+                          className="w-full px-3 py-2 border border-gray-300 rounded-md"
+                          placeholder="upstream_job"
+                        />
+                        <p className="text-xs text-amber-600 mt-1 flex items-center">
+                          <Plus className="w-3 h-3 mr-1" />
+                          No jobs found. Create a job first or enter a job name manually.
+                        </p>
+                      </>
+                    );
+                  })()}
                   <p className="text-xs text-gray-500 mt-1">
                     The job whose run status to monitor
                   </p>
