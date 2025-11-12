@@ -124,6 +124,7 @@ export function TemplateBuilder() {
   // State management for community asset checks
   const [selectedCommunityAssetCheck, setSelectedCommunityAssetCheck] = useState<string | null>(null);
   const [communityAssetCheckAttributes, setCommunityAssetCheckAttributes] = useState<Record<string, any>>({});
+  const [communityAssetCheckInstanceName, setCommunityAssetCheckInstanceName] = useState<string>('');
 
   const { data: communityAssetCheckSchema, isLoading: assetCheckSchemaLoading } = useQuery({
     queryKey: ['component-schema-asset-check', currentProject?.id, selectedCommunityAssetCheck],
@@ -147,6 +148,19 @@ export function TemplateBuilder() {
       setCommunityAssetCheckAttributes(defaults);
     }
   }, [communityAssetCheckSchema]);
+
+  // Auto-generate unique instance name for enhanced_data_quality_checks
+  useEffect(() => {
+    if (selectedCommunityAssetCheck === 'enhanced_data_quality_checks' && !communityAssetCheckInstanceName) {
+      const timestamp = new Date().getTime().toString().slice(-6);
+      const suggestedName = `enhanced_data_quality_checks_${timestamp}`;
+      console.log('[TemplateBuilder] Auto-generating instance name:', suggestedName);
+      setCommunityAssetCheckInstanceName(suggestedName);
+    } else if (selectedCommunityAssetCheck !== 'enhanced_data_quality_checks') {
+      // Clear instance name when switching away from enhanced_data_quality_checks
+      setCommunityAssetCheckInstanceName('');
+    }
+  }, [selectedCommunityAssetCheck, communityAssetCheckInstanceName]);
 
   // Python Asset Form State
   const [pythonAsset, setPythonAsset] = useState<PythonAssetParams>({
@@ -361,12 +375,26 @@ ${generateYamlAttributes(communityAssetCheckAttributes, 1)}`;
 
       // For community asset checks, use configure endpoint
       if (selectedCommunityAssetCheck) {
+        // For enhanced_data_quality_checks, validate instance name
+        if (selectedCommunityAssetCheck === 'enhanced_data_quality_checks') {
+          if (!communityAssetCheckInstanceName || communityAssetCheckInstanceName.trim() === '') {
+            throw new Error('Instance Name is required for Enhanced Data Quality Checks');
+          }
+        }
+
+        // For enhanced_data_quality_checks, include the instance name
+        const config = selectedCommunityAssetCheck === 'enhanced_data_quality_checks'
+          ? { name: communityAssetCheckInstanceName, ...communityAssetCheckAttributes }
+          : communityAssetCheckAttributes;
+
+        console.log('[TemplateBuilder] Saving community asset check with config:', config);
+
         const response = await fetch(`/api/v1/templates/configure/${selectedCommunityAssetCheck}`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             project_id: currentProject.id,
-            config: communityAssetCheckAttributes,
+            config,
           }),
         });
 
@@ -1925,20 +1953,38 @@ ${generateYamlAttributes(communityAssetCheckAttributes, 1)}`;
               </select>
             </div>
 
-            {/* Hide Check Name field for Enhanced Data Quality Checks (each check has its own name) */}
-            {selectedCommunityAssetCheck !== 'enhanced_data_quality_checks' && (
+            {/* Show Instance Name field for Enhanced Data Quality Checks to avoid overwriting */}
+            {selectedCommunityAssetCheck === 'enhanced_data_quality_checks' ? (
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">
-                  Check Name <span className="text-red-500">*</span>
+                  Instance Name <span className="text-red-500">*</span>
                 </label>
                 <input
                   type="text"
-                  value={assetCheck.check_name}
-                  onChange={(e) => setAssetCheck({ ...assetCheck, check_name: e.target.value })}
+                  value={communityAssetCheckInstanceName}
+                  onChange={(e) => setCommunityAssetCheckInstanceName(e.target.value)}
                   className="w-full px-3 py-2 border border-gray-300 rounded-md"
-                  placeholder="my_check"
+                  placeholder="enhanced_data_quality_checks_123456"
                 />
+                <p className="mt-1 text-xs text-gray-500">
+                  Each instance needs a unique name to avoid overwriting previous configurations
+                </p>
               </div>
+            ) : (
+              selectedCommunityAssetCheck === null && (
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Check Name <span className="text-red-500">*</span>
+                  </label>
+                  <input
+                    type="text"
+                    value={assetCheck.check_name}
+                    onChange={(e) => setAssetCheck({ ...assetCheck, check_name: e.target.value })}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md"
+                    placeholder="my_check"
+                  />
+                </div>
+              )
             )}
 
             {/* Hide Asset Name field for Enhanced Data Quality Checks (it has its own asset selection) */}
