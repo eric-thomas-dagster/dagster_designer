@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import * as Tabs from '@radix-ui/react-tabs';
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu';
+import { useQueryClient } from '@tanstack/react-query';
 import { GraphEditor } from './components/GraphEditor';
 import { ComponentPalette } from './components/ComponentPalette';
 import { ProjectComponentsList } from './components/ProjectComponentsList';
@@ -16,7 +17,7 @@ import { PipelineBuilder } from './components/PipelineBuilder';
 import { DagsterStartupModal } from './components/DagsterStartupModal';
 import { useProjectStore } from './hooks/useProject';
 import { Network, FileCode, Wand2, Zap, Package, ExternalLink, Settings, Workflow, ChevronDown, Skull } from 'lucide-react';
-import { dagsterUIApi, projectsApi } from './services/api';
+import { dagsterUIApi, projectsApi, filesApi } from './services/api';
 import type { ComponentInstance } from './types';
 
 function App() {
@@ -30,11 +31,22 @@ function App() {
   const [showDagsterStartupModal, setShowDagsterStartupModal] = useState(false);
   const [fileToOpen, setFileToOpen] = useState<string | null>(null);
   const { currentProject, updateComponents} = useProjectStore();
+  const queryClient = useQueryClient();
 
   // Handler to navigate to code tab and open a file
   const handleOpenFile = (filePath: string) => {
     setActiveMainTab('code');
     setFileToOpen(filePath);
+  };
+
+  // Prefetch file tree when hovering over Code tab
+  const handleCodeTabHover = () => {
+    if (currentProject?.id) {
+      queryClient.prefetchQuery({
+        queryKey: ['files', currentProject.id],
+        queryFn: () => filesApi.list(currentProject.id),
+      });
+    }
   };
 
   const handleDividerMouseDown = (e: React.MouseEvent) => {
@@ -307,6 +319,7 @@ function App() {
             </Tabs.Trigger>
             <Tabs.Trigger
               value="code"
+              onMouseEnter={handleCodeTabHover}
               className="flex items-center space-x-2 px-4 py-3 text-sm font-medium text-gray-600 hover:text-gray-900 border-b-2 border-transparent data-[state=active]:border-blue-600 data-[state=active]:text-blue-600"
             >
               <FileCode className="w-4 h-4" />
