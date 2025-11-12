@@ -229,6 +229,23 @@ async def regenerate_assets(project_id: str, recalculate_layout: bool = False):
         raise HTTPException(status_code=500, detail=f"Failed to regenerate assets: {str(e)}")
 
 
+@router.delete("/{project_id}/regenerate-assets/cache")
+async def clear_regenerate_cache(project_id: str):
+    """Clear the asset introspection cache for a specific project.
+
+    This forces the next regenerate-assets call to run dg list defs
+    instead of using cached results.
+    """
+    from ..services.asset_introspection_service import _assets_cache
+
+    if project_id in _assets_cache:
+        del _assets_cache[project_id]
+        print(f"[Cache] Cleared asset introspection cache for project {project_id}", flush=True)
+        return {"message": f"Cache cleared for project {project_id}"}
+
+    return {"message": f"No cache found for project {project_id}"}
+
+
 @router.post("/{project_id}/discover-components", response_model=Project)
 async def discover_components(project_id: str):
     """Discover components from YAML files in an existing project.

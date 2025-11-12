@@ -144,6 +144,15 @@ function App() {
     // Trigger asset regeneration if it's an asset factory
     if (component.is_asset_factory) {
       try {
+        // Clear asset introspection cache to force fresh dg list defs
+        try {
+          await fetch(`/api/v1/projects/${currentProject.id}/regenerate-assets/cache`, {
+            method: 'DELETE',
+          });
+        } catch (error) {
+          console.warn('Failed to clear asset introspection cache:', error);
+        }
+
         // Call regenerate-assets API
         const response = await fetch(`/api/v1/projects/${currentProject.id}/regenerate-assets`, {
           method: 'POST',

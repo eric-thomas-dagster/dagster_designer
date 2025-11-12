@@ -3,13 +3,20 @@
 import json
 import subprocess
 import sys
+import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Dict, Tuple
 
 from ..models.graph import GraphNode, GraphEdge
 from ..models.project import Project
 from ..core.config import settings
 from .codegen_service import CodegenService
+
+
+# Simple in-memory cache for asset introspection to avoid re-running slow dg list defs
+# Cache structure: {project_id: (timestamp, assets_data)}
+_assets_cache: Dict[str, Tuple[float, dict]] = {}
+CACHE_TTL_SECONDS = 10  # Cache results for 10 seconds
 
 
 class AssetIntrospectionService:
@@ -92,6 +99,15 @@ class AssetIntrospectionService:
         Returns:
             Parsed JSON data from dg list defs
         """
+        # Check cache first
+        current_time = time.time()
+        if project.id in _assets_cache:
+            cache_time, cached_data = _assets_cache[project.id]
+            age = current_time - cache_time
+            if age < CACHE_TTL_SECONDS:
+                print(f"[Asset Introspection] Returning cached data for project {project.id} (age: {age:.1f}s)", flush=True)
+                return cached_data
+
         # Get the path to dg in the project's virtualenv
         venv_dir = project_dir / ".venv"
         if sys.platform == "win32":
@@ -135,7 +151,12 @@ class AssetIntrospectionService:
                 )
                 print(f"[Asset Introspection] Command completed successfully", flush=True)
 
-            return json.loads(result.stdout)
+            # Parse and cache the results
+            assets_data = json.loads(result.stdout)
+            _assets_cache[project.id] = (time.time(), assets_data)
+            print(f"[Asset Introspection] Cached results for project {project.id}", flush=True)
+
+            return assets_data
 
         except subprocess.CalledProcessError as e:
             error_msg = f"dg list defs failed with return code {e.returncode}"
