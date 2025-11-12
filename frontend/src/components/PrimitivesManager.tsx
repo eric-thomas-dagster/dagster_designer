@@ -67,6 +67,7 @@ export function PrimitivesManager({ onNavigateToTemplates, onOpenFile }: Primiti
         : Promise.reject('No project'),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['primitives', currentProject?.id] });
+      queryClient.invalidateQueries({ queryKey: ['definitions', currentProject?.id] });
       setSelectedPrimitive(null);
       setDetailsOpen(false);
     },

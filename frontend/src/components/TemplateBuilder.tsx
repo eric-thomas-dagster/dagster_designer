@@ -405,6 +405,14 @@ ${generateYamlAttributes(communityAssetCheckAttributes, 1)}`;
         }
       } else {
         alert(`Saved to ${data.file_path}`);
+
+        // Invalidate primitives and definitions cache so jobs/schedules/sensors appear immediately
+        if (currentProject) {
+          // Invalidate template-created primitives (for schedules/sensors dropdowns)
+          queryClient.invalidateQueries({ queryKey: ['primitives', currentProject.id] });
+          // Invalidate all definitions (from dg list defs - includes all jobs)
+          queryClient.invalidateQueries({ queryKey: ['definitions', currentProject.id] });
+        }
       }
     },
   });
