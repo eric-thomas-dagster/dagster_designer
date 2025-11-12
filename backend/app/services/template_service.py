@@ -196,6 +196,7 @@ from typing import Any
         asset_selection: list[str] | None = None,
         description: str = "",
         timezone: str = "UTC",
+        project_path: Path | None = None,
     ) -> str:
         """
         Generate a schedule component YAML template.
@@ -207,12 +208,19 @@ from typing import Any
             asset_selection: List of assets to schedule (optional if job_name provided)
             description: Schedule description
             timezone: Timezone for schedule
+            project_path: Path to project (for module name resolution)
 
         Returns:
             Generated YAML code
         """
+        # Determine the module name
+        if project_path:
+            module_name = f"{project_path.name}.dagster_designer_components.ScheduleComponent"
+        else:
+            module_name = "dagster_designer_components.ScheduleComponent"
+
         config = {
-            "type": "dagster_designer_components.ScheduleComponent",
+            "type": module_name,
             "attributes": {
                 "schedule_name": schedule_name,
                 "cron_expression": cron_expression,
@@ -240,6 +248,7 @@ from typing import Any
         asset_selection: list[str],
         description: str = "",
         tags: dict[str, str] | None = None,
+        project_path: Path | None = None,
     ) -> str:
         """
         Generate a job component YAML template.
@@ -249,14 +258,21 @@ from typing import Any
             asset_selection: List of asset keys to include in job
             description: Job description
             tags: Dictionary of tags
+            project_path: Path to project (for module name resolution)
 
         Returns:
             Generated YAML code
         """
         tags = tags or {}
 
+        # Determine the module name
+        if project_path:
+            module_name = f"{project_path.name}.dagster_designer_components.JobComponent"
+        else:
+            module_name = "dagster_designer_components.JobComponent"
+
         config = {
-            "type": "dagster_designer_components.JobComponent",
+            "type": module_name,
             "attributes": {
                 "job_name": job_name,
                 "asset_selection": asset_selection or [],
@@ -582,6 +598,20 @@ from typing import Any
         """
         project_path = self._get_project_path(project_id)
 
+        # For jobs and schedules, fix the module path in the YAML if needed
+        if primitive_type in ["job", "schedule", "sensor", "asset_check"]:
+            import yaml
+            try:
+                config = yaml.safe_load(code)
+                if config and "type" in config:
+                    # If the type doesn't have the project module prefix, add it
+                    if not config["type"].startswith(project_path.name):
+                        component_class = config["type"].split(".")[-1]  # Get JobComponent, ScheduleComponent, etc.
+                        config["type"] = f"{project_path.name}.dagster_designer_components.{component_class}"
+                        code = yaml.dump(config, default_flow_style=False, sort_keys=False)
+            except Exception as e:
+                print(f"Warning: Could not fix module path in YAML: {e}")
+
         # Determine file location based on primitive type
         # Try src/{project_name}/defs/ (created by tool) first
         defs_dir = project_path / "src" / project_path.name / "defs"
@@ -625,18 +655,24 @@ from typing import Any
 
             return resources_file
         else:
-            # Primitives (schedule, job, sensor, asset_check) go in components directory as YAML
-            file_dir = defs_dir / "components"
+            # Primitives (schedule, job, sensor, asset_check) use component instance pattern
+            # Create instance folder: defs/<component_name>/defs.yaml
+            file_dir = defs_dir / name
             file_extension = ".yaml"
 
-            # Create components directory if it doesn't exist
+            # Create component instance directory if it doesn't exist
             file_dir.mkdir(parents=True, exist_ok=True)
 
             # Install component implementations in lib directory
             self._ensure_component_implementations(project_path, primitive_type)
 
         # Save the template code
-        file_path = file_dir / f"{name}{file_extension}"
+        # For primitives, always save as defs.yaml inside the component folder
+        if primitive_type in ["schedule", "job", "sensor", "asset_check"]:
+            file_path = file_dir / "defs.yaml"
+        else:
+            file_path = file_dir / f"{name}{file_extension}"
+
         file_path.write_text(code)
 
         return file_path
