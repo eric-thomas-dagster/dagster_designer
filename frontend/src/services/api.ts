@@ -12,7 +12,7 @@ const api = axios.create({
   headers: {
     'Content-Type': 'application/json',
   },
-  timeout: 20000, // 20 second timeout to prevent requests from hanging forever
+  timeout: 120000, // 2 minute timeout for long operations (project creation, package installation)
 });
 
 // Components API
