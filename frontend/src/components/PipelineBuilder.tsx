@@ -482,6 +482,15 @@ export function PipelineBuilder() {
 
       alert(`Pipeline created successfully!\n\nFiles created:\n${response.files_created.join('\n')}`);
 
+      // Clear backend cache to force fresh fetch
+      try {
+        await fetch(`/api/v1/primitives/definitions/cache/${currentProject.id}`, {
+          method: 'DELETE',
+        });
+      } catch (error) {
+        console.warn('Failed to clear backend cache:', error);
+      }
+
       queryClient.invalidateQueries({ queryKey: ['pipelines', currentProject.id] });
       queryClient.invalidateQueries({ queryKey: ['definitions', currentProject.id] });
 

@@ -436,6 +436,15 @@ ${generateYamlAttributes(communityAssetCheckAttributes, 1)}`;
 
         // Invalidate primitives and definitions cache so jobs/schedules/sensors appear immediately
         if (currentProject) {
+          // Clear backend cache to force fresh fetch
+          try {
+            await fetch(`/api/v1/primitives/definitions/cache/${currentProject.id}`, {
+              method: 'DELETE',
+            });
+          } catch (error) {
+            console.warn('Failed to clear backend cache:', error);
+          }
+
           // Invalidate template-created primitives (for schedules/sensors dropdowns)
           queryClient.invalidateQueries({ queryKey: ['primitives', currentProject.id] });
           // Invalidate all definitions (from dg list defs - includes all jobs)

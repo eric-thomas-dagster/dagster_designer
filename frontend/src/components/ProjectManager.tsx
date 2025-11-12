@@ -449,7 +449,10 @@ export function ProjectManager() {
               <div className="absolute inset-0 bg-white bg-opacity-90 rounded-lg flex flex-col items-center justify-center z-10">
                 <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mb-4"></div>
                 <p className="text-gray-700 font-medium">Creating project...</p>
-                <p className="text-sm text-gray-500 mt-2">Scaffolding project, installing dependencies, and discovering assets</p>
+                <p className="text-sm text-gray-500 mt-2 text-center px-4">
+                  Scaffolding project, installing dependencies,<br />
+                  and discovering assets
+                </p>
                 <p className="text-xs text-gray-400 mt-1">This usually takes 30-60 seconds</p>
               </div>
             )}
