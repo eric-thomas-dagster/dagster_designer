@@ -294,6 +294,7 @@ from typing import Any
         job_name: str,
         description: str = "",
         file_path: str = "",
+        asset_key: str = "",  # Asset key for asset sensors
         minimum_interval_seconds: int = 30,
         # S3 sensor params
         bucket_name: str = "",
@@ -339,6 +340,7 @@ from typing import Any
             job_name: Job to trigger
             description: Sensor description
             file_path: File path to watch (for file sensors)
+            asset_key: Asset key to monitor (for asset sensors)
             minimum_interval_seconds: Minimum interval between evaluations
             Additional params for each sensor type
             **kwargs: Extra attributes for community sensors
@@ -474,7 +476,7 @@ from typing import Any
             return yaml.dump(config, default_flow_style=False, sort_keys=False)
 
         else:
-            # For basic sensor types (file, run_status, custom), generate YAML component config
+            # For basic sensor types (file, run_status, asset, custom), generate YAML component config
             config = {
                 "type": "dagster_designer_components.SensorComponent",
                 "attributes": {
@@ -491,6 +493,10 @@ from typing import Any
 
             if file_path:
                 config["attributes"]["file_path"] = file_path
+
+            # Add asset_key for asset sensors
+            if sensor_type == "asset" and asset_key:
+                config["attributes"]["asset_key"] = asset_key
 
             return yaml.dump(config, default_flow_style=False, sort_keys=False)
 

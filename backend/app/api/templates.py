@@ -327,6 +327,7 @@ async def generate_sensor(request: SensorRequest):
             job_name=request.job_name,
             description=request.description,
             file_path=request.file_path,
+            asset_key=request_dict.get('asset_key', ''),  # Asset key for asset sensors
             minimum_interval_seconds=request.minimum_interval_seconds,
             # S3 params
             bucket_name=request.bucket_name,
@@ -361,9 +362,9 @@ async def generate_sensor(request: SensorRequest):
             validate_signature=request.validate_signature,
             signature_header=request.signature_header,
             secret_key=request.secret_key,
-            # Pass all extra fields for community sensors
+            # Pass all extra fields for community sensors (excluding asset_key since we handled it)
             **{k: v for k, v in request_dict.items() if k not in {
-                'sensor_name', 'sensor_type', 'job_name', 'description', 'file_path',
+                'sensor_name', 'sensor_type', 'job_name', 'description', 'file_path', 'asset_key',
                 'minimum_interval_seconds', 'bucket_name', 'prefix', 'pattern', 'aws_region',
                 'since_key', 'imap_host', 'imap_port', 'email_user', 'email_password',
                 'mailbox', 'subject_pattern', 'from_pattern', 'mark_as_read', 'directory_path',
