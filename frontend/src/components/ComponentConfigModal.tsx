@@ -90,6 +90,20 @@ export function ComponentConfigModal({
     return null;
   }
 
+  // Check if this is a single-asset component (has asset_name field)
+  const hasSingleAssetField = componentSchema.schema?.properties?.asset_name !== undefined;
+  const isCommunityComponent = type.includes('.components.');
+
+  // Auto-sync label with asset_name for single-asset community components
+  useEffect(() => {
+    if (isCommunityComponent && hasSingleAssetField && formData.asset_name) {
+      // Only auto-set if label is empty or matches the old asset_name
+      if (!label || label === component?.attributes?.asset_name) {
+        setLabel(formData.asset_name);
+      }
+    }
+  }, [formData.asset_name, hasSingleAssetField, isCommunityComponent]);
+
   const handleInstallAdapter = async (adapterType: string) => {
     if (!currentProject) return;
 
@@ -117,10 +131,10 @@ export function ComponentConfigModal({
   const validateRequiredFields = (): { valid: boolean; missing: string[] } => {
     const missing: string[] = [];
     const required = componentSchema.schema.required || [];
-    const isCommunityComponent = type.includes('.components.');
 
-    // For community components, instance name (label) is required
-    if (isCommunityComponent && (!label || label.trim() === '')) {
+    // For community components, instance name (label) is required UNLESS it's a single-asset component
+    // (single-asset components auto-generate the instance name from asset_name)
+    if (isCommunityComponent && !hasSingleAssetField && (!label || label.trim() === '')) {
       missing.push('Instance Name');
     }
 
@@ -597,22 +611,29 @@ export function ComponentConfigModal({
           {/* Component Label / Instance Name */}
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">
-              {type.includes('.components.') ? 'Instance Name' : 'Label'}
-              {type.includes('.components.') && <span className="text-red-500 ml-1">*</span>}
+              {isCommunityComponent ? 'Instance Name' : 'Label'}
+              {isCommunityComponent && !hasSingleAssetField && <span className="text-red-500 ml-1">*</span>}
+              {isCommunityComponent && hasSingleAssetField && <span className="text-blue-500 ml-1 text-xs">(auto-generated from asset name)</span>}
             </label>
             <input
               type="text"
               value={label}
               onChange={(e) => setLabel(e.target.value)}
               className="w-full px-3 py-2 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-              placeholder={type.includes('.components.') ?
-                `Enter unique name (e.g., ${componentSchema.name.toLowerCase().replace(/\s+/g, '_')}_1)` :
+              placeholder={isCommunityComponent ?
+                (hasSingleAssetField ? 'Will use asset name' : `Enter unique name (e.g., ${componentSchema.name.toLowerCase().replace(/\s+/g, '_')}_1)`) :
                 `${componentSchema.name} Component`}
-              required={type.includes('.components.')}
+              required={isCommunityComponent && !hasSingleAssetField}
+              disabled={isCommunityComponent && hasSingleAssetField}
             />
-            {type.includes('.components.') && (
+            {isCommunityComponent && !hasSingleAssetField && (
               <p className="text-xs text-gray-500 mt-1">
                 Each instance needs a unique name to avoid overwriting previous configurations
+              </p>
+            )}
+            {isCommunityComponent && hasSingleAssetField && (
+              <p className="text-xs text-blue-600 mt-1">
+                Instance name automatically matches the asset name below
               </p>
             )}
           </div>
