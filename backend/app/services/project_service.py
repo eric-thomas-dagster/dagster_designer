@@ -726,24 +726,52 @@ if custom_lineage_edges:
     def _clone_git_repo(self, project: Project) -> tuple[Path, str] | None:
         """Clone a git repository for the project.
 
+        Supports GitHub web URLs like:
+        - https://github.com/user/repo/tree/branch/path/to/dir
+
         Returns:
-            Tuple of (path to cloned repository, directory name) or None if cloning failed.
+            Tuple of (path to cloned repository or subdirectory, directory name) or None if cloning failed.
         """
         if not project.git_repo:
             return None
 
+        from .git_service import GitService
+
+        # Parse the GitHub URL to extract repo, branch, and subdirectory
+        parsed = GitService.parse_github_url(project.git_repo)
+        repo_url = parsed['repo_url']
+        branch = parsed['branch'] if parsed['branch'] != 'main' else project.git_branch
+        subdir = parsed['subdir']
+
         project_dir = self._get_project_dir(project)
-        repo_name = self._extract_repo_name(project.git_repo)
+        repo_name = self._extract_repo_name(repo_url)
         repo_dir = project_dir / repo_name
 
         try:
+            print(f"📦 Cloning git repository...")
+            print(f"   URL: {repo_url}")
+            print(f"   Branch: {branch}")
+            if subdir:
+                print(f"   Subdirectory: {subdir}")
+
             # Clone the repository
             subprocess.run(
-                ["git", "clone", "--depth", "1", "-b", project.git_branch, project.git_repo, str(repo_dir)],
+                ["git", "clone", "--depth", "1", "-b", branch, repo_url, str(repo_dir)],
                 check=True,
                 capture_output=True,
                 text=True,
             )
+
+            # If a subdirectory was specified, return that path instead
+            if subdir:
+                subdir_path = repo_dir / subdir
+                if not subdir_path.exists():
+                    print(f"⚠️  Warning: Subdirectory '{subdir}' not found in repository")
+                    print(f"   Using root directory instead")
+                    return repo_dir, repo_name
+                print(f"✅ Using subdirectory: {subdir}")
+                return subdir_path, repo_name
+
             return repo_dir, repo_name
         except subprocess.CalledProcessError as e:
             print(f"Failed to clone repository: {e.stderr}")

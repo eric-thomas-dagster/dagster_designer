@@ -1,6 +1,7 @@
 """Service for Git operations."""
 
 import shutil
+import re
 from pathlib import Path
 from git import Repo, GitCommandError
 
@@ -13,6 +14,42 @@ class GitService:
     def __init__(self):
         self.repos_dir = settings.data_dir / "repos"
         self.repos_dir.mkdir(parents=True, exist_ok=True)
+
+    @staticmethod
+    def parse_github_url(url: str) -> dict:
+        """Parse a GitHub URL and extract repository info.
+
+        Supports formats:
+        - https://github.com/user/repo.git
+        - https://github.com/user/repo
+        - https://github.com/user/repo/tree/branch/path/to/dir
+        - https://github.com/user/repo/tree/branch
+
+        Returns:
+            dict with keys: repo_url, branch, subdir
+        """
+        # Pattern for GitHub URLs with optional tree/branch/path
+        pattern = r'https://github\.com/([^/]+)/([^/]+?)(?:\.git)?(?:/tree/([^/]+)(?:/(.+))?)?/?$'
+        match = re.match(pattern, url)
+
+        if not match:
+            # Not a GitHub web URL, return as-is (might be a .git URL)
+            return {
+                'repo_url': url,
+                'branch': 'main',
+                'subdir': None
+            }
+
+        user, repo, branch, subdir = match.groups()
+
+        # Construct the .git clone URL
+        repo_url = f"https://github.com/{user}/{repo}.git"
+
+        return {
+            'repo_url': repo_url,
+            'branch': branch or 'main',
+            'subdir': subdir
+        }
 
     def clone_repo(self, repo_url: str, token: str | None = None, branch: str = "main") -> Path:
         """Clone a Git repository.
