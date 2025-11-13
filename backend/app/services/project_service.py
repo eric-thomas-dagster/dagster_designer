@@ -53,58 +53,149 @@ class ProjectService:
             is_imported=bool(project_create.git_repo),  # Mark as imported if created from git repo
         )
 
-        # If a git repo is specified, automatically add a dbt component to components list
-        if project_create.git_repo:
-            from ..models.component import ComponentInstance
-            repo_name = self._extract_repo_name(project_create.git_repo)
-            # Store path relative to project root (dg scaffold will handle the rest)
-            dbt_component = ComponentInstance(
-                id=f"dbt-{uuid.uuid4().hex[:8]}",
-                component_type="dagster_dbt.DbtProjectComponent",
-                label=f"{project.name} dbt",
-                attributes={
-                    "project": repo_name,
-                },
-                is_asset_factory=True,
-            )
-            project.components.append(dbt_component)
-
-        print(f"🏗️  Scaffolding project structure with create-dagster...")
-        self._scaffold_project_with_create_dagster(project)
-
-        # Save project metadata AFTER scaffolding so directory_name is set
-        print(f"💾 Saving project metadata...")
-        self._save_project(project)
-
-        # Clone git repository if specified
+        # If git repo specified, clone first to detect project type
+        is_existing_dagster_project = False
         if project.git_repo:
-            print(f"📦 Cloning git repository...")
-            result = self._clone_git_repo(project)
-            if result:
-                repo_dir, repo_name = result
-                print(f"Successfully cloned repository to {repo_dir}")
-                # Create minimal profiles.yml for dbt
-                self._create_dbt_profiles(repo_dir)
+            import tempfile
+            import shutil
+            import subprocess
+            from .git_service import GitService
+
+            # Clone to temporary directory first to detect project type
+            with tempfile.TemporaryDirectory() as temp_dir:
+                print(f"📦 Cloning git repository to temporary location...")
+
+                # Parse the GitHub URL to extract repo, branch, and subdirectory
+                parsed = GitService.parse_github_url(project.git_repo)
+                repo_url = parsed['repo_url']
+                branch = parsed['branch'] if parsed['branch'] != 'main' else project.git_branch
+                subdir = parsed['subdir']
+
+                print(f"   URL: {repo_url}")
+                print(f"   Branch: {branch}")
+                if subdir:
+                    print(f"   Subdirectory: {subdir}")
+
+                # Extract repo name from URL
+                repo_name = repo_url.rstrip("/").split("/")[-1].replace(".git", "")
+                temp_repo_dir = Path(temp_dir) / repo_name
+
+                try:
+                    # Clone the repository directly to temp directory
+                    subprocess.run(
+                        ["git", "clone", "--depth", "1", "-b", branch, repo_url, str(temp_repo_dir)],
+                        check=True,
+                        capture_output=True,
+                        text=True,
+                    )
+
+                    # Determine which directory to analyze (root or subdirectory)
+                    if subdir:
+                        analyze_dir = temp_repo_dir / subdir
+                        if not analyze_dir.exists():
+                            print(f"⚠️  Warning: Subdirectory '{subdir}' not found in repository")
+                            print(f"   Using root directory instead")
+                            analyze_dir = temp_repo_dir
+                        else:
+                            print(f"✅ Using subdirectory: {subdir}")
+                    else:
+                        analyze_dir = temp_repo_dir
+
+                    print(f"Successfully cloned repository to {analyze_dir}")
+
+                    # Auto-detect project type
+                    project_type = self._detect_project_type(analyze_dir)
+                    print(f"🔍 Detected project type: {project_type}")
+
+                    # Now set the proper directory_name
+                    module_name = project.name.lower().replace(" ", "_").replace("-", "_")
+                    if module_name and module_name[0].isdigit():
+                        module_name = f"project_{module_name}"
+                    project.directory_name = f"project_{project.id.split('-')[0]}_{module_name}"
+
+                    if project_type == "dagster":
+                        print(f"ℹ️  Detected existing Dagster project - using as-is")
+                        is_existing_dagster_project = True
+
+                        # Move the cloned Dagster project to final location
+                        project_dir = self._get_project_dir(project)
+                        print(f"📁 Moving Dagster project to {project_dir}")
+                        shutil.move(str(analyze_dir), str(project_dir))
+                        print(f"✅ Dagster project moved to {project_dir}")
+
+                        # Save project metadata
+                        self._save_project(project)
+                    elif project_type == "dbt":
+                        # Scaffold Dagster wrapper project FIRST
+                        print(f"🏗️  Scaffolding Dagster wrapper project for dbt...")
+                        self._scaffold_project_with_create_dagster(project)
+                        self._save_project(project)
+
+                        # Move dbt repo into scaffolded project
+                        project_dir = self._get_project_dir(project)
+                        # Use subdirectory name or repo name for the target directory
+                        target_name = Path(subdir).name if subdir else repo_name
+                        dbt_target_dir = project_dir / target_name
+                        print(f"📁 Moving dbt project to {dbt_target_dir}")
+                        shutil.move(str(analyze_dir), str(dbt_target_dir))
+
+                        # Add dbt component
+                        from ..models.component import ComponentInstance
+                        dbt_component = ComponentInstance(
+                            id=f"dbt-{uuid.uuid4().hex[:8]}",
+                            component_type="dagster_dbt.DbtProjectComponent",
+                            label=f"{project.name} dbt",
+                            attributes={
+                                "project": target_name,
+                            },
+                            is_asset_factory=True,
+                        )
+                        project.components.append(dbt_component)
+                        # Create/enhance profiles.yml and .env for dbt
+                        self._create_dbt_profiles(dbt_target_dir, project_dir)
+                    else:
+                        # Unknown project type - scaffold Dagster wrapper
+                        print(f"ℹ️  Unknown project type - scaffolding Dagster wrapper...")
+                        self._scaffold_project_with_create_dagster(project)
+                        self._save_project(project)
+
+                        # Move cloned files into scaffolded project
+                        project_dir = self._get_project_dir(project)
+                        target_dir = project_dir / repo_name
+                        print(f"📁 Moving repository to {target_dir}")
+                        shutil.move(str(analyze_dir), str(target_dir))
+
+                except subprocess.CalledProcessError as e:
+                    raise ValueError(f"Failed to clone repository: {e.stderr}")
+        else:
+            # No git repo - scaffold empty project
+            print(f"🏗️  Scaffolding project structure with create-dagster...")
+            self._scaffold_project_with_create_dagster(project)
+            self._save_project(project)
 
         # Install dependencies BEFORE scaffolding components so dg is available
         print(f"📥 Installing project dependencies...")
         self._install_dependencies_with_uv(project)
 
-        # Add components using dg scaffold (must come AFTER dependency installation)
-        if project.components:
-            print(f"📦 Scaffolding {len(project.components)} components...")
-            self._scaffold_components(project)
+        # For existing Dagster projects, skip scaffolding/generation steps
+        if not is_existing_dagster_project:
+            # Add components using dg scaffold (must come AFTER dependency installation)
+            if project.components:
+                print(f"📦 Scaffolding {len(project.components)} components...")
+                self._scaffold_components(project)
 
-        # Copy designer component classes (needed for custom primitives)
-        print(f"📝 Copying designer component classes...")
-        self._copy_component_classes_to_project(project)
+            # Copy designer component classes (needed for custom primitives)
+            print(f"📝 Copying designer component classes...")
+            self._copy_component_classes_to_project(project)
 
-        # Update pyproject.toml to register designer components (without .lib)
-        self._update_pyproject_registry(project)
+            # Update pyproject.toml to register designer components (without .lib)
+            self._update_pyproject_registry(project)
 
-        # Generate definitions.py with custom lineage support
-        print(f"📝 Generating definitions.py...")
-        self._generate_definitions_with_asset_customizations(project)
+            # Generate definitions.py with custom lineage support
+            print(f"📝 Generating definitions.py...")
+            self._generate_definitions_with_asset_customizations(project)
+        else:
+            print(f"ℹ️  Skipping scaffolding steps - using existing Dagster project as-is")
 
         print(f"✅ Project {project.name} created successfully!")
         print(f"{'='*60}\n")
@@ -1706,20 +1797,167 @@ if customizations_path.exists():
         print("No adapter detected, defaulting to duckdb")
         return 'duckdb'
 
-    def _create_dbt_profiles(self, repo_dir: Path):
-        """Create a minimal profiles.yml for dbt introspection."""
-        profiles_file = repo_dir / "profiles.yml"
+    def _detect_project_type(self, repo_dir: Path) -> str:
+        """Detect the type of project in the given directory.
 
+        Args:
+            repo_dir: Path to the cloned repository directory
+
+        Returns:
+            "dbt" if dbt_project.yml is found
+            "dagster" if it's an existing Dagster project (definitions.py or pyproject.toml with dagster)
+            "unknown" otherwise
+        """
+        print(f"🔍 Detecting project type in {repo_dir}...")
+
+        # Check for dbt project
+        if (repo_dir / "dbt_project.yml").exists():
+            print(f"   Found dbt_project.yml - this is a dbt project")
+            return "dbt"
+
+        # Check for Dagster project - look for definitions.py
+        if (repo_dir / "definitions.py").exists():
+            print(f"   Found definitions.py - this is a Dagster project")
+            return "dagster"
+
+        # Check for Dagster project - look in subdirectories for definitions.py
+        # (common pattern: repo/project_name/definitions.py)
+        for subdir in repo_dir.iterdir():
+            if subdir.is_dir() and (subdir / "definitions.py").exists():
+                print(f"   Found definitions.py in {subdir.name}/ - this is a Dagster project")
+                return "dagster"
+
+        # Check pyproject.toml for dagster dependencies
+        pyproject_file = repo_dir / "pyproject.toml"
+        if pyproject_file.exists():
+            try:
+                content = pyproject_file.read_text()
+                # Simple check - if "dagster" appears in dependencies
+                if "dagster" in content.lower():
+                    print(f"   Found 'dagster' in pyproject.toml - this is a Dagster project")
+                    return "dagster"
+            except Exception as e:
+                print(f"   Could not read pyproject.toml: {e}")
+
+        print(f"   No dbt or Dagster project markers found - unknown project type")
+        return "unknown"
+
+    def _create_dbt_profiles(self, dbt_dir: Path, project_root: Path):
+        """Create or enhance profiles.yml for dbt introspection.
+
+        Args:
+            dbt_dir: Path to the dbt project directory
+            project_root: Path to the Dagster project root (where .env file goes)
+
+        Checks for existing profiles in common locations:
+        1. profiles.yml in root (standard location)
+        2. profile/profiles.yml (some projects use this)
+        3. profiles/profiles.yml (alternative naming)
+
+        If found in a subdirectory:
+        - Copies it to root
+        - Extracts env vars and creates .env file at project root
+        - Adds a dev target with DuckDB for local development
+
+        Otherwise, creates a minimal profiles.yml.
+        """
+        import shutil
+        import yaml
+        import re
+
+        profiles_file = dbt_dir / "profiles.yml"
+
+        # Check if profiles.yml already exists in root
         if profiles_file.exists():
+            print(f"ℹ️  Using existing profiles.yml in root")
             return
 
+        # Check for profiles.yml in common subdirectories
+        possible_locations = [
+            dbt_dir / "profile" / "profiles.yml",
+            dbt_dir / "profiles" / "profiles.yml",
+        ]
+
+        existing_profiles_path = None
+        for location in possible_locations:
+            if location.exists():
+                existing_profiles_path = location
+                break
+
+        if existing_profiles_path:
+            print(f"✅ Found existing profiles.yml at {existing_profiles_path.relative_to(dbt_dir)}")
+
+            # Read the existing profiles
+            try:
+                with open(existing_profiles_path, 'r') as f:
+                    profiles_content = f.read()
+                    profiles_data = yaml.safe_load(profiles_content)
+
+                # Extract environment variables from the profiles
+                env_vars = re.findall(r"env_var\(['\"]([^'\"]+)['\"]\)", profiles_content)
+                if env_vars:
+                    # Create .env file at the PROJECT ROOT (where the env var editor expects it)
+                    env_file = project_root / ".env"
+                    env_lines = ["# Environment variables for dbt project", ""]
+                    for var in sorted(set(env_vars)):
+                        # Add placeholder with descriptive comment
+                        env_lines.append(f"# TODO: Set your {var}")
+                        env_lines.append(f"{var}=")
+                        env_lines.append("")
+
+                    env_file.write_text("\n".join(env_lines))
+                    print(f"📝 Created .env file at project root with {len(set(env_vars))} environment variable placeholders")
+
+                # Find the profile name (first non-config key in the profiles)
+                # Skip 'config' key as that's dbt settings, not a profile
+                profile_keys = [k for k in profiles_data.keys() if k != 'config']
+                profile_name = profile_keys[0] if profile_keys else "default"
+
+                # Add a dev target with DuckDB if it doesn't exist
+                if profile_name in profiles_data:
+                    profile_config = profiles_data[profile_name]
+                    outputs = profile_config.get('outputs', {})
+
+                    # Only add dev target if it doesn't exist
+                    if 'dev' not in outputs:
+                        # Add dev target with DuckDB
+                        outputs['dev'] = {
+                            'type': 'duckdb',
+                            'path': '../data.duckdb'
+                        }
+
+                        # Change default target to dev for local development
+                        profile_config['target'] = 'dev'
+                        profile_config['outputs'] = outputs
+
+                        # Write the modified profiles back
+                        with open(profiles_file, 'w') as f:
+                            yaml.dump(profiles_data, f, default_flow_style=False, sort_keys=False)
+                        print(f"📋 Enhanced profiles.yml with dev target (DuckDB) for local development")
+                    else:
+                        # Just copy as-is if dev target exists
+                        shutil.copy(existing_profiles_path, profiles_file)
+                        print(f"📋 Copied profiles.yml to root")
+                else:
+                    # Couldn't parse properly, just copy
+                    shutil.copy(existing_profiles_path, profiles_file)
+                    print(f"📋 Copied profiles.yml to root")
+
+            except Exception as e:
+                print(f"⚠️  Error processing profiles.yml: {e}")
+                # Fall back to simple copy
+                shutil.copy(existing_profiles_path, profiles_file)
+                print(f"📋 Copied profiles.yml to root (fallback)")
+
+            return
+
+        # No existing profiles found - create a minimal one
         # Extract project name from dbt_project.yml if it exists
-        dbt_project_file = repo_dir / "dbt_project.yml"
+        dbt_project_file = dbt_dir / "dbt_project.yml"
         project_name = "default"
 
         if dbt_project_file.exists():
             try:
-                import yaml
                 with open(dbt_project_file, 'r') as f:
                     dbt_config = yaml.safe_load(f)
                     project_name = dbt_config.get('name', 'default')
@@ -1727,10 +1965,10 @@ if customizations_path.exists():
                 pass
 
         # Detect the adapter type
-        adapter_type = self._detect_dbt_adapter(repo_dir)
+        adapter_type = self._detect_dbt_adapter(dbt_dir)
 
         # Create minimal profiles.yml with detected adapter
-        # Note: path is relative to the dbt project directory (repo_dir)
+        # Note: path is relative to the dbt project directory (dbt_dir)
         # The data.duckdb file is in the parent directory (Dagster project root)
         profiles_content = f"""{project_name}:
   target: dev
@@ -1740,7 +1978,7 @@ if customizations_path.exists():
       path: ../data.duckdb
 """
         profiles_file.write_text(profiles_content)
-        print(f"Created profiles.yml at {profiles_file} with adapter: {adapter_type}")
+        print(f"📝 Created minimal profiles.yml at {profiles_file} with adapter: {adapter_type}")
 
 
 # Global service instance
