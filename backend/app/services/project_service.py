@@ -21,6 +21,58 @@ class ProjectService:
     def __init__(self):
         self.projects_dir = settings.projects_dir
 
+    def _cleanup_orphaned_projects(self):
+        """Clean up orphaned project files from failed creation attempts.
+
+        Handles two types of orphans:
+        1. Orphaned directories: Project directories without corresponding JSON metadata
+        2. Orphaned JSON: JSON metadata files without corresponding project directories
+
+        This ensures the projects directory stays clean after failed creation attempts.
+        """
+        import shutil
+
+        # Find all JSON files and their corresponding directories
+        json_files = set()
+        for json_path in self.projects_dir.glob("*.json"):
+            try:
+                with open(json_path, 'r') as f:
+                    data = json.load(f)
+                    project_id = data.get('id')
+                    directory_name = data.get('directory_name')
+
+                    if project_id and directory_name:
+                        json_files.add((project_id, directory_name, json_path))
+            except Exception as e:
+                print(f"⚠️  Error reading project JSON {json_path}: {e}")
+                continue
+
+        # Find all project directories
+        project_dirs = {}
+        for item in self.projects_dir.iterdir():
+            if item.is_dir() and item.name.startswith('project_'):
+                project_dirs[item.name] = item
+
+        # Check for orphaned directories (directory exists but no JSON)
+        json_dir_names = {dir_name for _, dir_name, _ in json_files}
+        orphaned_dirs = set(project_dirs.keys()) - json_dir_names
+
+        for dir_name in orphaned_dirs:
+            dir_path = project_dirs[dir_name]
+            print(f"⚠️  Found orphaned directory from failed attempt: {dir_name}")
+            print(f"🧹 Cleaning up orphaned directory...")
+            shutil.rmtree(dir_path)
+            print(f"✅ Removed orphaned directory: {dir_name}")
+
+        # Check for orphaned JSON (JSON exists but no directory)
+        for project_id, dir_name, json_path in json_files:
+            if dir_name not in project_dirs:
+                print(f"⚠️  Found orphaned JSON metadata from failed attempt: {json_path.name}")
+                print(f"   Expected directory: {dir_name}")
+                print(f"🧹 Cleaning up orphaned JSON...")
+                json_path.unlink()
+                print(f"✅ Removed orphaned JSON: {json_path.name}")
+
     def _get_project_file(self, project_id: str) -> Path:
         """Get the file path for a project."""
         return self.projects_dir / f"{project_id}.json"
@@ -40,6 +92,9 @@ class ProjectService:
         print(f"\n{'='*60}")
         print(f"🚀 Creating new project: {project_create.name}")
         print(f"{'='*60}")
+
+        # Clean up any orphaned files from previous failed attempts
+        self._cleanup_orphaned_projects()
 
         project_id = str(uuid.uuid4())
         print(f"📋 Generated project ID: {project_id}")
@@ -1019,8 +1074,6 @@ if custom_lineage_edges:
 
     def _scaffold_project_with_create_dagster(self, project: Project):
         """Scaffold project using create-dagster command."""
-        import shutil
-
         # Sanitize project name for Python module (must start with letter/underscore)
         module_name = project.name.lower().replace(" ", "_").replace("-", "_")
         # Ensure module name starts with a letter or underscore
@@ -1033,15 +1086,6 @@ if custom_lineage_edges:
         # Store the directory name in the project
         project.directory_name = dir_name
         project_dir = self._get_project_dir(project)
-
-        # Check if directory exists from a failed previous attempt (orphaned directory)
-        # An orphaned directory has no corresponding JSON metadata file
-        project_json = self.projects_dir / f"{project.id}.json"
-        if project_dir.exists() and not project_json.exists():
-            print(f"⚠️  Found orphaned directory from failed attempt: {project_dir}")
-            print(f"🧹 Cleaning up orphaned directory...")
-            shutil.rmtree(project_dir)
-            print(f"✅ Removed orphaned directory")
 
         try:
             # Run create-dagster project command
