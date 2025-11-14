@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import * as Tabs from '@radix-ui/react-tabs';
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu';
-import { useQueryClient } from '@tanstack/react-query';
+import { useQueryClient, useQuery } from '@tanstack/react-query';
 import { GraphEditor } from './components/GraphEditor';
 import { ComponentPalette } from './components/ComponentPalette';
 import { ProjectComponentsList } from './components/ProjectComponentsList';
@@ -16,8 +16,8 @@ import { ResourcesManager } from './components/ResourcesManager';
 import { PipelineBuilder } from './components/PipelineBuilder';
 import { DagsterStartupModal } from './components/DagsterStartupModal';
 import { useProjectStore } from './hooks/useProject';
-import { Network, FileCode, Wand2, Zap, Package, ExternalLink, Settings, Workflow, ChevronDown, Skull } from 'lucide-react';
-import { dagsterUIApi, projectsApi, filesApi } from './services/api';
+import { Network, FileCode, Wand2, Zap, Package, ExternalLink, Settings, Workflow, ChevronDown, Skull, AlertTriangle, X } from 'lucide-react';
+import { dagsterUIApi, projectsApi, filesApi, primitivesApi } from './services/api';
 import type { ComponentInstance } from './types';
 
 function App() {
@@ -30,13 +30,48 @@ function App() {
   const [dagsterUILoading, setDagsterUILoading] = useState(false);
   const [showDagsterStartupModal, setShowDagsterStartupModal] = useState(false);
   const [fileToOpen, setFileToOpen] = useState<string | null>(null);
+  const [showValidationDialog, setShowValidationDialog] = useState(false);
+  const [validationResult, setValidationResult] = useState<any>(null);
+  const [isValidating, setIsValidating] = useState(false);
+  const [dismissedValidationError, setDismissedValidationError] = useState(false);
   const { currentProject, updateComponents} = useProjectStore();
   const queryClient = useQueryClient();
+
+  // Fetch validation status globally (checks if project validates)
+  const { data: validationStatus } = useQuery({
+    queryKey: ['validation-status', currentProject?.id],
+    queryFn: () => currentProject ? primitivesApi.getAllDefinitions(currentProject.id) : Promise.reject('No project'),
+    enabled: !!currentProject && !dismissedValidationError,
+    refetchInterval: 60000, // Recheck every 60 seconds
+    retry: false, // Don't retry on failure
+  });
 
   // Debug: Log when addingComponentType changes
   useEffect(() => {
     console.log('[App] addingComponentType changed:', addingComponentType, 'currentProject:', currentProject?.id);
   }, [addingComponentType, currentProject]);
+
+  // Reset dismissed validation error when project changes
+  useEffect(() => {
+    setDismissedValidationError(false);
+  }, [currentProject?.id]);
+
+  // Handler to run validation and show detailed results
+  const handleViewValidationDetails = async () => {
+    if (!currentProject) return;
+
+    setIsValidating(true);
+    try {
+      const result = await projectsApi.validate(currentProject.id);
+      setValidationResult(result);
+      setShowValidationDialog(true);
+    } catch (error) {
+      console.error('Failed to validate project:', error);
+      alert('Failed to validate project. Check console for details.');
+    } finally {
+      setIsValidating(false);
+    }
+  };
 
   // Handler to navigate to code tab and open a file
   const handleOpenFile = (filePath: string) => {
@@ -312,6 +347,46 @@ function App() {
         </div>
       </header>
 
+      {/* Global Validation Error Banner */}
+      {currentProject && validationStatus?.using_fallback && !dismissedValidationError && (
+        <div className="bg-yellow-50 border-b border-yellow-200 px-4 py-3">
+          <div className="max-w-7xl mx-auto flex items-start gap-3">
+            <AlertTriangle className="w-5 h-5 text-yellow-600 flex-shrink-0 mt-0.5" />
+            <div className="flex-1 min-w-0">
+              <div className="flex items-start justify-between gap-4">
+                <div className="flex-1 min-w-0">
+                  <h3 className="text-sm font-semibold text-yellow-800 mb-1">
+                    Project Validation Failed
+                  </h3>
+                  <p className="text-sm text-yellow-700 mb-2 font-mono break-all">
+                    {validationStatus.validation_error}
+                  </p>
+                  <p className="text-xs text-yellow-600">
+                    Some features may not work correctly until validation issues are resolved.
+                  </p>
+                </div>
+                <div className="flex items-center gap-2 flex-shrink-0">
+                  <button
+                    onClick={handleViewValidationDetails}
+                    disabled={isValidating}
+                    className="px-3 py-1.5 text-xs font-medium text-yellow-700 bg-yellow-100 hover:bg-yellow-200 rounded-md transition-colors disabled:opacity-50"
+                  >
+                    {isValidating ? 'Running...' : 'View Details'}
+                  </button>
+                  <button
+                    onClick={() => setDismissedValidationError(true)}
+                    className="p-1 text-yellow-600 hover:text-yellow-800 rounded"
+                    title="Dismiss"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Main content with tabs */}
       {currentProject ? (
         <Tabs.Root value={activeMainTab} onValueChange={setActiveMainTab} className="flex-1 flex flex-col overflow-hidden">
@@ -516,6 +591,87 @@ function App() {
             window.open(url, '_blank');
           }}
         />
+      )}
+
+      {/* Validation Results Dialog */}
+      {showValidationDialog && validationResult && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-lg shadow-xl w-full max-w-3xl max-h-[80vh] flex flex-col">
+            <div className="flex items-center justify-between p-6 border-b">
+              <h2 className="text-lg font-semibold">
+                {validationResult.valid ? '✅ Validation Successful' : '❌ Validation Failed'}
+              </h2>
+              <button onClick={() => setShowValidationDialog(false)}>
+                <X className="w-5 h-5 text-gray-400 hover:text-gray-600" />
+              </button>
+            </div>
+
+            <div className="flex-1 overflow-y-auto p-6">
+              {validationResult.valid ? (
+                <div>
+                  <p className="text-green-700 mb-4">{validationResult.message}</p>
+                  {validationResult.details?.stdout && (
+                    <div className="mt-4">
+                      <h3 className="text-sm font-semibold text-gray-700 mb-2">Full Output:</h3>
+                      <pre className="bg-gray-900 text-gray-100 p-4 rounded-lg overflow-x-auto text-xs">
+                        {validationResult.details.stdout}
+                      </pre>
+                    </div>
+                  )}
+                  {validationResult.details?.warnings && (
+                    <div className="mt-4">
+                      <h3 className="text-sm font-semibold text-gray-700 mb-2">Warnings:</h3>
+                      <pre className="bg-yellow-50 text-yellow-900 p-4 rounded-lg overflow-x-auto text-xs border border-yellow-200">
+                        {validationResult.details.warnings}
+                      </pre>
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <div>
+                  <p className="text-red-700 mb-4 font-medium">{validationResult.error}</p>
+
+                  {validationResult.details?.validation_error && (
+                    <div className="mt-4">
+                      <h3 className="text-sm font-semibold text-gray-700 mb-2">Error Details:</h3>
+                      <pre className="bg-red-50 text-red-900 p-4 rounded-lg overflow-x-auto text-xs border border-red-200">
+                        {validationResult.details.validation_error}
+                      </pre>
+                    </div>
+                  )}
+
+                  {validationResult.details?.stderr && (
+                    <div className="mt-4">
+                      <h3 className="text-sm font-semibold text-gray-700 mb-2">Full Error Output:</h3>
+                      <pre className="bg-gray-900 text-gray-100 p-4 rounded-lg overflow-x-auto text-xs">
+                        {validationResult.details.stderr}
+                      </pre>
+                    </div>
+                  )}
+
+                  <div className="mt-6 p-4 bg-yellow-50 border border-yellow-200 rounded-md">
+                    <h4 className="text-sm font-semibold text-yellow-800 mb-2">💡 Common Issues:</h4>
+                    <ul className="text-sm text-yellow-700 space-y-1 list-disc list-inside">
+                      <li>Check for syntax errors in Python files</li>
+                      <li>Verify all imports are correct</li>
+                      <li>Ensure asset definitions don't have conflicts</li>
+                      <li>Check that all required dependencies are installed</li>
+                    </ul>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div className="p-4 border-t flex justify-end">
+              <button
+                onClick={() => setShowValidationDialog(false)}
+                className="px-4 py-2 text-sm bg-gray-600 text-white rounded-md hover:bg-gray-700"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );
