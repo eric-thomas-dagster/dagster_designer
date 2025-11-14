@@ -2042,15 +2042,18 @@ if customizations_path.exists():
             return
 
         # No existing profiles found - create a minimal one
-        # Extract project name from dbt_project.yml if it exists
+        # Extract profile name from dbt_project.yml if it exists
+        # Note: dbt_project.yml has both 'name' (project name) and 'profile' (which profile to use)
+        # We need to use the 'profile' field, not 'name'
         dbt_project_file = dbt_dir / "dbt_project.yml"
-        project_name = "default"
+        profile_name = "default"
 
         if dbt_project_file.exists():
             try:
                 with open(dbt_project_file, 'r') as f:
                     dbt_config = yaml.safe_load(f)
-                    project_name = dbt_config.get('name', 'default')
+                    # Use the 'profile' field if it exists, otherwise fall back to 'name'
+                    profile_name = dbt_config.get('profile', dbt_config.get('name', 'default'))
             except:
                 pass
 
@@ -2060,7 +2063,7 @@ if customizations_path.exists():
         # Create minimal profiles.yml with detected adapter
         # Note: path is relative to the dbt project directory (dbt_dir)
         # The data.duckdb file is in the parent directory (Dagster project root)
-        profiles_content = f"""{project_name}:
+        profiles_content = f"""{profile_name}:
   target: dev
   outputs:
     dev:
@@ -2068,7 +2071,7 @@ if customizations_path.exists():
       path: ../data.duckdb
 """
         profiles_file.write_text(profiles_content)
-        print(f"📝 Created minimal profiles.yml at {profiles_file} with adapter: {adapter_type}")
+        print(f"📝 Created profiles.yml for profile '{profile_name}' with adapter: {adapter_type}")
 
 
 # Global service instance
