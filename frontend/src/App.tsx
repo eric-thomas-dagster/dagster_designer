@@ -34,15 +34,31 @@ function App() {
   const [validationResult, setValidationResult] = useState<any>(null);
   const [isValidating, setIsValidating] = useState(false);
   const [dismissedValidationError, setDismissedValidationError] = useState(false);
+  const [enableValidationCheck, setEnableValidationCheck] = useState(false);
   const { currentProject, updateComponents} = useProjectStore();
   const queryClient = useQueryClient();
 
+  // Delay validation check by 2 seconds after project loads to avoid blocking UI
+  useEffect(() => {
+    if (currentProject) {
+      const timer = setTimeout(() => {
+        setEnableValidationCheck(true);
+      }, 2000); // 2 second delay
+      return () => clearTimeout(timer);
+    } else {
+      setEnableValidationCheck(false);
+    }
+  }, [currentProject?.id]);
+
   // Fetch validation status globally (checks if project validates)
+  // This is intentionally delayed to not block initial page load
   const { data: validationStatus } = useQuery({
     queryKey: ['validation-status', currentProject?.id],
     queryFn: () => currentProject ? primitivesApi.getAllDefinitions(currentProject.id) : Promise.reject('No project'),
-    enabled: !!currentProject && !dismissedValidationError,
-    refetchInterval: 60000, // Recheck every 60 seconds
+    enabled: !!currentProject && enableValidationCheck && !dismissedValidationError,
+    staleTime: 300000, // Consider fresh for 5 minutes
+    refetchInterval: 180000, // Recheck every 3 minutes (reduced frequency)
+    refetchOnWindowFocus: false, // Don't refetch on window focus
     retry: false, // Don't retry on failure
   });
 
