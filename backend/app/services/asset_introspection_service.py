@@ -1,5 +1,6 @@
 """Service for introspecting Dagster assets using dg CLI."""
 
+import asyncio
 import json
 import subprocess
 import sys
@@ -16,7 +17,7 @@ from .codegen_service import CodegenService
 # Simple in-memory cache for asset introspection to avoid re-running slow dg list defs
 # Cache structure: {project_id: (timestamp, assets_data)}
 _assets_cache: Dict[str, Tuple[float, dict]] = {}
-CACHE_TTL_SECONDS = 10  # Cache results for 10 seconds
+CACHE_TTL_SECONDS = 60  # Cache results for 60 seconds (increased from 10s for better performance)
 
 
 class AssetIntrospectionService:
@@ -174,6 +175,152 @@ class AssetIntrospectionService:
             error_msg = f"Failed to parse dg list defs output: {e}"
             print(f"❌ {error_msg}", flush=True)
             raise RuntimeError(error_msg) from e
+
+    async def _run_dg_list_defs_async(self, project: Project, project_dir: Path) -> dict[str, Any]:
+        """Run dg list defs command asynchronously (non-blocking).
+
+        Args:
+            project: The project to introspect
+            project_dir: Directory containing the Dagster project
+
+        Returns:
+            Parsed JSON data from dg list defs
+        """
+        # Check cache first
+        current_time = time.time()
+        if project.id in _assets_cache:
+            cache_time, cached_data = _assets_cache[project.id]
+            age = current_time - cache_time
+            if age < CACHE_TTL_SECONDS:
+                print(f"[Asset Introspection] Returning cached data for project {project.id} (age: {age:.1f}s)", flush=True)
+                return cached_data
+
+        # Get the path to dg in the project's virtualenv
+        venv_dir = project_dir / ".venv"
+        if sys.platform == "win32":
+            dg_path = venv_dir / "Scripts" / "dg.exe"
+        else:
+            dg_path = venv_dir / "bin" / "dg"
+
+        # Fall back to system dg if venv doesn't exist
+        if not dg_path.exists():
+            print(f"Project virtualenv dg not found at {dg_path}, falling back to system dg")
+            dg_cmd = "dg"
+        else:
+            dg_cmd = str(dg_path)
+
+        try:
+            print(f"[Asset Introspection] Running dg list defs ASYNC for project {project.id}...", flush=True)
+
+            # If using project venv, we need to activate it first
+            if dg_path.exists():
+                # Run with venv activated using bash -c (use absolute paths for both)
+                dg_abs_path = str(dg_path.resolve())
+                cmd = f"source {str(venv_dir.resolve())}/bin/activate && {dg_abs_path} list defs --json"
+
+                proc = await asyncio.create_subprocess_shell(
+                    cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    cwd=str(project_dir.resolve())
+                )
+            else:
+                # Fallback to system dg (already in PATH)
+                proc = await asyncio.create_subprocess_exec(
+                    dg_cmd, "list", "defs", "--json",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    cwd=str(project_dir.resolve())
+                )
+
+            # Wait for completion with timeout
+            try:
+                stdout, stderr = await asyncio.wait_for(
+                    proc.communicate(),
+                    timeout=30.0  # 30 second timeout
+                )
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()
+                error_msg = "dg list defs timed out after 30 seconds"
+                print(f"❌ {error_msg}", flush=True)
+                raise RuntimeError(error_msg)
+
+            if proc.returncode != 0:
+                error_msg = f"dg list defs failed with return code {proc.returncode}"
+                if stderr:
+                    error_msg += f"\nStderr: {stderr.decode()}"
+                if stdout:
+                    error_msg += f"\nStdout: {stdout.decode()}"
+                print(f"❌ {error_msg}", flush=True)
+                raise RuntimeError(error_msg)
+
+            print(f"[Asset Introspection] Command completed successfully", flush=True)
+
+            # Parse and cache the results
+            assets_data = json.loads(stdout.decode())
+            _assets_cache[project.id] = (time.time(), assets_data)
+            print(f"[Asset Introspection] Cached results for project {project.id}", flush=True)
+
+            return assets_data
+
+        except json.JSONDecodeError as e:
+            error_msg = f"Failed to parse dg list defs output: {e}"
+            print(f"❌ {error_msg}", flush=True)
+            raise RuntimeError(error_msg) from e
+
+    async def get_assets_for_project_async(self, project: Project, recalculate_layout: bool = False) -> tuple[list[GraphNode], list[GraphEdge]]:
+        """Async version of get_assets_for_project. Non-blocking!
+
+        Args:
+            project: Project to introspect
+            recalculate_layout: If True, recalculates all node positions instead of preserving existing ones
+
+        Returns:
+            Tuple of (asset_nodes, asset_edges)
+        """
+        # First, generate the Dagster code
+        project_dir = self._get_project_dir(project)
+
+        try:
+            # Run dg list defs asynchronously (non-blocking)
+            assets_data = await self._run_dg_list_defs_async(project, project_dir)
+
+            # Build a map of existing node positions (unless we're recalculating)
+            existing_positions = {}
+            if not recalculate_layout and project.graph and project.graph.nodes:
+                for node in project.graph.nodes:
+                    existing_positions[node.id] = node.position
+
+            # Parse assets and create nodes/edges
+            nodes, edges = self._parse_assets_data(assets_data, project, existing_positions)
+
+            # Mark which edges are custom (from custom_lineage)
+            custom_edge_keys = set()
+            for custom_edge in project.custom_lineage:
+                # Convert asset keys to node IDs
+                source_id = custom_edge.source.replace("/", "_")
+                target_id = custom_edge.target.replace("/", "_")
+                custom_edge_keys.add((source_id, target_id))
+
+            # Mark edges as custom
+            custom_count = 0
+            for edge in edges:
+                if (edge.source, edge.target) in custom_edge_keys:
+                    edge.is_custom = True
+                    custom_count += 1
+
+            if custom_count > 0:
+                print(f"[Custom Lineage] Marked {custom_count} edge(s) as custom", flush=True)
+
+            return nodes, edges
+
+        except Exception as e:
+            print(f"❌ Error introspecting assets: {e}", flush=True)
+            import traceback
+            traceback.print_exc()
+            # Re-raise the exception so the API can report it properly
+            raise
 
     def _parse_assets_data(
         self,

@@ -41,7 +41,7 @@ async def create_project(project_create: ProjectCreate):
     if project.components:
         print(f"🔄 Auto-regenerating assets for new project...")
         try:
-            nodes, edges = asset_introspection_service.get_assets_for_project(project)
+            nodes, edges = await asset_introspection_service.get_assets_for_project_async(project)
             project.graph.nodes = nodes
             project.graph.edges = edges
             # Save the updated project with assets
@@ -70,7 +70,7 @@ async def import_project(request: ProjectImportRequest):
         # Auto-regenerate assets to discover existing assets
         print(f"🔄 Discovering assets from imported project...")
         try:
-            nodes, edges = asset_introspection_service.get_assets_for_project(project)
+            nodes, edges = await asset_introspection_service.get_assets_for_project_async(project)
             project.graph.nodes = nodes
             project.graph.edges = edges
             # Save the updated project with assets
@@ -172,8 +172,8 @@ async def regenerate_assets(project_id: str, recalculate_layout: bool = False):
         raise HTTPException(status_code=404, detail="Project not found")
 
     try:
-        # Get assets from dg list defs
-        asset_nodes, asset_edges = asset_introspection_service.get_assets_for_project(project, recalculate_layout=recalculate_layout)
+        # Get assets from dg list defs (using async version for non-blocking)
+        asset_nodes, asset_edges = await asset_introspection_service.get_assets_for_project_async(project, recalculate_layout=recalculate_layout)
         print(f"[regenerate_assets] Got {len(asset_nodes)} nodes, {len(asset_edges)} edges from introspection", flush=True)
         sys.stdout.flush()
 
@@ -702,7 +702,7 @@ async def import_project_yaml(project_id: str, request: YAMLImportRequest):
 
         # Regenerate assets from the imported components
         try:
-            asset_nodes, asset_edges = asset_introspection_service.get_assets_for_project(updated_project)
+            asset_nodes, asset_edges = await asset_introspection_service.get_assets_for_project_async(updated_project)
 
             # Update graph with regenerated assets
             non_asset_nodes = [n for n in updated_project.graph.nodes if n.node_kind != "asset"]

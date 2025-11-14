@@ -370,7 +370,7 @@ async def configure_component(
             asset_introspection_service = AssetIntrospectionService()
 
             print(f"[Configure] Auto-regenerating assets for project {project.id}...")
-            asset_nodes, asset_edges = asset_introspection_service.get_assets_for_project(project)
+            asset_nodes, asset_edges = await asset_introspection_service.get_assets_for_project_async(project)
 
             # Update project graph with new assets
             project.graph.nodes = asset_nodes
