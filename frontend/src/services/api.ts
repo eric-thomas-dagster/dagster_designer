@@ -802,6 +802,8 @@ export interface AllDefinitionsResponse {
   schedules: DefinitionSchedule[];
   sensors: DefinitionSensor[];
   asset_checks: DefinitionAssetCheck[];
+  using_fallback?: boolean;
+  validation_error?: string;
 }
 
 export interface PrimitiveSearchResult {
