@@ -225,7 +225,7 @@ class ProjectService:
                         print(f"📁 Moving dbt project to {dbt_target_dir}")
                         shutil.move(str(analyze_dir), str(dbt_target_dir))
 
-                        # Add dbt component
+                        # Add dbt component with translator to resolve key conflicts
                         from ..models.component import ComponentInstance
                         dbt_component = ComponentInstance(
                             id=f"dbt-{uuid.uuid4().hex[:8]}",
@@ -233,6 +233,7 @@ class ProjectService:
                             label=f"{project.name} dbt",
                             attributes={
                                 "project": target_name,
+                                "dagster_dbt_translator": "{{ project_module }}.dagster_designer_components.dbt_translator.ResourceTypePrefixTranslator",
                             },
                             is_asset_factory=True,
                         )
@@ -275,6 +276,7 @@ class ProjectService:
                                     label=f"{component_name}",
                                     attributes={
                                         "project": str(component_path),
+                                        "dagster_dbt_translator": "{{ project_module }}.dagster_designer_components.dbt_translator.ResourceTypePrefixTranslator",
                                     },
                                     is_asset_factory=True,
                                 )
@@ -1220,6 +1222,45 @@ if custom_lineage_edges:
 
                     if result.returncode == 0:
                         print(f"Successfully scaffolded component {component.id}")
+
+                        # Add custom dbt translator to the generated YAML if configured
+                        if "dagster_dbt_translator" in component.attributes:
+                            try:
+                                # Read the project's pyproject.toml to get the module name
+                                pyproject_file = project_dir / "pyproject.toml"
+                                if pyproject_file.exists():
+                                    import toml
+                                    pyproject_data = toml.load(pyproject_file)
+                                    module_name = pyproject_data.get("project", {}).get("name", "").replace("-", "_")
+
+                                    # Resolve the {{ project_module }} template
+                                    translator_value = component.attributes["dagster_dbt_translator"]
+                                    translator_value = translator_value.replace("{{ project_module }}", module_name)
+
+                                    # Find the defs directory
+                                    src_dir = project_dir / "src" / module_name
+                                    if not src_dir.exists():
+                                        src_dir = project_dir / module_name
+                                    defs_dir = src_dir / "defs" if src_dir.exists() else project_dir / "defs"
+
+                                    # Update the YAML file
+                                    yaml_file = defs_dir / component.id / "defs.yaml"
+                                    if yaml_file.exists():
+                                        import yaml
+                                        with open(yaml_file, 'r') as f:
+                                            yaml_data = yaml.safe_load(f)
+
+                                        # Add the translator to attributes
+                                        if 'attributes' not in yaml_data:
+                                            yaml_data['attributes'] = {}
+                                        yaml_data['attributes']['dagster_dbt_translator'] = translator_value
+
+                                        with open(yaml_file, 'w') as f:
+                                            yaml.dump(yaml_data, f, default_flow_style=False, sort_keys=False)
+
+                                        print(f"✅ Added custom dbt translator to {component.id}")
+                            except Exception as e:
+                                print(f"⚠️  Failed to add translator to {component.id}: {e}")
                     else:
                         print(f"Failed to scaffold component {component.id}: {result.stderr}")
 
