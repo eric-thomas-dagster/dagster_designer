@@ -240,16 +240,61 @@ class ProjectService:
                         # Create/enhance profiles.yml and .env for dbt
                         self._create_dbt_profiles(dbt_target_dir, project_dir)
                     else:
-                        # Unknown project type - scaffold Dagster wrapper
-                        print(f"ℹ️  Unknown project type - scaffolding Dagster wrapper...")
-                        self._scaffold_project_with_create_dagster(project)
-                        self._save_project(project)
+                        # Unknown project type - check for multiple dbt projects in subdirectories
+                        print(f"ℹ️  Unknown project type - checking for dbt projects in subdirectories...")
+                        dbt_projects = self._find_dbt_projects_recursive(analyze_dir)
 
-                        # Move cloned files into scaffolded project
-                        project_dir = self._get_project_dir(project)
-                        target_dir = project_dir / repo_name
-                        print(f"📁 Moving repository to {target_dir}")
-                        shutil.move(str(analyze_dir), str(target_dir))
+                        if dbt_projects:
+                            # Found dbt projects in subdirectories - treat as multi-dbt-project
+                            print(f"📦 Found {len(dbt_projects)} dbt project(s) - creating components for each")
+
+                            # Scaffold Dagster wrapper project FIRST
+                            print(f"🏗️  Scaffolding Dagster wrapper project...")
+                            self._scaffold_project_with_create_dagster(project)
+                            self._save_project(project)
+
+                            # Move cloned repo into scaffolded project
+                            project_dir = self._get_project_dir(project)
+                            target_dir = project_dir / repo_name
+                            print(f"📁 Moving repository to {target_dir}")
+                            shutil.move(str(analyze_dir), str(target_dir))
+
+                            # Create a component for each dbt project found
+                            from ..models.component import ComponentInstance
+                            for dbt_project_path in dbt_projects:
+                                # Calculate relative path from the target_dir
+                                relative_path = dbt_project_path.relative_to(analyze_dir)
+                                component_path = repo_name / relative_path
+                                component_name = relative_path.name
+
+                                print(f"📦 Creating dbt component for: {component_path}")
+
+                                dbt_component = ComponentInstance(
+                                    id=f"dbt-{uuid.uuid4().hex[:8]}",
+                                    component_type="dagster_dbt.DbtProjectComponent",
+                                    label=f"{component_name}",
+                                    attributes={
+                                        "project": str(component_path),
+                                    },
+                                    is_asset_factory=True,
+                                )
+                                project.components.append(dbt_component)
+
+                                # Create/enhance profiles.yml for this dbt project
+                                dbt_target_dir = project_dir / component_path
+                                self._create_dbt_profiles(dbt_target_dir, project_dir)
+
+                        else:
+                            # No dbt projects found - scaffold as generic wrapper
+                            print(f"ℹ️  No dbt projects found - scaffolding generic Dagster wrapper...")
+                            self._scaffold_project_with_create_dagster(project)
+                            self._save_project(project)
+
+                            # Move cloned files into scaffolded project
+                            project_dir = self._get_project_dir(project)
+                            target_dir = project_dir / repo_name
+                            print(f"📁 Moving repository to {target_dir}")
+                            shutil.move(str(analyze_dir), str(target_dir))
 
                 except subprocess.CalledProcessError as e:
                     raise ValueError(f"Failed to clone repository: {e.stderr}")
@@ -1962,6 +2007,52 @@ if customizations_path.exists():
 
         print(f"   No dbt or Dagster project markers found - unknown project type")
         return "unknown"
+
+    def _find_dbt_projects_recursive(self, repo_dir: Path, max_depth: int = 3) -> list[Path]:
+        """Recursively search for dbt projects (dbt_project.yml files) in subdirectories.
+
+        Args:
+            repo_dir: Path to the root directory to search
+            max_depth: Maximum depth to search (default 3)
+
+        Returns:
+            List of Path objects pointing to directories containing dbt_project.yml files
+        """
+        dbt_projects = []
+
+        def search_dir(current_dir: Path, depth: int):
+            if depth > max_depth:
+                return
+
+            # Don't search hidden directories or common non-project directories
+            if current_dir.name.startswith('.') or current_dir.name in {'node_modules', '__pycache__', 'venv', '.venv'}:
+                return
+
+            try:
+                # Check if current directory has dbt_project.yml
+                if (current_dir / "dbt_project.yml").exists():
+                    dbt_projects.append(current_dir)
+                    print(f"   Found dbt project at: {current_dir.relative_to(repo_dir)}")
+                    # Don't search subdirectories of a dbt project
+                    return
+
+                # Search subdirectories
+                for item in current_dir.iterdir():
+                    if item.is_dir():
+                        search_dir(item, depth + 1)
+            except (PermissionError, OSError) as e:
+                # Skip directories we can't access
+                pass
+
+        print(f"🔍 Searching for dbt projects in subdirectories...")
+        search_dir(repo_dir, 0)
+
+        if dbt_projects:
+            print(f"✅ Found {len(dbt_projects)} dbt project(s)")
+        else:
+            print(f"   No dbt projects found in subdirectories")
+
+        return dbt_projects
 
     def _create_dbt_profiles(self, dbt_dir: Path, project_root: Path):
         """Create or enhance profiles.yml for dbt introspection.
