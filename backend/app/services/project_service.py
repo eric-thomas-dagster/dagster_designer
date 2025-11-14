@@ -1019,6 +1019,8 @@ if custom_lineage_edges:
 
     def _scaffold_project_with_create_dagster(self, project: Project):
         """Scaffold project using create-dagster command."""
+        import shutil
+
         # Sanitize project name for Python module (must start with letter/underscore)
         module_name = project.name.lower().replace(" ", "_").replace("-", "_")
         # Ensure module name starts with a letter or underscore
@@ -1031,6 +1033,15 @@ if custom_lineage_edges:
         # Store the directory name in the project
         project.directory_name = dir_name
         project_dir = self._get_project_dir(project)
+
+        # Check if directory exists from a failed previous attempt (orphaned directory)
+        # An orphaned directory has no corresponding JSON metadata file
+        project_json = self.projects_dir / f"{project.id}.json"
+        if project_dir.exists() and not project_json.exists():
+            print(f"⚠️  Found orphaned directory from failed attempt: {project_dir}")
+            print(f"🧹 Cleaning up orphaned directory...")
+            shutil.rmtree(project_dir)
+            print(f"✅ Removed orphaned directory")
 
         try:
             # Run create-dagster project command
