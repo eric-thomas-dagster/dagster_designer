@@ -3,9 +3,10 @@
 import subprocess
 import json
 import time
+import yaml
 from pathlib import Path
 from fastapi import APIRouter, HTTPException
-from typing import Dict, Tuple, Any
+from typing import Dict, Tuple, Any, List
 
 from app.services.primitives_service import PrimitivesService, PrimitiveCategory
 from app.core.config import settings
@@ -17,6 +18,105 @@ primitives_service = PrimitivesService(str(settings.projects_dir))
 # Cache structure: {project_id: (timestamp, definitions_data)}
 _definitions_cache: Dict[str, Tuple[float, Dict[str, Any]]] = {}
 CACHE_TTL_SECONDS = 10  # Cache results for 10 seconds
+
+
+def _parse_automations_from_yaml(project_path: Path) -> Dict[str, List[Dict[str, Any]]]:
+    """
+    Parse jobs, schedules, and sensors directly from YAML files in defs/ directory.
+
+    This provides a fallback when dg list defs fails (e.g., project doesn't validate).
+    Returns what the user *created*, even if it has errors.
+
+    Args:
+        project_path: Path to the project directory
+
+    Returns:
+        Dictionary with 'jobs', 'schedules', 'sensors' lists
+    """
+    import sys
+    jobs = []
+    schedules = []
+    sensors = []
+
+    # Find the defs directory
+    defs_dir = None
+    for subdir in project_path.glob("src/*/defs"):
+        if subdir.is_dir():
+            defs_dir = subdir
+            break
+
+    if not defs_dir or not defs_dir.exists():
+        print(f"[YAML Fallback] No defs directory found in {project_path}", file=sys.stderr, flush=True)
+        return {"jobs": [], "schedules": [], "sensors": []}
+
+    print(f"[YAML Fallback] Parsing automations from {defs_dir}", file=sys.stderr, flush=True)
+
+    # Iterate through all subdirectories in defs/
+    for item in defs_dir.iterdir():
+        if not item.is_dir() or item.name.startswith('.') or item.name == '__pycache__':
+            continue
+
+        yaml_file = item / "defs.yaml"
+        if not yaml_file.exists():
+            continue
+
+        try:
+            with open(yaml_file, 'r') as f:
+                config = yaml.safe_load(f)
+
+            if not config or 'type' not in config:
+                continue
+
+            component_type = config['type']
+            attributes = config.get('attributes', {})
+
+            # Determine if it's a job, schedule, or sensor based on type
+            if 'JobComponent' in component_type:
+                job_data = {
+                    "name": attributes.get('job_name', item.name),
+                    "description": attributes.get('description'),
+                    "tags": attributes.get('tags', {}),
+                    "config": attributes.get('config'),
+                    "asset_selection": attributes.get('asset_selection', []),
+                    "source": str(yaml_file),
+                    "_from_yaml": True  # Mark as parsed from YAML
+                }
+                jobs.append(job_data)
+                print(f"[YAML Fallback] Found job: {job_data['name']}", file=sys.stderr, flush=True)
+
+            elif 'ScheduleComponent' in component_type:
+                schedule_data = {
+                    "name": attributes.get('schedule_name', item.name),
+                    "cron_schedule": attributes.get('cron_expression'),
+                    "job_name": attributes.get('job_name'),
+                    "timezone": attributes.get('timezone', 'UTC'),
+                    "default_status": attributes.get('default_status', 'STOPPED'),
+                    "description": attributes.get('description'),
+                    "source": str(yaml_file),
+                    "_from_yaml": True
+                }
+                schedules.append(schedule_data)
+                print(f"[YAML Fallback] Found schedule: {schedule_data['name']}", file=sys.stderr, flush=True)
+
+            elif 'SensorComponent' in component_type:
+                sensor_data = {
+                    "name": attributes.get('sensor_name', item.name),
+                    "job_name": attributes.get('job_name'),
+                    "minimum_interval_seconds": attributes.get('minimum_interval_seconds', 30),
+                    "description": attributes.get('description'),
+                    "default_status": attributes.get('default_status', 'STOPPED'),
+                    "source": str(yaml_file),
+                    "_from_yaml": True
+                }
+                sensors.append(sensor_data)
+                print(f"[YAML Fallback] Found sensor: {sensor_data['name']}", file=sys.stderr, flush=True)
+
+        except Exception as e:
+            print(f"[YAML Fallback] Error parsing {yaml_file}: {e}", file=sys.stderr, flush=True)
+            continue
+
+    print(f"[YAML Fallback] Parsed {len(jobs)} jobs, {len(schedules)} schedules, {len(sensors)} sensors", file=sys.stderr, flush=True)
+    return {"jobs": jobs, "schedules": schedules, "sensors": sensors}
 
 
 @router.get("/list/{project_id}/{category}")
@@ -499,11 +599,28 @@ async def list_all_definitions(project_id: str):
         print(f"[Definitions] Command completed with return code {result.returncode}", file=sys.stderr, flush=True)
 
         if result.returncode != 0:
+            print(f"[Definitions] dg list defs failed with return code {result.returncode}", file=sys.stderr, flush=True)
             print(f"[Definitions] Error output: {result.stderr}", file=sys.stderr, flush=True)
-            raise HTTPException(
-                status_code=500,
-                detail=f"Failed to list definitions: {result.stderr}"
-            )
+
+            # FALLBACK: Parse YAML files directly to show what user created
+            print(f"[Definitions] Using YAML fallback to parse automations...", file=sys.stderr, flush=True)
+            yaml_data = _parse_automations_from_yaml(project_path)
+
+            result_data = {
+                "project_id": project_id,
+                "jobs": yaml_data.get("jobs", []),
+                "schedules": yaml_data.get("schedules", []),
+                "sensors": yaml_data.get("sensors", []),
+                "asset_checks": [],
+                "validation_error": result.stderr,  # Include error message
+                "using_fallback": True  # Flag to indicate data is from YAML, not introspection
+            }
+
+            # Cache the fallback results too
+            _definitions_cache[project_id] = (time.time(), result_data)
+            print(f"[Definitions] Cached fallback results for project {project_id}", file=sys.stderr, flush=True)
+
+            return result_data
 
         # Parse JSON output
         defs = json.loads(result.stdout)
@@ -545,17 +662,61 @@ async def list_all_definitions(project_id: str):
         return result_data
 
     except subprocess.TimeoutExpired:
-        raise HTTPException(
-            status_code=500,
-            detail="Command timed out while listing definitions"
-        )
+        # FALLBACK: If command times out, still try to parse YAML
+        print(f"[Definitions] Command timed out, using YAML fallback...", file=sys.stderr, flush=True)
+        try:
+            yaml_data = _parse_automations_from_yaml(project_path)
+            return {
+                "project_id": project_id,
+                "jobs": yaml_data.get("jobs", []),
+                "schedules": yaml_data.get("schedules", []),
+                "sensors": yaml_data.get("sensors", []),
+                "asset_checks": [],
+                "validation_error": "Command timed out after 15 seconds",
+                "using_fallback": True
+            }
+        except Exception as fallback_error:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Command timed out and fallback failed: {str(fallback_error)}"
+            )
+
     except json.JSONDecodeError as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to parse definitions output: {str(e)}"
-        )
+        # FALLBACK: If JSON parsing fails, use YAML
+        print(f"[Definitions] JSON parse error, using YAML fallback...", file=sys.stderr, flush=True)
+        try:
+            yaml_data = _parse_automations_from_yaml(project_path)
+            return {
+                "project_id": project_id,
+                "jobs": yaml_data.get("jobs", []),
+                "schedules": yaml_data.get("schedules", []),
+                "sensors": yaml_data.get("sensors", []),
+                "asset_checks": [],
+                "validation_error": f"Failed to parse JSON output: {str(e)}",
+                "using_fallback": True
+            }
+        except Exception as fallback_error:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to parse definitions output: {str(e)}"
+            )
+
     except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to list definitions: {str(e)}"
-        )
+        # FALLBACK: For any other error, try YAML parsing
+        print(f"[Definitions] Unexpected error: {e}, attempting YAML fallback...", file=sys.stderr, flush=True)
+        try:
+            yaml_data = _parse_automations_from_yaml(project_path)
+            return {
+                "project_id": project_id,
+                "jobs": yaml_data.get("jobs", []),
+                "schedules": yaml_data.get("schedules", []),
+                "sensors": yaml_data.get("sensors", []),
+                "asset_checks": [],
+                "validation_error": f"Error listing definitions: {str(e)}",
+                "using_fallback": True
+            }
+        except Exception as fallback_error:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to list definitions: {str(e)}"
+            )
