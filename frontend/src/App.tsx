@@ -54,10 +54,15 @@ function App() {
   // This is intentionally delayed to not block initial page load
   const { data: validationStatus } = useQuery({
     queryKey: ['validation-status', currentProject?.id],
-    queryFn: () => currentProject ? primitivesApi.getAllDefinitions(currentProject.id) : Promise.reject('No project'),
+    queryFn: async () => {
+      if (!currentProject) return Promise.reject('No project');
+      const result = await primitivesApi.getAllDefinitions(currentProject.id);
+      console.log('[Validation] Project:', currentProject.name, 'using_fallback:', result.using_fallback, 'jobs:', result.jobs?.length, 'schedules:', result.schedules?.length);
+      return result;
+    },
     enabled: !!currentProject && enableValidationCheck && !dismissedValidationError,
-    staleTime: 300000, // Consider fresh for 5 minutes
-    refetchInterval: 180000, // Recheck every 3 minutes (reduced frequency)
+    staleTime: 60000, // Consider fresh for 1 minute (matches backend cache)
+    refetchInterval: 60000, // Recheck every minute to catch validation changes
     refetchOnWindowFocus: false, // Don't refetch on window focus
     retry: false, // Don't retry on failure
   });
@@ -66,6 +71,19 @@ function App() {
   useEffect(() => {
     console.log('[App] addingComponentType changed:', addingComponentType, 'currentProject:', currentProject?.id);
   }, [addingComponentType, currentProject]);
+
+  // Debug: Log when validation banner should be shown
+  useEffect(() => {
+    if (currentProject && validationStatus) {
+      const shouldShowBanner = validationStatus.using_fallback && !dismissedValidationError;
+      console.log('[Validation Banner]', {
+        shouldShow: shouldShowBanner,
+        using_fallback: validationStatus.using_fallback,
+        dismissed: dismissedValidationError,
+        project: currentProject.name
+      });
+    }
+  }, [currentProject, validationStatus, dismissedValidationError]);
 
   // Reset dismissed validation error when project changes
   useEffect(() => {
