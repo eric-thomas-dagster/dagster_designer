@@ -136,13 +136,44 @@ class ProjectService:
                 temp_repo_dir = Path(temp_dir) / repo_name
 
                 try:
-                    # Clone the repository directly to temp directory
-                    subprocess.run(
+                    # Try to clone with the specified branch
+                    result = subprocess.run(
                         ["git", "clone", "--depth", "1", "-b", branch, repo_url, str(temp_repo_dir)],
-                        check=True,
                         capture_output=True,
                         text=True,
                     )
+
+                    # If clone failed because branch not found, try to detect default branch
+                    if result.returncode != 0 and "not found in upstream" in result.stderr:
+                        print(f"⚠️  Branch '{branch}' not found, detecting default branch...")
+
+                        # Get the default branch using git ls-remote
+                        ls_remote_result = subprocess.run(
+                            ["git", "ls-remote", "--symref", repo_url, "HEAD"],
+                            capture_output=True,
+                            text=True,
+                            check=True,
+                        )
+
+                        # Parse output like: "ref: refs/heads/master	HEAD"
+                        default_branch = "main"  # fallback
+                        for line in ls_remote_result.stdout.split('\n'):
+                            if line.startswith('ref:'):
+                                default_branch = line.split('/')[-1].split('\t')[0].strip()
+                                break
+
+                        print(f"✅ Detected default branch: {default_branch}")
+
+                        # Try cloning with the detected default branch
+                        result = subprocess.run(
+                            ["git", "clone", "--depth", "1", "-b", default_branch, repo_url, str(temp_repo_dir)],
+                            capture_output=True,
+                            text=True,
+                            check=True,
+                        )
+                    elif result.returncode != 0:
+                        # Some other git error occurred
+                        raise subprocess.CalledProcessError(result.returncode, result.args, result.stdout, result.stderr)
 
                     # Determine which directory to analyze (root or subdirectory)
                     if subdir:
