@@ -327,6 +327,41 @@ class ProjectService:
         projects.sort(key=lambda p: p.updated_at, reverse=True)
         return projects
 
+    def list_projects_summary(self) -> list[dict]:
+        """List all projects with minimal metadata (optimized for large lists).
+
+        This method only parses the essential fields from JSON files,
+        skipping heavy data like graph nodes/edges and components.
+        Much faster than list_projects() for displaying project lists.
+        """
+        from ..models.project import ProjectSummary
+
+        projects = []
+
+        for project_file in self.projects_dir.glob("*.json"):
+            try:
+                with open(project_file, "r") as f:
+                    data = json.load(f)
+                    # Only extract the fields we need for the list view
+                    summary = ProjectSummary(
+                        id=data.get("id"),
+                        name=data.get("name"),
+                        description=data.get("description"),
+                        created_at=data.get("created_at"),
+                        updated_at=data.get("updated_at"),
+                        git_repo=data.get("git_repo"),
+                        is_imported=data.get("is_imported", False),
+                    )
+                    projects.append(summary)
+            except Exception as e:
+                # Skip invalid project files
+                print(f"Skipping invalid project file {project_file}: {e}")
+                continue
+
+        # Sort by updated_at descending
+        projects.sort(key=lambda p: p.updated_at, reverse=True)
+        return projects
+
     def update_project(self, project_id: str, project_update: ProjectUpdate) -> Project | None:
         """Update a project."""
         import sys

@@ -8,6 +8,7 @@ from ..models.project import (
     ProjectCreate,
     ProjectUpdate,
     ProjectListResponse,
+    ProjectSummaryListResponse,
 )
 from ..services.project_service import project_service
 from ..services.asset_introspection_service import asset_introspection_service
@@ -87,9 +88,20 @@ async def import_project(request: ProjectImportRequest):
         raise HTTPException(status_code=500, detail=f"Failed to import project: {str(e)}")
 
 
+@router.get("/summary", response_model=ProjectSummaryListResponse)
+async def list_projects_summary():
+    """List all projects with minimal metadata (optimized for large lists).
+
+    This endpoint is much faster than /projects for displaying project lists
+    because it only loads essential metadata without graphs, components, etc.
+    """
+    projects = project_service.list_projects_summary()
+    return ProjectSummaryListResponse(projects=projects, total=len(projects))
+
+
 @router.get("", response_model=ProjectListResponse)
 async def list_projects():
-    """List all projects."""
+    """List all projects with full data."""
     projects = project_service.list_projects()
     return ProjectListResponse(projects=projects, total=len(projects))
 

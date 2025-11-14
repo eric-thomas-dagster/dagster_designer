@@ -47,7 +47,8 @@ export interface MaterializeResponse {
 
 export const projectsApi = {
   list: async () => {
-    const response = await api.get<{ projects: Project[]; total: number }>('/projects');
+    // Use /projects/summary for faster list loading (only loads minimal metadata)
+    const response = await api.get<{ projects: Project[]; total: number }>('/projects/summary');
     return response.data;
   },
 

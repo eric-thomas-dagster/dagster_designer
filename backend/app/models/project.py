@@ -50,8 +50,27 @@ class ProjectUpdate(BaseModel):
     is_imported: bool | None = None
 
 
+class ProjectSummary(BaseModel):
+    """Lightweight project metadata for list views."""
+
+    id: str
+    name: str
+    description: str | None = None
+    created_at: datetime
+    updated_at: datetime
+    git_repo: str | None = None
+    is_imported: bool = False
+
+
 class ProjectListResponse(BaseModel):
     """Response containing list of projects."""
 
     projects: list[Project]
+    total: int
+
+
+class ProjectSummaryListResponse(BaseModel):
+    """Response containing lightweight list of project summaries."""
+
+    projects: list[ProjectSummary]
     total: int
