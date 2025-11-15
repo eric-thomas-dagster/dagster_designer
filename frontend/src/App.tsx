@@ -16,7 +16,7 @@ import { ResourcesManager } from './components/ResourcesManager';
 import { PipelineBuilder } from './components/PipelineBuilder';
 import { DagsterStartupModal } from './components/DagsterStartupModal';
 import { useProjectStore } from './hooks/useProject';
-import { Network, FileCode, Wand2, Zap, Package, ExternalLink, Settings, Workflow, ChevronDown, Skull, AlertTriangle, X } from 'lucide-react';
+import { Network, FileCode, Wand2, Zap, Package, ExternalLink, Settings, Workflow, ChevronDown, Skull, AlertTriangle, X, Loader2, CheckCircle, XCircle } from 'lucide-react';
 import { dagsterUIApi, projectsApi, filesApi, primitivesApi } from './services/api';
 import type { ComponentInstance } from './types';
 
@@ -35,7 +35,21 @@ function App() {
   const [isValidating, setIsValidating] = useState(false);
   const [dismissedValidationError, setDismissedValidationError] = useState(false);
   const [enableValidationCheck, setEnableValidationCheck] = useState(false);
-  const { currentProject, updateComponents} = useProjectStore();
+  const [showDependencyOutputDialog, setShowDependencyOutputDialog] = useState(false);
+  const {
+    currentProject,
+    updateComponents,
+    assetGenerationStatus,
+    assetGenerationError,
+    dismissAssetGenerationStatus,
+    validationStatus,
+    validationError,
+    dismissValidationStatus,
+    dependencyInstallStatus,
+    dependencyInstallError,
+    dependencyInstallOutput,
+    dismissDependencyInstallStatus
+  } = useProjectStore();
   const queryClient = useQueryClient();
 
   // Delay validation check by 2 seconds after project loads to avoid blocking UI
@@ -52,7 +66,8 @@ function App() {
 
   // Fetch validation status globally (checks if project validates)
   // This is intentionally delayed to not block initial page load
-  const { data: validationStatus } = useQuery({
+  // Only runs after dependencies are installed to avoid premature validation errors
+  const { data: backgroundValidationStatus } = useQuery({
     queryKey: ['validation-status', currentProject?.id],
     queryFn: async () => {
       if (!currentProject) return Promise.reject('No project');
@@ -60,7 +75,7 @@ function App() {
       console.log('[Validation] Project:', currentProject.name, 'using_fallback:', result.using_fallback, 'jobs:', result.jobs?.length, 'schedules:', result.schedules?.length);
       return result;
     },
-    enabled: !!currentProject && enableValidationCheck && !dismissedValidationError,
+    enabled: !!currentProject && enableValidationCheck && !dismissedValidationError && dependencyInstallStatus !== 'installing',
     staleTime: 60000, // Consider fresh for 1 minute (matches backend cache)
     refetchInterval: 60000, // Recheck every minute to catch validation changes
     refetchOnWindowFocus: false, // Don't refetch on window focus
@@ -74,16 +89,16 @@ function App() {
 
   // Debug: Log when validation banner should be shown
   useEffect(() => {
-    if (currentProject && validationStatus) {
-      const shouldShowBanner = validationStatus.using_fallback && !dismissedValidationError;
+    if (currentProject && backgroundValidationStatus) {
+      const shouldShowBanner = backgroundValidationStatus.using_fallback && !dismissedValidationError;
       console.log('[Validation Banner]', {
         shouldShow: shouldShowBanner,
-        using_fallback: validationStatus.using_fallback,
+        using_fallback: backgroundValidationStatus.using_fallback,
         dismissed: dismissedValidationError,
         project: currentProject.name
       });
     }
-  }, [currentProject, validationStatus, dismissedValidationError]);
+  }, [currentProject, backgroundValidationStatus, dismissedValidationError]);
 
   // Reset dismissed validation error when project changes
   useEffect(() => {
@@ -381,8 +396,192 @@ function App() {
         </div>
       </header>
 
+      {/* Dependency Installation Status Banner */}
+      {currentProject && dependencyInstallStatus !== 'idle' && (
+        <div className={`border-b px-4 py-2 ${
+          dependencyInstallStatus === 'installing' ? 'bg-blue-50 border-blue-200' :
+          dependencyInstallStatus === 'success' ? 'bg-green-50 border-green-200' :
+          'bg-red-50 border-red-200'
+        }`}>
+          <div className="max-w-7xl mx-auto flex items-center gap-3">
+            {dependencyInstallStatus === 'installing' && (
+              <Loader2 className="w-5 h-5 text-blue-600 flex-shrink-0 animate-spin" />
+            )}
+            {dependencyInstallStatus === 'success' && (
+              <CheckCircle className="w-5 h-5 text-green-600 flex-shrink-0" />
+            )}
+            {dependencyInstallStatus === 'error' && (
+              <XCircle className="w-5 h-5 text-red-600 flex-shrink-0" />
+            )}
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center justify-between gap-4">
+                <div className="flex items-center gap-3 min-w-0">
+                  <span className={`text-sm font-semibold ${
+                    dependencyInstallStatus === 'installing' ? 'text-blue-800' :
+                    dependencyInstallStatus === 'success' ? 'text-green-800' :
+                    'text-red-800'
+                  }`}>
+                    {dependencyInstallStatus === 'installing' && 'Installing dependencies...'}
+                    {dependencyInstallStatus === 'success' && 'Dependencies installed!'}
+                    {dependencyInstallStatus === 'error' && 'Dependency installation failed'}
+                  </span>
+                  {dependencyInstallStatus === 'installing' && (
+                    <span className="text-xs text-blue-700">
+                      This may take 2-5 minutes for large projects
+                    </span>
+                  )}
+                  {dependencyInstallStatus === 'error' && dependencyInstallError && (
+                    <span className="text-xs text-red-700 truncate">
+                      {dependencyInstallError}
+                    </span>
+                  )}
+                  {dependencyInstallOutput && (
+                    <button
+                      onClick={() => setShowDependencyOutputDialog(true)}
+                      className={`text-sm underline font-medium ${
+                        dependencyInstallStatus === 'installing' ? 'text-blue-700 hover:text-blue-900' :
+                        dependencyInstallStatus === 'success' ? 'text-green-700 hover:text-green-900' :
+                        'text-red-700 hover:text-red-900'
+                      }`}
+                    >
+                      View Details
+                    </button>
+                  )}
+                </div>
+                {dependencyInstallStatus !== 'installing' && (
+                  <button
+                    onClick={dismissDependencyInstallStatus}
+                    className={`p-1 rounded flex-shrink-0 ${
+                      dependencyInstallStatus === 'success'
+                        ? 'text-green-600 hover:text-green-800'
+                        : 'text-red-600 hover:text-red-800'
+                    }`}
+                    title="Dismiss"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Asset Generation Status Banner */}
+      {currentProject && assetGenerationStatus !== 'idle' && (
+        <div className={`border-b px-4 py-2 ${
+          assetGenerationStatus === 'generating' ? 'bg-blue-50 border-blue-200' :
+          assetGenerationStatus === 'success' ? 'bg-green-50 border-green-200' :
+          'bg-red-50 border-red-200'
+        }`}>
+          <div className="max-w-7xl mx-auto flex items-center gap-3">
+            {assetGenerationStatus === 'generating' && (
+              <Loader2 className="w-5 h-5 text-blue-600 flex-shrink-0 animate-spin" />
+            )}
+            {assetGenerationStatus === 'success' && (
+              <CheckCircle className="w-5 h-5 text-green-600 flex-shrink-0" />
+            )}
+            {assetGenerationStatus === 'error' && (
+              <XCircle className="w-5 h-5 text-red-600 flex-shrink-0" />
+            )}
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center justify-between gap-4">
+                <div className="flex items-center gap-3 min-w-0">
+                  <span className={`text-sm font-semibold ${
+                    assetGenerationStatus === 'generating' ? 'text-blue-800' :
+                    assetGenerationStatus === 'success' ? 'text-green-800' :
+                    'text-red-800'
+                  }`}>
+                    {assetGenerationStatus === 'generating' && 'Generating assets...'}
+                    {assetGenerationStatus === 'success' && 'Assets generated successfully!'}
+                    {assetGenerationStatus === 'error' && 'Asset generation failed'}
+                  </span>
+                  {assetGenerationStatus === 'generating' && (
+                    <span className="text-xs text-blue-700">
+                      This may take 30-180 seconds for large projects
+                    </span>
+                  )}
+                  {assetGenerationStatus === 'error' && assetGenerationError && (
+                    <span className="text-xs text-red-700 truncate">
+                      {assetGenerationError}
+                    </span>
+                  )}
+                </div>
+                {assetGenerationStatus !== 'generating' && (
+                  <button
+                    onClick={dismissAssetGenerationStatus}
+                    className={`p-1 rounded flex-shrink-0 ${
+                      assetGenerationStatus === 'success'
+                        ? 'text-green-600 hover:text-green-800'
+                        : 'text-red-600 hover:text-red-800'
+                    }`}
+                    title="Dismiss"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Validation Status Banner */}
+      {currentProject && validationStatus !== 'idle' && (
+        <div className={`border-b px-4 py-2 ${
+          validationStatus === 'validating' ? 'bg-blue-50 border-blue-200' :
+          validationStatus === 'success' ? 'bg-green-50 border-green-200' :
+          'bg-red-50 border-red-200'
+        }`}>
+          <div className="max-w-7xl mx-auto flex items-center gap-3">
+            {validationStatus === 'validating' && (
+              <Loader2 className="w-5 h-5 text-blue-600 flex-shrink-0 animate-spin" />
+            )}
+            {validationStatus === 'success' && (
+              <CheckCircle className="w-5 h-5 text-green-600 flex-shrink-0" />
+            )}
+            {validationStatus === 'error' && (
+              <XCircle className="w-5 h-5 text-red-600 flex-shrink-0" />
+            )}
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center justify-between gap-4">
+                <div className="flex items-center gap-3 min-w-0">
+                  <span className={`text-sm font-semibold ${
+                    validationStatus === 'validating' ? 'text-blue-800' :
+                    validationStatus === 'success' ? 'text-green-800' :
+                    'text-red-800'
+                  }`}>
+                    {validationStatus === 'validating' && 'Validating project...'}
+                    {validationStatus === 'success' && 'Project validated successfully!'}
+                    {validationStatus === 'error' && 'Project validation failed'}
+                  </span>
+                  {validationStatus === 'error' && validationError && (
+                    <span className="text-xs text-red-700 truncate">
+                      {validationError}
+                    </span>
+                  )}
+                </div>
+                {validationStatus !== 'validating' && (
+                  <button
+                    onClick={dismissValidationStatus}
+                    className={`p-1 rounded flex-shrink-0 ${
+                      validationStatus === 'success'
+                        ? 'text-green-600 hover:text-green-800'
+                        : 'text-red-600 hover:text-red-800'
+                    }`}
+                    title="Dismiss"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Global Validation Error Banner - Compact */}
-      {currentProject && validationStatus?.using_fallback && !dismissedValidationError && (
+      {currentProject && backgroundValidationStatus?.using_fallback && !dismissedValidationError && (
         <div className="bg-yellow-50 border-b border-yellow-200 px-4 py-2">
           <div className="max-w-7xl mx-auto flex items-center gap-3">
             <AlertTriangle className="w-5 h-5 text-yellow-600 flex-shrink-0" />
@@ -617,6 +816,43 @@ function App() {
             window.open(url, '_blank');
           }}
         />
+      )}
+
+      {/* Dependency Installation Output Dialog */}
+      {showDependencyOutputDialog && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-lg shadow-xl w-full max-w-3xl max-h-[80vh] flex flex-col">
+            <div className="flex items-center justify-between p-6 border-b">
+              <h2 className="text-lg font-semibold">
+                {dependencyInstallStatus === 'installing' && '⏳ Dependency Installation Progress'}
+                {dependencyInstallStatus === 'success' && '✅ Dependency Installation Complete'}
+                {dependencyInstallStatus === 'error' && '❌ Dependency Installation Failed'}
+              </h2>
+              <button onClick={() => setShowDependencyOutputDialog(false)}>
+                <X className="w-5 h-5 text-gray-400 hover:text-gray-600" />
+              </button>
+            </div>
+
+            <div className="flex-1 overflow-y-auto p-6">
+              {dependencyInstallOutput ? (
+                <pre className="bg-gray-900 text-gray-100 p-4 rounded-lg overflow-x-auto text-xs whitespace-pre-wrap">
+                  {dependencyInstallOutput}
+                </pre>
+              ) : (
+                <p className="text-gray-500 text-sm">No output available yet...</p>
+              )}
+            </div>
+
+            <div className="p-4 border-t flex justify-end">
+              <button
+                onClick={() => setShowDependencyOutputDialog(false)}
+                className="px-4 py-2 text-sm bg-gray-600 text-white rounded-md hover:bg-gray-700"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* Validation Results Dialog */}

@@ -37,6 +37,20 @@ async def get_component(component_type: str, project_id: str | None = None):
     # First check built-in component registry
     component = component_registry.get_component(component_type)
 
+    # If not found by exact match, try fuzzy matching by class name
+    # This handles project-specific module paths like "project_xxx.dagster_designer_components.DbtProjectWithTranslatorComponent"
+    if not component:
+        # Extract the class name from the component type
+        class_name = component_type.split('.')[-1] if '.' in component_type else component_type
+
+        # Try to find a component with matching class name
+        all_components = component_registry.get_all_components()
+        for comp in all_components:
+            comp_class_name = comp.type.split('.')[-1] if '.' in comp.type else comp.type
+            if comp_class_name == class_name:
+                component = comp
+                break
+
     if not component and project_id:
         # Check for installed community component
         from ..services.project_service import project_service

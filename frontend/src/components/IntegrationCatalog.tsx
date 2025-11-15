@@ -732,7 +732,7 @@ export function IntegrationCatalog({ projectId }: IntegrationCatalogProps) {
 
             return (
               <div
-                key={integration.package}
+                key={`${integration.package}-${integration.name}`}
                 className="border border-gray-200 rounded-lg p-4 bg-white hover:shadow-lg transition-shadow cursor-pointer flex flex-col"
                 onClick={() => setSelectedIntegration(integration)}
               >

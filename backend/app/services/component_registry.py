@@ -152,6 +152,23 @@ class ComponentRegistry:
                 },
             },
             {
+                "name": "dbt-with-translator",
+                "type": "dagster_designer_components.DbtProjectWithTranslatorComponent",
+                "module": "dagster_designer_components",
+                "category": "dbt",
+                "description": "Enhanced dbt project component with automatic asset key conflict resolution",
+                "icon": "database",
+                "schema": {
+                    "properties": {
+                        "project": {
+                            "type": "string",
+                            "description": "Path to your dbt project directory relative to the Dagster project root",
+                        },
+                    },
+                    "required": ["project"],
+                },
+            },
+            {
                 "name": "fivetran",
                 "type": "dagster_fivetran.FivetranConnector",
                 "module": "dagster_fivetran",

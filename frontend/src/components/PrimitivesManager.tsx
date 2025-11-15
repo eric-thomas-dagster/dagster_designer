@@ -123,8 +123,26 @@ export function PrimitivesManager({ onNavigateToTemplates, onOpenFile }: Primiti
 
   // Merge template-created primitives with discovered definitions
   const getMergedPrimitives = (category: PrimitiveCategory): Array<PrimitiveItem & { isManaged: boolean }> => {
-    const templatePrimitives = allPrimitives?.primitives?.[category === 'schedule' ? 'schedules' : category === 'job' ? 'jobs' : category === 'sensor' ? 'sensors' : 'asset_checks'] || [];
-    const definitionPrimitives = allDefinitions?.[category === 'schedule' ? 'schedules' : category === 'job' ? 'jobs' : category === 'sensor' ? 'sensors' : 'asset_checks'] || [];
+    const categoryKey = category === 'schedule' ? 'schedules' : category === 'job' ? 'jobs' : category === 'sensor' ? 'sensors' : 'asset_checks';
+
+    // Get primitives from the fast /list endpoint (includes template-created + stored graph data)
+    const primitives = allPrimitives?.primitives?.[categoryKey] || [];
+
+    // For asset_checks, the /list endpoint now returns them from the stored graph
+    // so we don't need to fetch from the slow /definitions endpoint
+    if (category === 'asset_check') {
+      // All asset checks from /list are considered "discovered" (from stored graph)
+      const result = primitives.map(p => ({
+        ...p,
+        asset: (p as any).asset_key || p.asset, // Ensure asset field is set
+        isManaged: false, // Asset checks from stored graph are "discovered"
+      }));
+      return result;
+    }
+
+    // For other categories (jobs, schedules, sensors), merge with definitions if available
+    const templatePrimitives = primitives;
+    const definitionPrimitives = allDefinitions?.[categoryKey] || [];
 
     // Mark template primitives as managed
     const managed = templatePrimitives.map(p => ({ ...p, isManaged: true }));

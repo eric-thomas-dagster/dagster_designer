@@ -12,7 +12,7 @@ const api = axios.create({
   headers: {
     'Content-Type': 'application/json',
   },
-  timeout: 120000, // 2 minute timeout for long operations (project creation, package installation)
+  timeout: 600000, // 10 minute timeout for long operations (asset generation for large projects with 500+ assets)
 });
 
 // Components API
@@ -97,7 +97,8 @@ export const projectsApi = {
 
   validate: async (projectId: string) => {
     const response = await api.post<{
-      valid: boolean;
+      valid: boolean | null;  // null indicates pending/unknown status
+      pending?: boolean;  // true if dependencies are still installing
       message?: string;
       error?: string;
       details?: {

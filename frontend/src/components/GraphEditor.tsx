@@ -826,6 +826,7 @@ function GraphEditorInner({ onNodeSelect }: GraphEditorProps) {
   }, [setNodes, getNodes]);
 
   // Auto-regenerate assets if project has components but no assets
+  // Only triggers if dependencies are installed to avoid premature regeneration
   useEffect(() => {
     if (!currentProject || hasTriggeredRegeneration.current) {
       return;
@@ -833,6 +834,15 @@ function GraphEditorInner({ onNodeSelect }: GraphEditorProps) {
 
     const hasAssetFactories = currentProject.components.some((c) => c.is_asset_factory);
     const hasAssets = nodes.some((n) => n.data.node_kind === 'asset');
+
+    // Check dependency status from project store
+    const { dependencyInstallStatus } = useProjectStore.getState();
+
+    // Don't trigger regeneration if dependencies are still installing
+    if (dependencyInstallStatus === 'installing') {
+      console.log('[GraphEditor] Skipping auto-regeneration - dependencies are still installing');
+      return;
+    }
 
     if (hasAssetFactories && !hasAssets) {
       console.log('[GraphEditor] Project has components but no assets - triggering regeneration');

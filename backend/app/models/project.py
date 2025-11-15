@@ -21,6 +21,7 @@ class Project(BaseModel):
     graph: PipelineGraph = Field(default_factory=PipelineGraph, description="Pipeline graph (assets and 1:1 components)")
     components: list[ComponentInstance] = Field(default_factory=list, description="Component instances (particularly asset factories)")
     custom_lineage: list[CustomLineageEdge] = Field(default_factory=list, description="Custom lineage edges drawn by user")
+    discovered_primitives: dict = Field(default_factory=dict, description="Discovered schedules/sensors/jobs from dg list defs")
     created_at: datetime = Field(default_factory=datetime.now)
     updated_at: datetime = Field(default_factory=datetime.now)
     git_repo: str | None = Field(None, description="Git repository URL")

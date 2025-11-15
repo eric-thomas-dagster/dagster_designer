@@ -175,18 +175,36 @@ export function ProjectManager() {
 
     setIsRegeneratingLineage(true);
 
+    // Update asset generation status in store to show banner
+    const projectStore = useProjectStore.getState();
+    projectStore.assetGenerationStatus = 'generating';
+    projectStore.assetGenerationError = null;
+
     try {
       // Regenerate with layout recalculation to keep the graph beautiful
       await projectsApi.regenerateAssets(currentProject.id, true);
 
+      // Update status to success
+      projectStore.assetGenerationStatus = 'success';
+      projectStore.assetGenerationError = null;
+
       // Reload project to get updated graph
       await loadProject(currentProject.id);
 
-      alert('Lineage graph regenerated successfully!');
+      // Auto-dismiss success banner after 3 seconds
+      setTimeout(() => {
+        const currentStatus = useProjectStore.getState().assetGenerationStatus;
+        if (currentStatus === 'success') {
+          useProjectStore.getState().dismissAssetGenerationStatus();
+        }
+      }, 3000);
     } catch (error: any) {
       console.error('Failed to regenerate lineage:', error);
       const errorMessage = error?.response?.data?.detail || error?.message || 'Unknown error';
-      alert(`Failed to regenerate lineage:\n\n${errorMessage}`);
+
+      // Update status to error
+      projectStore.assetGenerationStatus = 'error';
+      projectStore.assetGenerationError = errorMessage;
     } finally {
       setIsRegeneratingLineage(false);
     }
@@ -217,13 +235,36 @@ export function ProjectManager() {
 
     setIsValidating(true);
 
+    // Update validation status in store to show banner
+    const projectStore = useProjectStore.getState();
+    projectStore.validationStatus = 'validating';
+    projectStore.validationError = null;
+
     try {
       const result = await projectsApi.validate(currentProject.id);
       setValidationResult(result);
       setShowValidationDialog(true);
-    } catch (error) {
+
+      // Update status based on validation result
+      if (result.valid) {
+        projectStore.validationStatus = 'success';
+        projectStore.validationError = null;
+        // Auto-dismiss success banner after 3 seconds
+        setTimeout(() => {
+          const currentStatus = useProjectStore.getState().validationStatus;
+          if (currentStatus === 'success') {
+            useProjectStore.getState().dismissValidationStatus();
+          }
+        }, 3000);
+      } else {
+        projectStore.validationStatus = 'error';
+        projectStore.validationError = result.error || 'Validation failed';
+      }
+    } catch (error: any) {
       console.error('Failed to validate project:', error);
-      alert('Failed to validate project. Check console for details.');
+      const errorMessage = error?.response?.data?.detail || error?.message || 'Failed to validate project';
+      projectStore.validationStatus = 'error';
+      projectStore.validationError = errorMessage;
     } finally {
       setIsValidating(false);
     }
@@ -450,10 +491,11 @@ export function ProjectManager() {
                 <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mb-4"></div>
                 <p className="text-gray-700 font-medium">Creating project...</p>
                 <p className="text-sm text-gray-500 mt-2 text-center px-4">
-                  Scaffolding project, installing dependencies,<br />
-                  and discovering assets
+                  Scaffolding project structure and<br />
+                  installing dependencies
                 </p>
-                <p className="text-xs text-gray-400 mt-1">This usually takes 30-60 seconds</p>
+                <p className="text-xs text-gray-400 mt-1">This usually takes 10-30 seconds</p>
+                <p className="text-xs text-blue-600 mt-2">Assets will be generated in the background after creation</p>
               </div>
             )}
 

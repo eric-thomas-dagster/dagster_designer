@@ -1,12 +1,20 @@
 import { create } from 'zustand';
 import type { Project, GraphNode, GraphEdge, ComponentInstance } from '@/types';
 import { projectsApi } from '@/services/api';
+import api from '@/services/api';
 
 interface ProjectStore {
   currentProject: Project | null;
   projects: Project[];
   isLoading: boolean;
   error: string | null;
+  assetGenerationStatus: 'idle' | 'generating' | 'success' | 'error';
+  assetGenerationError: string | null;
+  validationStatus: 'idle' | 'validating' | 'success' | 'error';
+  validationError: string | null;
+  dependencyInstallStatus: 'idle' | 'installing' | 'success' | 'error';
+  dependencyInstallError: string | null;
+  dependencyInstallOutput: string;
 
   // Actions
   loadProject: (id: string) => Promise<void>;
@@ -18,6 +26,10 @@ interface ProjectStore {
   setCurrentProject: (project: Project) => void;
   saveProject: () => Promise<void>;
   deleteProject: (id: string) => Promise<void>;
+  dismissAssetGenerationStatus: () => void;
+  dismissValidationStatus: () => void;
+  dismissDependencyInstallStatus: () => void;
+  pollDependencyStatus: (projectId: string) => Promise<void>;
 }
 
 export const useProjectStore = create<ProjectStore>((set, get) => ({
@@ -25,6 +37,13 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   projects: [],
   isLoading: false,
   error: null,
+  assetGenerationStatus: 'idle',
+  assetGenerationError: null,
+  validationStatus: 'idle',
+  validationError: null,
+  dependencyInstallStatus: 'idle',
+  dependencyInstallError: null,
+  dependencyInstallOutput: '',
 
   loadProject: async (id: string) => {
     set({ isLoading: true, error: null });
@@ -49,6 +68,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   createProject: async (name: string, description?: string, gitRepo?: string, gitBranch?: string) => {
     set({ isLoading: true, error: null });
     try {
+      // Create project (returns immediately without asset generation)
       const project = await projectsApi.create({
         name,
         description,
@@ -60,6 +80,13 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
         projects: [project, ...get().projects],
         isLoading: false,
       });
+
+      // Start polling for dependency installation status
+      // Dependencies install in background, then we'll trigger asset generation
+      console.log('🔄 Starting dependency installation polling...');
+      set({ dependencyInstallStatus: 'installing', dependencyInstallError: null });
+      get().pollDependencyStatus(project.id);
+
       return project;
     } catch (error) {
       set({ error: 'Failed to create project', isLoading: false });
@@ -70,12 +97,39 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   importProject: async (path: string) => {
     set({ isLoading: true, error: null });
     try {
+      // Import project (returns immediately without asset generation)
       const project = await projectsApi.import(path);
       set({
         currentProject: project,
         projects: [project, ...get().projects],
         isLoading: false,
       });
+
+      // Trigger asset generation in the background (non-blocking)
+      console.log('🔄 Triggering asset generation in background...');
+      set({ assetGenerationStatus: 'generating', assetGenerationError: null });
+
+      projectsApi.regenerateAssets(project.id, true).then(() => {
+        console.log('✅ Assets generated successfully');
+        set({ assetGenerationStatus: 'success', assetGenerationError: null });
+        // Reload the project to get the updated graph with assets
+        get().loadProject(project.id);
+        // Auto-dismiss success message after 3 seconds
+        setTimeout(() => {
+          if (get().assetGenerationStatus === 'success') {
+            set({ assetGenerationStatus: 'idle' });
+          }
+        }, 3000);
+      }).catch(error => {
+        console.error('⚠️  Asset generation failed:', error);
+        const errorMessage = error?.response?.data?.detail || error?.message || 'Unknown error';
+        set({
+          assetGenerationStatus: 'error',
+          assetGenerationError: errorMessage
+        });
+        // Don't throw - project was imported successfully, just assets failed to generate
+      });
+
       return project;
     } catch (error) {
       set({ error: 'Failed to import project', isLoading: false });
@@ -162,5 +216,74 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     } catch (error) {
       set({ error: 'Failed to delete project', isLoading: false });
     }
+  },
+
+  dismissAssetGenerationStatus: () => {
+    set({ assetGenerationStatus: 'idle', assetGenerationError: null });
+  },
+
+  dismissValidationStatus: () => {
+    set({ validationStatus: 'idle', validationError: null });
+  },
+
+  dismissDependencyInstallStatus: () => {
+    set({ dependencyInstallStatus: 'idle', dependencyInstallError: null });
+  },
+
+  pollDependencyStatus: async (projectId: string) => {
+    // Poll dependency status until it's done (success or error)
+    const poll = async () => {
+      try {
+        const response = await api.get(`/projects/${projectId}/dependency-status`);
+        const { status, error, output } = response.data;
+
+        set({
+          dependencyInstallStatus: status,
+          dependencyInstallError: error,
+          dependencyInstallOutput: output || ''
+        });
+
+        if (status === 'installing') {
+          // Continue polling every 2 seconds
+          setTimeout(poll, 2000);
+        } else if (status === 'success') {
+          // Dependencies installed! Now trigger asset generation
+          console.log('✅ Dependencies installed, triggering asset generation...');
+
+          // Auto-dismiss dependency success after 2 seconds
+          setTimeout(() => {
+            if (get().dependencyInstallStatus === 'success') {
+              set({ dependencyInstallStatus: 'idle' });
+            }
+          }, 2000);
+
+          // Start asset generation
+          set({ assetGenerationStatus: 'generating', assetGenerationError: null });
+
+          projectsApi.regenerateAssets(projectId, true).then(() => {
+            console.log('✅ Assets generated successfully');
+            set({ assetGenerationStatus: 'success', assetGenerationError: null });
+            get().loadProject(projectId);
+            setTimeout(() => {
+              if (get().assetGenerationStatus === 'success') {
+                set({ assetGenerationStatus: 'idle' });
+              }
+            }, 3000);
+          }).catch(error => {
+            console.error('⚠️  Asset generation failed:', error);
+            const errorMessage = error?.response?.data?.detail || error?.message || 'Unknown error';
+            set({
+              assetGenerationStatus: 'error',
+              assetGenerationError: errorMessage
+            });
+          });
+        }
+      } catch (error) {
+        console.error('Failed to poll dependency status:', error);
+        // Don't set error state, just stop polling
+      }
+    };
+
+    await poll();
   },
 }));

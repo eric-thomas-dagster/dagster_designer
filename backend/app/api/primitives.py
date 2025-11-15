@@ -132,6 +132,91 @@ async def list_primitives(project_id: str, category: PrimitiveCategory):
         List of primitives
     """
     try:
+        # First, try to use the shared asset introspection cache
+        # This cache is populated when the Assets UI loads and includes dbt tests as asset checks
+        from ..services.asset_introspection_service import _assets_cache
+        from ..services.project_service import project_service
+        import sys
+
+        current_time = time.time()
+        if project_id in _assets_cache:
+            cache_time, cached_defs = _assets_cache[project_id]
+            age = current_time - cache_time
+            if age < 60:  # 60 second cache from asset introspection
+                print(f"[Primitives/{category}] Using shared asset cache for project {project_id} (age: {age:.1f}s)", file=sys.stderr, flush=True)
+
+                # Map category to cache key
+                cache_key_map = {
+                    "schedule": "schedules",
+                    "job": "jobs",
+                    "sensor": "sensors",
+                    "asset_check": "asset_checks",
+                }
+                cache_key = cache_key_map.get(category)
+
+                if cache_key and cache_key in cached_defs:
+                    primitives = cached_defs[cache_key]
+                    return {
+                        "project_id": project_id,
+                        "category": category,
+                        "primitives": primitives,
+                        "total": len(primitives),
+                    }
+
+        # Second fallback: Read from stored project data (instant, no dg list defs)
+        print(f"[Primitives/{category}] Cache miss, reading from stored project for {project_id}", file=sys.stderr, flush=True)
+
+        project = project_service.get_project(project_id)
+
+        if category == "asset_check":
+            # Extract asset checks from stored graph
+            if project and project.graph and project.graph.nodes:
+                asset_checks = []
+                for node in project.graph.nodes:
+                    if node.node_kind == "asset":
+                        checks = node.data.get("checks", [])
+                        for check in checks:
+                            check_data = {
+                                "name": check.get("name", ""),
+                                "key": check.get("key", ""),
+                                "description": check.get("description", ""),
+                                "asset_key": node.data.get("asset_key", ""),
+                                "file": check.get("source", ""),
+                            }
+                            asset_checks.append(check_data)
+
+                if asset_checks:
+                    print(f"[Primitives/asset_check] Found {len(asset_checks)} checks in stored graph", file=sys.stderr, flush=True)
+                    return {
+                        "project_id": project_id,
+                        "category": category,
+                        "primitives": asset_checks,
+                        "total": len(asset_checks),
+                        "source": "stored_graph"
+                    }
+        elif category in ["schedule", "sensor", "job"]:
+            # Extract schedules/sensors/jobs from discovered_primitives
+            if project and project.discovered_primitives:
+                category_map = {
+                    "schedule": "schedules",
+                    "sensor": "sensors",
+                    "job": "jobs",
+                }
+                primitives_key = category_map[category]
+                primitives = project.discovered_primitives.get(primitives_key, [])
+
+                if primitives:
+                    print(f"[Primitives/{category}] Found {len(primitives)} {category}s in stored project", file=sys.stderr, flush=True)
+                    return {
+                        "project_id": project_id,
+                        "category": category,
+                        "primitives": primitives,
+                        "total": len(primitives),
+                        "source": "stored_primitives"
+                    }
+
+        # Final fallback: YAML file discovery (for template-created primitives)
+        print(f"[Primitives/{category}] Using YAML fallback for project {project_id}", file=sys.stderr, flush=True)
         primitives = primitives_service.list_primitives(project_id, category)
         return {
             "project_id": project_id,
@@ -159,10 +244,70 @@ async def list_all_primitives(project_id: str):
         Dictionary with all primitive categories
     """
     try:
-        primitives = primitives_service.list_all_primitives(project_id)
+        # First, try to use the shared asset introspection cache
+        # This cache is populated when the Assets UI loads and includes dbt tests as asset checks
+        from ..services.asset_introspection_service import _assets_cache
+        from ..services.project_service import project_service
+        import sys
+
+        current_time = time.time()
+        if project_id in _assets_cache:
+            cache_time, cached_defs = _assets_cache[project_id]
+            age = current_time - cache_time
+            if age < 60:  # 60 second cache from asset introspection
+                print(f"[Primitives/all] Using shared asset cache for project {project_id} (age: {age:.1f}s)", file=sys.stderr, flush=True)
+
+                primitives = {
+                    "schedules": cached_defs.get("schedules", []),
+                    "jobs": cached_defs.get("jobs", []),
+                    "sensors": cached_defs.get("sensors", []),
+                    "asset_checks": cached_defs.get("asset_checks", []),
+                }
+                return {
+                    "project_id": project_id,
+                    "primitives": primitives,
+                }
+
+        # Second fallback: Read from stored project data (instant)
+        # This includes schedules/sensors/jobs from discovered_primitives and asset checks from graph
+        print(f"[Primitives/all] Cache miss, reading from stored project for {project_id}", file=sys.stderr, flush=True)
+
+        project = project_service.get_project(project_id)
+
+        # Start with discovered primitives (from dg list defs)
+        primitives = {
+            "schedules": project.discovered_primitives.get("schedules", []) if project and project.discovered_primitives else [],
+            "sensors": project.discovered_primitives.get("sensors", []) if project and project.discovered_primitives else [],
+            "jobs": project.discovered_primitives.get("jobs", []) if project and project.discovered_primitives else [],
+            "asset_checks": [],
+        }
+
+        # Add asset checks from stored graph
+        if project and project.graph and project.graph.nodes:
+            asset_checks = []
+            for node in project.graph.nodes:
+                if node.node_kind == "asset":
+                    checks = node.data.get("checks", [])
+                    for check in checks:
+                        check_data = {
+                            "name": check.get("name", ""),
+                            "key": check.get("key", ""),
+                            "description": check.get("description", ""),
+                            "asset_key": node.data.get("asset_key", ""),
+                            "file": check.get("source", ""),
+                        }
+                        asset_checks.append(check_data)
+
+            primitives["asset_checks"] = asset_checks
+
+        print(f"[Primitives/all] Found {len(primitives['schedules'])} schedules, "
+              f"{len(primitives['sensors'])} sensors, {len(primitives['jobs'])} jobs, "
+              f"{len(primitives['asset_checks'])} asset checks from stored project", file=sys.stderr, flush=True)
+
         return {
             "project_id": project_id,
             "primitives": primitives,
+            "source": "stored_graph"
         }
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
@@ -494,6 +639,87 @@ def _search_primitive_definition_internal(project_id: str, primitive_type: str, 
         )
 
 
+def _build_asset_check_index(project_path: Path) -> Dict[str, Tuple[str, int]]:
+    """
+    Build an index of asset check names to their file locations.
+    This is much faster than running find/grep for each check individually.
+
+    Returns:
+        Dict mapping check names to (file_path, line_number) tuples
+    """
+    import sys
+    check_index = {}
+
+    try:
+        # Find all defs.yaml files (for community components)
+        find_result = subprocess.run(
+            ["find", ".", "-name", "defs.yaml", "-type", "f", "-not", "-path", "*/.venv/*"],
+            cwd=str(project_path),
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+
+        if find_result.returncode == 0 and find_result.stdout:
+            yaml_files = [f for f in find_result.stdout.strip().split('\n') if f]
+
+            # Read each yaml file and index check names
+            for yaml_file in yaml_files:
+                try:
+                    full_path = project_path / yaml_file.lstrip('./')
+                    with open(full_path, 'r') as f:
+                        for line_num, line in enumerate(f, 1):
+                            # Look for "name: check_name" pattern
+                            if 'name:' in line:
+                                parts = line.split('name:', 1)
+                                if len(parts) == 2:
+                                    check_name = parts[1].strip().strip('"').strip("'")
+                                    if check_name and check_name not in check_index:
+                                        check_index[check_name] = (yaml_file.lstrip('./'), line_num)
+                except Exception as e:
+                    continue
+
+        # Find all schema.yml files (for dbt tests)
+        find_result = subprocess.run(
+            ["find", ".", "-name", "*.yml", "-type", "f", "-not", "-path", "*/.venv/*", "-not", "-path", "*/dbt_packages/*"],
+            cwd=str(project_path),
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+
+        if find_result.returncode == 0 and find_result.stdout:
+            yml_files = [f for f in find_result.stdout.strip().split('\n') if f]
+
+            # For yml files, we need to extract model names and potential test patterns
+            # This is a heuristic - we index model names that could match test name patterns
+            for yml_file in yml_files:
+                try:
+                    full_path = project_path / yml_file.lstrip('./')
+                    with open(full_path, 'r') as f:
+                        content = f.read()
+                        # Use yaml to parse and find model names
+                        import yaml
+                        data = yaml.safe_load(content)
+                        if data and isinstance(data, dict):
+                            models = data.get('models', [])
+                            for model in models:
+                                if isinstance(model, dict) and 'name' in model:
+                                    model_name = model['name']
+                                    # Store yml file for this model - tests will reference it
+                                    # We'll use this as a fallback when exact check name isn't found
+                                    check_index[f"_model_{model_name}"] = (yml_file.lstrip('./'), 1)
+                except Exception as e:
+                    continue
+
+        print(f"[Check Index] Built index with {len(check_index)} entries", file=sys.stderr, flush=True)
+        return check_index
+
+    except Exception as e:
+        print(f"[Check Index] Error building index: {e}", file=sys.stderr, flush=True)
+        return {}
+
+
 @router.get("/definitions/{project_id}/search/{primitive_type}/{name}")
 async def search_primitive_definition(project_id: str, primitive_type: str, name: str):
     """
@@ -530,7 +756,8 @@ async def list_all_definitions(project_id: str):
     This endpoint discovers ALL primitives in the project, not just those created
     through the template system.
 
-    Results are cached for 10 seconds to improve performance.
+    Results are cached and shared with asset introspection for optimal performance.
+    Uses a lock to prevent multiple simultaneous dg list defs calls.
 
     Args:
         project_id: Project ID
@@ -539,27 +766,54 @@ async def list_all_definitions(project_id: str):
         All definitions discovered in the project
     """
     try:
-        # Check cache first
+        # First, try to use the shared asset introspection service
+        # This service uses locking to prevent multiple simultaneous dg list defs calls
+        from ..services.asset_introspection_service import asset_introspection_service, _assets_cache
+        import sys
+
         current_time = time.time()
+
+        # Check if cache exists and is fresh
+        if project_id in _assets_cache:
+            cache_time, cached_defs = _assets_cache[project_id]
+            age = current_time - cache_time
+            if age < 60:  # 60 second cache from asset introspection
+                print(f"[Definitions] Using shared asset cache for project {project_id} (age: {age:.1f}s)", file=sys.stderr, flush=True)
+
+                # Extract definitions from cached data
+                result_data = {
+                    "project_id": project_id,
+                    "jobs": cached_defs.get("jobs", []),
+                    "schedules": cached_defs.get("schedules", []),
+                    "sensors": cached_defs.get("sensors", []),
+                    "asset_checks": cached_defs.get("asset_checks", []),
+                }
+
+                # Also cache in local definitions cache for consistency
+                _definitions_cache[project_id] = (cache_time, result_data)
+                return result_data
+
+        # Check local cache if not in shared cache
         if project_id in _definitions_cache:
             cache_time, cached_data = _definitions_cache[project_id]
             age = current_time - cache_time
             if age < CACHE_TTL_SECONDS:
-                import sys
                 print(f"[Definitions] Returning cached data for project {project_id} (age: {age:.1f}s)", file=sys.stderr, flush=True)
                 return cached_data
 
-        # Get project path
-        project_file = (settings.projects_dir / f"{project_id}.json").resolve()
-        if not project_file.exists():
+        # No cache found - need to run dg list defs
+        # Use the asset introspection service which has locking to prevent simultaneous calls
+        print(f"[Definitions] Cache miss for project {project_id}, using asset introspection service with locking", file=sys.stderr, flush=True)
+
+        # Get project to pass to asset introspection service
+        from ..services.project_service import project_service
+        project = project_service.get_project(project_id)
+
+        if not project:
             raise HTTPException(status_code=404, detail=f"Project {project_id} not found")
 
-        # Read project metadata to get directory name
-        with open(project_file, 'r') as f:
-            project_data = json.load(f)
-
-        directory_name = project_data.get("directory_name", project_id)
-        project_path = (settings.projects_dir / directory_name).resolve()
+        # Get project path
+        project_path = settings.projects_dir / project.directory_name if project.directory_name else settings.projects_dir / project_id
 
         if not project_path.exists():
             raise HTTPException(status_code=404, detail=f"Project directory not found")
@@ -567,43 +821,8 @@ async def list_all_definitions(project_id: str):
         # Check for venv
         venv_dg = project_path / ".venv" / "bin" / "dg"
         if not venv_dg.exists():
-            raise HTTPException(
-                status_code=500,
-                detail="Project virtual environment not found. dg command not available."
-            )
-
-        # Run dg list defs --json with clean environment
-        # Set PATH to prioritize project's venv to avoid conflicts with system packages
-        import os
-        env = os.environ.copy()
-        # Remove VIRTUAL_ENV and other Python paths from parent process
-        env.pop('VIRTUAL_ENV', None)
-        env.pop('PYTHONPATH', None)
-        env.pop('PYTHONHOME', None)
-        # Prepend project's venv bin to PATH so dbt command uses correct version
-        project_venv_bin = str(project_path / ".venv" / "bin")
-        env['PATH'] = f"{project_venv_bin}:{env.get('PATH', '')}"
-
-        import sys
-        print(f"[Definitions] Running dg list defs for project {project_id}...", file=sys.stderr, flush=True)
-
-        result = subprocess.run(
-            [str(venv_dg), "list", "defs", "--json"],
-            cwd=str(project_path),
-            capture_output=True,
-            text=True,
-            timeout=15,  # Reduced from 30 to 15 seconds
-            env=env,
-        )
-
-        print(f"[Definitions] Command completed with return code {result.returncode}", file=sys.stderr, flush=True)
-
-        if result.returncode != 0:
-            print(f"[Definitions] dg list defs failed with return code {result.returncode}", file=sys.stderr, flush=True)
-            print(f"[Definitions] Error output: {result.stderr}", file=sys.stderr, flush=True)
-
-            # FALLBACK: Parse YAML files directly to show what user created
-            print(f"[Definitions] Using YAML fallback to parse automations...", file=sys.stderr, flush=True)
+            # FALLBACK: Parse YAML files directly
+            print(f"[Definitions] No venv found, using YAML fallback", file=sys.stderr, flush=True)
             yaml_data = _parse_automations_from_yaml(project_path)
 
             result_data = {
@@ -612,40 +831,95 @@ async def list_all_definitions(project_id: str):
                 "schedules": yaml_data.get("schedules", []),
                 "sensors": yaml_data.get("sensors", []),
                 "asset_checks": [],
-                "validation_error": result.stderr,  # Include error message
-                "using_fallback": True  # Flag to indicate data is from YAML, not introspection
+                "validation_error": "Project virtual environment not found",
+                "using_fallback": True
+            }
+
+            # Cache the fallback results
+            _definitions_cache[project_id] = (time.time(), result_data)
+            return result_data
+
+        # Use the asset introspection service's async method with locking
+        try:
+            print(f"[Definitions] Calling asset_introspection_service._run_dg_list_defs_async for project {project_id}...", file=sys.stderr, flush=True)
+            defs = await asset_introspection_service._run_dg_list_defs_async(project, project_path)
+            print(f"[Definitions] Successfully got definitions from asset introspection service", file=sys.stderr, flush=True)
+        except Exception as e:
+            # FALLBACK: Parse YAML files directly to show what user created
+            print(f"[Definitions] dg list defs failed, using YAML fallback: {e}", file=sys.stderr, flush=True)
+            yaml_data = _parse_automations_from_yaml(project_path)
+
+            result_data = {
+                "project_id": project_id,
+                "jobs": yaml_data.get("jobs", []),
+                "schedules": yaml_data.get("schedules", []),
+                "sensors": yaml_data.get("sensors", []),
+                "asset_checks": [],
+                "validation_error": str(e),
+                "using_fallback": True
             }
 
             # Cache the fallback results too
             _definitions_cache[project_id] = (time.time(), result_data)
-            print(f"[Definitions] Cached fallback results for project {project_id}", file=sys.stderr, flush=True)
-
             return result_data
-
-        # Parse JSON output
-        defs = json.loads(result.stdout)
 
         # Resolve sources to actual file locations for checks that point to defs.yaml
         # This includes both dbt tests and community component checks
+        # OPTIMIZED: Build index once, then lookup each check (much faster than individual find/grep)
         asset_checks = defs.get("asset_checks", [])
-        for check in asset_checks:
-            source = check.get("source", "")
-            # Check if source points to defs.yaml (could be dbt test or community component)
-            if source and "defs.yaml" in source:
-                # Try to find the actual definition file
-                try:
-                    # For dbt tests, search for the .sql test file
-                    # For community components, find the defs.yaml with full path
-                    search_result = _search_primitive_definition_internal(
-                        project_id, "asset_check", check["name"]
-                    )
-                    if search_result["found"] and search_result.get("file_path"):
-                        # Update source to point to actual file (either .sql for dbt or full path to defs.yaml)
-                        line_number = search_result.get("line_number", "")
-                        check["source"] = f"{search_result['file_path']}" + (f":{line_number}" if line_number else "")
-                except Exception as e:
-                    # If search fails, keep original source
-                    pass
+
+        # Build the check index once for all checks
+        checks_to_resolve = [c for c in asset_checks if c.get("source", "") and "defs.yaml" in c.get("source", "")]
+
+        if checks_to_resolve:
+            print(f"[Definitions] Building check index for {len(checks_to_resolve)} checks...", file=sys.stderr, flush=True)
+            start_time = time.time()
+
+            check_index = _build_asset_check_index(project_path)
+
+            elapsed = time.time() - start_time
+            print(f"[Definitions] Check index built in {elapsed:.2f}s, resolving sources...", file=sys.stderr, flush=True)
+
+            # Now resolve each check using the index (fast lookup)
+            resolved_count = 0
+            for check in checks_to_resolve:
+                check_name = check["name"]
+
+                # Direct lookup in index
+                if check_name in check_index:
+                    file_path, line_number = check_index[check_name]
+                    check["source"] = f"{file_path}:{line_number}"
+                    resolved_count += 1
+                else:
+                    # Try to find model name from test name pattern (for dbt tests)
+                    # e.g., "not_null_customer_metrics_total_orders" -> look for model "customer_metrics"
+                    test_prefixes = [
+                        'not_null_', 'unique_', 'accepted_values_', 'relationships_',
+                        'dbt_utils_accepted_range_', 'dbt_utils_expression_is_true_',
+                        'dbt_utils_recency_', 'dbt_utils_'
+                    ]
+
+                    name_without_prefix = check_name
+                    for prefix in test_prefixes:
+                        if check_name.startswith(prefix):
+                            name_without_prefix = check_name[len(prefix):]
+                            break
+
+                    # Try to extract model name (first 1-3 words)
+                    parts = name_without_prefix.split('_')
+                    for num_parts in [2, 3, 1]:
+                        if len(parts) >= num_parts:
+                            potential_model = '_'.join(parts[:num_parts])
+                            model_key = f"_model_{potential_model}"
+
+                            if model_key in check_index:
+                                file_path, _ = check_index[model_key]
+                                check["source"] = f"{file_path}:1"
+                                resolved_count += 1
+                                break
+
+            elapsed_total = time.time() - start_time
+            print(f"[Definitions] Resolved {resolved_count}/{len(checks_to_resolve)} check sources in {elapsed_total:.2f}s total", file=sys.stderr, flush=True)
 
         result_data = {
             "project_id": project_id,
@@ -661,62 +935,33 @@ async def list_all_definitions(project_id: str):
 
         return result_data
 
-    except subprocess.TimeoutExpired:
-        # FALLBACK: If command times out, still try to parse YAML
-        print(f"[Definitions] Command timed out, using YAML fallback...", file=sys.stderr, flush=True)
-        try:
-            yaml_data = _parse_automations_from_yaml(project_path)
-            return {
-                "project_id": project_id,
-                "jobs": yaml_data.get("jobs", []),
-                "schedules": yaml_data.get("schedules", []),
-                "sensors": yaml_data.get("sensors", []),
-                "asset_checks": [],
-                "validation_error": "Command timed out after 15 seconds",
-                "using_fallback": True
-            }
-        except Exception as fallback_error:
-            raise HTTPException(
-                status_code=500,
-                detail=f"Command timed out and fallback failed: {str(fallback_error)}"
-            )
-
-    except json.JSONDecodeError as e:
-        # FALLBACK: If JSON parsing fails, use YAML
-        print(f"[Definitions] JSON parse error, using YAML fallback...", file=sys.stderr, flush=True)
-        try:
-            yaml_data = _parse_automations_from_yaml(project_path)
-            return {
-                "project_id": project_id,
-                "jobs": yaml_data.get("jobs", []),
-                "schedules": yaml_data.get("schedules", []),
-                "sensors": yaml_data.get("sensors", []),
-                "asset_checks": [],
-                "validation_error": f"Failed to parse JSON output: {str(e)}",
-                "using_fallback": True
-            }
-        except Exception as fallback_error:
-            raise HTTPException(
-                status_code=500,
-                detail=f"Failed to parse definitions output: {str(e)}"
-            )
-
+    except HTTPException:
+        # Re-raise HTTP exceptions
+        raise
     except Exception as e:
         # FALLBACK: For any other error, try YAML parsing
         print(f"[Definitions] Unexpected error: {e}, attempting YAML fallback...", file=sys.stderr, flush=True)
         try:
-            yaml_data = _parse_automations_from_yaml(project_path)
-            return {
-                "project_id": project_id,
-                "jobs": yaml_data.get("jobs", []),
-                "schedules": yaml_data.get("schedules", []),
-                "sensors": yaml_data.get("sensors", []),
-                "asset_checks": [],
-                "validation_error": f"Error listing definitions: {str(e)}",
-                "using_fallback": True
-            }
+            # Get project path for fallback
+            from ..services.project_service import project_service
+            project = project_service.get_project(project_id)
+            if project:
+                project_path = settings.projects_dir / project.directory_name if project.directory_name else settings.projects_dir / project_id
+                if project_path.exists():
+                    yaml_data = _parse_automations_from_yaml(project_path)
+                    return {
+                        "project_id": project_id,
+                        "jobs": yaml_data.get("jobs", []),
+                        "schedules": yaml_data.get("schedules", []),
+                        "sensors": yaml_data.get("sensors", []),
+                        "asset_checks": [],
+                        "validation_error": f"Error listing definitions: {str(e)}",
+                        "using_fallback": True
+                    }
         except Exception as fallback_error:
-            raise HTTPException(
-                status_code=500,
-                detail=f"Failed to list definitions: {str(e)}"
-            )
+            print(f"[Definitions] Fallback also failed: {fallback_error}", file=sys.stderr, flush=True)
+
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to list definitions: {str(e)}"
+        )

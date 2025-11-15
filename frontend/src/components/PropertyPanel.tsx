@@ -15,6 +15,19 @@ const iconMap: Record<string, any> = {
   'Package': Package,
 };
 
+// Helper to check if a component is a dbt component (including custom dbt components)
+const isDbtComponentType = (componentType: string | undefined): boolean => {
+  if (!componentType) return false;
+  // Check for standard dbt component
+  if (componentType === 'dagster_dbt.DbtProjectComponent') return true;
+  // Check for custom dbt components (matches by class name, not full module path)
+  if (componentType.includes('DbtProjectWithTranslatorComponent')) return true;
+  if (componentType.includes('DbtProjectComponent')) return true;
+  // Also check the generic component catalog type
+  if (componentType === 'dagster_designer_components.DbtProjectWithTranslatorComponent') return true;
+  return false;
+};
+
 interface PropertyPanelProps {
   nodeId: string;
   onConfigureComponent?: (component: ComponentInstance) => void;
@@ -41,8 +54,20 @@ export function PropertyPanel({ nodeId, onConfigureComponent, onOpenFile }: Prop
       return;
     }
 
-    if (sourceComponentId.startsWith('community_')) {
-      // Community component - load from backend
+    // First try to find component in project.components (works for both regular and community)
+    // Community components have the 'community_' prefix stripped from their ID in the components list
+    const componentId = sourceComponentId.startsWith('community_')
+      ? sourceComponentId.replace('community_', '')
+      : sourceComponentId;
+
+    const comp = currentProject?.components.find((c) => c.id === componentId);
+
+    if (comp) {
+      // Found in components list - use it directly (has correct label)
+      setSourceComponent(comp);
+      setLoadingCommunityComponent(false);
+    } else if (sourceComponentId.startsWith('community_')) {
+      // Community component not in list - load from backend as fallback
       const componentName = sourceComponentId.replace('community_', '');
       setLoadingCommunityComponent(true);
 
@@ -52,7 +77,7 @@ export function PropertyPanel({ nodeId, onConfigureComponent, onOpenFile }: Prop
           setSourceComponent({
             id: sourceComponentId,
             component_type: data.component_type,
-            label: node.data.label || componentName,
+            label: data.display_name || componentName.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase()),
             attributes: data.attributes || {},
           });
         })
@@ -64,11 +89,10 @@ export function PropertyPanel({ nodeId, onConfigureComponent, onOpenFile }: Prop
           setLoadingCommunityComponent(false);
         });
     } else {
-      // Regular component from project.components
-      const comp = currentProject?.components.find((c) => c.id === sourceComponentId) || null;
-      setSourceComponent(comp);
+      setSourceComponent(null);
+      setLoadingCommunityComponent(false);
     }
-  }, [isAssetNode, sourceComponentId, currentProject?.id, node?.data.label, nodeId]);
+  }, [isAssetNode, sourceComponentId, currentProject?.id, currentProject?.components, nodeId]);
 
   const { data: componentSchema } = useComponent(node?.data.component_type || '');
 
@@ -127,7 +151,7 @@ export function PropertyPanel({ nodeId, onConfigureComponent, onOpenFile }: Prop
 
       try {
         // Check if this asset is from a dbt component and has customizations
-        const isDbtAsset = sourceComponent?.component_type === 'dagster_dbt.DbtProjectComponent';
+        const isDbtAsset = isDbtComponentType(sourceComponent?.component_type);
         const assetKey = node.data.asset_key || node.id;
 
         // Check if metadata has changed from original
@@ -377,7 +401,7 @@ export function PropertyPanel({ nodeId, onConfigureComponent, onOpenFile }: Prop
 
         <div className="flex-1 overflow-y-auto p-4 space-y-4">
           {/* dbt Asset Notice */}
-          {sourceComponent?.component_type === 'dagster_dbt.DbtProjectComponent' && (
+          {isDbtComponentType(sourceComponent?.component_type) && (
             <div className="text-xs bg-blue-50 border border-blue-200 rounded-md p-3">
               <div className="flex items-start space-x-2">
                 <div className="flex-shrink-0 mt-0.5">
@@ -407,7 +431,7 @@ export function PropertyPanel({ nodeId, onConfigureComponent, onOpenFile }: Prop
           </div>
 
           {/* dbt Model Source - Link to SQL file */}
-          {node.data.source && node.data.kinds?.includes('dbt') && sourceComponent?.component_type === 'dagster_dbt.DbtProjectComponent' && (
+          {node.data.source && node.data.kinds?.includes('dbt') && isDbtComponentType(sourceComponent?.component_type) && (
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">
                 dbt Model

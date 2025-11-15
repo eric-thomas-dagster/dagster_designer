@@ -471,10 +471,17 @@ export function PipelineBuilder() {
       const firstSchedule = triggers.find(t => t.type === 'schedule');
       const firstSensor = triggers.find(t => t.type === 'sensor');
 
+      // Convert node IDs to asset keys
+      const assetKeys = Array.from(selectedAssets)
+        .map(nodeId => {
+          const node = allAssets.find(n => n.id === nodeId);
+          return node?.data?.asset_key || nodeId;
+        });
+
       const response = await pipelinesApi.create(currentProject.id, {
         name: pipelineName,
         description: pipelineDescription,
-        asset_selection: Array.from(selectedAssets),
+        asset_selection: assetKeys,
         trigger_type: triggers.length === 0 ? 'manual' : firstSchedule ? 'schedule' : 'sensor',
         cron_schedule: firstSchedule?.cronSchedule,
         sensor_config: firstSensor?.sensorConfig || sensorConfig,

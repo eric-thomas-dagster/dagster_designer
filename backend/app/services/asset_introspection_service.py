@@ -19,12 +19,23 @@ from .codegen_service import CodegenService
 _assets_cache: Dict[str, Tuple[float, dict]] = {}
 CACHE_TTL_SECONDS = 60  # Cache results for 60 seconds (increased from 10s for better performance)
 
+# Lock to prevent multiple simultaneous dg list defs calls for the same project
+# This prevents the race condition where lineage and automations both try to run dg list defs
+_introspection_locks: Dict[str, asyncio.Lock] = {}
+
 
 class AssetIntrospectionService:
     """Service for discovering assets from Dagster components."""
 
     def __init__(self):
         self.codegen_service = CodegenService()
+
+    def _is_running(self, project_id: str) -> bool:
+        """Check if asset introspection is currently running for a project."""
+        if project_id not in _introspection_locks:
+            return False
+        lock = _introspection_locks[project_id]
+        return lock.locked()
 
     def _get_project_dir(self, project: Project) -> Path:
         """Get the directory path for a project.
@@ -136,7 +147,7 @@ class AssetIntrospectionService:
                     capture_output=True,
                     text=True,
                     check=True,
-                    timeout=15,  # Reduced from 30 to 15 seconds
+                    timeout=180,  # 180 seconds for massive dbt projects
                 )
                 print(f"[Asset Introspection] Command completed successfully", flush=True)
             else:
@@ -148,7 +159,7 @@ class AssetIntrospectionService:
                     capture_output=True,
                     text=True,
                     check=True,
-                    timeout=15,  # Reduced from 30 to 15 seconds
+                    timeout=180,  # 180 seconds for massive dbt projects
                 )
                 print(f"[Asset Introspection] Command completed successfully", flush=True)
 
@@ -179,6 +190,8 @@ class AssetIntrospectionService:
     async def _run_dg_list_defs_async(self, project: Project, project_dir: Path) -> dict[str, Any]:
         """Run dg list defs command asynchronously (non-blocking).
 
+        Uses a lock to prevent multiple simultaneous calls for the same project.
+
         Args:
             project: The project to introspect
             project_dir: Directory containing the Dagster project
@@ -186,7 +199,7 @@ class AssetIntrospectionService:
         Returns:
             Parsed JSON data from dg list defs
         """
-        # Check cache first
+        # Check cache first (before acquiring lock for better performance)
         current_time = time.time()
         if project.id in _assets_cache:
             cache_time, cached_data = _assets_cache[project.id]
@@ -195,85 +208,102 @@ class AssetIntrospectionService:
                 print(f"[Asset Introspection] Returning cached data for project {project.id} (age: {age:.1f}s)", flush=True)
                 return cached_data
 
-        # Get the path to dg in the project's virtualenv
-        venv_dir = project_dir / ".venv"
-        if sys.platform == "win32":
-            dg_path = venv_dir / "Scripts" / "dg.exe"
-        else:
-            dg_path = venv_dir / "bin" / "dg"
+        # Get or create a lock for this project
+        if project.id not in _introspection_locks:
+            _introspection_locks[project.id] = asyncio.Lock()
 
-        # Fall back to system dg if venv doesn't exist
-        if not dg_path.exists():
-            print(f"Project virtualenv dg not found at {dg_path}, falling back to system dg")
-            dg_cmd = "dg"
-        else:
-            dg_cmd = str(dg_path)
+        lock = _introspection_locks[project.id]
 
-        try:
-            print(f"[Asset Introspection] Running dg list defs ASYNC for project {project.id}...", flush=True)
+        # Acquire the lock to prevent multiple simultaneous dg list defs calls
+        async with lock:
+            # Check cache again after acquiring lock (another call might have populated it)
+            current_time = time.time()
+            if project.id in _assets_cache:
+                cache_time, cached_data = _assets_cache[project.id]
+                age = current_time - cache_time
+                if age < CACHE_TTL_SECONDS:
+                    print(f"[Asset Introspection] Returning cached data for project {project.id} after lock (age: {age:.1f}s)", flush=True)
+                    return cached_data
 
-            # If using project venv, we need to activate it first
-            if dg_path.exists():
-                # Run with venv activated using bash -c (use absolute paths for both)
-                dg_abs_path = str(dg_path.resolve())
-                cmd = f"source {str(venv_dir.resolve())}/bin/activate && {dg_abs_path} list defs --json"
-
-                proc = await asyncio.create_subprocess_shell(
-                    cmd,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                    cwd=str(project_dir.resolve())
-                )
+            # Get the path to dg in the project's virtualenv
+            venv_dir = project_dir / ".venv"
+            if sys.platform == "win32":
+                dg_path = venv_dir / "Scripts" / "dg.exe"
             else:
-                # Fallback to system dg (already in PATH)
-                proc = await asyncio.create_subprocess_exec(
-                    dg_cmd, "list", "defs", "--json",
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                    cwd=str(project_dir.resolve())
-                )
+                dg_path = venv_dir / "bin" / "dg"
 
-            # Wait for completion with timeout
+            # Fall back to system dg if venv doesn't exist
+            if not dg_path.exists():
+                print(f"Project virtualenv dg not found at {dg_path}, falling back to system dg")
+                dg_cmd = "dg"
+            else:
+                dg_cmd = str(dg_path)
+
             try:
-                stdout, stderr = await asyncio.wait_for(
-                    proc.communicate(),
-                    timeout=30.0  # 30 second timeout
-                )
-            except asyncio.TimeoutError:
-                proc.kill()
-                await proc.wait()
-                error_msg = "dg list defs timed out after 30 seconds"
+                print(f"[Asset Introspection] Running dg list defs ASYNC for project {project.id}...", flush=True)
+
+                # If using project venv, we need to activate it first
+                if dg_path.exists():
+                    # Run with venv activated using bash -c (use absolute paths for both)
+                    dg_abs_path = str(dg_path.resolve())
+                    cmd = f"source {str(venv_dir.resolve())}/bin/activate && {dg_abs_path} list defs --json"
+
+                    proc = await asyncio.create_subprocess_shell(
+                        cmd,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                        cwd=str(project_dir.resolve())
+                    )
+                else:
+                    # Fallback to system dg (already in PATH)
+                    proc = await asyncio.create_subprocess_exec(
+                        dg_cmd, "list", "defs", "--json",
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                        cwd=str(project_dir.resolve())
+                    )
+
+                # Wait for completion with timeout
+                try:
+                    stdout, stderr = await asyncio.wait_for(
+                        proc.communicate(),
+                        timeout=180.0  # 180 second timeout for massive dbt projects
+                    )
+                except asyncio.TimeoutError:
+                    proc.kill()
+                    await proc.wait()
+                    error_msg = "dg list defs timed out after 180 seconds"
+                    print(f"❌ {error_msg}", flush=True)
+                    raise RuntimeError(error_msg)
+
+                if proc.returncode != 0:
+                    error_msg = f"dg list defs failed with return code {proc.returncode}"
+                    if stderr:
+                        error_msg += f"\nStderr: {stderr.decode()}"
+                    if stdout:
+                        error_msg += f"\nStdout: {stdout.decode()}"
+                    print(f"❌ {error_msg}", flush=True)
+                    raise RuntimeError(error_msg)
+
+                print(f"[Asset Introspection] Command completed successfully", flush=True)
+
+                # Parse and cache the results
+                assets_data = json.loads(stdout.decode())
+                _assets_cache[project.id] = (time.time(), assets_data)
+                print(f"[Asset Introspection] Cached results for project {project.id}", flush=True)
+
+                return assets_data
+
+            except json.JSONDecodeError as e:
+                error_msg = f"Failed to parse dg list defs output: {e}"
                 print(f"❌ {error_msg}", flush=True)
-                raise RuntimeError(error_msg)
-
-            if proc.returncode != 0:
-                error_msg = f"dg list defs failed with return code {proc.returncode}"
-                if stderr:
-                    error_msg += f"\nStderr: {stderr.decode()}"
-                if stdout:
-                    error_msg += f"\nStdout: {stdout.decode()}"
-                print(f"❌ {error_msg}", flush=True)
-                raise RuntimeError(error_msg)
-
-            print(f"[Asset Introspection] Command completed successfully", flush=True)
-
-            # Parse and cache the results
-            assets_data = json.loads(stdout.decode())
-            _assets_cache[project.id] = (time.time(), assets_data)
-            print(f"[Asset Introspection] Cached results for project {project.id}", flush=True)
-
-            return assets_data
-
-        except json.JSONDecodeError as e:
-            error_msg = f"Failed to parse dg list defs output: {e}"
-            print(f"❌ {error_msg}", flush=True)
-            raise RuntimeError(error_msg) from e
+                raise RuntimeError(error_msg) from e
 
     async def get_assets_for_project_async(self, project: Project, recalculate_layout: bool = False) -> tuple[list[GraphNode], list[GraphEdge]]:
         """Async version of get_assets_for_project. Non-blocking!
 
         Args:
-            project: Project to introspect
+            project: Project to introspect (will be modified to store discovered primitives)
             recalculate_layout: If True, recalculates all node positions instead of preserving existing ones
 
         Returns:
@@ -294,6 +324,17 @@ class AssetIntrospectionService:
 
             # Parse assets and create nodes/edges
             nodes, edges = self._parse_assets_data(assets_data, project, existing_positions)
+
+            # Store discovered primitives (schedules/sensors/jobs) in project
+            # These will be saved to the project JSON for instant loading
+            project.discovered_primitives = {
+                "schedules": assets_data.get("schedules", []),
+                "sensors": assets_data.get("sensors", []),
+                "jobs": assets_data.get("jobs", []),
+            }
+            print(f"[Asset Introspection] Stored {len(project.discovered_primitives.get('schedules', []))} schedules, "
+                  f"{len(project.discovered_primitives.get('sensors', []))} sensors, "
+                  f"{len(project.discovered_primitives.get('jobs', []))} jobs", flush=True)
 
             # Mark which edges are custom (from custom_lineage)
             custom_edge_keys = set()
@@ -480,7 +521,12 @@ class AssetIntrospectionService:
 
                 for comp_id, comp in component_map.items():
                     # Check for dbt assets (must have "dbt" in kinds)
-                    if comp.component_type.startswith("dagster_dbt"):
+                    # Matches both dagster_dbt.DbtProjectComponent and DbtProjectWithTranslatorComponent
+                    is_dbt_component = (
+                        comp.component_type.startswith("dagster_dbt") or
+                        "DbtProject" in comp.component_type
+                    )
+                    if is_dbt_component:
                         # ONLY assign if "dbt" is explicitly in kinds
                         if "dbt" in kinds:
                             # Check if this asset is excluded from this component

@@ -7,6 +7,7 @@ from .asset_check import AssetCheckComponent
 from .python_asset import PythonAssetComponent
 from .sql_asset import SQLAssetComponent
 from .dbt_translator import ResourceTypePrefixTranslator
+from .dbt_project_with_translator import DbtProjectWithTranslatorComponent
 
 __all__ = [
     "ScheduleComponent",
@@ -16,4 +17,5 @@ __all__ = [
     "PythonAssetComponent",
     "SQLAssetComponent",
     "ResourceTypePrefixTranslator",
+    "DbtProjectWithTranslatorComponent",
 ]

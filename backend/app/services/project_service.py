@@ -7,12 +7,19 @@ import toml
 import sys
 import venv
 import yaml
+import asyncio
 from pathlib import Path
 from datetime import datetime
+from typing import Dict, Tuple
 
 from ..core.config import settings
 from ..models.project import Project, ProjectCreate, ProjectUpdate
 from .component_registry import component_registry
+
+# Track dependency installation status for each project
+# {project_id: {'status': 'installing|success|error', 'error': str|None, 'output': str|None}}
+_dependency_status: Dict[str, Dict[str, str]] = {}
+_dependency_locks: Dict[str, asyncio.Lock] = {}
 
 
 class ProjectService:
@@ -98,6 +105,9 @@ class ProjectService:
 
         project_id = str(uuid.uuid4())
         print(f"📋 Generated project ID: {project_id}")
+        if project_create.git_repo:
+            print(f"🔗 Git repo URL: {project_create.git_repo}")
+            print(f"🌿 Git branch: {project_create.git_branch}")
 
         project = Project(
             id=project_id,
@@ -121,6 +131,7 @@ class ProjectService:
                 print(f"📦 Cloning git repository to temporary location...")
 
                 # Parse the GitHub URL to extract repo, branch, and subdirectory
+                print(f"🔗🔗🔗 RAW GIT URL RECEIVED: {project.git_repo}")
                 parsed = GitService.parse_github_url(project.git_repo)
                 repo_url = parsed['repo_url']
                 branch = parsed['branch'] if parsed['branch'] != 'main' else project.git_branch
@@ -128,6 +139,7 @@ class ProjectService:
 
                 print(f"   URL: {repo_url}")
                 print(f"   Branch: {branch}")
+                print(f"🔗🔗🔗 PARSED SUBDIRECTORY: {subdir}")
                 if subdir:
                     print(f"   Subdirectory: {subdir}")
 
@@ -227,19 +239,92 @@ class ProjectService:
 
                         # Add dbt component with translator to resolve key conflicts
                         from ..models.component import ComponentInstance
+                        # Use directory name as module name (with hyphens replaced by underscores)
+                        full_module_name = project.directory_name.replace("-", "_")
+                        component_module = f"{full_module_name}.dagster_designer_components.DbtProjectWithTranslatorComponent"
                         dbt_component = ComponentInstance(
                             id=f"dbt-{uuid.uuid4().hex[:8]}",
-                            component_type="dagster_dbt.DbtProjectComponent",
+                            component_type=component_module,
                             label=f"{project.name} dbt",
                             attributes={
                                 "project": target_name,
-                                "dagster_dbt_translator": "{{ project_module }}.dagster_designer_components.dbt_translator.ResourceTypePrefixTranslator",
                             },
                             is_asset_factory=True,
                         )
                         project.components.append(dbt_component)
                         # Create/enhance profiles.yml and .env for dbt
                         self._create_dbt_profiles(dbt_target_dir, project_dir)
+
+                        # Generate YAML files for all components
+                        print(f"📝 Generating component YAML files...")
+                        self._generate_component_yaml_files(project)
+
+                        # Generate definitions.py with asset customizations
+                        print(f"📝 Generating definitions.py...")
+                        self._generate_definitions_with_asset_customizations(project)
+
+                        self._save_project(project)
+                    elif project_type == "multi-dbt":
+                        # Multiple dbt projects detected - scaffold Dagster project and create components for each
+                        print(f"ℹ️  Multiple dbt projects detected - creating components for each...")
+                        dbt_projects = self._find_dbt_projects_recursive(analyze_dir)
+
+                        if dbt_projects:
+                            print(f"📦 Found {len(dbt_projects)} dbt projects:")
+                            # Store relative paths BEFORE moving the directory
+                            dbt_project_relative_paths = []
+                            for dbt_proj in dbt_projects:
+                                rel_path = dbt_proj.relative_to(analyze_dir)
+                                dbt_project_relative_paths.append(rel_path)
+                                print(f"   - {rel_path}")
+
+                            # Scaffold Dagster wrapper project
+                            self._scaffold_project_with_create_dagster(project)
+                            self._save_project(project)
+
+                            # Move the repository to the project directory
+                            project_dir = self._get_project_dir(project)
+                            target_dir = project_dir / repo_name
+                            print(f"📁 Moving repository to {target_dir}")
+                            shutil.move(str(analyze_dir), str(target_dir))
+
+                            # Create a component for each dbt project found
+                            from ..models.component import ComponentInstance
+                            # Use directory name as module name (with hyphens replaced by underscores)
+                            full_module_name = project.directory_name.replace("-", "_")
+                            component_module = f"{full_module_name}.dagster_designer_components.DbtProjectWithTranslatorComponent"
+
+                            print(f"📦 Creating {len(dbt_project_relative_paths)} dbt components...")
+                            for relative_path in dbt_project_relative_paths:
+                                component_path = repo_name / relative_path
+                                component_name = relative_path.name
+
+                                print(f"📦 Creating dbt component for: {component_path}")
+
+                                dbt_component = ComponentInstance(
+                                    id=f"dbt-{uuid.uuid4().hex[:8]}",
+                                    component_type=component_module,
+                                    label=f"{component_name}",
+                                    attributes={
+                                        "project": str(component_path),
+                                    },
+                                    is_asset_factory=True,
+                                )
+                                project.components.append(dbt_component)
+
+                                # Create/enhance profiles.yml for this dbt project
+                                dbt_target_dir = project_dir / component_path
+                                self._create_dbt_profiles(dbt_target_dir, project_dir)
+
+                            # Generate YAML files for all components
+                            print(f"📝 Generating component YAML files...")
+                            self._generate_component_yaml_files(project)
+
+                            # Generate definitions.py with asset customizations
+                            print(f"📝 Generating definitions.py...")
+                            self._generate_definitions_with_asset_customizations(project)
+
+                            self._save_project(project)
                     else:
                         # Unknown project type - check for multiple dbt projects in subdirectories
                         print(f"ℹ️  Unknown project type - checking for dbt projects in subdirectories...")
@@ -262,6 +347,10 @@ class ProjectService:
 
                             # Create a component for each dbt project found
                             from ..models.component import ComponentInstance
+                            # Use directory name as module name (with hyphens replaced by underscores)
+                            full_module_name = project.directory_name.replace("-", "_")
+                            component_module = f"{full_module_name}.dagster_designer_components.DbtProjectWithTranslatorComponent"
+
                             for dbt_project_path in dbt_projects:
                                 # Calculate relative path from the target_dir
                                 relative_path = dbt_project_path.relative_to(analyze_dir)
@@ -272,11 +361,10 @@ class ProjectService:
 
                                 dbt_component = ComponentInstance(
                                     id=f"dbt-{uuid.uuid4().hex[:8]}",
-                                    component_type="dagster_dbt.DbtProjectComponent",
+                                    component_type=component_module,
                                     label=f"{component_name}",
                                     attributes={
                                         "project": str(component_path),
-                                        "dagster_dbt_translator": "{{ project_module }}.dagster_designer_components.dbt_translator.ResourceTypePrefixTranslator",
                                     },
                                     is_asset_factory=True,
                                 )
@@ -285,6 +373,16 @@ class ProjectService:
                                 # Create/enhance profiles.yml for this dbt project
                                 dbt_target_dir = project_dir / component_path
                                 self._create_dbt_profiles(dbt_target_dir, project_dir)
+
+                            # Generate YAML files for all components
+                            print(f"📝 Generating component YAML files...")
+                            self._generate_component_yaml_files(project)
+
+                            # Generate definitions.py with asset customizations
+                            print(f"📝 Generating definitions.py...")
+                            self._generate_definitions_with_asset_customizations(project)
+
+                            self._save_project(project)
 
                         else:
                             # No dbt projects found - scaffold as generic wrapper
@@ -306,9 +404,10 @@ class ProjectService:
             self._scaffold_project_with_create_dagster(project)
             self._save_project(project)
 
-        # Install dependencies BEFORE scaffolding components so dg is available
-        print(f"📥 Installing project dependencies...")
-        self._install_dependencies_with_uv(project)
+        # Skip dependency installation during creation - will be done asynchronously
+        # This allows the project to be returned to the user immediately (fast!)
+        # Dependencies will be installed in the background via install_dependencies_async
+        print(f"⏭️  Skipping dependency installation during creation (will install in background)")
 
         # For existing Dagster projects, skip scaffolding/generation steps
         if not is_existing_dagster_project:
@@ -1204,6 +1303,11 @@ if custom_lineage_edges:
 
         for component in project.components:
             try:
+                # Skip custom components (they use YAML generation instead of dg scaffold)
+                if "dagster_designer_components" in component.component_type:
+                    print(f"Skipping scaffold for custom component {component.id} - will use YAML generation")
+                    continue
+
                 # Build the scaffold command based on component type
                 if component.component_type == "dagster_dbt.DbtProjectComponent":
                     # Use 'project' field (the new standard) or fall back to legacy 'project_path'
@@ -1222,58 +1326,76 @@ if custom_lineage_edges:
 
                     if result.returncode == 0:
                         print(f"Successfully scaffolded component {component.id}")
-
-                        # Add custom dbt translator to the generated YAML if configured
-                        if "dagster_dbt_translator" in component.attributes:
-                            try:
-                                # Read the project's pyproject.toml to get the module name
-                                pyproject_file = project_dir / "pyproject.toml"
-                                if pyproject_file.exists():
-                                    import toml
-                                    pyproject_data = toml.load(pyproject_file)
-                                    module_name = pyproject_data.get("project", {}).get("name", "").replace("-", "_")
-
-                                    # Resolve the {{ project_module }} template
-                                    translator_value = component.attributes["dagster_dbt_translator"]
-                                    translator_value = translator_value.replace("{{ project_module }}", module_name)
-
-                                    # Find the defs directory
-                                    src_dir = project_dir / "src" / module_name
-                                    if not src_dir.exists():
-                                        src_dir = project_dir / module_name
-                                    defs_dir = src_dir / "defs" if src_dir.exists() else project_dir / "defs"
-
-                                    # Update the YAML file
-                                    yaml_file = defs_dir / component.id / "defs.yaml"
-                                    if yaml_file.exists():
-                                        import yaml
-                                        with open(yaml_file, 'r') as f:
-                                            yaml_data = yaml.safe_load(f)
-
-                                        # Add the translator to attributes
-                                        if 'attributes' not in yaml_data:
-                                            yaml_data['attributes'] = {}
-                                        yaml_data['attributes']['dagster_dbt_translator'] = translator_value
-
-                                        with open(yaml_file, 'w') as f:
-                                            yaml.dump(yaml_data, f, default_flow_style=False, sort_keys=False)
-
-                                        print(f"✅ Added custom dbt translator to {component.id}")
-                            except Exception as e:
-                                print(f"⚠️  Failed to add translator to {component.id}: {e}")
                     else:
                         print(f"Failed to scaffold component {component.id}: {result.stderr}")
 
             except Exception as e:
                 print(f"Error scaffolding component {component.id}: {e}")
 
-    def _install_dependencies_with_uv(self, project: Project):
-        """Install dependencies using uv."""
+    async def install_dependencies_async(self, project: Project):
+        """Install dependencies asynchronously in the background.
+
+        This allows the project to be returned to the user immediately while
+        dependencies are installed in the background. Status is tracked in _dependency_status.
+        """
+        # Get or create lock for this project
+        if project.id not in _dependency_locks:
+            _dependency_locks[project.id] = asyncio.Lock()
+
+        async with _dependency_locks[project.id]:
+            # Set status to installing
+            _dependency_status[project.id] = {'status': 'installing', 'error': None, 'output': ''}
+            print(f"🔄 [ASYNC] Starting dependency installation for project {project.id}...")
+
+            try:
+                # Run the synchronous install in a thread pool to not block
+                loop = asyncio.get_event_loop()
+                output = await loop.run_in_executor(None, self._install_dependencies_with_uv, project)
+
+                # Success!
+                _dependency_status[project.id] = {'status': 'success', 'error': None, 'output': output}
+                print(f"✅ [ASYNC] Dependencies installed successfully for project {project.id}")
+
+            except Exception as e:
+                error_msg = str(e)
+                # Get any output that was captured before the error
+                current_output = _dependency_status[project.id].get('output', '')
+                _dependency_status[project.id] = {'status': 'error', 'error': error_msg, 'output': current_output}
+                print(f"❌ [ASYNC] Failed to install dependencies for project {project.id}: {error_msg}")
+
+    def get_dependency_status(self, project_id: str) -> Dict[str, str]:
+        """Get the current dependency installation status for a project."""
+        return _dependency_status.get(project_id, {'status': 'idle', 'error': None, 'output': ''})
+
+    def _install_dependencies_with_uv(self, project: Project) -> str:
+        """Install dependencies using uv.
+
+        Returns:
+            str: Combined stdout and stderr output from all installation commands
+        """
         project_dir = self._get_project_dir(project)
+        output_lines = []
+
+        def log(msg: str):
+            """Log message to both console and output buffer"""
+            print(msg)
+            output_lines.append(msg)
+            # Update status immediately so user sees the message
+            _dependency_status[project.id]['output'] = '\n'.join(output_lines)
+
+        log(f"🔍 Starting dependency installation for project {project.id}")
+        log(f"📂 Project directory: {project_dir}")
+        log(f"⚙️  Using UV directly (not uvx) for faster performance")
+        log(f"📦 UV cache: ~/.cache/uv/ (730+ packages cached)")
 
         try:
             # First install dagster-dbt and the detected dbt adapter if we have dbt components
-            has_dbt = any(c.component_type == "dagster_dbt.DbtProjectComponent" for c in project.components)
+            # Check for both standard and custom dbt components
+            has_dbt = any(
+                c.component_type == "dagster_dbt.DbtProjectComponent" or
+                "DbtProject" in c.component_type
+                for c in project.components
+            )
 
             if has_dbt:
                 # Detect the adapter from the cloned repo
@@ -1295,90 +1417,169 @@ if custom_lineage_edges:
 
                 # Pin dbt-core to 1.10.13 to avoid uv installation bug in 1.10.14
                 # See: https://github.com/dbt-labs/dbt-core/issues/10xxx
-                print(f"Adding dagster-dbt, dbt-core==1.10.13, and {adapter_package} to dependencies...")
-                subprocess.run(
-                    ["/Users/ericthomas/.local/bin/uvx", "--with", "uv", "uv", "add", "dagster-dbt", "dbt-core==1.10.13", adapter_package],
+                log(f"📦 Step 1/3: Adding dagster-dbt, dbt-core==1.10.13, and {adapter_package}...")
+                log(f"⏳ This may take 1-3 minutes depending on network speed and number of dependencies...")
+
+                # Use subprocess.Popen for real-time output streaming
+                import time
+                import os
+                import threading
+                start_time = time.time()
+
+                # Add UV_NO_WORKSPACE to prevent scanning sibling projects
+                env = os.environ.copy()
+                env['UV_NO_WORKSPACE'] = '1'
+
+                # Add verbose flag to get more output from UV
+                # Use UV directly (not uvx) for much faster performance
+                process = subprocess.Popen(
+                    ["/Users/ericthomas/.local/bin/uv", "add", "-v", "dagster-dbt", "dbt-core==1.10.13", adapter_package],
                     cwd=str(project_dir),
-                    capture_output=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
                     text=True,
-                    timeout=300,
-                    check=True,
+                    bufsize=1,  # Line buffered
+                    env=env,
                 )
 
-            # Install all dependencies including dev dependencies (which includes dagster-dg-cli)
-            print("Installing all dependencies including dev dependencies...")
-            subprocess.run(
-                ["/Users/ericthomas/.local/bin/uvx", "--with", "uv", "uv", "sync", "--all-groups"],
+                # Add a progress indicator for when UV is silent
+                def progress_indicator():
+                    last_update = time.time()
+                    while process.poll() is None:
+                        time.sleep(10)
+                        if time.time() - start_time > 10:
+                            elapsed = int(time.time() - start_time)
+                            log(f"   ... still working ({elapsed}s elapsed)")
+
+                progress_thread = threading.Thread(target=progress_indicator, daemon=True)
+                progress_thread.start()
+
+                # Read output in real-time
+                for line in process.stdout:
+                    line = line.rstrip()
+                    if line:
+                        output_lines.append(f"   {line}")
+                        _dependency_status[project.id]['output'] = '\n'.join(output_lines)
+
+                process.wait(timeout=300)
+                elapsed = time.time() - start_time
+                log(f"✅ Package addition completed in {elapsed:.1f}s")
+
+                if process.returncode != 0:
+                    raise subprocess.CalledProcessError(process.returncode, process.args)
+
+                _dependency_status[project.id]['output'] = '\n'.join(output_lines)
+
+            # Install all dependencies including dev dependencies
+            # We need dagster-dg-cli (dg command) for asset introspection
+            log("📥 Step 2/3: Syncing dependencies (installing packages)...")
+            log("⏳ This may take 1-3 minutes for large projects...")
+
+            # Use subprocess.Popen for real-time output streaming
+            import time
+            import os
+            import threading
+            start_time = time.time()
+
+            # Add UV_NO_WORKSPACE to prevent scanning sibling projects
+            env = os.environ.copy()
+            env['UV_NO_WORKSPACE'] = '1'
+
+            # Add verbose flag to get more output from UV
+            # Use UV directly (not uvx) for much faster performance
+            # Install dev dependencies too (includes dagster-dg-cli which we need for `dg list defs`)
+            process = subprocess.Popen(
+                ["/Users/ericthomas/.local/bin/uv", "sync", "-v"],
                 cwd=str(project_dir),
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
                 text=True,
-                timeout=300,
-                check=True,
+                bufsize=1,  # Line buffered
+                env=env,
             )
 
-            print("Dependencies installed successfully")
+            # Add a progress indicator for when UV is silent
+            def progress_indicator():
+                while process.poll() is None:
+                    time.sleep(10)
+                    if time.time() - start_time > 10:
+                        elapsed = int(time.time() - start_time)
+                        log(f"   ... still syncing ({elapsed}s elapsed)")
 
-            # For imported projects, install dagster-webserver and project in editable mode
-            # Check if this is an imported project (has module at root, not src/)
-            src_dir = project_dir / "src"
-            is_imported = False
-            if not src_dir.exists() or not src_dir.is_dir():
-                # Check for module directory at root
-                for item in project_dir.iterdir():
-                    if item.is_dir() and not item.name.startswith('.') and item.name not in ['src', 'tests', 'dbt_project', '.venv', '__pycache__']:
-                        potential_defs_dir = item / "defs"
-                        if potential_defs_dir.exists():
-                            is_imported = True
-                            break
+            progress_thread = threading.Thread(target=progress_indicator, daemon=True)
+            progress_thread.start()
 
-            if is_imported:
-                print("Installing dagster-webserver for imported project...")
+            # Read output in real-time
+            for line in process.stdout:
+                line = line.rstrip()
+                if line:
+                    output_lines.append(f"   {line}")
+                    _dependency_status[project.id]['output'] = '\n'.join(output_lines)
 
-                # Detect the installed dagster version to install matching webserver
-                detect_version_cmd = ["bash", "-c", f"UV_PROJECT_ENVIRONMENT=.venv /Users/ericthomas/.local/bin/uvx --with uv uv pip list | grep '^dagster ' | awk '{{print $2}}'"]
-                version_result = subprocess.run(
-                    detect_version_cmd,
-                    cwd=str(project_dir),
-                    capture_output=True,
-                    text=True,
-                    timeout=30,
-                )
+            process.wait(timeout=180)
+            elapsed = time.time() - start_time
+            log(f"✅ Sync completed in {elapsed:.1f}s")
 
-                dagster_version = version_result.stdout.strip() if version_result.returncode == 0 else ""
+            if process.returncode != 0:
+                raise subprocess.CalledProcessError(process.returncode, process.args)
 
-                if dagster_version:
-                    print(f"Detected Dagster version {dagster_version}, installing matching webserver...")
-                    webserver_package = f"dagster-webserver=={dagster_version}"
-                    graphql_package = f"dagster-graphql=={dagster_version}"
-                else:
-                    print("Could not detect Dagster version, installing latest webserver...")
-                    webserver_package = "dagster-webserver"
-                    graphql_package = "dagster-graphql"
+            _dependency_status[project.id]['output'] = '\n'.join(output_lines)
 
-                subprocess.run(
-                    ["bash", "-c", f"UV_PROJECT_ENVIRONMENT=.venv /Users/ericthomas/.local/bin/uvx --with uv uv pip install {webserver_package} {graphql_package}"],
-                    cwd=str(project_dir),
-                    capture_output=True,
-                    text=True,
-                    timeout=120,
-                    check=True,
-                )
+            log("✅ Dependencies installed successfully")
 
-                print("Installing project in editable mode...")
-                subprocess.run(
-                    ["bash", "-c", f"UV_PROJECT_ENVIRONMENT=.venv /Users/ericthomas/.local/bin/uvx --with uv uv pip install -e ."],
-                    cwd=str(project_dir),
-                    capture_output=True,
-                    text=True,
-                    timeout=120,
-                    check=True,
-                )
-                print("Imported project setup complete")
+            # Skip dagster-webserver installation during project creation for faster setup
+            # It will be installed on-demand when user opens Dagster UI
+            # This saves 30-60 seconds during project creation
 
-        except subprocess.TimeoutExpired:
-            print("Timeout installing dependencies")
+            # Install project in editable mode so dg can import it
+            # This is required for both scaffolded and imported projects
+            log("📦 Step 3/3: Installing project in editable mode...")
+            log("⏳ This allows `dg list defs` to import the project module...")
+            _dependency_status[project.id]['output'] = '\n'.join(output_lines)
+
+            # Use subprocess.Popen for real-time output streaming
+            import time
+            start_time = time.time()
+            # Use UV directly (not uvx) for much faster performance
+            process = subprocess.Popen(
+                ["bash", "-c", f"UV_PROJECT_ENVIRONMENT=.venv /Users/ericthomas/.local/bin/uv pip install -e ."],
+                cwd=str(project_dir),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,  # Line buffered
+            )
+
+            # Read output in real-time
+            for line in process.stdout:
+                line = line.rstrip()
+                if line:
+                    output_lines.append(f"   {line}")
+                    _dependency_status[project.id]['output'] = '\n'.join(output_lines)
+
+            process.wait(timeout=60)
+            elapsed = time.time() - start_time
+            log(f"✅ Editable install completed in {elapsed:.1f}s")
+
+            if process.returncode != 0:
+                raise subprocess.CalledProcessError(process.returncode, process.args)
+
+            _dependency_status[project.id]['output'] = '\n'.join(output_lines)
+
+            log("✅ Project setup complete (dagster-webserver will be installed when needed)")
+
+            return '\n'.join(output_lines)
+
+        except subprocess.TimeoutExpired as e:
+            log("❌ Timeout installing dependencies")
+            if e.stdout:
+                output_lines.append(f"\nStdout before timeout:\n{e.stdout}")
+            if e.stderr:
+                output_lines.append(f"\nStderr before timeout:\n{e.stderr}")
+            raise Exception(f"Timeout installing dependencies: {e}")
         except Exception as e:
-            print(f"Error installing dependencies: {e}")
+            log(f"❌ Error installing dependencies: {e}")
+            raise
 
     def _discover_components(self, project: Project):
         """Discover existing components from defs.yaml files in the project."""
@@ -1590,6 +1791,8 @@ if custom_lineage_edges:
             "dagster_fivetran.FivetranConnector": "dagster_fivetran.FivetranConnector",
             "dagster_sling.SlingReplication": "dagster_sling.SlingReplication",
             "dagster_dlt.DltPipeline": "dagster_dlt.DltPipeline",
+            # Custom dbt component with translator (maps to itself - full path already provided)
+            f"{module_name}.dagster_designer_components.DbtProjectWithTranslatorComponent": f"{module_name}.dagster_designer_components.DbtProjectWithTranslatorComponent",
         }
 
         print(f"[YAML Generation] Processing {len(project.components)} components", flush=True)
@@ -1612,7 +1815,12 @@ if custom_lineage_edges:
         non_dbt_components = []
 
         for component in components:
-            if component.component_type.startswith("dagster_dbt"):
+            # Recognize both standard and custom dbt components
+            is_dbt_component = (
+                component.component_type.startswith("dagster_dbt") or
+                "DbtProject" in component.component_type
+            )
+            if is_dbt_component:
                 # Use 'project' field (the new standard) or fall back to legacy 'project_path'
                 project_path = component.attributes.get("project") or component.attributes.get("project_path", "")
                 if project_path:
@@ -1644,7 +1852,7 @@ if custom_lineage_edges:
             base_dbt_ids.add(base_id)
             base_comp = ComponentInstance(
                 id=base_id,
-                component_type="dagster_dbt.DbtProjectComponent",
+                component_type=first_comp.component_type,  # Preserve original type (standard or custom)
                 label=label,
                 attributes=first_comp.attributes,
                 translation=first_comp.translation,
@@ -1666,7 +1874,12 @@ if custom_lineage_edges:
                     with open(defs_yaml) as f:
                         yaml_content = yaml.safe_load(f)
                     # If it's a dbt component and not in our base list, remove it
-                    if yaml_content and yaml_content.get("type") == "dagster_dbt.DbtProjectComponent":
+                    component_type = yaml_content.get("type", "")
+                    is_dbt = (
+                        component_type == "dagster_dbt.DbtProjectComponent" or
+                        "DbtProject" in component_type
+                    )
+                    if yaml_content and is_dbt:
                         if existing_dir.name not in base_dbt_ids and existing_dir.name not in [c.id for c in non_dbt_components]:
                             print(f"[YAML Generation] Removing obsolete dbt component directory: {existing_dir}", flush=True)
                             shutil.rmtree(existing_dir)
@@ -1680,13 +1893,16 @@ if custom_lineage_edges:
             component_type = component.component_type
             print(f"[YAML Generation] Component {component.id}: type={component_type}", flush=True)
 
-            # Skip dbt components - they should be managed by dg scaffold only
-            if component_type.startswith("dagster_dbt"):
-                print(f"[YAML Generation] Skipping dbt component {component.id} - managed by dg scaffold", flush=True)
+            # Skip standard dbt components - they should be managed by dg scaffold only
+            # But DO NOT skip custom dbt components - they need YAML generation
+            if component_type == "dagster_dbt.DbtProjectComponent":
+                print(f"[YAML Generation] Skipping standard dbt component {component.id} - managed by dg scaffold", flush=True)
                 continue
 
             # Only generate YAML for components in the type map
-            if component_type not in component_type_map:
+            # Allow custom dbt components even if not explicitly in the map
+            is_custom_dbt = "DbtProject" in component_type and "dagster_designer_components" in component_type
+            if component_type not in component_type_map and not is_custom_dbt:
                 print(f"[YAML Generation] Skipping {component_type} - not in type map", flush=True)
                 continue
 
@@ -1703,10 +1919,14 @@ if custom_lineage_edges:
 
             # Use 'attributes' for dbt components (they use a different format)
             # Use 'params' for other components
-            params_key = "attributes" if component_type.startswith("dagster_dbt") else "params"
+            is_dbt_component = (
+                component_type.startswith("dagster_dbt") or
+                "DbtProject" in component_type
+            )
+            params_key = "attributes" if is_dbt_component else "params"
 
             # For dbt components, handle special field mappings and nesting translation
-            if component_type.startswith("dagster_dbt"):
+            if is_dbt_component:
                 # Create a copy of attributes
                 dbt_attributes = dict(component.attributes)
 
@@ -1718,8 +1938,10 @@ if custom_lineage_edges:
                     dbt_attributes["translation"] = component.translation
                     print(f"[YAML Generation] Adding translation inside attributes for {component.id}: {component.translation}", flush=True)
 
+                # Use component_type directly for custom dbt components, otherwise lookup in map
+                type_value = component_type if is_custom_dbt else component_type_map.get(component_type, component_type)
                 yaml_data = {
-                    "type": component_type_map[component_type],
+                    "type": type_value,
                     params_key: dbt_attributes,
                 }
             else:
@@ -2011,13 +2233,20 @@ if customizations_path.exists():
             repo_dir: Path to the cloned repository directory
 
         Returns:
+            "multi-dbt" if multiple dbt projects are found in subdirectories
             "dbt" if dbt_project.yml is found
             "dagster" if it's an existing Dagster project (definitions.py or pyproject.toml with dagster)
             "unknown" otherwise
         """
         print(f"🔍 Detecting project type in {repo_dir}...")
 
-        # Check for dbt project
+        # First check for multiple dbt projects in subdirectories
+        dbt_projects = self._find_dbt_projects_recursive(repo_dir)
+        if len(dbt_projects) > 1:
+            print(f"   Found {len(dbt_projects)} dbt projects in subdirectories - this is a multi-dbt project")
+            return "multi-dbt"
+
+        # Check for single dbt project in root
         if (repo_dir / "dbt_project.yml").exists():
             print(f"   Found dbt_project.yml - this is a dbt project")
             return "dbt"

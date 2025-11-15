@@ -25,5 +25,6 @@ mkdir -p data projects
 
 # Start the server
 echo "Starting FastAPI server on http://localhost:8000..."
-# Exclude projects/ from reload to prevent restarts during project creation
-uvicorn app.main:app --reload --reload-exclude="projects/*" --host 0.0.0.0 --port 8000
+# Disable auto-reload to prevent interrupting async background tasks (dependency installation)
+# For development: manually restart the server when you change backend code
+uvicorn app.main:app --host 0.0.0.0 --port 8000
