@@ -248,10 +248,10 @@ export function DbtCloudImportModal({ isOpen, onClose, onSuccess }: DbtCloudImpo
                     value={baseUrl}
                     onChange={(e) => setBaseUrl(e.target.value)}
                     className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-                    placeholder="https://YOUR_PREFIX.us1.dbt.com/api/v2"
+                    placeholder="https://YOUR_PREFIX.us1.dbt.com"
                   />
                   <p className="text-xs text-gray-500 mt-1">
-                    Must end with <code className="bg-gray-100 px-1 rounded">/api/v2</code> (e.g., https://lm759.us1.dbt.com/api/v2)
+                    Just paste the domain from your browser (e.g., https://lm759.us1.dbt.com)
                   </p>
                 </div>
               )}

@@ -17,10 +17,18 @@ class DbtCloudClient:
             api_key: dbt Cloud API key
             account_id: dbt Cloud account ID
             base_url: Optional custom base URL for multi-tenant accounts
-                     (e.g., https://lm759.us1.dbt.com/api/v2)
+                     (e.g., https://lm759.us1.dbt.com or https://lm759.us1.dbt.com/api/v2)
+                     Will automatically append /api/v2 if not present
         """
         self.api_key = api_key
         self.account_id = account_id
+
+        # Normalize base URL - automatically append /api/v2 if not present
+        if base_url:
+            base_url = base_url.rstrip('/')
+            if not base_url.endswith('/api/v2'):
+                base_url = f"{base_url}/api/v2"
+
         self.base_url = base_url or self.DEFAULT_BASE_URL
         self.headers = {
             "Authorization": f"Token {api_key}",
