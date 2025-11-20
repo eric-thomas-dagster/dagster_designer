@@ -17,18 +17,31 @@ class JobComponent(dg.Component, dg.Model, dg.Resolvable):
 
     def build_defs(self, context: dg.ComponentLoadContext) -> dg.Definitions:
         """Build Dagster definitions from component parameters."""
-        # Create asset selection - parse strings with slashes as multi-part keys
-        # "nba/asset1" should become AssetKey(["nba", "asset1"])
-        asset_keys = []
+        # Handle asset selection patterns
+        # Patterns like "analytics.*" should select all assets
+        # Individual keys like "my_model" should select specific assets
+        asset_selections = []
+
         for key_str in self.asset_selection:
-            if "/" in key_str:
-                # Split on slashes to create multi-part key
+            if key_str.endswith(".*"):
+                # Wildcard pattern - select all assets
+                asset_selections.append(AssetSelection.all())
+            elif "/" in key_str:
+                # Multi-part key like "path/to/asset"
                 parts = key_str.split("/")
-                asset_keys.append(dg.AssetKey(parts))
+                asset_selections.append(AssetSelection.keys(dg.AssetKey(parts)))
             else:
-                # Single-part key
-                asset_keys.append(dg.AssetKey([key_str]))
-        asset_sel = AssetSelection.keys(*asset_keys)
+                # Single-part key like "my_model"
+                asset_selections.append(AssetSelection.keys(dg.AssetKey([key_str])))
+
+        # Combine all selections
+        if len(asset_selections) == 1:
+            asset_sel = asset_selections[0]
+        else:
+            # Union of all selections
+            asset_sel = asset_selections[0]
+            for sel in asset_selections[1:]:
+                asset_sel = asset_sel | sel
 
         # Create job
         job = dg.define_asset_job(

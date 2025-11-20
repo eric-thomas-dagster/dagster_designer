@@ -4,7 +4,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from .core.config import settings
-from .api import components, projects, git, codegen, dagster, files, templates, primitives, dagster_webserver, dbt_adapters, integrations, env_vars, pipelines, templates_registry
+from .api import components, projects, git, codegen, dagster, files, templates, primitives, dagster_webserver, dbt_adapters, integrations, env_vars, pipelines, templates_registry, dbt_cloud
 
 # Create FastAPI app
 app = FastAPI(
@@ -36,6 +36,7 @@ app.include_router(integrations.router, prefix=settings.api_prefix)  # New: Inte
 app.include_router(env_vars.router, prefix=settings.api_prefix)  # New: Environment variable management
 app.include_router(pipelines.router, prefix=settings.api_prefix)  # New: Pipeline builder
 app.include_router(templates_registry.router, prefix=settings.api_prefix)  # New: Community component templates
+app.include_router(dbt_cloud.router, prefix=settings.api_prefix)  # New: dbt Cloud integration
 
 
 @app.get("/")
