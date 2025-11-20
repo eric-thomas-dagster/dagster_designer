@@ -322,7 +322,7 @@ export function ProjectManager() {
                 className="fixed inset-0 z-10"
                 onClick={() => setShowProjectMenu(false)}
               />
-              <div className="absolute right-0 mt-1 w-48 bg-white border border-gray-200 rounded-md shadow-lg z-20">
+              <div className="absolute right-0 mt-1 w-56 bg-white border border-gray-200 rounded-md shadow-lg z-20">
                 <button
                   onClick={() => {
                     setShowNewDialog(true);
