@@ -23,7 +23,7 @@ class DbtCloudProject(BaseModel):
     id: int
     name: str
     repository_url: Optional[str] = None
-    state: Optional[str] = None
+    state: Optional[Any] = None  # Can be int or string depending on dbt Cloud version
 
 
 class DbtCloudConnectionResponse(BaseModel):

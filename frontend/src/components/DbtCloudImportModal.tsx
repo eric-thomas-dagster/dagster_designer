@@ -250,6 +250,9 @@ export function DbtCloudImportModal({ isOpen, onClose, onSuccess }: DbtCloudImpo
                     className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
                     placeholder="https://YOUR_PREFIX.us1.dbt.com/api/v2"
                   />
+                  <p className="text-xs text-gray-500 mt-1">
+                    Must end with <code className="bg-gray-100 px-1 rounded">/api/v2</code> (e.g., https://lm759.us1.dbt.com/api/v2)
+                  </p>
                 </div>
               )}
 
@@ -297,9 +300,9 @@ export function DbtCloudImportModal({ isOpen, onClose, onSuccess }: DbtCloudImpo
                       </div>
                       {project.state && (
                         <span className={`text-xs px-2 py-1 rounded ${
-                          project.state === 'active' ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-700'
+                          String(project.state) === 'active' || String(project.state) === '1' ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-700'
                         }`}>
-                          {project.state}
+                          {String(project.state) === '1' ? 'active' : String(project.state)}
                         </span>
                       )}
                     </label>
