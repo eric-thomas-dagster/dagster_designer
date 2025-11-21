@@ -18,8 +18,25 @@ export const AssetNode = memo(({ data, selected, id }: NodeProps) => {
   const hasChecks = data.checks && data.checks.length > 0;
   const isSelected = selected;
 
-  // Check if this asset produces DataFrames (based on source component)
-  const producesDataFrame = data.io_output_type === 'dataframe';
+  // Detect if we're in pipeline builder mode (vertical layout with delete button)
+  const isPipelineBuilder = !!data.onDelete;
+
+  // Check if this asset has IO types
+  const outputType = data.io_output_type;
+  const inputType = data.io_input_type;
+  const inputRequired = data.io_input_required;
+
+  // Debug logging
+  if (data.asset_key === 'synth_synth') {
+    console.log('[AssetNode] synth_synth data:', {
+      io_output_type: data.io_output_type,
+      io_input_type: data.io_input_type,
+      io_input_required: data.io_input_required,
+      outputType,
+      inputType,
+      inputRequired
+    });
+  }
 
   // Truncate description to 60 characters for display
   const truncatedDescription = hasDescription
@@ -62,31 +79,22 @@ export const AssetNode = memo(({ data, selected, id }: NodeProps) => {
         </button>
       )}
 
-      {/* Input handles on all four sides */}
-      <Handle
-        type="target"
-        position={Position.Left}
-        id="left"
-        style={handleStyle}
-      />
-      <Handle
-        type="target"
-        position={Position.Top}
-        id="top"
-        style={handleStyle}
-      />
-      <Handle
-        type="target"
-        position={Position.Bottom}
-        id="bottom"
-        style={handleStyle}
-      />
-      <Handle
-        type="target"
-        position={Position.Right}
-        id="right-target"
-        style={handleStyle}
-      />
+      {/* Input handles - top/bottom for pipeline builder, left for lineage */}
+      {isPipelineBuilder ? (
+        <Handle
+          type="target"
+          position={Position.Top}
+          id="top"
+          style={handleStyle}
+        />
+      ) : (
+        <Handle
+          type="target"
+          position={Position.Left}
+          id="left"
+          style={handleStyle}
+        />
+      )}
 
       {/* Header with asset icon and key */}
       <div className="px-2 py-1.5 bg-gradient-to-r from-purple-500 to-blue-500 rounded-t-md">
@@ -173,46 +181,55 @@ export const AssetNode = memo(({ data, selected, id }: NodeProps) => {
             </div>
           )}
 
-          {/* DataFrame badge */}
-          {producesDataFrame && (
+          {/* Input type badge */}
+          {inputType && (
             <div
-              className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-medium bg-cyan-100 text-cyan-700 border border-cyan-300"
-              title="Produces DataFrame output"
+              className={`inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-medium ${
+                inputRequired
+                  ? 'bg-amber-100 text-amber-700 border border-amber-300'
+                  : 'bg-gray-100 text-gray-700 border border-gray-300'
+              }`}
+              title={inputRequired ? `Requires ${inputType} input` : `Accepts ${inputType} input (optional)`}
             >
               <svg className="w-2.5 h-2.5" fill="currentColor" viewBox="0 0 20 20">
-                <path d="M3 4a1 1 0 011-1h12a1 1 0 011 1v2a1 1 0 01-1 1H4a1 1 0 01-1-1V4zM3 10a1 1 0 011-1h12a1 1 0 011 1v6a1 1 0 01-1 1H4a1 1 0 01-1-1v-6z" />
+                <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm.707-10.293a1 1 0 00-1.414-1.414l-3 3a1 1 0 000 1.414l3 3a1 1 0 001.414-1.414L9.414 11H13a1 1 0 100-2H9.414l1.293-1.293z" clipRule="evenodd" />
               </svg>
-              <span>DataFrame</span>
+              <span>{inputType}</span>
+              {inputRequired && <span className="ml-0.5">*</span>}
+            </div>
+          )}
+
+          {/* Output type badge */}
+          {outputType && (
+            <div
+              className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-medium bg-cyan-100 text-cyan-700 border border-cyan-300"
+              title={`Produces ${outputType} output`}
+            >
+              <span>{outputType}</span>
+              <svg className="w-2.5 h-2.5" fill="currentColor" viewBox="0 0 20 20">
+                <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-8.707l-3-3a1 1 0 00-1.414 1.414L10.586 9H7a1 1 0 100 2h3.586l-1.293 1.293a1 1 0 101.414 1.414l3-3a1 1 0 000-1.414z" clipRule="evenodd" />
+              </svg>
             </div>
           )}
         </div>
       </div>
 
-      {/* Output handles on all four sides */}
-      <Handle
-        type="source"
-        position={Position.Right}
-        id="right"
-        style={handleStyle}
-      />
-      <Handle
-        type="source"
-        position={Position.Left}
-        id="left-source"
-        style={handleStyle}
-      />
-      <Handle
-        type="source"
-        position={Position.Top}
-        id="top-source"
-        style={handleStyle}
-      />
-      <Handle
-        type="source"
-        position={Position.Bottom}
-        id="bottom-source"
-        style={handleStyle}
-      />
+      {/* Output handles - bottom for pipeline builder, right for lineage */}
+      {isPipelineBuilder ? (
+        <Handle
+          type="source"
+          position={Position.Bottom}
+          id="bottom"
+          style={handleStyle}
+        />
+      ) : (
+        <Handle
+          type="source"
+          position={Position.Right}
+          id="right"
+          style={handleStyle}
+        />
+      )}
     </div>
   );
 });

@@ -187,12 +187,20 @@ export function ProjectManager() {
       // Regenerate with layout recalculation to keep the graph beautiful
       await projectsApi.regenerateAssets(currentProject.id, true);
 
-      // Update status to success
+      // Update status to success immediately after API call completes
       projectStore.assetGenerationStatus = 'success';
       projectStore.assetGenerationError = null;
 
-      // Reload project to get updated graph
-      await loadProject(currentProject.id);
+      // Reload project to get updated graph (with timeout protection)
+      const loadPromise = loadProject(currentProject.id);
+      const timeoutPromise = new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('Load timeout')), 30000)
+      );
+
+      await Promise.race([loadPromise, timeoutPromise]).catch((error) => {
+        console.error('Failed to reload project after regeneration:', error);
+        // Don't fail the whole operation if reload fails - regeneration was successful
+      });
 
       // Auto-dismiss success banner after 3 seconds
       setTimeout(() => {
@@ -208,6 +216,14 @@ export function ProjectManager() {
       // Update status to error
       projectStore.assetGenerationStatus = 'error';
       projectStore.assetGenerationError = errorMessage;
+
+      // Auto-dismiss error banner after 5 seconds
+      setTimeout(() => {
+        const currentStatus = useProjectStore.getState().assetGenerationStatus;
+        if (currentStatus === 'error') {
+          useProjectStore.getState().dismissAssetGenerationStatus();
+        }
+      }, 5000);
     } finally {
       setIsRegeneratingLineage(false);
     }

@@ -149,6 +149,107 @@ async def delete_project(project_id: str):
     return None
 
 
+@router.delete("/{project_id}/component-instances/{component_id}", response_model=Project)
+async def delete_component_instance(project_id: str, component_id: str):
+    """Delete a component instance (asset created from a component).
+
+    This removes the component instance directory (/defs/{component_id}/)
+    and regenerates assets to reflect the change.
+
+    Args:
+        project_id: The project ID
+        component_id: The component instance ID (asset name)
+    """
+    from pathlib import Path
+    import shutil
+
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    project_dir = project_service._get_project_dir(project)
+    directory_name = project.directory_name
+
+    # Try both flat and src layouts
+    flat_defs_dir = project_dir / directory_name / "defs" / component_id
+    src_defs_dir = project_dir / "src" / directory_name / "defs" / component_id
+
+    component_instance_dir = None
+    if flat_defs_dir.exists():
+        component_instance_dir = flat_defs_dir
+    elif src_defs_dir.exists():
+        component_instance_dir = src_defs_dir
+
+    if not component_instance_dir:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Component instance '{component_id}' not found"
+        )
+
+    try:
+        # Delete the component instance directory
+        shutil.rmtree(component_instance_dir)
+        print(f"[Delete Component Instance] Deleted {component_instance_dir}")
+
+        # Clear the asset introspection cache to force fresh introspection
+        asset_introspection_service.clear_cache(project.id)
+        print(f"[Delete Component Instance] Cleared asset cache for project {project.id}")
+
+        # Regenerate assets to reflect the change
+        # Get assets from dg list defs (using async version for non-blocking)
+        asset_nodes, asset_edges = await asset_introspection_service.get_assets_for_project_async(project, recalculate_layout=False)
+        print(f"[Delete Component Instance] Got {len(asset_nodes)} nodes, {len(asset_edges)} edges from introspection")
+
+        # Update project graph with assets (preserving any non-asset nodes)
+        non_asset_nodes = [n for n in project.graph.nodes if n.node_kind != "asset"]
+        project.graph.nodes = non_asset_nodes + asset_nodes
+
+        # Merge introspected edges with custom lineage edges
+        from ..models.graph import GraphEdge
+
+        # Create a map of edge IDs for quick lookup
+        edge_map = {edge.id: edge for edge in asset_edges}
+
+        # Process custom lineage edges
+        for custom_lineage in project.custom_lineage:
+            edge_id = f"{custom_lineage.source}_to_{custom_lineage.target}"
+
+            if edge_id in edge_map:
+                # Edge already exists from introspection, just mark it as custom
+                edge_map[edge_id].is_custom = True
+            else:
+                # Edge doesn't exist, create a new custom edge
+                edge_map[edge_id] = GraphEdge(
+                    id=edge_id,
+                    source=custom_lineage.source,
+                    target=custom_lineage.target,
+                    is_custom=True
+                )
+
+        # Convert edge map back to list
+        project.graph.edges = list(edge_map.values())
+
+        # Save updated project
+        updated_project = project_service.update_project(project_id, ProjectUpdate(graph=project.graph))
+
+        if not updated_project:
+            raise HTTPException(
+                status_code=500,
+                detail="Failed to save project after deletion"
+            )
+
+        return updated_project
+
+    except Exception as e:
+        print(f"[Delete Component Instance] Error: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to delete component instance: {str(e)}"
+        )
+
+
 @router.post("/{project_id}/clone-repo", response_model=CloneRepoResponse)
 async def clone_repo(project_id: str, request: CloneRepoRequest):
     """Clone a git repository for a project."""
@@ -186,6 +287,10 @@ async def regenerate_assets(project_id: str, recalculate_layout: bool = False):
         raise HTTPException(status_code=404, detail="Project not found")
 
     try:
+        # Clear cache to ensure fresh introspection
+        asset_introspection_service.clear_cache(project.id)
+        print(f"[regenerate_assets] Cleared asset cache for project {project.id}", flush=True)
+
         # Get assets from dg list defs (using async version for non-blocking)
         asset_nodes, asset_edges = await asset_introspection_service.get_assets_for_project_async(project, recalculate_layout=recalculate_layout)
         print(f"[regenerate_assets] Got {len(asset_nodes)} nodes, {len(asset_edges)} edges from introspection", flush=True)

@@ -76,6 +76,11 @@ export const projectsApi = {
     await api.delete(`/projects/${id}`);
   },
 
+  deleteComponentInstance: async (projectId: string, componentId: string) => {
+    const response = await api.delete<Project>(`/projects/${projectId}/component-instances/${componentId}`);
+    return response.data;
+  },
+
   materialize: async (projectId: string, assetKeys?: string[]) => {
     const response = await api.post<MaterializeResponse>(
       `/projects/${projectId}/materialize`,

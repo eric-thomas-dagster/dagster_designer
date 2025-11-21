@@ -66,6 +66,27 @@ export function PropertyPanel({ nodeId, onConfigureComponent, onOpenFile }: Prop
       // Found in components list - use it directly (has correct label)
       setSourceComponent(comp);
       setLoadingCommunityComponent(false);
+    } else if (sourceComponentId.includes('.components.')) {
+      // Handle case where source_component is a full component type
+      // e.g., "project_name.components.dataframe_transformer.DataFrameTransformerComponent"
+      // Extract component name from type and use asset's component data
+      const parts = sourceComponentId.split('.');
+      const componentIdx = parts.indexOf('components');
+      const componentName = componentIdx >= 0 && componentIdx + 1 < parts.length
+        ? parts[componentIdx + 1]
+        : parts[parts.length - 1] || 'Component';
+      const displayName = componentName.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
+
+      // Create a component instance from the asset's component data
+      const assetComponentId = (node as any)?.data?.component_id || node?.id;
+      setSourceComponent({
+        id: assetComponentId,
+        component_type: sourceComponentId,
+        label: displayName,
+        attributes: (node as any)?.data?.component_attributes || {},
+        is_asset_factory: false,
+      });
+      setLoadingCommunityComponent(false);
     } else if (sourceComponentId.startsWith('community_')) {
       // Community component not in list - load from backend as fallback
       const componentName = sourceComponentId.replace('community_', '');
@@ -698,6 +719,63 @@ export function PropertyPanel({ nodeId, onConfigureComponent, onOpenFile }: Prop
               <p className="text-xs text-gray-500 mt-2">
                 Click to modify the source component configuration. Changes to the component may regenerate this asset.
               </p>
+
+              {/* Delete Component Instance Button - only for non-factory components */}
+              {!sourceComponent.is_asset_factory && (
+                <div className="border-t border-red-200 pt-4 mt-4">
+                  <button
+                    onClick={async () => {
+                      if (!currentProject) return;
+
+                      // Use the component_id from node.data, which contains the actual folder name
+                      const componentId = node.data.component_id;
+                      const confirmed = window.confirm(
+                        `Are you sure you want to delete "${node.data.asset_key || node.data.label}"?\n\nThis will permanently remove the component instance and all its configuration.`
+                      );
+
+                      if (!confirmed) return;
+
+                      try {
+                        // Optimistic update: immediately remove the node from the UI
+                        const updatedNodes = currentProject.graph.nodes.filter(n => n.id !== nodeId);
+                        const updatedEdges = currentProject.graph.edges.filter(
+                          e => e.source !== nodeId && e.target !== nodeId
+                        );
+                        await updateGraph(updatedNodes, updatedEdges);
+
+                        // Call the API to delete the component instance in the background
+                        // The backend will regenerate assets and return the updated project
+                        projectsApi.deleteComponentInstance(
+                          currentProject.id,
+                          componentId
+                        ).then(async (updatedProject) => {
+                          // Reload the project to get the final state from the backend
+                          await loadProject(currentProject.id);
+                        }).catch((error) => {
+                          console.error('Failed to delete component instance:', error);
+                          // Reload to restore the correct state
+                          loadProject(currentProject.id);
+                          alert('Failed to delete component instance. The view has been restored.');
+                        });
+                      } catch (error) {
+                        console.error('Failed to update UI:', error);
+                        alert('Failed to update UI. Please try again.');
+                      }
+                    }}
+                    className="w-full p-3 bg-red-50 border-2 border-red-300 hover:border-red-500 hover:bg-red-100 rounded-lg transition-all group"
+                  >
+                    <div className="flex items-center justify-center space-x-2">
+                      <Trash2 className="w-5 h-5 text-red-600 group-hover:text-red-700" />
+                      <div className="text-sm font-semibold text-red-900 group-hover:text-red-950">
+                        Delete Component Instance
+                      </div>
+                    </div>
+                  </button>
+                  <p className="text-xs text-gray-600 mt-2 text-center">
+                    Remove this asset and its configuration permanently
+                  </p>
+                </div>
+              )}
             </div>
           )}
 

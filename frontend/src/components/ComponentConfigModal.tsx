@@ -283,13 +283,18 @@ export function ComponentConfigModal({
         }
         const componentId = parts[componentsIndex + 1];
 
+        // For single-asset components, always use asset_name as the instance name
+        const instanceName = (isCommunityComponent && hasSingleAssetField && formData.asset_name)
+          ? formData.asset_name
+          : (label || componentId);
+
         const response = await fetch(`/api/v1/templates/configure/${componentId}`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             project_id: currentProject.id,
             config: {
-              name: label || componentId,
+              name: instanceName,
               ...formData
             }
           })
@@ -728,56 +733,51 @@ export function ComponentConfigModal({
 
         {/* Body */}
         <div className="flex-1 overflow-y-auto p-6 space-y-4">
-          {/* Component Label / Instance Name */}
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">
-              {isCommunityComponent ? 'Instance Name' : 'Label'}
-              {isCommunityComponent && !hasSingleAssetField && <span className="text-red-500 ml-1">*</span>}
-              {isCommunityComponent && hasSingleAssetField && <span className="text-blue-500 ml-1 text-xs">(auto-generated from asset name)</span>}
-            </label>
-            <input
-              type="text"
-              value={label}
-              onChange={(e) => {
-                setLabel(e.target.value);
-                // Clear error when user types
-                if (instanceNameError) {
-                  setInstanceNameError(null);
-                }
-              }}
-              onBlur={(e) => {
-                // Validate on blur for multi-check components
-                if (isNew && isCommunityComponent && !hasSingleAssetField && e.target.value) {
-                  validateInstanceName(e.target.value);
-                }
-              }}
-              className={`w-full px-3 py-2 text-sm border rounded-md focus:outline-none focus:ring-2 ${
-                instanceNameError
-                  ? 'border-red-500 focus:ring-red-500'
-                  : 'border-gray-300 focus:ring-blue-500'
-              }`}
-              placeholder={isCommunityComponent ?
-                (hasSingleAssetField ? 'Will use asset name' : `Enter unique name (e.g., ${componentSchema.name.toLowerCase().replace(/\s+/g, '_')}_1)`) :
-                `${componentSchema.name} Component`}
-              required={isCommunityComponent && !hasSingleAssetField}
-              disabled={isCommunityComponent && hasSingleAssetField}
-            />
-            {instanceNameError && (
-              <p className="text-xs text-red-600 mt-1 flex items-center">
-                <span className="font-semibold mr-1">⚠</span> {instanceNameError}
-              </p>
-            )}
-            {!instanceNameError && isCommunityComponent && !hasSingleAssetField && (
-              <p className="text-xs text-gray-500 mt-1">
-                Each instance needs a unique name to avoid overwriting previous configurations
-              </p>
-            )}
-            {isCommunityComponent && hasSingleAssetField && (
-              <p className="text-xs text-blue-600 mt-1">
-                Instance name automatically matches the asset name below
-              </p>
-            )}
-          </div>
+          {/* Component Label / Instance Name - only show for non-community or multi-asset components */}
+          {(!isCommunityComponent || !hasSingleAssetField) && (
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                {isCommunityComponent ? 'Instance Name' : 'Label'}
+                {isCommunityComponent && !hasSingleAssetField && <span className="text-red-500 ml-1">*</span>}
+              </label>
+              <input
+                type="text"
+                value={label}
+                onChange={(e) => {
+                  setLabel(e.target.value);
+                  // Clear error when user types
+                  if (instanceNameError) {
+                    setInstanceNameError(null);
+                  }
+                }}
+                onBlur={(e) => {
+                  // Validate on blur for multi-check components
+                  if (isNew && isCommunityComponent && !hasSingleAssetField && e.target.value) {
+                    validateInstanceName(e.target.value);
+                  }
+                }}
+                className={`w-full px-3 py-2 text-sm border rounded-md focus:outline-none focus:ring-2 ${
+                  instanceNameError
+                    ? 'border-red-500 focus:ring-red-500'
+                    : 'border-gray-300 focus:ring-blue-500'
+                }`}
+                placeholder={isCommunityComponent ?
+                  `Enter unique name (e.g., ${componentSchema.name.toLowerCase().replace(/\s+/g, '_')}_1)` :
+                  `${componentSchema.name} Component`}
+                required={isCommunityComponent && !hasSingleAssetField}
+              />
+              {instanceNameError && (
+                <p className="text-xs text-red-600 mt-1 flex items-center">
+                  <span className="font-semibold mr-1">⚠</span> {instanceNameError}
+                </p>
+              )}
+              {!instanceNameError && isCommunityComponent && !hasSingleAssetField && (
+                <p className="text-xs text-gray-500 mt-1">
+                  Each instance needs a unique name to avoid overwriting previous configurations
+                </p>
+              )}
+            </div>
+          )}
 
           {/* Component Description */}
           <div>

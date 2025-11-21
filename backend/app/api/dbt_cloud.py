@@ -6,6 +6,7 @@ from typing import List, Dict, Optional, Any
 
 from ..services.dbt_cloud.dbt_cloud_client import DbtCloudClient
 from ..services.project_service import project_service
+from ..models.project import ProjectCreate
 from ..core.config import settings
 
 router = APIRouter(prefix="/dbt-cloud", tags=["dbt-cloud"])
@@ -163,14 +164,33 @@ async def import_dbt_cloud_projects(
         project_repos: Dict[int, str] = {}
         for proj in selected_projects:
             proj_id = proj.get("id")
+            proj_name = proj.get("name", f"project_{proj_id}")
+            print(f"[DEBUG] Processing project {proj_id} ({proj_name})")
+            print(f"[DEBUG] Project data keys: {proj.keys()}")
+            print(f"[DEBUG] Project data: {proj}")
             try:
                 repo_conn = client.get_repository_connection(proj_id)
+                print(f"[DEBUG] Repository connection result: {repo_conn}")
                 if repo_conn:
-                    repo_url = repo_conn.get("url") or repo_conn.get("repository_url")
+                    # Check multiple possible field names for the repository URL
+                    repo_url = (
+                        repo_conn.get("url") or
+                        repo_conn.get("repository_url") or
+                        repo_conn.get("remote_url") or
+                        repo_conn.get("web_url")
+                    )
+                    print(f"[DEBUG] Extracted repo URL: {repo_url}")
                     if repo_url:
+                        # Convert git:// protocol to https:// for cloning
+                        if repo_url.startswith("git://"):
+                            repo_url = repo_url.replace("git://", "https://")
+                            print(f"[DEBUG] Converted git:// to https://: {repo_url}")
                         project_repos[proj_id] = repo_url
-            except Exception:
-                pass
+                        print(f"[DEBUG] Added repo URL for project {proj_id}: {repo_url}")
+            except Exception as e:
+                print(f"[DEBUG] Exception while getting repo connection: {e}")
+                import traceback
+                traceback.print_exc()
 
         if not project_repos:
             raise HTTPException(
@@ -178,14 +198,47 @@ async def import_dbt_cloud_projects(
                 detail="No git repositories found for the selected projects. Please ensure your dbt Cloud projects have git repositories configured."
             )
 
-        # Create Dagster Designer project
-        # We'll use the existing project creation flow
-        project = project_service.create_project(
-            name=request.dagster_project_name,
-            template="blank"  # Start with blank, we'll add dbt components
-        )
+        # Detect dbt adapters from connection information
+        detected_adapters = set()
+        # Always include dbt-duckdb for local development
+        detected_adapters.add("dbt-duckdb")
 
-        # Add dbt components for each selected project
+        for dbt_project in selected_projects:
+            proj_id = dbt_project.get("id")
+            # Get connection info to detect adapter
+            try:
+                connection_id = dbt_project.get("connection_id")
+                if connection_id:
+                    # We already have connection info in the project data
+                    connection = dbt_project.get("connection", {})
+                    adapter_version = connection.get("adapter_version", "")
+                    if "bigquery" in adapter_version.lower():
+                        detected_adapters.add("dbt-bigquery")
+                    elif "snowflake" in adapter_version.lower():
+                        detected_adapters.add("dbt-snowflake")
+                    elif "redshift" in adapter_version.lower():
+                        detected_adapters.add("dbt-redshift")
+                    elif "postgres" in adapter_version.lower():
+                        detected_adapters.add("dbt-postgres")
+                    elif "databricks" in adapter_version.lower():
+                        detected_adapters.add("dbt-databricks")
+            except Exception as e:
+                print(f"[DEBUG] Could not detect adapter for project {proj_id}: {e}")
+
+        # Create Dagster Designer project
+        # create_project automatically scaffolds when there's no git_repo
+        project_create = ProjectCreate(
+            name=request.dagster_project_name,
+            description=f"Imported from dbt Cloud with {len(selected_projects)} project(s)"
+        )
+        project = project_service.create_project(project_create)
+        # Project is already scaffolded and saved by create_project
+
+        # Prepare data for background setup
+        project_dir = str(settings.projects_dir / project.directory_name)
+
+        # Prepare dbt project data for background tasks
+        dbt_projects_to_setup = []
         for dbt_project in selected_projects:
             proj_id = dbt_project.get("id")
             if proj_id not in project_repos:
@@ -194,18 +247,32 @@ async def import_dbt_cloud_projects(
             proj_name = dbt_project.get("name", f"project_{proj_id}")
             repo_url = project_repos[proj_id]
 
-            # Clone the dbt project repository
+            # Get environments for this project
+            project_environments = [
+                env for env in all_environments
+                if env.get("project_id") == proj_id
+            ]
+
+            # Prepare dbt project directory
             dbt_project_dir = settings.projects_dir / project.directory_name / "dbt_projects" / proj_name
             dbt_project_dir.parent.mkdir(parents=True, exist_ok=True)
 
-            # Add as background task to avoid blocking
-            background_tasks.add_task(
-                _clone_and_setup_dbt_project,
-                repo_url,
-                str(dbt_project_dir),
-                project.id,
-                proj_name
-            )
+            dbt_projects_to_setup.append({
+                "repo_url": repo_url,
+                "target_dir": str(dbt_project_dir),
+                "proj_name": proj_name,
+                "environments": project_environments,
+                "dbt_cloud_project": dbt_project
+            })
+
+        # Add single background task to handle all setup
+        background_tasks.add_task(
+            _setup_dbt_cloud_import,
+            project.id,
+            project_dir,
+            list(detected_adapters),
+            dbt_projects_to_setup
+        )
 
         return DbtCloudImportResponse(
             project_id=project.id,
@@ -226,11 +293,100 @@ async def import_dbt_cloud_projects(
         )
 
 
+async def _setup_dbt_cloud_import(
+    project_id: str,
+    project_dir: str,
+    detected_adapters: List[str],
+    dbt_projects_to_setup: List[Dict[str, Any]]
+):
+    """
+    Background task to setup dbt Cloud import (install dependencies and clone projects).
+
+    Args:
+        project_id: Dagster Designer project ID
+        project_dir: Project directory path
+        detected_adapters: List of dbt adapters to install
+        dbt_projects_to_setup: List of dbt projects to clone and setup
+    """
+    import subprocess
+    from pathlib import Path
+
+    print(f"[INFO] Starting background setup for dbt Cloud import...")
+
+    # Add dbt dependencies
+    print(f"[INFO] Adding dbt dependencies...")
+
+    # Add dagster-dbt
+    try:
+        subprocess.run(
+            ["uv", "add", "dagster-dbt"],
+            cwd=project_dir,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=120
+        )
+        print(f"[INFO] Added dagster-dbt")
+    except subprocess.CalledProcessError as e:
+        print(f"[ERROR] Failed to add dagster-dbt: {e.stderr}")
+    except Exception as e:
+        print(f"[ERROR] Error adding dagster-dbt: {e}")
+
+    # Add dbt adapters
+    for adapter in detected_adapters:
+        try:
+            subprocess.run(
+                ["uv", "add", adapter],
+                cwd=project_dir,
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=120
+            )
+            print(f"[INFO] Added {adapter}")
+        except subprocess.CalledProcessError as e:
+            print(f"[ERROR] Failed to add {adapter}: {e.stderr}")
+        except Exception as e:
+            print(f"[ERROR] Error adding {adapter}: {e}")
+
+    # Set up virtual environment
+    print(f"[INFO] Setting up virtual environment...")
+    try:
+        subprocess.run(
+            ["uv", "sync"],
+            cwd=project_dir,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=300
+        )
+        print(f"[INFO] Virtual environment setup complete")
+    except subprocess.CalledProcessError as e:
+        print(f"[ERROR] Failed to setup venv: {e.stderr}")
+    except Exception as e:
+        print(f"[ERROR] Error setting up venv: {e}")
+
+    # Clone and setup each dbt project
+    for dbt_project_data in dbt_projects_to_setup:
+        await _clone_and_setup_dbt_project(
+            dbt_project_data["repo_url"],
+            dbt_project_data["target_dir"],
+            project_id,
+            dbt_project_data["proj_name"],
+            dbt_project_data["environments"],
+            dbt_project_data["dbt_cloud_project"]
+        )
+
+    print(f"[INFO] Background setup for dbt Cloud import complete!")
+
+
 async def _clone_and_setup_dbt_project(
     repo_url: str,
     target_dir: str,
     project_id: str,
-    dbt_project_name: str
+    dbt_project_name: str,
+    environments: List[Dict[str, Any]],
+    dbt_cloud_project: Dict[str, Any]
 ):
     """
     Background task to clone and setup a dbt project.
@@ -240,9 +396,13 @@ async def _clone_and_setup_dbt_project(
         target_dir: Target directory for cloning
         project_id: Dagster Designer project ID
         dbt_project_name: Name of the dbt project
+        environments: List of dbt Cloud environments for this project
+        dbt_cloud_project: The dbt Cloud project dictionary
     """
     import subprocess
     from pathlib import Path
+    import yaml
+    from ..services.dbt_cloud.profiles_generator import generate_profiles_yml
 
     target_path = Path(target_dir)
 
@@ -260,6 +420,47 @@ async def _clone_and_setup_dbt_project(
             text=True
         )
         print(f"[INFO] Successfully cloned {dbt_project_name}")
+
+        # Generate profiles.yml
+        print(f"[INFO] Generating profiles.yml for {dbt_project_name}...")
+
+        # If no environments, create a minimal profile from project connection
+        if not environments:
+            print(f"[WARN] No environments found for {dbt_project_name}, creating minimal profile")
+            connection = dbt_cloud_project.get("connection", {})
+            # Create a synthetic environment with the connection
+            environments = [{
+                "name": "default",
+                "connection": connection
+            }]
+
+        try:
+            profiles_content = generate_profiles_yml(environments)
+            profiles_path = target_path / "profiles.yml"
+            with open(profiles_path, "w") as f:
+                f.write(profiles_content)
+            print(f"[INFO] Created profiles.yml at {profiles_path}")
+        except Exception as e:
+            print(f"[ERROR] Failed to generate profiles.yml: {e}")
+            # Create a minimal placeholder profiles.yml
+            print(f"[INFO] Creating placeholder profiles.yml")
+            profiles_path = target_path / "profiles.yml"
+            with open(profiles_path, "w") as f:
+                yaml.dump({
+                    dbt_project_name.lower().replace("-", "_").replace(" ", "_"): {
+                        "outputs": {
+                            "dev": {
+                                "type": "bigquery",  # Default to bigquery, user can change
+                                "method": "service-account",
+                                "project": "{{ env_var('DBT_BIGQUERY_PROJECT') }}",
+                                "dataset": "{{ env_var('DBT_BIGQUERY_DATASET', 'analytics') }}",
+                                "keyfile": "{{ env_var('DBT_BIGQUERY_KEYFILE') }}"
+                            }
+                        },
+                        "target": "dev"
+                    }
+                }, f)
+            print(f"[INFO] Created placeholder profiles.yml at {profiles_path}")
 
         # Add dbt component to the project
         project = project_service.get_project(project_id)

@@ -32,6 +32,14 @@ export interface GraphNode {
     description?: string;
     group_name?: string;
     owners?: string[];
+    checks?: any[];
+    component_id?: string;
+    source_component?: string;
+    component_icon?: string;
+    io_input_type?: string | null;
+    io_output_type?: string | null;
+    io_input_required?: boolean;
+    onDelete?: (id: string) => void;
   };
   position: { x: number; y: number };
   node_kind?: 'asset' | 'component';

@@ -262,6 +262,37 @@ function getIOMetadata(schema: any): IOMetadata | null {
   return schema?.['x-dagster-io'] || null;
 }
 
+// Helper to extract all IO metadata for a node
+function extractNodeIOMetadata(sourceComponent: string | null | undefined): {
+  io_output_type: string | null;
+  io_input_type: string | null;
+  io_input_required: boolean;
+} {
+  if (!sourceComponent) {
+    return {
+      io_output_type: null,
+      io_input_type: null,
+      io_input_required: false,
+    };
+  }
+
+  const schema = componentSchemasCache.get(sourceComponent);
+  if (!schema) {
+    return {
+      io_output_type: null,
+      io_input_type: null,
+      io_input_required: false,
+    };
+  }
+
+  const ioMetadata = getIOMetadata(schema.schema);
+  return {
+    io_output_type: ioMetadata?.outputs?.type || null,
+    io_input_type: ioMetadata?.inputs?.type || null,
+    io_input_required: ioMetadata?.inputs?.required || false,
+  };
+}
+
 // Helper to get output type from a node
 function getNodeOutputType(node: Node): string | null {
   if (!node) return null;
@@ -316,7 +347,7 @@ function getNodeInputType(node: Node): string | null {
   return null;
 }
 
-// Helper to calculate smart edge routing based on node positions
+// Helper to calculate edge routing - always use left/right handles for clarity
 function calculateEdgeHandles(sourceNode: Node | undefined, targetNode: Node | undefined): {
   sourceHandle: string | undefined;
   targetHandle: string | undefined;
@@ -325,48 +356,12 @@ function calculateEdgeHandles(sourceNode: Node | undefined, targetNode: Node | u
     return { sourceHandle: undefined, targetHandle: undefined };
   }
 
-  // Calculate center positions
-  const sourceCenterX = sourceNode.position.x + 140; // Approximate node width / 2
-  const sourceCenterY = sourceNode.position.y + 60;  // Approximate node height / 2
-  const targetCenterX = targetNode.position.x + 140;
-  const targetCenterY = targetNode.position.y + 60;
-
-  // Calculate delta
-  const deltaX = targetCenterX - sourceCenterX;
-  const deltaY = targetCenterY - sourceCenterY;
-
-  // Determine primary direction based on which delta is larger
-  const absX = Math.abs(deltaX);
-  const absY = Math.abs(deltaY);
-
-  let sourceHandle: string;
-  let targetHandle: string;
-
-  if (absX > absY) {
-    // Horizontal connection is dominant
-    if (deltaX > 0) {
-      // Target is to the right of source
-      sourceHandle = 'right';
-      targetHandle = 'left';
-    } else {
-      // Target is to the left of source
-      sourceHandle = 'left-source';
-      targetHandle = 'right-target';
-    }
-  } else {
-    // Vertical connection is dominant
-    if (deltaY > 0) {
-      // Target is below source
-      sourceHandle = 'bottom-source';
-      targetHandle = 'top';
-    } else {
-      // Target is above source
-      sourceHandle = 'top-source';
-      targetHandle = 'bottom';
-    }
-  }
-
-  return { sourceHandle, targetHandle };
+  // Always use right handle for source and left handle for target
+  // This maintains clear left-to-right data flow regardless of node positions
+  return {
+    sourceHandle: 'right',
+    targetHandle: 'left'
+  };
 }
 
 interface GraphEditorProps {
@@ -408,7 +403,7 @@ function GraphEditorInner({ onNodeSelect }: GraphEditorProps) {
       if (!componentSchemasCache.has(componentType)) {
         loadPromises.push(
           componentsApi
-            .get(componentType)
+            .get(componentType, currentProject.id)
             .then((schema) => {
               componentSchemasCache.set(componentType, schema);
               console.log(
@@ -561,17 +556,16 @@ function GraphEditorInner({ onNodeSelect }: GraphEditorProps) {
       // }
 
       const flowNodes: Node[] = currentProject.graph.nodes.map((node: GraphNode) => {
-        // Determine IO output type for visual indicators
-        let ioOutputType: string | null = null;
-        if (node.node_kind === 'asset' && node.source_component) {
-          const schema = componentSchemasCache.get(node.source_component);
-          if (schema) {
-            const ioMetadata = getIOMetadata(schema.schema);
-            if (ioMetadata?.outputs) {
-              ioOutputType = ioMetadata.outputs.type;
+        // Use IO metadata from node.data if available (from backend), otherwise extract from schema cache
+        const ioMetadata = (node.data.io_output_type || node.data.io_input_type)
+          ? {
+              io_output_type: node.data.io_output_type,
+              io_input_type: node.data.io_input_type,
+              io_input_required: node.data.io_input_required || false,
             }
-          }
-        }
+          : (node.node_kind === 'asset'
+              ? extractNodeIOMetadata(node.source_component)
+              : { io_output_type: null, io_input_type: null, io_input_required: false });
 
         return {
           id: node.id,
@@ -583,7 +577,7 @@ function GraphEditorInner({ onNodeSelect }: GraphEditorProps) {
             category: getCategoryFromType(node.data.component_type || ''),
             node_kind: node.node_kind,
             source_component: node.source_component,
-            io_output_type: ioOutputType,
+            ...ioMetadata,
           },
         };
       });
@@ -858,16 +852,16 @@ function GraphEditorInner({ onNodeSelect }: GraphEditorProps) {
 
           // Update the graph with the regenerated assets
           const flowNodes: Node[] = updatedProject.graph.nodes.map((node: GraphNode) => {
-            let ioOutputType: string | null = null;
-            if (node.node_kind === 'asset' && node.source_component) {
-              const schema = componentSchemasCache.get(node.source_component);
-              if (schema) {
-                const ioMetadata = getIOMetadata(schema.schema);
-                if (ioMetadata?.outputs) {
-                  ioOutputType = ioMetadata.outputs.type;
+            // Use IO metadata from node.data if available (from backend), otherwise extract from schema cache
+            const ioMetadata = (node.data.io_output_type || node.data.io_input_type)
+              ? {
+                  io_output_type: node.data.io_output_type,
+                  io_input_type: node.data.io_input_type,
+                  io_input_required: node.data.io_input_required || false,
                 }
-              }
-            }
+              : (node.node_kind === 'asset'
+                  ? extractNodeIOMetadata(node.source_component)
+                  : { io_output_type: null, io_input_type: null, io_input_required: false });
 
             return {
               id: node.id,
@@ -879,7 +873,7 @@ function GraphEditorInner({ onNodeSelect }: GraphEditorProps) {
                 category: getCategoryFromType(node.data.component_type || ''),
                 node_kind: node.node_kind,
                 source_component: node.source_component,
-                io_output_type: ioOutputType,
+                ...ioMetadata,
               },
             };
           });
@@ -1184,16 +1178,16 @@ function GraphEditorInner({ onNodeSelect }: GraphEditorProps) {
 
           // Update the graph with regenerated assets
           const flowNodes: Node[] = updatedProject.graph.nodes.map((node: GraphNode) => {
-            let ioOutputType: string | null = null;
-            if (node.node_kind === 'asset' && node.source_component) {
-              const schema = componentSchemasCache.get(node.source_component);
-              if (schema) {
-                const ioMetadata = getIOMetadata(schema.schema);
-                if (ioMetadata?.outputs) {
-                  ioOutputType = ioMetadata.outputs.type;
+            // Use IO metadata from node.data if available (from backend), otherwise extract from schema cache
+            const ioMetadata = (node.data.io_output_type || node.data.io_input_type)
+              ? {
+                  io_output_type: node.data.io_output_type,
+                  io_input_type: node.data.io_input_type,
+                  io_input_required: node.data.io_input_required || false,
                 }
-              }
-            }
+              : (node.node_kind === 'asset'
+                  ? extractNodeIOMetadata(node.source_component)
+                  : { io_output_type: null, io_input_type: null, io_input_required: false });
 
             return {
               id: node.id,
@@ -1205,7 +1199,7 @@ function GraphEditorInner({ onNodeSelect }: GraphEditorProps) {
                 category: getCategoryFromType(node.data.component_type || ''),
                 node_kind: node.node_kind,
                 source_component: node.source_component,
-                io_output_type: ioOutputType,
+                ...ioMetadata,
               },
             };
           });

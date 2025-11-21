@@ -30,6 +30,12 @@ class AssetIntrospectionService:
     def __init__(self):
         self.codegen_service = CodegenService()
 
+    def clear_cache(self, project_id: str) -> None:
+        """Clear the asset introspection cache for a specific project."""
+        if project_id in _assets_cache:
+            del _assets_cache[project_id]
+            print(f"[Asset Introspection] Cleared cache for project {project_id}", flush=True)
+
     def _is_running(self, project_id: str) -> bool:
         """Check if asset introspection is currently running for a project."""
         if project_id not in _introspection_locks:
@@ -569,10 +575,12 @@ class AssetIntrospectionService:
                         break
 
                 # Check for community components by matching source path
-                # Community components create assets in defs/<component_id>/defs.yaml
-                # Example: src/project_name/defs/synthetic_data_generator/defs.yaml
+                # Community components create assets in defs/<asset_name>/defs.yaml
+                # Example: src/project_name/defs/my_asset/defs.yaml
                 if not source_component and asset_source:
                     print(f"[Asset Introspection] Checking community components for asset {asset_key}, source: {asset_source}", flush=True)
+
+                    # First try matching against registered components
                     print(f"[Asset Introspection] Available components: {list(component_map.keys())}", flush=True)
                     for comp_id, comp in component_map.items():
                         print(f"[Asset Introspection] Checking component {comp_id}: {comp.component_type}", flush=True)
@@ -591,6 +599,40 @@ class AssetIntrospectionService:
                                         source_component = comp_id
                                         print(f"[Asset Introspection] Matched community component: {component_id} for asset: {asset_key}", flush=True)
                                         break
+
+                    # If not matched yet, check if the asset source matches the pattern /defs/{folder}/defs.yaml
+                    # and read the YAML to determine component type
+                    if not source_component and "/defs/" in asset_source and "/defs.yaml" in asset_source:
+                        import re
+                        import yaml
+                        from pathlib import Path
+
+                        # Extract folder name from path like "src/project_name/defs/my_asset/defs.yaml"
+                        match = re.search(r'/defs/([^/]+)/defs\.yaml', asset_source)
+                        if match:
+                            asset_folder = match.group(1)
+                            print(f"[Asset Introspection] Found unregistered component instance in folder: {asset_folder}", flush=True)
+
+                            # Construct path to the YAML file
+                            yaml_path = Path(project_dir) / asset_source.split(':')[0]
+                            if yaml_path.exists():
+                                try:
+                                    with open(yaml_path, 'r') as f:
+                                        yaml_data = yaml.safe_load(f)
+
+                                    component_type = yaml_data.get('type')
+                                    if component_type:
+                                        print(f"[Asset Introspection] Found component type in YAML: {component_type}", flush=True)
+                                        # Check if we already created a pseudo-component for this folder
+                                        pseudo_comp_id = f"community_{asset_folder}"
+                                        if pseudo_comp_id in component_map:
+                                            source_component = pseudo_comp_id
+                                            print(f"[Asset Introspection] Matched to pseudo-component: {pseudo_comp_id}", flush=True)
+                                        else:
+                                            # Use the component type as the source_component
+                                            source_component = component_type
+                                except Exception as e:
+                                    print(f"[Asset Introspection] Error reading YAML for {asset_key}: {e}", flush=True)
 
                 if source_component:
                     print(f"[Asset Introspection] Assigned source_component: {source_component} for asset: {asset_key}", flush=True)
@@ -626,6 +668,73 @@ class AssetIntrospectionService:
                     print(f"[Asset Introspection] Including component attributes for {asset_key}: {component_attributes}", flush=True)
                     if actual_component_id:
                         print(f"[Asset Introspection] Component folder name: {actual_component_id}", flush=True)
+                elif source_component and "/defs/" in asset_source and "/defs.yaml" in asset_source:
+                    # For unregistered components discovered from YAML, read the attributes
+                    import re
+                    import yaml
+                    from pathlib import Path
+
+                    match = re.search(r'/defs/([^/]+)/defs\.yaml', asset_source)
+                    if match:
+                        asset_folder = match.group(1)
+                        yaml_path = Path(project_dir) / asset_source.split(':')[0]
+                        if yaml_path.exists():
+                            try:
+                                with open(yaml_path, 'r') as f:
+                                    yaml_data = yaml.safe_load(f)
+
+                                component_type = yaml_data.get('type')
+                                component_attributes = yaml_data.get('attributes', {})
+                                actual_component_id = asset_folder
+                                print(f"[Asset Introspection] Read attributes from YAML for {asset_key}: {component_attributes}", flush=True)
+                            except Exception as e:
+                                print(f"[Asset Introspection] Error reading attributes for {asset_key}: {e}", flush=True)
+
+                # Extract IO type information from component schema (x-dagster-io metadata)
+                io_input_type = None
+                io_output_type = None
+                io_input_required = False
+
+                if component_type and components_dir:
+                    # Extract component folder name from component_type
+                    # e.g., "project_name.components.synthetic_data_generator.SyntheticDataGeneratorComponent" -> "synthetic_data_generator"
+                    component_folder = None
+                    if '.components.' in component_type:
+                        parts = component_type.split('.')
+                        if 'components' in parts:
+                            idx = parts.index('components')
+                            if idx + 1 < len(parts):
+                                component_folder = parts[idx + 1]
+
+                    if component_folder:
+                        schema_file = components_dir / component_folder / "schema.json"
+                    elif actual_component_id:
+                        # Fallback to using actual_component_id (for components in defs/)
+                        schema_file = components_dir / actual_component_id / "schema.json"
+                    else:
+                        schema_file = None
+
+                    if schema_file and schema_file.exists():
+                        try:
+                            import json
+                            with open(schema_file, 'r') as f:
+                                schema_data = json.load(f)
+
+                            io_metadata = schema_data.get('x-dagster-io', {})
+                            if io_metadata:
+                                # Extract input type
+                                if 'inputs' in io_metadata:
+                                    io_input_type = io_metadata['inputs'].get('type')
+                                    io_input_required = io_metadata['inputs'].get('required', False)
+
+                                # Extract output type
+                                if 'outputs' in io_metadata:
+                                    io_output_type = io_metadata['outputs'].get('type')
+
+                                if io_input_type or io_output_type:
+                                    print(f"[Asset Introspection] Found IO metadata for {asset_key}: input={io_input_type} (required={io_input_required}), output={io_output_type}", flush=True)
+                        except Exception as e:
+                            print(f"[Asset Introspection] Failed to read schema for {asset_key}: {e}", flush=True)
 
                 # Create asset node with comprehensive data
                 node = GraphNode(
@@ -652,6 +761,9 @@ class AssetIntrospectionService:
                         "component_attributes": component_attributes,  # Include component configuration
                         "component_type": component_type,  # Include component type for frontend
                         "component_id": actual_component_id,  # Actual folder name for fetching configuration
+                        "io_input_type": io_input_type,  # Input type from schema x-dagster-io
+                        "io_output_type": io_output_type,  # Output type from schema x-dagster-io
+                        "io_input_required": io_input_required,  # Whether input is required
                     }
                 )
                 nodes.append(node)

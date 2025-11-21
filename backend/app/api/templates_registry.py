@@ -369,6 +369,10 @@ async def configure_component(
             from ..services.asset_introspection_service import AssetIntrospectionService
             asset_introspection_service = AssetIntrospectionService()
 
+            # Clear cache to ensure fresh introspection includes the new component
+            asset_introspection_service.clear_cache(project.id)
+            print(f"[Configure] Cleared asset cache for project {project.id}")
+
             print(f"[Configure] Auto-regenerating assets for project {project.id}...")
             asset_nodes, asset_edges = await asset_introspection_service.get_assets_for_project_async(project)
 
