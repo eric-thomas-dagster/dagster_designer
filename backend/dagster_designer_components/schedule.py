@@ -17,6 +17,7 @@ class ScheduleComponent(dg.Component, dg.Model, dg.Resolvable):
     description: Optional[str] = None
     timezone: str = "UTC"
     default_status: str = "RUNNING"
+    is_partitioned: Optional[bool] = None  # Explicitly specify if schedule targets partitioned assets
 
     def build_defs(self, context: dg.ComponentLoadContext) -> dg.Definitions:
         """Build Dagster definitions from component parameters."""
@@ -42,31 +43,71 @@ class ScheduleComponent(dg.Component, dg.Model, dg.Resolvable):
                 f"Schedule {self.schedule_name} must specify either job_name or asset_selection"
             )
 
-        # Check if the job contains partitioned assets
-        # For asset selections, we can try to detect partitioned assets
+        # Determine if this schedule should be partition-aware
+        # Priority: 1) explicit is_partitioned flag, 2) auto-detection
         is_partitioned_job = False
-        if self.asset_selection:
-            # Try to resolve assets and check for partitions
-            try:
-                # Get all assets from the context
-                if hasattr(context, 'defs') and context.defs and hasattr(context.defs, 'get_all_asset_specs'):
-                    all_specs = context.defs.get_all_asset_specs()
-                    selected_keys = [dg.AssetKey.from_user_string(key) for key in self.asset_selection]
 
-                    # Check if any selected asset has partitions
+        if self.is_partitioned is not None:
+            # User explicitly specified partition-awareness
+            is_partitioned_job = self.is_partitioned
+        elif self.asset_selection or self.job_name:
+            # Try to auto-detect partitioned assets/jobs
+            try:
+                # Get all asset specs from context
+                all_specs = []
+                if hasattr(context, 'defs') and context.defs:
+                    if hasattr(context.defs, 'get_all_asset_specs'):
+                        all_specs = list(context.defs.get_all_asset_specs())
+                    elif hasattr(context.defs, 'assets'):
+                        # Fallback: get specs from asset list
+                        all_specs = [asset.to_source_asset().to_spec() if hasattr(asset, 'to_source_asset') else None
+                                    for asset in context.defs.assets]
+                        all_specs = [s for s in all_specs if s is not None]
+
+                if self.asset_selection:
+                    # Check selected assets for partitions
+                    selected_keys = [dg.AssetKey.from_user_string(key) for key in self.asset_selection]
                     for spec in all_specs:
                         if spec.key in selected_keys and spec.partitions_def is not None:
                             is_partitioned_job = True
                             break
-            except Exception:
+
+                elif self.job_name:
+                    # For job references, try to resolve the job and check its assets
+                    if hasattr(context.defs, 'get_job_def'):
+                        try:
+                            job_def = context.defs.get_job_def(self.job_name)
+                            # Check if the job has a partitions_def
+                            if hasattr(job_def, 'partitions_def') and job_def.partitions_def is not None:
+                                is_partitioned_job = True
+                        except Exception:
+                            pass
+
+                    # Fallback: check if any asset in the job is partitioned
+                    if not is_partitioned_job:
+                        for spec in all_specs:
+                            if spec.partitions_def is not None:
+                                # Conservative approach: assume job might contain this partitioned asset
+                                is_partitioned_job = True
+                                break
+
+            except Exception as e:
                 # If we can't determine, fall back to regular schedule
-                pass
+                import sys
+                print(f"[ScheduleComponent] Could not detect partitions, using regular schedule: {e}",
+                      file=sys.stderr, flush=True)
 
         # Create schedule
         # Use build_schedule_from_partitioned_job for partitioned assets
         if is_partitioned_job and target_job:
             # For partitioned jobs, use build_schedule_from_partitioned_job
-            # This automatically handles partition selection based on the schedule
+            # This automatically handles partition selection based on the partition definition
+            # Note: The schedule timing is derived from the partition definition, not cron_expression
+            import sys
+            print(f"[ScheduleComponent] Creating partitioned schedule '{self.schedule_name}' - "
+                  f"schedule will be derived from partition definition",
+                  file=sys.stderr, flush=True)
+
             schedule = dg.build_schedule_from_partitioned_job(
                 job=target_job,
                 name=self.schedule_name,
@@ -79,6 +120,11 @@ class ScheduleComponent(dg.Component, dg.Model, dg.Resolvable):
             )
         else:
             # Regular schedule for non-partitioned jobs
+            import sys
+            print(f"[ScheduleComponent] Creating regular schedule '{self.schedule_name}' "
+                  f"with cron '{self.cron_expression}'",
+                  file=sys.stderr, flush=True)
+
             schedule = dg.ScheduleDefinition(
                 name=self.schedule_name,
                 cron_schedule=self.cron_expression,
