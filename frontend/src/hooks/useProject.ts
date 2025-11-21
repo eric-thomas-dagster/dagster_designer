@@ -145,8 +145,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
       return;
     }
 
-    // Only update local state - don't save to backend on every change
-    // User can manually save with saveProject() when ready
+    // Only update local state - save will be triggered manually via Save button
     const updatedProject = {
       ...currentProject,
       graph: { nodes, edges },

@@ -13,6 +13,7 @@ import ReactFlow, {
 import 'reactflow/dist/style.css';
 import { AssetNode } from './nodes/AssetNode';
 import { CronBuilder } from './CronBuilder';
+import { Launchpad } from './Launchpad';
 import { useProjectStore } from '@/hooks/useProject';
 import { pipelinesApi, primitivesApi, templatesApi, projectsApi } from '@/services/api';
 import {
@@ -72,6 +73,32 @@ export function PipelineBuilder() {
   // Component-specific fields
   const [apiUrl, setApiUrl] = useState('https://api.example.com/data');
   const [apiMethod, setApiMethod] = useState<'GET' | 'POST' | 'PUT' | 'DELETE'>('GET');
+
+  // Launchpad state
+  const [showLaunchpad, setShowLaunchpad] = useState(false);
+  const [selectedJobName, setSelectedJobName] = useState<string>('');
+
+  // Handler for launching jobs
+  const handleLaunchJob = (jobName: string) => {
+    setSelectedJobName(jobName);
+    setShowLaunchpad(true);
+  };
+
+  const handleLaunchpadSubmit = async (config?: Record<string, any>, tags?: Record<string, string>) => {
+    if (!currentProject || !selectedJobName) return;
+    try {
+      const result = await pipelinesApi.launch(currentProject.id, selectedJobName, config, tags);
+      if (result.success) {
+        alert(`Job ${selectedJobName} launched successfully!`);
+      } else {
+        alert(`Failed to launch job ${selectedJobName}`);
+      }
+    } catch (error) {
+      console.error('Launch failed:', error);
+      throw error;
+    }
+  };
+
   const [dbConnectionString, setDbConnectionString] = useState('');
   const [dbQuery, setDbQuery] = useState('');
   const [inputAsset, setInputAsset] = useState('');
@@ -834,16 +861,28 @@ export function PipelineBuilder() {
                           </p>
                         )}
                       </div>
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          handleDeletePipeline(pipeline.id);
-                        }}
-                        className="p-1 text-gray-400 hover:bg-gray-100 rounded"
-                        title="To delete, remove files manually"
-                      >
-                        <Trash2 className="w-4 h-4" />
-                      </button>
+                      <div className="flex items-center gap-1">
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleLaunchJob(pipeline.name);
+                          }}
+                          className="p-1.5 text-blue-600 hover:bg-blue-50 rounded transition-colors"
+                          title="Launch job"
+                        >
+                          <Play className="w-4 h-4" />
+                        </button>
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleDeletePipeline(pipeline.id);
+                          }}
+                          className="p-1 text-gray-400 hover:bg-gray-100 rounded"
+                          title="To delete, remove files manually"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      </div>
                     </div>
                   </div>
                 ))}
@@ -2069,6 +2108,20 @@ export function PipelineBuilder() {
             </div>
           </div>
         </div>
+      )}
+
+      {/* Launchpad for job execution */}
+      {currentProject && selectedJobName && (
+        <Launchpad
+          open={showLaunchpad}
+          onOpenChange={setShowLaunchpad}
+          projectId={currentProject.id}
+          mode="job"
+          jobName={selectedJobName}
+          onLaunch={handleLaunchpadSubmit}
+          defaultConfig={{}}
+          configSchema={{}}
+        />
       )}
     </div>
   );

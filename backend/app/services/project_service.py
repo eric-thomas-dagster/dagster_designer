@@ -14,7 +14,9 @@ from typing import Dict, Tuple
 
 from ..core.config import settings
 from ..models.project import Project, ProjectCreate, ProjectUpdate
+from ..models.partition import PartitionConfig
 from .component_registry import component_registry
+from .partition_service import partition_service
 
 # Track dependency installation status for each project
 # {project_id: {'status': 'installing|success|error', 'error': str|None, 'output': str|None}}
@@ -663,8 +665,46 @@ class ProjectService:
             # Generate definitions.py with asset customizations
             self._generate_definitions_with_asset_customizations(project)
             print(f"[update_project] YAML generation and definitions completed", flush=True)
+        elif "graph" in update_data:
+            # If graph was updated, check if any nodes have partition_config and apply them
+            print(f"[update_project] Graph updated! Checking for partition configs...", flush=True)
+            sys.stdout.flush()
+
+            nodes_with_partition_configs = []
+            for node in project.graph.nodes:
+                if node.data and node.data.get("partition_config"):
+                    nodes_with_partition_configs.append(node)
+                    print(f"[update_project] Found partition config on node: {node.id}", flush=True)
+
+            if nodes_with_partition_configs:
+                print(f"[update_project] Applying partition configs to {len(nodes_with_partition_configs)} component(s)...", flush=True)
+                # Find matching components and apply partition configs
+                for node in nodes_with_partition_configs:
+                    # Find the component instance that matches this node
+                    component_found = False
+                    for component in project.components:
+                        if component.id == node.id:
+                            print(f"[update_project] Applying partition config to registered component: {component.id}", flush=True)
+                            self._apply_component_partition_config(project, component)
+                            component_found = True
+                            break
+
+                    # If not found in registered components, it might be a community component
+                    # Create a pseudo-component object for the partition service
+                    if not component_found:
+                        print(f"[update_project] Applying partition config to community component: {node.id}", flush=True)
+                        # Create a simple object with just an id attribute
+                        class PseudoComponent:
+                            def __init__(self, component_id):
+                                self.id = component_id
+
+                        pseudo_component = PseudoComponent(node.id)
+                        self._apply_component_partition_config(project, pseudo_component)
+                print(f"[update_project] Partition config application completed", flush=True)
+            else:
+                print(f"[update_project] No partition configs found in graph", flush=True)
         else:
-            print(f"[update_project] Components NOT in update_data, skipping YAML generation", flush=True)
+            print(f"[update_project] Neither components nor graph in update_data, skipping generation", flush=True)
 
         project.updated_at = datetime.now()
         self._save_project(project)
@@ -1326,11 +1366,58 @@ if custom_lineage_edges:
 
                     if result.returncode == 0:
                         print(f"Successfully scaffolded component {component.id}")
+
+                        # Apply partition configuration if present
+                        self._apply_component_partition_config(project, component)
                     else:
                         print(f"Failed to scaffold component {component.id}: {result.stderr}")
 
             except Exception as e:
                 print(f"Error scaffolding component {component.id}: {e}")
+
+    def _apply_component_partition_config(self, project: Project, component):
+        """
+        Apply partition configuration to a component from its node data.
+
+        Args:
+            project: The project containing the component
+            component: Component instance to apply partitions to
+        """
+        try:
+            # Find the component node in the graph to get partition_config
+            if not project.graph or not project.graph.nodes:
+                return
+
+            component_node = None
+            for node in project.graph.nodes:
+                if node.id == component.id:
+                    component_node = node
+                    break
+
+            if not component_node or not component_node.data:
+                return
+
+            # Check if partition_config exists in node data
+            partition_config_data = component_node.data.get("partition_config")
+            if not partition_config_data:
+                return
+
+            # Parse partition config
+            partition_config = PartitionConfig(**partition_config_data)
+
+            # Get component directory
+            project_dir = self._get_project_dir(project)
+            component_dir = project_dir / "src" / project.directory_name / "defs" / component.id
+
+            if not component_dir.exists():
+                print(f"[Partition] Component directory not found: {component_dir}")
+                return
+
+            # Apply partition configuration
+            partition_service.apply_partition_config(component_dir, partition_config)
+
+        except Exception as e:
+            print(f"[Partition] Error applying partition config to {component.id}: {e}")
 
     async def install_dependencies_async(self, project: Project):
         """Install dependencies asynchronously in the background.
@@ -2013,6 +2100,9 @@ if custom_lineage_edges:
                     with open(yaml_file, 'w') as f:
                         yaml.dump(yaml_data, f, default_flow_style=False, sort_keys=False)
                     print(f"✅ Generated YAML for {component_type} component: {yaml_file}", flush=True)
+
+                    # Apply partition configuration if present
+                    self._apply_component_partition_config(project, component)
             except Exception as e:
                 print(f"❌ Error generating YAML for component {component.id}: {e}", flush=True)
 

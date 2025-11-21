@@ -700,3 +700,154 @@ async def list_pipelines(project_id: str):
             status_code=500,
             detail=f"Failed to list pipelines: {str(e)}"
         )
+
+
+class LaunchJobRequest(BaseModel):
+    """Request to launch a job."""
+    config: dict | None = None  # Run config (ops, resources, execution, loggers)
+    tags: dict[str, str] | None = None  # Run tags
+
+
+class LaunchJobResponse(BaseModel):
+    """Response from launching a job."""
+    success: bool
+    message: str
+    stdout: str
+    stderr: str
+
+
+@router.post("/{project_id}/{job_name}/launch", response_model=LaunchJobResponse)
+async def launch_job(project_id: str, job_name: str, request: LaunchJobRequest):
+    """Launch a job using dg launch command.
+
+    This executes the dg launch command to run a specific job.
+    """
+    import subprocess
+    from pathlib import Path
+    from app.services.project_service import project_service
+
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    # Get project path - construct it the same way as during project creation
+    project_name_sanitized = project.name.lower().replace(" ", "_").replace("-", "_")
+    project_dir_name = f"project_{project_id.split('-')[0]}_{project_name_sanitized}"
+    project_path = Path("./projects") / project_dir_name
+    if not project_path.exists():
+        raise HTTPException(status_code=404, detail=f"Project directory not found: {project_path}")
+
+    try:
+        # Build dg launch command using project's venv
+        venv_python = project_path / ".venv" / "bin" / "python"
+        venv_dg = project_path / ".venv" / "bin" / "dg"
+
+        if not venv_dg.exists():
+            raise HTTPException(
+                status_code=500,
+                detail="Project virtual environment not found. Please ensure the project was created successfully."
+            )
+
+        # Build the command - use absolute path to dg binary
+        cmd = [str(venv_dg.absolute()), "launch", "--job", job_name]
+
+        # Add config if provided
+        config_file_path = None
+        if request.config:
+            import yaml
+            import tempfile
+            # Write config to temporary YAML file
+            config_file = tempfile.NamedTemporaryFile(mode='w', suffix='.yaml', delete=False, dir=str(project_path))
+            config_file_path = config_file.name
+            yaml.dump(request.config, config_file)
+            config_file.close()
+            cmd.extend(["--config", config_file_path])
+
+        # Add tags if provided
+        if request.tags:
+            import json
+            # Tags are passed as part of run config in Dagster
+            # We'll need to merge them into the config
+            tags_config = {"tags": request.tags}
+            if config_file_path:
+                # Merge tags into existing config
+                with open(config_file_path, 'r') as f:
+                    existing_config = yaml.safe_load(f) or {}
+                existing_config.update(tags_config)
+                with open(config_file_path, 'w') as f:
+                    yaml.dump(existing_config, f)
+            else:
+                # Create config file just for tags
+                import tempfile
+                config_file = tempfile.NamedTemporaryFile(mode='w', suffix='.yaml', delete=False, dir=str(project_path))
+                config_file_path = config_file.name
+                yaml.dump(tags_config, config_file)
+                config_file.close()
+                cmd.extend(["--config", config_file_path])
+
+        print(f"[launch_job] Running command: {' '.join(cmd)}")
+        print(f"[launch_job] Working directory: {project_path}")
+
+        # Set up environment to use project's venv (use absolute paths)
+        import os
+        project_path_abs = project_path.absolute()
+        venv_path_abs = project_path_abs / ".venv"
+
+        env = os.environ.copy()
+        env['VIRTUAL_ENV'] = str(venv_path_abs)
+        env['PATH'] = f"{venv_path_abs / 'bin'}:{env.get('PATH', '')}"
+        # Remove any parent venv variables that might confuse dg
+        env.pop('PYTHONHOME', None)
+
+        print(f"[launch_job] Using venv: {venv_path_abs}")
+
+        # Run command
+        result = subprocess.run(
+            cmd,
+            cwd=str(project_path),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=300  # 5 minute timeout
+        )
+
+        print(f"[launch_job] Return code: {result.returncode}")
+        print(f"[launch_job] stdout: {result.stdout[:500]}")  # First 500 chars
+        print(f"[launch_job] stderr: {result.stderr[:500]}")  # First 500 chars
+
+        success = result.returncode == 0
+        message = "Job launched successfully" if success else "Job launch failed"
+
+        # Clean up temporary config file
+        if config_file_path:
+            try:
+                import os
+                os.unlink(config_file_path)
+            except Exception as e:
+                print(f"[launch_job] Warning: Failed to delete temp config file: {e}")
+
+        return LaunchJobResponse(
+            success=success,
+            message=message,
+            stdout=result.stdout,
+            stderr=result.stderr
+        )
+
+    except subprocess.TimeoutExpired:
+        # Clean up config file on timeout
+        if config_file_path:
+            try:
+                import os
+                os.unlink(config_file_path)
+            except:
+                pass
+        raise HTTPException(status_code=408, detail="Job launch timed out after 5 minutes")
+    except Exception as e:
+        # Clean up config file on error
+        if config_file_path:
+            try:
+                import os
+                os.unlink(config_file_path)
+            except:
+                pass
+        raise HTTPException(status_code=500, detail=f"Failed to launch job: {str(e)}")

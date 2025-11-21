@@ -25,6 +25,7 @@ import ReactFlow, {
 import 'reactflow/dist/style.css';
 import { ComponentNode } from './nodes/ComponentNode';
 import { AssetNode } from './nodes/AssetNode';
+import { Launchpad } from './Launchpad';
 import { useProjectStore } from '@/hooks/useProject';
 import { projectsApi, componentsApi } from '@/services/api';
 import { Play, Trash2 } from 'lucide-react';
@@ -380,6 +381,46 @@ function GraphEditorInner({ onNodeSelect }: GraphEditorProps) {
   const lastSavedNodesHash = useRef<string>('');
   const { screenToFlowPosition, getNodes } = useReactFlow();
 
+  // Launchpad state
+  const [showLaunchpad, setShowLaunchpad] = useState(false);
+  const [launchpadAssetKey, setLaunchpadAssetKey] = useState<string>('');
+
+  // Handlers for asset context menu
+  const handleMaterializeAsset = useCallback(async (assetKey: string) => {
+    if (!currentProject) return;
+    try {
+      const result = await projectsApi.materialize(currentProject.id, [assetKey]);
+      if (result.success) {
+        alert(`Asset ${assetKey} materialized successfully!`);
+      } else {
+        alert(`Failed to materialize asset ${assetKey}`);
+      }
+    } catch (error) {
+      console.error('Materialize failed:', error);
+      alert(`Failed to materialize asset ${assetKey}`);
+    }
+  }, [currentProject]);
+
+  const handleOpenLaunchpad = useCallback((assetKey: string) => {
+    setLaunchpadAssetKey(assetKey);
+    setShowLaunchpad(true);
+  }, []);
+
+  const handleLaunchpadSubmit = useCallback(async (config?: Record<string, any>, tags?: Record<string, string>) => {
+    if (!currentProject || !launchpadAssetKey) return;
+    try {
+      const result = await projectsApi.materialize(currentProject.id, [launchpadAssetKey], config, tags);
+      if (result.success) {
+        alert(`Asset ${launchpadAssetKey} materialized successfully!`);
+      } else {
+        alert(`Failed to materialize asset ${launchpadAssetKey}`);
+      }
+    } catch (error) {
+      console.error('Materialize failed:', error);
+      throw error;
+    }
+  }, [currentProject, launchpadAssetKey]);
+
   // Load component schemas for IO validation
   useEffect(() => {
     if (!currentProject) return;
@@ -578,6 +619,11 @@ function GraphEditorInner({ onNodeSelect }: GraphEditorProps) {
             node_kind: node.node_kind,
             source_component: node.source_component,
             ...ioMetadata,
+            // Add context menu handlers for asset nodes
+            ...(node.node_kind === 'asset' ? {
+              onMaterialize: handleMaterializeAsset,
+              onOpenLaunchpad: handleOpenLaunchpad,
+            } : {}),
           },
         };
       });
@@ -1522,6 +1568,20 @@ function GraphEditorInner({ onNodeSelect }: GraphEditorProps) {
         <Controls />
         <MiniMap />
       </ReactFlow>
+
+      {/* Launchpad for single asset materialization */}
+      {currentProject && launchpadAssetKey && (
+        <Launchpad
+          open={showLaunchpad}
+          onOpenChange={setShowLaunchpad}
+          projectId={currentProject.id}
+          mode="materialize"
+          assetKeys={[launchpadAssetKey]}
+          onLaunch={handleLaunchpadSubmit}
+          defaultConfig={{}}
+          configSchema={{}}
+        />
+      )}
     </div>
   );
 }

@@ -1,10 +1,14 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
+import { useQuery } from '@tanstack/react-query';
 import { useProjectStore } from '@/hooks/useProject';
 import { useComponent } from '@/hooks/useComponentRegistry';
-import { X, Save, Settings, Play, Trash2, Plus, Wand2, Database, Search, Package } from 'lucide-react';
+import { X, Save, Settings, Play, Trash2, Plus, Wand2, Database, Search, Package, ChevronDown, FileCode, Calendar } from 'lucide-react';
 import { AssetPreview } from './AssetPreview';
 import { TranslationEditor } from './TranslationEditor';
-import { projectsApi, primitivesApi } from '@/services/api';
+import { Launchpad } from './Launchpad';
+import { PartitionBackfill } from './PartitionBackfill';
+import { PartitionConfig, type PartitionConfig as PartitionConfigType } from './PartitionConfig';
+import { projectsApi, primitivesApi, partitionsApi, type BackfillRequest } from '@/services/api';
 import type { ComponentInstance } from '@/types';
 
 // Icon mapping for component icons
@@ -28,6 +32,18 @@ const isDbtComponentType = (componentType: string | undefined): boolean => {
   return false;
 };
 
+interface ComponentTemplate {
+  id: string;
+  name: string;
+  category: string;
+  supports_partitions?: boolean;
+  supported_partition_types?: string[];
+}
+
+interface TemplateManifest {
+  components: ComponentTemplate[];
+}
+
 interface PropertyPanelProps {
   nodeId: string;
   onConfigureComponent?: (component: ComponentInstance) => void;
@@ -42,6 +58,53 @@ export function PropertyPanel({ nodeId, onConfigureComponent, onOpenFile }: Prop
   const nodeKind = (node as any)?.node_kind || node?.data?.node_kind;
   const sourceComponentId = (node as any)?.source_component || node?.data?.source_component;
   const isAssetNode = nodeKind === 'asset';
+
+  // Fetch component templates manifest to check partition support
+  const { data: manifest } = useQuery({
+    queryKey: ['community-templates-manifest'],
+    queryFn: async () => {
+      const response = await fetch('/api/v1/templates/manifest');
+      if (!response.ok) {
+        throw new Error('Failed to fetch manifest');
+      }
+      return response.json() as Promise<TemplateManifest>;
+    },
+    staleTime: Infinity, // Never refetch automatically
+    gcTime: Infinity, // Keep in cache forever (formerly cacheTime)
+  });
+
+  // Check if current component supports partitions (memoized for performance)
+  const componentType = node?.data.component_type;
+  const componentSupportsPartitions = useMemo(() => {
+    if (!componentType || !manifest) return false;
+
+    // Extract component ID from component_type
+    // Format: "project_name.components.component_id.ComponentClass"
+    // We want the second-to-last part (component_id)
+    const parts = componentType.split('.');
+    const componentId = parts.length > 1 ? parts[parts.length - 2] : null;
+
+    if (!componentId) return false;
+
+    // Find component in manifest
+    const template = manifest.components.find(c => c.id === componentId);
+    return template?.supports_partitions === true;
+  }, [componentType, manifest]);
+
+  // Get supported partition types for the component
+  const supportedPartitionTypes = useMemo(() => {
+    if (!componentType || !manifest?.components) return undefined;
+
+    // Extract component ID from component_type
+    const parts = componentType.split('.');
+    const componentId = parts.length > 1 ? parts[parts.length - 2] : null;
+
+    if (!componentId) return undefined;
+
+    // Find component in manifest and return supported_partition_types
+    const template = manifest.components.find(c => c.id === componentId);
+    return template?.supported_partition_types;
+  }, [componentType, manifest]);
 
   // Handle both regular components and community components
   const [sourceComponent, setSourceComponent] = useState<ComponentInstance | null>(null);
@@ -127,6 +190,13 @@ export function PropertyPanel({ nodeId, onConfigureComponent, onOpenFile }: Prop
   const [isSaving, setIsSaving] = useState(false);
   const [materializeResult, setMaterializeResult] = useState<{ success: boolean; message: string } | null>(null);
   const [saveResult, setSaveResult] = useState<{ success: boolean; message: string } | null>(null);
+  const [showMaterializeMenu, setShowMaterializeMenu] = useState(false);
+  const [showLaunchpad, setShowLaunchpad] = useState(false);
+  const [showBackfillModal, setShowBackfillModal] = useState(false);
+  const [isPartitioned, setIsPartitioned] = useState(false);
+  const [checkingPartitions, setCheckingPartitions] = useState(false);
+  const [assetConfigSchema, setAssetConfigSchema] = useState<any>(null);
+  const [assetDefaultConfig, setAssetDefaultConfig] = useState<any>(null);
   const [editableMetadata, setEditableMetadata] = useState({
     description: '',
     group_name: '',
@@ -153,10 +223,29 @@ export function PropertyPanel({ nodeId, onConfigureComponent, onOpenFile }: Prop
     }
   }, [nodeId, node, isAssetNode, hasEdited, isSaving]);
 
-  console.log('[PropertyPanel] Node:', node);
-  console.log('[PropertyPanel] nodeKind (resolved):', nodeKind);
-  console.log('[PropertyPanel] isAssetNode:', isAssetNode);
-  console.log('[PropertyPanel] sourceComponent:', sourceComponent);
+  // Check if asset is partitioned
+  useEffect(() => {
+    if (isAssetNode && currentProject && node) {
+      const assetKey = node.data.asset_key || node.id;
+      setCheckingPartitions(true);
+      setIsPartitioned(false);
+
+      partitionsApi
+        .getPartitionInfo(currentProject.id, assetKey)
+        .then((response) => {
+          setIsPartitioned(response.is_partitioned);
+        })
+        .catch((err) => {
+          console.error('[PropertyPanel] Failed to check partitions:', err);
+          setIsPartitioned(false);
+        })
+        .finally(() => {
+          setCheckingPartitions(false);
+        });
+    } else {
+      setIsPartitioned(false);
+    }
+  }, [isAssetNode, currentProject?.id, nodeId, node]);
 
   if (!node) {
     return null;
@@ -313,6 +402,12 @@ export function PropertyPanel({ nodeId, onConfigureComponent, onOpenFile }: Prop
             message: 'Asset metadata updated successfully.',
           });
         }
+
+        // Always save the graph to persist any partition config changes
+        await projectsApi.update(currentProject.id, {
+          graph: currentProject.graph,
+        });
+
       } catch (error) {
         console.error('Failed to save metadata:', error);
         setSaveResult({
@@ -375,6 +470,99 @@ export function PropertyPanel({ nodeId, onConfigureComponent, onOpenFile }: Prop
       }
     };
 
+    const handleOpenLaunchpad = async () => {
+      setShowMaterializeMenu(false);
+
+      // Fetch config schema before opening
+      if (currentProject && node) {
+        const assetKey = node.data.asset_key || node.id;
+        try {
+          const configInfo = await partitionsApi.getConfigSchema(currentProject.id, assetKey);
+          if (configInfo.has_config) {
+            setAssetConfigSchema(configInfo.config_schema);
+            setAssetDefaultConfig(configInfo.default_config);
+          } else {
+            setAssetConfigSchema(null);
+            setAssetDefaultConfig(null);
+          }
+        } catch (err) {
+          console.error('[PropertyPanel] Failed to fetch config schema:', err);
+          setAssetConfigSchema(null);
+          setAssetDefaultConfig(null);
+        }
+      }
+
+      setShowLaunchpad(true);
+    };
+
+    const handleLaunchpadSubmit = async (config?: Record<string, any>, tags?: Record<string, string>) => {
+      if (!currentProject) return;
+
+      setIsMaterializing(true);
+      setMaterializeResult(null);
+
+      try {
+        const assetKey = node.data.asset_key || node.id;
+        const result = await projectsApi.materialize(currentProject.id, [assetKey], config, tags);
+
+        setMaterializeResult({
+          success: result.success,
+          message: result.message,
+        });
+
+        if (result.success) {
+          console.log('Materialization output:', result.stdout);
+        } else {
+          console.error('Materialization failed:', result.stderr);
+        }
+      } catch (error) {
+        console.error('Materialize failed:', error);
+        setMaterializeResult({
+          success: false,
+          message: 'Failed to materialize asset. Check console for details.',
+        });
+        throw error;
+      } finally {
+        setIsMaterializing(false);
+      }
+    };
+
+    const handleOpenBackfill = () => {
+      setShowMaterializeMenu(false);
+      setShowBackfillModal(true);
+    };
+
+    const handleBackfillSubmit = async (request: BackfillRequest) => {
+      if (!currentProject) return;
+
+      setIsMaterializing(true);
+      setMaterializeResult(null);
+
+      try {
+        const result = await partitionsApi.launchBackfill(currentProject.id, request);
+
+        setMaterializeResult({
+          success: result.success,
+          message: result.message,
+        });
+
+        if (result.success) {
+          console.log('Backfill output:', result.stdout);
+        } else {
+          console.error('Backfill failed:', result.stderr);
+        }
+      } catch (error) {
+        console.error('Backfill failed:', error);
+        setMaterializeResult({
+          success: false,
+          message: 'Failed to launch backfill. Check console for details.',
+        });
+        throw error;
+      } finally {
+        setIsMaterializing(false);
+      }
+    };
+
     // Get component icon from node data
     const componentIconName = node.data.component_icon;
     const ComponentIcon = componentIconName ? iconMap[componentIconName] || Package : Package;
@@ -390,14 +578,57 @@ export function PropertyPanel({ nodeId, onConfigureComponent, onOpenFile }: Prop
               </h2>
             </div>
             <div className="flex items-center space-x-2">
-              <button
-                onClick={handleMaterialize}
-                disabled={isMaterializing}
-                className="flex items-center space-x-1 px-3 py-1.5 text-sm bg-green-600 text-white rounded-md hover:bg-green-700 disabled:bg-gray-400 disabled:cursor-not-allowed"
-              >
-                <Play className="w-4 h-4" />
-                <span>{isMaterializing ? 'Materializing...' : 'Materialize'}</span>
-              </button>
+              <div className="relative">
+                <button
+                  onClick={() => setShowMaterializeMenu(!showMaterializeMenu)}
+                  disabled={isMaterializing}
+                  className="flex items-center space-x-1 px-3 py-1.5 text-sm bg-green-600 text-white rounded-md hover:bg-green-700 disabled:bg-gray-400 disabled:cursor-not-allowed"
+                >
+                  <Play className="w-4 h-4" />
+                  <span>{isMaterializing ? 'Materializing...' : 'Materialize'}</span>
+                  <ChevronDown className="w-3 h-3" />
+                </button>
+                {showMaterializeMenu && (
+                  <>
+                    <div
+                      className="fixed inset-0 z-10"
+                      onClick={() => setShowMaterializeMenu(false)}
+                    />
+                    <div className="absolute right-0 mt-1 w-48 bg-white border border-gray-200 rounded-md shadow-lg z-20">
+                      {!isPartitioned && (
+                        <button
+                          onClick={() => {
+                            handleMaterialize();
+                            setShowMaterializeMenu(false);
+                          }}
+                          className="w-full flex items-center gap-2 px-4 py-2 text-sm text-gray-700 hover:bg-gray-50 text-left"
+                        >
+                          <Play className="w-4 h-4" />
+                          Materialize
+                        </button>
+                      )}
+                      {!isPartitioned && (
+                        <button
+                          onClick={handleOpenLaunchpad}
+                          className="w-full flex items-center gap-2 px-4 py-2 text-sm text-gray-700 hover:bg-gray-50 text-left"
+                        >
+                          <FileCode className="w-4 h-4" />
+                          Open Launchpad
+                        </button>
+                      )}
+                      {isPartitioned && (
+                        <button
+                          onClick={handleOpenBackfill}
+                          className="w-full flex items-center gap-2 px-4 py-2 text-sm text-gray-700 hover:bg-gray-50 text-left"
+                        >
+                          <Calendar className="w-4 h-4" />
+                          Launch Backfill
+                        </button>
+                      )}
+                    </div>
+                  </>
+                )}
+              </div>
               <button
                 onClick={handleSaveMetadata}
                 disabled={isSaving}
@@ -688,6 +919,24 @@ export function PropertyPanel({ nodeId, onConfigureComponent, onOpenFile }: Prop
               <p className="text-xs text-gray-500 mt-2">
                 Click to configure this component's properties and dependencies
               </p>
+
+              {/* Partition Configuration for Components */}
+              {componentSupportsPartitions && (
+                <PartitionConfig
+                  config={node.data.partition_config || null}
+                  onChange={(partitionConfig) => {
+                    if (!updateNode) return;
+                    updateNode(node.id, {
+                      ...node,
+                      data: {
+                        ...node.data,
+                        partition_config: partitionConfig,
+                      },
+                    });
+                  }}
+                  supportedPartitionTypes={supportedPartitionTypes}
+                />
+              )}
             </div>
           )}
 
@@ -719,6 +968,32 @@ export function PropertyPanel({ nodeId, onConfigureComponent, onOpenFile }: Prop
               <p className="text-xs text-gray-500 mt-2">
                 Click to modify the source component configuration. Changes to the component may regenerate this asset.
               </p>
+
+              {/* Partition Configuration for Component-Generated Assets */}
+              {componentSupportsPartitions && (
+                <PartitionConfig
+                  config={node.data.partition_config || null}
+                  onChange={(partitionConfig) => {
+                    if (!currentProject) return;
+
+                    // Update the node with partition config
+                    const updatedNodes = currentProject.graph.nodes.map((n) =>
+                      n.id === nodeId
+                        ? {
+                            ...n,
+                            data: {
+                              ...n.data,
+                              partition_config: partitionConfig,
+                            },
+                          }
+                        : n
+                    );
+
+                    updateGraph(updatedNodes, currentProject.graph.edges);
+                  }}
+                  supportedPartitionTypes={supportedPartitionTypes}
+                />
+              )}
 
               {/* Delete Component Instance Button - only for non-factory components */}
               {!sourceComponent.is_asset_factory && (
@@ -892,6 +1167,31 @@ export function PropertyPanel({ nodeId, onConfigureComponent, onOpenFile }: Prop
             </div>
           )}
         </div>
+
+        {/* Launchpad for asset materialization */}
+        {currentProject && (
+          <Launchpad
+            open={showLaunchpad}
+            onOpenChange={setShowLaunchpad}
+            projectId={currentProject.id}
+            mode="materialize"
+            assetKeys={[node.data.asset_key || node.id]}
+            onLaunch={handleLaunchpadSubmit}
+            defaultConfig={assetDefaultConfig || {}}
+            configSchema={assetConfigSchema || {}}
+          />
+        )}
+
+        {/* Partition Backfill modal */}
+        {currentProject && isPartitioned && (
+          <PartitionBackfill
+            open={showBackfillModal}
+            onOpenChange={setShowBackfillModal}
+            projectId={currentProject.id}
+            assetKey={node.data.asset_key || node.id}
+            onLaunch={handleBackfillSubmit}
+          />
+        )}
       </div>
     );
   }

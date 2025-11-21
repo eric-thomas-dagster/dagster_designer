@@ -1,5 +1,10 @@
 """API endpoints for project management."""
 
+import sys
+import json
+import subprocess
+from pathlib import Path
+
 from fastapi import APIRouter, HTTPException, BackgroundTasks
 from pydantic import BaseModel, Field
 
@@ -588,6 +593,8 @@ async def validate_project(project_id: str):
 class MaterializeRequest(BaseModel):
     """Request to materialize assets."""
     asset_keys: list[str] | None = None  # If None, materialize all assets
+    config: dict | None = None  # Run config (ops, resources, execution, loggers)
+    tags: dict[str, str] | None = None  # Run tags
 
 
 class MaterializeResponse(BaseModel):
@@ -649,6 +656,40 @@ async def materialize_assets(project_id: str, request: MaterializeRequest):
                     stderr=""
                 )
 
+        # Add config if provided
+        config_file_path = None
+        if request.config:
+            import yaml
+            import tempfile
+            # Write config to temporary YAML file
+            config_file = tempfile.NamedTemporaryFile(mode='w', suffix='.yaml', delete=False, dir=str(project_path))
+            config_file_path = config_file.name
+            yaml.dump(request.config, config_file)
+            config_file.close()
+            cmd.extend(["--config", config_file_path])
+
+        # Add tags if provided
+        if request.tags:
+            import json
+            # Tags are passed as part of run config in Dagster
+            # We'll need to merge them into the config
+            tags_config = {"tags": request.tags}
+            if config_file_path:
+                # Merge tags into existing config
+                with open(config_file_path, 'r') as f:
+                    existing_config = yaml.safe_load(f) or {}
+                existing_config.update(tags_config)
+                with open(config_file_path, 'w') as f:
+                    yaml.dump(existing_config, f)
+            else:
+                # Create config file just for tags
+                import tempfile
+                config_file = tempfile.NamedTemporaryFile(mode='w', suffix='.yaml', delete=False, dir=str(project_path))
+                config_file_path = config_file.name
+                yaml.dump(tags_config, config_file)
+                config_file.close()
+                cmd.extend(["--config", config_file_path])
+
         print(f"[materialize] Running command: {' '.join(cmd)}")
         print(f"[materialize] Working directory: {project_path}")
 
@@ -682,6 +723,14 @@ async def materialize_assets(project_id: str, request: MaterializeRequest):
         success = result.returncode == 0
         message = "Materialization completed successfully" if success else "Materialization failed"
 
+        # Clean up temporary config file
+        if config_file_path:
+            try:
+                import os
+                os.unlink(config_file_path)
+            except Exception as e:
+                print(f"[materialize] Warning: Failed to delete temp config file: {e}")
+
         return MaterializeResponse(
             success=success,
             message=message,
@@ -690,8 +739,22 @@ async def materialize_assets(project_id: str, request: MaterializeRequest):
         )
 
     except subprocess.TimeoutExpired:
+        # Clean up config file on timeout
+        if config_file_path:
+            try:
+                import os
+                os.unlink(config_file_path)
+            except:
+                pass
         raise HTTPException(status_code=408, detail="Materialization timed out after 5 minutes")
     except Exception as e:
+        # Clean up config file on error
+        if config_file_path:
+            try:
+                import os
+                os.unlink(config_file_path)
+            except:
+                pass
         raise HTTPException(status_code=500, detail=f"Failed to materialize assets: {str(e)}")
 
 
@@ -1037,3 +1100,361 @@ async def get_community_component_config(project_id: str, component_id: str):
             status_code=500,
             detail=f"Failed to read component configuration: {str(e)}"
         )
+
+
+# ============================================================================
+# Partition & Config Endpoints
+# ============================================================================
+
+
+class PartitionInfoResponse(BaseModel):
+    """Response containing partition information for an asset."""
+    asset_key: str
+    is_partitioned: bool
+    partitions_def: dict | None = None
+
+
+class ConfigSchemaResponse(BaseModel):
+    """Response containing config schema for an asset."""
+    asset_key: str
+    has_config: bool
+    config_schema: dict | None = None
+    default_config: dict | None = None
+
+
+@router.get("/{project_id}/assets/{asset_key:path}/partitions", response_model=PartitionInfoResponse)
+async def get_asset_partitions(project_id: str, asset_key: str):
+    """Get partition definition for an asset.
+
+    Args:
+        project_id: The project ID
+        asset_key: The asset key (e.g., "my_asset" or "prefix/my_asset")
+
+    Returns:
+        PartitionInfoResponse with partition definition info
+    """
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    project_dir = project_service._get_project_dir(project)
+    if not project_dir.exists():
+        raise HTTPException(status_code=404, detail="Project directory not found")
+
+    # Get the project module name
+    project_module = project.directory_name
+
+    try:
+        # Run the show_partitions.py script from backend directory
+        # Add project src to PYTHONPATH so it can import the project module
+        import os
+        env = os.environ.copy()
+        project_src_dir = project_dir / "src"
+        if "PYTHONPATH" in env:
+            env["PYTHONPATH"] = f"{project_src_dir}:{env['PYTHONPATH']}"
+        else:
+            env["PYTHONPATH"] = str(project_src_dir)
+
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "scripts.show_partitions",
+                project_module,
+                asset_key,
+            ],
+            cwd=Path.cwd(),  # Run from backend directory
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+
+        if result.returncode != 0:
+            # Try to parse error from stderr
+            try:
+                error_data = json.loads(result.stdout or result.stderr)
+                raise HTTPException(
+                    status_code=400,
+                    detail=error_data.get("error", "Failed to get partition info")
+                )
+            except json.JSONDecodeError:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Failed to get partition info: {result.stderr}"
+                )
+
+        # Parse the JSON output - extract JSON from stdout (may have warnings before it)
+        stdout = result.stdout.strip()
+        # Find the first line that starts with { (the JSON output)
+        for line in stdout.split('\n'):
+            if line.strip().startswith('{'):
+                # Found the start of JSON, get everything from here
+                json_start_idx = stdout.index(line)
+                json_str = stdout[json_start_idx:]
+                partition_info = json.loads(json_str)
+                break
+        else:
+            raise HTTPException(
+                status_code=500,
+                detail=f"No JSON found in output: {stdout[:200]}"
+            )
+
+        return PartitionInfoResponse(**partition_info)
+
+    except subprocess.TimeoutExpired:
+        raise HTTPException(
+            status_code=504,
+            detail="Request timed out while fetching partition info"
+        )
+    except json.JSONDecodeError as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to parse partition info: {str(e)}"
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error fetching partition info: {str(e)}"
+        )
+
+
+@router.get("/{project_id}/assets/{asset_key:path}/config-schema", response_model=ConfigSchemaResponse)
+async def get_asset_config_schema(project_id: str, asset_key: str):
+    """Get config schema for an asset.
+
+    Args:
+        project_id: The project ID
+        asset_key: The asset key (e.g., "my_asset" or "prefix/my_asset")
+
+    Returns:
+        ConfigSchemaResponse with config schema and defaults
+    """
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    project_dir = project_service._get_project_dir(project)
+    if not project_dir.exists():
+        raise HTTPException(status_code=404, detail="Project directory not found")
+
+    # Get the project module name
+    project_module = project.directory_name
+
+    try:
+        # Run the show_config.py script from backend directory
+        # Add project src to PYTHONPATH so it can import the project module
+        import os
+        env = os.environ.copy()
+        project_src_dir = project_dir / "src"
+        if "PYTHONPATH" in env:
+            env["PYTHONPATH"] = f"{project_src_dir}:{env['PYTHONPATH']}"
+        else:
+            env["PYTHONPATH"] = str(project_src_dir)
+
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "scripts.show_config",
+                project_module,
+                asset_key,
+            ],
+            cwd=Path.cwd(),  # Run from backend directory
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+
+        if result.returncode != 0:
+            # Try to parse error from stderr
+            try:
+                error_data = json.loads(result.stdout or result.stderr)
+                raise HTTPException(
+                    status_code=400,
+                    detail=error_data.get("error", "Failed to get config schema")
+                )
+            except json.JSONDecodeError:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Failed to get config schema: {result.stderr}"
+                )
+
+        # Parse the JSON output - extract JSON from stdout (may have warnings before it)
+        stdout = result.stdout.strip()
+        # Find the first line that starts with { (the JSON output)
+        for line in stdout.split('\n'):
+            if line.strip().startswith('{'):
+                # Found the start of JSON, get everything from here
+                json_start_idx = stdout.index(line)
+                json_str = stdout[json_start_idx:]
+                config_info = json.loads(json_str)
+                break
+        else:
+            raise HTTPException(
+                status_code=500,
+                detail=f"No JSON found in output: {stdout[:200]}"
+            )
+
+        return ConfigSchemaResponse(**config_info)
+
+    except subprocess.TimeoutExpired:
+        raise HTTPException(
+            status_code=504,
+            detail="Request timed out while fetching config schema"
+        )
+    except json.JSONDecodeError as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to parse config schema: {str(e)}"
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error fetching config schema: {str(e)}"
+        )
+
+
+class BackfillRequest(BaseModel):
+    """Request to launch a backfill for partitioned assets."""
+    asset_keys: list[str]
+    partition_selection: list[str] | None = Field(
+        None,
+        description="List of partition keys to backfill, or None for all partitions"
+    )
+    partition_range: dict[str, str] | None = Field(
+        None,
+        description="Partition range with 'start' and 'end' keys"
+    )
+    config: dict | None = None
+    tags: dict[str, str] | None = None
+    backfill_failed_only: bool = Field(
+        False,
+        description="Only backfill failed and missing partitions"
+    )
+
+
+class BackfillResponse(BaseModel):
+    """Response from launching a backfill."""
+    success: bool
+    message: str
+    stdout: str
+    stderr: str
+
+
+@router.post("/{project_id}/backfill", response_model=BackfillResponse)
+async def launch_backfill(project_id: str, request: BackfillRequest):
+    """Launch a backfill for partitioned assets.
+
+    Args:
+        project_id: The project ID
+        request: Backfill configuration
+
+    Returns:
+        BackfillResponse with backfill status
+    """
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    project_dir = project_service._get_project_dir(project)
+    if not project_dir.exists():
+        raise HTTPException(status_code=404, detail="Project directory not found")
+
+    # Build the dg asset backfill command
+    cmd = [
+        project_dir / ".venv" / "bin" / "dg",
+        "asset",
+        "backfill",
+    ]
+
+    # Add asset selection
+    if request.asset_keys:
+        for asset_key in request.asset_keys:
+            cmd.extend(["--select", asset_key])
+
+    # Add partition selection
+    if request.partition_selection:
+        # Convert list of partitions to comma-separated string
+        cmd.extend(["--partitions", ",".join(request.partition_selection)])
+    elif request.partition_range:
+        # Use partition range
+        start = request.partition_range.get("start")
+        end = request.partition_range.get("end")
+        if start and end:
+            cmd.extend(["--partitions", f"[{start}...{end}]"])
+        elif start:
+            cmd.extend(["--from", start])
+
+    # Handle config and tags
+    config_file = None
+    try:
+        if request.config or request.tags:
+            # Create temporary config file
+            config_data = {}
+            if request.config:
+                config_data.update(request.config)
+            if request.tags:
+                if "tags" not in config_data:
+                    config_data["tags"] = {}
+                config_data["tags"].update(request.tags)
+
+            import tempfile
+            import yaml
+
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                suffix=".yaml",
+                dir=project_dir,
+                delete=False
+            ) as f:
+                yaml.dump(config_data, f)
+                config_file = Path(f.name)
+
+            cmd.extend(["--config", str(config_file)])
+
+        # Add other flags
+        if request.backfill_failed_only:
+            cmd.append("--failed")
+
+        # Execute the backfill command
+        result = subprocess.run(
+            cmd,
+            cwd=project_dir,
+            capture_output=True,
+            text=True,
+            timeout=300,  # 5 minute timeout for backfills
+        )
+
+        success = result.returncode == 0
+        message = "Backfill launched successfully" if success else "Backfill failed"
+
+        return BackfillResponse(
+            success=success,
+            message=message,
+            stdout=result.stdout,
+            stderr=result.stderr,
+        )
+
+    except subprocess.TimeoutExpired:
+        return BackfillResponse(
+            success=False,
+            message="Backfill command timed out",
+            stdout="",
+            stderr="Command exceeded 5 minute timeout",
+        )
+    except Exception as e:
+        return BackfillResponse(
+            success=False,
+            message=f"Error launching backfill: {str(e)}",
+            stdout="",
+            stderr=str(e),
+        )
+    finally:
+        # Clean up temporary config file
+        if config_file and config_file.exists():
+            try:
+                config_file.unlink()
+            except Exception:
+                pass

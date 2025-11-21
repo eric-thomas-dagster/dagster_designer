@@ -93,6 +93,7 @@ class ComponentTemplate(BaseModel):
     requirements_url: Optional[str] = None
     manifest_url: Optional[str] = None
     icon: Optional[str] = "Package"  # Lucide icon name for visual identification
+    supports_partitions: Optional[bool] = False  # Whether the component supports partitioned assets
 
 
 class TemplateManifest(BaseModel):

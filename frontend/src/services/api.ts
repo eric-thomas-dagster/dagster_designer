@@ -36,6 +36,8 @@ export const componentsApi = {
 // Projects API
 export interface MaterializeRequest {
   asset_keys?: string[];
+  config?: Record<string, any>;
+  tags?: Record<string, string>;
 }
 
 export interface MaterializeResponse {
@@ -81,10 +83,15 @@ export const projectsApi = {
     return response.data;
   },
 
-  materialize: async (projectId: string, assetKeys?: string[]) => {
+  materialize: async (
+    projectId: string,
+    assetKeys?: string[],
+    config?: Record<string, any>,
+    tags?: Record<string, string>
+  ) => {
     const response = await api.post<MaterializeResponse>(
       `/projects/${projectId}/materialize`,
-      { asset_keys: assetKeys }
+      { asset_keys: assetKeys, config, tags }
     );
     return response.data;
   },
@@ -939,6 +946,18 @@ export interface PipelinesListResponse {
   total: number;
 }
 
+export interface LaunchJobRequest {
+  config?: Record<string, any>;
+  tags?: Record<string, string>;
+}
+
+export interface LaunchJobResponse {
+  success: boolean;
+  message: string;
+  stdout: string;
+  stderr: string;
+}
+
 export const pipelinesApi = {
   create: async (projectId: string, pipeline: PipelineCreateRequest): Promise<PipelineResponse> => {
     const response = await api.post<PipelineResponse>(
@@ -960,6 +979,105 @@ export const pipelinesApi = {
 
   getSensorTypes: async (projectId: string): Promise<any> => {
     const response = await api.get(`/pipelines/sensor-types/${projectId}`);
+    return response.data;
+  },
+
+  launch: async (
+    projectId: string,
+    jobName: string,
+    config?: Record<string, any>,
+    tags?: Record<string, string>
+  ): Promise<LaunchJobResponse> => {
+    const response = await api.post<LaunchJobResponse>(
+      `/pipelines/${projectId}/${jobName}/launch`,
+      { config, tags }
+    );
+    return response.data;
+  },
+};
+
+// ============================================================================
+// Partition & Backfill Types and API
+// ============================================================================
+
+export interface PartitionDef {
+  type: string;
+  partition_keys?: string[];
+  partition_count?: number;
+  start_date?: string;
+  end_date?: string;
+  cron_schedule?: string;
+  date_format?: string;
+  timezone?: string;
+  sample_note?: string;
+}
+
+export interface PartitionInfoResponse {
+  asset_key: string;
+  is_partitioned: boolean;
+  partitions_def?: PartitionDef | null;
+}
+
+export interface ConfigField {
+  is_required: boolean;
+  description?: string;
+  config_type?: any;
+  default_value?: any;
+}
+
+export interface ConfigSchema {
+  kind?: string;
+  description?: string;
+  fields?: Record<string, ConfigField>;
+  inner_type?: any;
+}
+
+export interface ConfigSchemaResponse {
+  asset_key: string;
+  has_config: boolean;
+  config_schema?: ConfigSchema | null;
+  default_config?: Record<string, any> | null;
+}
+
+export interface BackfillRequest {
+  asset_keys: string[];
+  partition_selection?: string[] | null;
+  partition_range?: {
+    start: string;
+    end: string;
+  } | null;
+  config?: Record<string, any> | null;
+  tags?: Record<string, string> | null;
+  backfill_failed_only?: boolean;
+}
+
+export interface BackfillResponse {
+  success: boolean;
+  message: string;
+  stdout: string;
+  stderr: string;
+}
+
+export const partitionsApi = {
+  getPartitionInfo: async (projectId: string, assetKey: string): Promise<PartitionInfoResponse> => {
+    const response = await api.get<PartitionInfoResponse>(
+      `/projects/${projectId}/assets/${encodeURIComponent(assetKey)}/partitions`
+    );
+    return response.data;
+  },
+
+  getConfigSchema: async (projectId: string, assetKey: string): Promise<ConfigSchemaResponse> => {
+    const response = await api.get<ConfigSchemaResponse>(
+      `/projects/${projectId}/assets/${encodeURIComponent(assetKey)}/config-schema`
+    );
+    return response.data;
+  },
+
+  launchBackfill: async (projectId: string, request: BackfillRequest): Promise<BackfillResponse> => {
+    const response = await api.post<BackfillResponse>(
+      `/projects/${projectId}/backfill`,
+      request
+    );
     return response.data;
   },
 };

@@ -15,6 +15,8 @@ interface ComponentTemplate {
   dependencies: {
     pip: string[];
   };
+  icon?: string;
+  supports_partitions?: boolean;
   readme_url: string;
   component_url: string;
   schema_url: string;
