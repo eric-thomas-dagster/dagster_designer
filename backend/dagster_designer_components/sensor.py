@@ -17,6 +17,7 @@ class SensorComponent(dg.Component, dg.Model, dg.Resolvable):
     asset_key: Optional[str] = None  # For asset sensors
     minimum_interval_seconds: int = 30
     default_status: str = "RUNNING"
+    is_partitioned: Optional[bool] = None  # Whether sensor should handle partitioned assets
 
     def build_defs(self, context: dg.ComponentLoadContext) -> dg.Definitions:
         """Build Dagster definitions from component parameters."""
@@ -77,7 +78,13 @@ class SensorComponent(dg.Component, dg.Model, dg.Resolvable):
         return status_sensor
 
     def _create_asset_sensor(self):
-        """Create an asset sensor that monitors asset materializations."""
+        """Create an asset sensor that monitors asset materializations.
+
+        For partitioned assets, this will automatically trigger runs with the
+        same partition key as the materialization event.
+        """
+        import sys
+
         # Parse asset key (handle both simple keys and path-like keys)
         # e.g., "my_asset" or "path/to/asset"
         asset_key_parts = self.asset_key.split("/") if self.asset_key else ["unknown"]
@@ -96,11 +103,50 @@ class SensorComponent(dg.Component, dg.Model, dg.Resolvable):
             ),
         )
         def asset_sensor_fn(context: dg.SensorEvaluationContext, asset_event: dg.EventLogEntry):
-            """Sensor that triggers when the monitored asset is materialized."""
-            yield dg.RunRequest(
-                run_key=f"{self.sensor_name}_{asset_event.run_id}",
-                run_config={},
-            )
+            """Sensor that triggers when the monitored asset is materialized.
+
+            For partitioned assets, automatically passes the partition key to the triggered run.
+            """
+            # Check if the asset event has a partition key
+            partition_key = None
+            if hasattr(asset_event, 'partition_key') and asset_event.partition_key:
+                partition_key = asset_event.partition_key
+            elif hasattr(asset_event, 'dagster_event') and asset_event.dagster_event:
+                # Try to extract partition from the event metadata
+                event = asset_event.dagster_event
+                if hasattr(event, 'partition') and event.partition:
+                    partition_key = event.partition
+                elif hasattr(event, 'step_key') and event.step_key:
+                    # Partition might be encoded in step_key
+                    step_key = event.step_key
+                    if '[' in step_key and ']' in step_key:
+                        # Format: "asset_name[partition_key]"
+                        partition_key = step_key[step_key.find('[')+1:step_key.find(']')]
+
+            run_key = f"{self.sensor_name}_{asset_event.run_id}"
+
+            if partition_key:
+                # Partitioned asset - trigger run for the same partition
+                print(f"[SensorComponent] Asset sensor '{self.sensor_name}' detected "
+                      f"partition '{partition_key}' for asset {self.asset_key}, "
+                      f"triggering partitioned run",
+                      file=sys.stderr, flush=True)
+
+                yield dg.RunRequest(
+                    run_key=f"{run_key}_{partition_key}",
+                    partition_key=partition_key,  # Pass partition key to the triggered run
+                    run_config={},
+                )
+            else:
+                # Non-partitioned asset or partition key not available
+                print(f"[SensorComponent] Asset sensor '{self.sensor_name}' detected "
+                      f"materialization of {self.asset_key} (non-partitioned)",
+                      file=sys.stderr, flush=True)
+
+                yield dg.RunRequest(
+                    run_key=run_key,
+                    run_config={},
+                )
 
         return asset_sensor_fn
 
