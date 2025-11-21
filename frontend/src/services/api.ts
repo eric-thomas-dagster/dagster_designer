@@ -410,6 +410,7 @@ export interface JobParams {
   asset_selection: string[];
   description?: string;
   tags?: Record<string, string>;
+  project_id?: string;  // For partition validation
 }
 
 export interface SensorParams {

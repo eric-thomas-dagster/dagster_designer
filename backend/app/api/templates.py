@@ -5,6 +5,8 @@ from pydantic import BaseModel
 from typing import Any, Literal
 
 from app.services.template_service import TemplateService, PrimitiveType
+from app.services.partition_validation import validate_partition_compatibility, get_partition_summary
+from app.models.partition import PartitionConfig
 
 router = APIRouter(prefix="/templates", tags=["templates"])
 template_service = TemplateService()
@@ -52,6 +54,7 @@ class JobRequest(BaseModel):
     asset_selection: list[str]
     description: str = ""
     tags: dict[str, str] = {}
+    project_id: str | None = None  # Optional for validation
 
 
 class SensorRequest(BaseModel):
@@ -286,6 +289,10 @@ async def generate_job(request: JobRequest):
     """
     Generate a job template.
 
+    Validates that all partitioned assets in the job have compatible partition definitions.
+    According to Dagster requirements, all partitioned assets in a job must have the same
+    partition definition.
+
     Args:
         request: Job parameters
 
@@ -293,6 +300,50 @@ async def generate_job(request: JobRequest):
         Generated Python code
     """
     try:
+        # Validate partition compatibility if project_id provided
+        if request.project_id and request.asset_selection:
+            from app.services.project_service import project_service
+
+            project = project_service.get_project(request.project_id)
+            if project and project.graph and project.graph.nodes:
+                # Extract partition configs for selected assets
+                partition_configs = []
+                asset_partition_info = []
+
+                for asset_key in request.asset_selection:
+                    # Find the node for this asset
+                    node = next(
+                        (
+                            n
+                            for n in project.graph.nodes
+                            if n.node_kind == "asset"
+                            and (n.data.get("asset_key") == asset_key or n.id == asset_key)
+                        ),
+                        None,
+                    )
+
+                    if node and node.data.get("partition_config"):
+                        config = PartitionConfig(**node.data["partition_config"])
+                        partition_configs.append(config)
+                        asset_partition_info.append({
+                            "asset_key": asset_key,
+                            "partition_summary": get_partition_summary(config),
+                        })
+
+                # Validate compatibility
+                is_compatible, issues = validate_partition_compatibility(partition_configs)
+
+                if not is_compatible:
+                    # Build detailed error message
+                    error_details = {
+                        "error": "Incompatible partition definitions",
+                        "message": "Dagster requires that all partitioned assets in a job must have the same partition definition.",
+                        "issues": issues,
+                        "assets": asset_partition_info,
+                    }
+                    raise HTTPException(status_code=400, detail=error_details)
+
+        # Generate the job code
         code = template_service.generate_job(
             job_name=request.job_name,
             asset_selection=request.asset_selection,
@@ -300,6 +351,9 @@ async def generate_job(request: JobRequest):
             tags=request.tags,
         )
         return {"code": code, "job_name": request.job_name}
+    except HTTPException:
+        # Re-raise HTTP exceptions (including our validation error)
+        raise
     except Exception as e:
         raise HTTPException(
             status_code=500, detail=f"Failed to generate job: {str(e)}"

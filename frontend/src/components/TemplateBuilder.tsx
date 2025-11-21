@@ -14,6 +14,7 @@ import {
   Plus,
   Users,
   ArrowLeftRight,
+  AlertTriangle,
 } from 'lucide-react';
 import { primitivesApi } from '@/services/api';
 import { CommunityTemplates } from './CommunityTemplates';
@@ -283,7 +284,7 @@ export function TemplateBuilder() {
   });
 
   const generateJobMutation = useMutation({
-    mutationFn: () => templatesApi.generateJob(job),
+    mutationFn: () => templatesApi.generateJob({ ...job, project_id: currentProject?.id }),
     onSuccess: (data) => setGeneratedCode(data.code),
   });
 
@@ -1145,6 +1146,91 @@ ${generateYamlAttributes(communityAssetCheckAttributes, 1)}`;
                           ))}
                         </div>
                       )}
+                      {/* Partition compatibility validation */}
+                      {(() => {
+                        if (job.asset_selection.length === 0 || !currentProject?.graph?.nodes) {
+                          return null;
+                        }
+
+                        // Get partition configs for selected assets
+                        const selectedAssetPartitions = job.asset_selection
+                          .map((assetKey: string) => {
+                            const node = currentProject.graph.nodes.find(
+                              (n: any) => (n.data.asset_key || n.id) === assetKey
+                            );
+                            if (!node?.data?.partition_config?.enabled) {
+                              return null;
+                            }
+                            return {
+                              assetKey,
+                              partitionType: node.data.partition_config.partition_type,
+                              startDate: node.data.partition_config.start_date,
+                              timezone: node.data.partition_config.timezone,
+                            };
+                          })
+                          .filter(Boolean);
+
+                        // If no partitioned assets or only one, no incompatibility
+                        if (selectedAssetPartitions.length <= 1) {
+                          return null;
+                        }
+
+                        // Check for incompatibility
+                        const firstPartition = selectedAssetPartitions[0];
+                        const incompatibleAssets = selectedAssetPartitions.filter((p: any) => {
+                          return (
+                            p.partitionType !== firstPartition.partitionType ||
+                            p.startDate !== firstPartition.startDate ||
+                            p.timezone !== firstPartition.timezone
+                          );
+                        });
+
+                        if (incompatibleAssets.length === 0) {
+                          return null;
+                        }
+
+                        // Group assets by their partition config
+                        const partitionGroups = new Map<string, string[]>();
+                        selectedAssetPartitions.forEach((p: any) => {
+                          const key = `${p.partitionType}|${p.startDate || 'none'}|${p.timezone || 'UTC'}`;
+                          if (!partitionGroups.has(key)) {
+                            partitionGroups.set(key, []);
+                          }
+                          partitionGroups.get(key)!.push(p.assetKey);
+                        });
+
+                        return (
+                          <div className="mt-3 bg-amber-50 border border-amber-300 rounded-md p-3">
+                            <div className="flex gap-2">
+                              <AlertTriangle className="h-5 w-5 text-amber-600 flex-shrink-0 mt-0.5" />
+                              <div className="flex-1">
+                                <p className="text-sm font-medium text-amber-900">
+                                  Warning: Selected assets have incompatible partition definitions
+                                </p>
+                                <p className="text-xs text-amber-800 mt-1">
+                                  Dagster requires all partitioned assets in a job to have the same partition definition.
+                                </p>
+                                <div className="mt-2 space-y-2">
+                                  {Array.from(partitionGroups.entries()).map(([config, assets], idx) => {
+                                    const [partitionType, startDate, timezone] = config.split('|');
+                                    return (
+                                      <div key={idx} className="text-xs">
+                                        <div className="font-medium text-amber-900">
+                                          {partitionType}
+                                          {startDate !== 'none' && ` (start: ${startDate}, tz: ${timezone})`}:
+                                        </div>
+                                        <div className="ml-2 text-amber-700">
+                                          {assets.join(', ')}
+                                        </div>
+                                      </div>
+                                    );
+                                  })}
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })()}
                     </div>
                   ) : (
                     <div className="text-sm text-amber-600 bg-amber-50 border border-amber-200 rounded-md p-3">
