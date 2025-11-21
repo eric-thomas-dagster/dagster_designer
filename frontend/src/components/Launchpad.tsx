@@ -2,8 +2,9 @@ import { useState, useEffect } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
 import * as Tabs from '@radix-ui/react-tabs';
 import Editor from '@monaco-editor/react';
-import { X, Play, Tag, AlertCircle, CheckCircle2 } from 'lucide-react';
+import { X, Play, Tag, AlertCircle, CheckCircle2, Calendar } from 'lucide-react';
 import yaml from 'js-yaml';
+import { partitionsApi, type PartitionDef } from '@/services/api';
 
 interface LaunchpadProps {
   open: boolean;
@@ -12,7 +13,7 @@ interface LaunchpadProps {
   mode: 'materialize' | 'job';
   assetKeys?: string[];
   jobName?: string;
-  onLaunch: (config?: Record<string, any>, tags?: Record<string, string>) => Promise<void>;
+  onLaunch: (config?: Record<string, any>, tags?: Record<string, string>, partition?: string) => Promise<void>;
   defaultConfig?: Record<string, any>;
   configSchema?: Record<string, any>;
 }
@@ -20,7 +21,7 @@ interface LaunchpadProps {
 export function Launchpad({
   open,
   onOpenChange,
-  projectId: _projectId,
+  projectId,
   mode,
   assetKeys = [],
   jobName,
@@ -33,6 +34,11 @@ export function Launchpad({
   const [showTagEditor, setShowTagEditor] = useState(false);
   const [errors, setErrors] = useState<string[]>([]);
   const [isLaunching, setIsLaunching] = useState(false);
+
+  // Partition state
+  const [partitionDef, setPartitionDef] = useState<PartitionDef | null>(null);
+  const [selectedPartition, setSelectedPartition] = useState<string>('');
+  const [loadingPartitions, setLoadingPartitions] = useState(false);
 
   // Initialize config YAML from defaultConfig
   useEffect(() => {
@@ -47,6 +53,38 @@ export function Launchpad({
       }
     }
   }, [open, defaultConfig]);
+
+  // Fetch partition info for single asset materialization
+  useEffect(() => {
+    if (open && mode === 'materialize' && assetKeys.length === 1) {
+      setLoadingPartitions(true);
+      setPartitionDef(null);
+      setSelectedPartition('');
+
+      partitionsApi
+        .getPartitionInfo(projectId, assetKeys[0])
+        .then((response) => {
+          if (response.is_partitioned && response.partitions_def) {
+            setPartitionDef(response.partitions_def);
+            // Auto-select latest partition
+            const keys = response.partitions_def.partition_keys || [];
+            if (keys.length > 0) {
+              setSelectedPartition(keys[keys.length - 1]);
+            }
+          }
+        })
+        .catch((err) => {
+          console.error('Failed to load partition info:', err);
+        })
+        .finally(() => {
+          setLoadingPartitions(false);
+        });
+    } else {
+      // Reset partition state if not a single asset
+      setPartitionDef(null);
+      setSelectedPartition('');
+    }
+  }, [open, mode, assetKeys, projectId]);
 
   // Validate YAML on change
   const handleEditorChange = (value: string | undefined) => {
@@ -79,7 +117,11 @@ export function Launchpad({
 
     setIsLaunching(true);
     try {
-      await onLaunch(config, Object.keys(tags).length > 0 ? tags : undefined);
+      await onLaunch(
+        config,
+        Object.keys(tags).length > 0 ? tags : undefined,
+        selectedPartition || undefined
+      );
       onOpenChange(false);
     } catch (err: any) {
       setErrors([err.message || 'Launch failed']);
@@ -101,14 +143,39 @@ export function Launchpad({
         <Dialog.Content className="fixed top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 bg-white rounded-lg shadow-xl z-50 w-[90vw] h-[85vh] max-w-[1400px] flex flex-col">
           {/* Header */}
           <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200">
-            <div>
-              <Dialog.Title className="text-lg font-semibold text-gray-900 flex items-center gap-2">
-                <span className="text-gray-400">◇</span>
-                {title}
-              </Dialog.Title>
-              <Dialog.Description className="sr-only">
-                Configure run parameters including config and tags before launching
-              </Dialog.Description>
+            <div className="flex items-center gap-4">
+              <div>
+                <Dialog.Title className="text-lg font-semibold text-gray-900 flex items-center gap-2">
+                  <span className="text-gray-400">◇</span>
+                  {title}
+                </Dialog.Title>
+                <Dialog.Description className="sr-only">
+                  Configure run parameters including config and tags before launching
+                </Dialog.Description>
+              </div>
+
+              {/* Partition selector */}
+              {partitionDef && (
+                <div className="flex items-center gap-2 ml-4">
+                  <Calendar className="w-4 h-4 text-gray-400" />
+                  <label className="text-sm font-medium text-gray-700">Partition:</label>
+                  {loadingPartitions ? (
+                    <span className="text-sm text-gray-500">Loading...</span>
+                  ) : (
+                    <select
+                      value={selectedPartition}
+                      onChange={(e) => setSelectedPartition(e.target.value)}
+                      className="px-2 py-1 text-sm border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    >
+                      {partitionDef.partition_keys?.map((key) => (
+                        <option key={key} value={key}>
+                          {key}
+                        </option>
+                      ))}
+                    </select>
+                  )}
+                </div>
+              )}
             </div>
             <div className="flex items-center gap-2">
               {assetKeys.length > 0 && (

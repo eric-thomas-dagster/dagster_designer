@@ -406,12 +406,13 @@ function GraphEditorInner({ onNodeSelect }: GraphEditorProps) {
     setShowLaunchpad(true);
   }, []);
 
-  const handleLaunchpadSubmit = useCallback(async (config?: Record<string, any>, tags?: Record<string, string>) => {
+  const handleLaunchpadSubmit = useCallback(async (config?: Record<string, any>, tags?: Record<string, string>, partition?: string) => {
     if (!currentProject || !launchpadAssetKey) return;
     try {
-      const result = await projectsApi.materialize(currentProject.id, [launchpadAssetKey], config, tags);
+      const result = await projectsApi.materialize(currentProject.id, [launchpadAssetKey], config, tags, partition);
       if (result.success) {
-        alert(`Asset ${launchpadAssetKey} materialized successfully!`);
+        const partitionMsg = partition ? ` (partition: ${partition})` : '';
+        alert(`Asset ${launchpadAssetKey}${partitionMsg} materialized successfully!`);
       } else {
         alert(`Failed to materialize asset ${launchpadAssetKey}`);
       }

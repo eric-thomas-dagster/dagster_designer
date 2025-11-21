@@ -87,11 +87,12 @@ export const projectsApi = {
     projectId: string,
     assetKeys?: string[],
     config?: Record<string, any>,
-    tags?: Record<string, string>
+    tags?: Record<string, string>,
+    partition?: string
   ) => {
     const response = await api.post<MaterializeResponse>(
       `/projects/${projectId}/materialize`,
-      { asset_keys: assetKeys, config, tags }
+      { asset_keys: assetKeys, config, tags, partition }
     );
     return response.data;
   },
@@ -1048,7 +1049,6 @@ export interface BackfillRequest {
   } | null;
   config?: Record<string, any> | null;
   tags?: Record<string, string> | null;
-  backfill_failed_only?: boolean;
 }
 
 export interface BackfillResponse {

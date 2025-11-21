@@ -607,15 +607,13 @@ export function PropertyPanel({ nodeId, onConfigureComponent, onOpenFile }: Prop
                           Materialize
                         </button>
                       )}
-                      {!isPartitioned && (
-                        <button
-                          onClick={handleOpenLaunchpad}
-                          className="w-full flex items-center gap-2 px-4 py-2 text-sm text-gray-700 hover:bg-gray-50 text-left"
-                        >
-                          <FileCode className="w-4 h-4" />
-                          Open Launchpad
-                        </button>
-                      )}
+                      <button
+                        onClick={handleOpenLaunchpad}
+                        className="w-full flex items-center gap-2 px-4 py-2 text-sm text-gray-700 hover:bg-gray-50 text-left"
+                      >
+                        <FileCode className="w-4 h-4" />
+                        Open Launchpad
+                      </button>
                       {isPartitioned && (
                         <button
                           onClick={handleOpenBackfill}
@@ -925,14 +923,23 @@ export function PropertyPanel({ nodeId, onConfigureComponent, onOpenFile }: Prop
                 <PartitionConfig
                   config={node.data.partition_config || null}
                   onChange={(partitionConfig) => {
-                    if (!updateNode) return;
-                    updateNode(node.id, {
-                      ...node,
-                      data: {
-                        ...node.data,
-                        partition_config: partitionConfig,
-                      },
-                    });
+                    if (!currentProject) return;
+
+                    // Update the node with partition config
+                    const updatedNodes = currentProject.graph.nodes.map((n) =>
+                      n.id === nodeId
+                        ? {
+                            ...n,
+                            data: {
+                              ...n.data,
+                              partition_config: partitionConfig,
+                            },
+                          }
+                        : n
+                    );
+
+                    // Save to backend
+                    updateGraph(updatedNodes, currentProject.graph.edges);
                   }}
                   supportedPartitionTypes={supportedPartitionTypes}
                 />

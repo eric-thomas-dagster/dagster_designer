@@ -40,9 +40,6 @@ export function PartitionBackfill({
   const [showTagEditor, setShowTagEditor] = useState(false);
   const [showConfigEditor, setShowConfigEditor] = useState(false);
 
-  // Options
-  const [backfillFailedOnly, setBackfillFailedOnly] = useState(false);
-
   // Launch state
   const [isLaunching, setIsLaunching] = useState(false);
   const [errors, setErrors] = useState<string[]>([]);
@@ -196,7 +193,6 @@ export function PartitionBackfill({
       partition_range: partitionRange,
       config,
       tags: Object.keys(tags).length > 0 ? tags : undefined,
-      backfill_failed_only: backfillFailedOnly,
     };
 
     setIsLaunching(true);
@@ -448,20 +444,6 @@ export function PartitionBackfill({
                     </div>
                   )}
                   <p className="text-xs text-gray-500 mt-2">Config will be applied to all backfill runs</p>
-                </div>
-
-                {/* Options */}
-                <div>
-                  <h3 className="text-sm font-semibold text-gray-700 mb-3">Options</h3>
-                  <label className="flex items-center gap-2">
-                    <input
-                      type="checkbox"
-                      checked={backfillFailedOnly}
-                      onChange={(e) => setBackfillFailedOnly(e.target.checked)}
-                      className="w-4 h-4 text-blue-600"
-                    />
-                    <span className="text-sm text-gray-700">Backfill only failed and missing partitions within selection</span>
-                  </label>
                 </div>
 
                 {/* Info message */}

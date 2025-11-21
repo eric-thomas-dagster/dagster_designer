@@ -1,7 +1,8 @@
 import { useState, useEffect } from 'react';
 import { useProjectStore } from '@/hooks/useProject';
-import { codegenApi, projectsApi, filesApi } from '@/services/api';
+import { codegenApi, projectsApi, filesApi, pipelinesApi } from '@/services/api';
 import { DbtCloudImportModal } from './DbtCloudImportModal';
+import { Launchpad } from './Launchpad';
 import {
   FolderOpen,
   Plus,
@@ -18,6 +19,7 @@ import {
   FileText,
   GitBranch,
   Cloud,
+  Workflow,
 } from 'lucide-react';
 
 export function ProjectManager() {
@@ -53,10 +55,26 @@ export function ProjectManager() {
   const [isDiscoveringComponents, setIsDiscoveringComponents] = useState(false);
   const [showValidationDialog, setShowValidationDialog] = useState(false);
   const [validationResult, setValidationResult] = useState<any>(null);
+  const [showLaunchpad, setShowLaunchpad] = useState(false);
+  const [launchpadMode, setLaunchpadMode] = useState<'materialize' | 'job'>('materialize');
+  const [selectedJobName, setSelectedJobName] = useState<string>('');
+  const [availableJobs, setAvailableJobs] = useState<any[]>([]);
+  const [showJobsMenu, setShowJobsMenu] = useState(false);
 
   useEffect(() => {
     loadProjects();
   }, [loadProjects]);
+
+  useEffect(() => {
+    // Fetch available jobs when project changes
+    if (currentProject) {
+      pipelinesApi.list(currentProject.id).then((data) => {
+        setAvailableJobs(data.pipelines || []);
+      }).catch((error) => {
+        console.error('Failed to fetch jobs:', error);
+      });
+    }
+  }, [currentProject]);
 
   const handleCreateProject = async () => {
     if (!newProjectName.trim()) return;
@@ -168,6 +186,51 @@ export function ProjectManager() {
         message: 'Failed to materialize assets. Check console for details.',
       });
       alert('Failed to materialize assets. Check console for details.');
+    } finally {
+      setIsMaterializingAll(false);
+    }
+  };
+
+  const handleLaunchpadSubmit = async (config?: Record<string, any>, tags?: Record<string, string>) => {
+    if (!currentProject) return;
+
+    setIsMaterializingAll(true);
+    setMaterializeAllResult(null);
+
+    try {
+      if (launchpadMode === 'materialize') {
+        const result = await projectsApi.materialize(currentProject.id, undefined, config, tags);
+
+        setMaterializeAllResult({
+          success: result.success,
+          message: result.message,
+        });
+
+        if (result.success) {
+          console.log('Materialization output:', result.stdout);
+          alert('Assets materialized successfully!');
+        } else {
+          console.error('Materialization failed:', result.stderr);
+          alert('Materialization failed. Check console for details.');
+        }
+      } else if (launchpadMode === 'job') {
+        const result = await pipelinesApi.launch(currentProject.id, selectedJobName, config, tags);
+
+        if (result.success) {
+          console.log('Job launch output:', result.stdout);
+          alert('Job launched successfully!');
+        } else {
+          console.error('Job launch failed:', result.stderr);
+          alert('Job launch failed. Check console for details.');
+        }
+      }
+    } catch (error) {
+      console.error('Launch failed:', error);
+      setMaterializeAllResult({
+        success: false,
+        message: 'Failed to launch. Check console for details.',
+      });
+      throw error; // Re-throw so Launchpad can handle the error
     } finally {
       setIsMaterializingAll(false);
     }
@@ -429,6 +492,53 @@ export function ProjectManager() {
                     <Play className="w-4 h-4" />
                     <span>{isMaterializingAll ? 'Materializing...' : 'Materialize All Assets'}</span>
                   </button>
+                  <button
+                    onClick={() => {
+                      setLaunchpadMode('materialize');
+                      setShowLaunchpad(true);
+                      setShowActionsMenu(false);
+                    }}
+                    className="w-full flex items-center space-x-2 px-4 py-2 text-sm text-gray-700 hover:bg-gray-50"
+                  >
+                    <FileCode className="w-4 h-4" />
+                    <span>Open Launchpad (Assets)</span>
+                  </button>
+                  <div className="relative">
+                    <button
+                      onClick={() => setShowJobsMenu(!showJobsMenu)}
+                      className="w-full flex items-center justify-between px-4 py-2 text-sm text-gray-700 hover:bg-gray-50 border-b border-gray-200"
+                    >
+                      <div className="flex items-center space-x-2">
+                        <Play className="w-4 h-4" />
+                        <span>Launch Job</span>
+                      </div>
+                      <ChevronDown className="w-3 h-3" />
+                    </button>
+                    {showJobsMenu && (
+                      <div className="absolute left-full top-0 ml-1 w-56 bg-white border border-gray-200 rounded-md shadow-lg z-30">
+                        {availableJobs.length === 0 ? (
+                          <div className="px-4 py-2 text-sm text-gray-500">No jobs found</div>
+                        ) : (
+                          availableJobs.map((job) => (
+                            <button
+                              key={job.id}
+                              onClick={() => {
+                                setSelectedJobName(job.name);
+                                setLaunchpadMode('job');
+                                setShowLaunchpad(true);
+                                setShowJobsMenu(false);
+                                setShowActionsMenu(false);
+                              }}
+                              className="w-full flex items-center space-x-2 px-4 py-2 text-sm text-gray-700 hover:bg-gray-50"
+                            >
+                              <Workflow className="w-4 h-4" />
+                              <span>{job.name}</span>
+                            </button>
+                          ))
+                        )}
+                      </div>
+                    )}
+                  </div>
                   <button
                     onClick={() => {
                       handleRegenerateLineage();
@@ -894,6 +1004,25 @@ export function ProjectManager() {
           setShowDbtCloudImportDialog(false);
         }}
       />
+
+      {/* Launchpad */}
+      {currentProject && (
+        <Launchpad
+          open={showLaunchpad}
+          onOpenChange={setShowLaunchpad}
+          projectId={currentProject.id}
+          mode={launchpadMode}
+          assetKeys={launchpadMode === 'materialize'
+            ? currentProject.graph.nodes
+                .filter(node => node.node_kind === 'asset')
+                .map(node => node.data.asset_key || node.id)
+            : []}
+          jobName={launchpadMode === 'job' ? selectedJobName : undefined}
+          onLaunch={handleLaunchpadSubmit}
+          defaultConfig={{}}
+          configSchema={{}}
+        />
+      )}
     </>
   );
 }

@@ -2,6 +2,8 @@
 
 from pathlib import Path
 import yaml
+import re
+import ast
 
 from ..models.partition import PartitionConfig
 
@@ -111,6 +113,95 @@ class PartitionService:
         self.update_defs_yaml(component_dir, partition_config)
 
         print(f"[Partition Service] Partition config applied successfully")
+
+    def read_partition_config(self, component_dir: Path) -> PartitionConfig | None:
+        """
+        Read partition configuration from a component's template_vars.py file.
+
+        Args:
+            component_dir: Path to the component directory
+
+        Returns:
+            PartitionConfig object if partitions are configured, None otherwise
+        """
+        template_vars_path = component_dir / "template_vars.py"
+
+        if not template_vars_path.exists():
+            return None
+
+        try:
+            content = template_vars_path.read_text()
+
+            # Parse the Python file using AST
+            tree = ast.parse(content)
+
+            # Find the function that returns a partition definition
+            partition_type = None
+            kwargs = {}
+
+            for node in ast.walk(tree):
+                if isinstance(node, ast.FunctionDef):
+                    # Look for the return statement
+                    for stmt in node.body:
+                        if isinstance(stmt, ast.Return) and stmt.value:
+                            if isinstance(stmt.value, ast.Call):
+                                call = stmt.value
+
+                                # Get the partition type from the function name
+                                if isinstance(call.func, ast.Attribute):
+                                    func_name = call.func.attr
+                                    if "Daily" in func_name:
+                                        partition_type = "daily"
+                                    elif "Weekly" in func_name:
+                                        partition_type = "weekly"
+                                    elif "Monthly" in func_name:
+                                        partition_type = "monthly"
+                                    elif "Hourly" in func_name:
+                                        partition_type = "hourly"
+                                    elif "Static" in func_name:
+                                        partition_type = "static"
+                                    elif "TimeWindow" in func_name:
+                                        partition_type = "dynamic"
+
+                                # Extract kwargs
+                                for keyword in call.keywords:
+                                    key = keyword.arg
+                                    value = keyword.value
+
+                                    if isinstance(value, ast.Constant):
+                                        kwargs[key] = value.value
+                                    elif isinstance(value, ast.List):
+                                        # For static partition keys
+                                        keys = []
+                                        for elt in value.elts:
+                                            if isinstance(elt, ast.Constant):
+                                                keys.append(elt.value)
+                                        kwargs[key] = keys
+
+            if not partition_type:
+                return None
+
+            # Build PartitionConfig from parsed data
+            config_data = {
+                "enabled": True,
+                "partition_type": partition_type,
+                "start_date": kwargs.get("start_date"),
+                "end_date": kwargs.get("end_date"),
+                "timezone": kwargs.get("timezone", "UTC"),
+                "cron_schedule": kwargs.get("cron_schedule"),
+                "fmt": kwargs.get("fmt"),
+                "partition_keys": kwargs.get("partition_keys", []) if partition_type == "static" else [],
+                "var_name": "component_partitions_def",
+                "minute_offset": kwargs.get("minute_offset"),
+                "hour_offset": kwargs.get("hour_offset"),
+                "day_offset": kwargs.get("day_offset"),
+            }
+
+            return PartitionConfig(**config_data)
+
+        except Exception as e:
+            print(f"[Partition Service] Error reading partition config from {template_vars_path}: {e}")
+            return None
 
 
 # Singleton instance

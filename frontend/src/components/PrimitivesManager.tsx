@@ -3,6 +3,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import * as Tabs from '@radix-ui/react-tabs';
 import * as Dialog from '@radix-ui/react-dialog';
 import Editor from '@monaco-editor/react';
+import { Launchpad } from './Launchpad';
 import {
   Clock,
   Play,
@@ -14,7 +15,7 @@ import {
   X,
   FileCode,
 } from 'lucide-react';
-import { primitivesApi, type PrimitiveCategory, type PrimitiveItem } from '@/services/api';
+import { primitivesApi, pipelinesApi, type PrimitiveCategory, type PrimitiveItem } from '@/services/api';
 import { useProjectStore } from '@/hooks/useProject';
 
 interface PrimitivesManagerProps {
@@ -27,6 +28,8 @@ export function PrimitivesManager({ onNavigateToTemplates, onOpenFile }: Primiti
   const [activeTab, setActiveTab] = useState<PrimitiveCategory>('schedule');
   const [selectedPrimitive, setSelectedPrimitive] = useState<PrimitiveItem | null>(null);
   const [detailsOpen, setDetailsOpen] = useState(false);
+  const [showLaunchpad, setShowLaunchpad] = useState(false);
+  const [selectedJobName, setSelectedJobName] = useState<string>('');
   const queryClient = useQueryClient();
 
   // Fetch all primitives (template-created only)
@@ -118,6 +121,26 @@ export function PrimitivesManager({ onNavigateToTemplates, onOpenFile }: Primiti
     } catch (error) {
       console.error('Failed to search for primitive:', error);
       alert('Failed to search for source code');
+    }
+  };
+
+  const handleLaunchJob = (jobName: string) => {
+    setSelectedJobName(jobName);
+    setShowLaunchpad(true);
+  };
+
+  const handleLaunchpadSubmit = async (config?: Record<string, any>, tags?: Record<string, string>) => {
+    if (!currentProject || !selectedJobName) return;
+    try {
+      const result = await pipelinesApi.launch(currentProject.id, selectedJobName, config, tags);
+      if (result.success) {
+        alert(`Job ${selectedJobName} launched successfully!`);
+      } else {
+        alert(`Failed to launch job ${selectedJobName}`);
+      }
+    } catch (error) {
+      console.error('Launch failed:', error);
+      throw error;
     }
   };
 
@@ -255,6 +278,15 @@ export function PrimitivesManager({ onNavigateToTemplates, onOpenFile }: Primiti
                     title="Find and open source code"
                   >
                     <FileCode className="w-4 h-4" />
+                  </button>
+                )}
+                {category === 'job' && (
+                  <button
+                    onClick={() => handleLaunchJob(primitive.name)}
+                    className="p-1.5 text-blue-600 hover:bg-blue-50 rounded transition-colors"
+                    title="Launch job"
+                  >
+                    <Play className="w-4 h-4" />
                   </button>
                 )}
                 {primitive.isManaged && (
@@ -407,6 +439,20 @@ export function PrimitivesManager({ onNavigateToTemplates, onOpenFile }: Primiti
           </Dialog.Content>
         </Dialog.Portal>
       </Dialog.Root>
+
+      {/* Launchpad for job execution */}
+      {currentProject && selectedJobName && (
+        <Launchpad
+          open={showLaunchpad}
+          onOpenChange={setShowLaunchpad}
+          projectId={currentProject.id}
+          mode="job"
+          jobName={selectedJobName}
+          onLaunch={handleLaunchpadSubmit}
+          defaultConfig={{}}
+          configSchema={{}}
+        />
+      )}
     </div>
   );
 }

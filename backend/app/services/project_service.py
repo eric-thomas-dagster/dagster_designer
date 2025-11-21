@@ -542,7 +542,12 @@ class ProjectService:
 
         with open(project_file, "r") as f:
             data = json.load(f)
-            return Project(**data)
+            project = Project(**data)
+
+        # Enrich with partition configs from component files
+        self._enrich_with_partition_configs(project)
+
+        return project
 
     def list_projects(self) -> list[Project]:
         """List all projects."""
@@ -1374,6 +1379,44 @@ if custom_lineage_edges:
 
             except Exception as e:
                 print(f"Error scaffolding component {component.id}: {e}")
+
+    def _enrich_with_partition_configs(self, project: Project) -> None:
+        """
+        Enrich project graph nodes with partition configs read from component files.
+
+        Args:
+            project: The project to enrich
+        """
+        if not project.graph or not project.graph.nodes:
+            return
+
+        project_dir = self._get_project_dir(project)
+        defs_dir = project_dir / "src" / project.directory_name / "defs"
+
+        if not defs_dir.exists():
+            return
+
+        # Iterate through graph nodes and read partition configs
+        for node in project.graph.nodes:
+            # Skip if partition_config is already set
+            if node.data and node.data.get("partition_config"):
+                continue
+
+            # Get component directory
+            component_dir = defs_dir / node.id
+
+            if not component_dir.exists():
+                continue
+
+            # Read partition config from component files
+            partition_config = partition_service.read_partition_config(component_dir)
+
+            if partition_config:
+                # Attach to node data
+                if not node.data:
+                    node.data = {}
+                node.data["partition_config"] = partition_config.model_dump()
+                print(f"[Project Service] Loaded partition config for component: {node.id}")
 
     def _apply_component_partition_config(self, project: Project, component):
         """

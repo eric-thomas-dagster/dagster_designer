@@ -301,8 +301,23 @@ async def regenerate_assets(project_id: str, recalculate_layout: bool = False):
         print(f"[regenerate_assets] Got {len(asset_nodes)} nodes, {len(asset_edges)} edges from introspection", flush=True)
         sys.stdout.flush()
 
-        # Update project graph with assets (preserving any non-asset nodes)
+        # Update project graph with assets (preserving any non-asset nodes and partition configs)
         non_asset_nodes = [n for n in project.graph.nodes if n.node_kind != "asset"]
+
+        # Create a map of existing partition configs by node ID
+        existing_partition_configs = {}
+        for node in project.graph.nodes:
+            if node.data and node.data.get("partition_config"):
+                existing_partition_configs[node.id] = node.data["partition_config"]
+
+        # Preserve partition configs in regenerated asset nodes
+        for node in asset_nodes:
+            if node.id in existing_partition_configs:
+                if not node.data:
+                    node.data = {}
+                node.data["partition_config"] = existing_partition_configs[node.id]
+                print(f"[regenerate_assets] Preserved partition config for node: {node.id}", flush=True)
+
         project.graph.nodes = non_asset_nodes + asset_nodes
 
         # Merge introspected edges with custom lineage edges
@@ -595,6 +610,7 @@ class MaterializeRequest(BaseModel):
     asset_keys: list[str] | None = None  # If None, materialize all assets
     config: dict | None = None  # Run config (ops, resources, execution, loggers)
     tags: dict[str, str] | None = None  # Run tags
+    partition: str | None = None  # Specific partition to materialize
 
 
 class MaterializeResponse(BaseModel):
@@ -655,6 +671,10 @@ async def materialize_assets(project_id: str, request: MaterializeRequest):
                     stdout="",
                     stderr=""
                 )
+
+        # Add partition if provided
+        if request.partition:
+            cmd.extend(["--partition", request.partition])
 
         # Add config if provided
         config_file_path = None
@@ -1329,10 +1349,6 @@ class BackfillRequest(BaseModel):
     )
     config: dict | None = None
     tags: dict[str, str] | None = None
-    backfill_failed_only: bool = Field(
-        False,
-        description="Only backfill failed and missing partitions"
-    )
 
 
 class BackfillResponse(BaseModel):
@@ -1413,10 +1429,6 @@ async def launch_backfill(project_id: str, request: BackfillRequest):
                 config_file = Path(f.name)
 
             cmd.extend(["--config", str(config_file)])
-
-        # Add other flags
-        if request.backfill_failed_only:
-            cmd.append("--failed")
 
         # Execute the backfill command
         result = subprocess.run(
