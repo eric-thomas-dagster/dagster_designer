@@ -1007,63 +1007,8 @@ function GraphEditorInner({ onNodeSelect }: GraphEditorProps) {
       console.log('[GraphEditor] Source is asset:', isSourceAsset, 'Target is asset:', isTargetAsset);
 
       if (isSourceAsset && isTargetAsset) {
-        console.log('[GraphEditor] Both nodes are assets - custom lineage allowed');
-        // Custom lineage between assets
-        // Only check IO types if target is from a component that requires specific inputs
-        if (targetNode.data?.source_component) {
-          const targetSchema = componentSchemasCache.get(targetNode.data.source_component);
-          if (targetSchema) {
-            const targetIOMetadata = getIOMetadata(targetSchema.schema);
-            if (targetIOMetadata?.inputs && targetIOMetadata.inputs.required) {
-              // Target requires input - check if source produces output
-              const sourceHasOutput = sourceNode.data?.io_output_type != null;
-
-              if (!sourceHasOutput) {
-                console.warn(
-                  '[GraphEditor] Connection validation failed: ' +
-                  `Source asset "${sourceNode.data?.label || sourceNode.id}" does not produce output, ` +
-                  `but target asset "${targetNode.data?.label || targetNode.id}" requires input (${targetIOMetadata.inputs.type})`
-                );
-
-                alert(
-                  `⚠️ Cannot Connect These Assets\n\n` +
-                  `Source: "${sourceNode.data?.label || sourceNode.id}"\n` +
-                  `• This asset does not produce output\n\n` +
-                  `Target: "${targetNode.data?.label || targetNode.id}"\n` +
-                  `• Requires ${targetIOMetadata.inputs.type} input\n\n` +
-                  `To fix: Connect an asset that produces output to the target.`
-                );
-
-                return false;
-              }
-
-              // Both have IO metadata - check type compatibility
-              const sourceOutputType = sourceNode.data.io_output_type;
-              const targetInputType = targetIOMetadata.inputs.type;
-
-              if (sourceOutputType !== targetInputType) {
-                console.warn(
-                  '[GraphEditor] Connection validation warning: ' +
-                  `Source outputs "${sourceOutputType}" but target expects "${targetInputType}"`
-                );
-
-                alert(
-                  `⚠️ Type Mismatch Warning\n\n` +
-                  `Source: "${sourceNode.data?.label || sourceNode.id}"\n` +
-                  `• Produces: ${sourceOutputType}\n\n` +
-                  `Target: "${targetNode.data?.label || targetNode.id}"\n` +
-                  `• Requires: ${targetInputType}\n\n` +
-                  `These types may not be compatible.`
-                );
-
-                return false;
-              }
-            }
-          }
-        }
-
-        // Custom lineage allowed
-        console.log('[GraphEditor] Custom lineage validation passed');
+        console.log('[GraphEditor] Both nodes are assets - custom lineage allowed (validation will happen on release)');
+        // Allow the connection attempt - validation with user feedback happens in onConnect
         return true;
       }
 
@@ -1145,6 +1090,41 @@ function GraphEditorInner({ onNodeSelect }: GraphEditorProps) {
         const targetAssetKey = targetNode.data.asset_key || targetNode.data.label;
 
         console.log('[GraphEditor] Creating custom lineage:', sourceAssetKey, '->', targetAssetKey);
+
+        // Validate IO type compatibility and show alerts if invalid
+        const targetInputType = targetNode.data?.io_input_type;
+        const targetInputRequired = targetNode.data?.io_input_required;
+        const sourceOutputType = sourceNode.data?.io_output_type;
+
+        if (targetInputRequired && targetInputType) {
+          // Check if source produces output
+          if (!sourceOutputType) {
+            alert(
+              `⚠️ Cannot Connect These Assets\n\n` +
+              `Source: "${sourceNode.data?.label || sourceNode.id}"\n` +
+              `• This asset does not produce output\n\n` +
+              `Target: "${targetNode.data?.label || targetNode.id}"\n` +
+              `• Requires ${targetInputType} input\n\n` +
+              `To fix: Connect an asset that produces ${targetInputType} output to the target.`
+            );
+            return;
+          }
+
+          // Check type compatibility
+          if (sourceOutputType !== targetInputType) {
+            alert(
+              `⚠️ Type Mismatch - Connection Not Allowed\n\n` +
+              `Source: "${sourceNode.data?.label || sourceNode.id}"\n` +
+              `• Produces: ${sourceOutputType}\n\n` +
+              `Target: "${targetNode.data?.label || targetNode.id}"\n` +
+              `• Requires: ${targetInputType}\n\n` +
+              `These types are incompatible. To fix:\n` +
+              `• Connect a ${targetInputType}-producing asset to the target\n` +
+              `• Or use a different target component that accepts ${sourceOutputType}`
+            );
+            return;
+          }
+        }
 
         // Optimistically add the edge immediately
         const newEdge = {
