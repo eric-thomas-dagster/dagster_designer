@@ -1097,4 +1097,26 @@ export const partitionsApi = {
   },
 };
 
+// Assets API
+export interface AssetDataPreview {
+  success: boolean;
+  data: Record<string, any>[] | null;
+  columns: string[] | null;
+  dtypes: Record<string, string> | null;
+  shape: [number, number] | null;
+  row_count: number | null;
+  column_count: number | null;
+  error: string | null;
+  sample_limit: number | null;
+}
+
+export const assetsApi = {
+  previewData: async (projectId: string, assetKey: string): Promise<AssetDataPreview> => {
+    const response = await api.get<AssetDataPreview>(
+      `/assets/${projectId}/${encodeURIComponent(assetKey)}/preview`
+    );
+    return response.data;
+  },
+};
+
 export default api;

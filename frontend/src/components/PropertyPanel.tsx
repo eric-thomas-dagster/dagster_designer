@@ -2,12 +2,13 @@ import { useState, useEffect, useMemo } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { useProjectStore } from '@/hooks/useProject';
 import { useComponent } from '@/hooks/useComponentRegistry';
-import { X, Save, Settings, Play, Trash2, Plus, Wand2, Database, Search, Package, ChevronDown, FileCode, Calendar } from 'lucide-react';
+import { X, Save, Settings, Play, Trash2, Plus, Wand2, Database, Search, Package, ChevronDown, FileCode, Calendar, Table } from 'lucide-react';
 import { AssetPreview } from './AssetPreview';
 import { TranslationEditor } from './TranslationEditor';
 import { Launchpad } from './Launchpad';
 import { PartitionBackfill } from './PartitionBackfill';
 import { PartitionConfig, type PartitionConfig as PartitionConfigType } from './PartitionConfig';
+import { DataPreviewModal } from './DataPreviewModal';
 import { projectsApi, primitivesApi, partitionsApi, type BackfillRequest } from '@/services/api';
 import type { ComponentInstance } from '@/types';
 
@@ -193,7 +194,11 @@ export function PropertyPanel({ nodeId, onConfigureComponent, onOpenFile }: Prop
   const [showMaterializeMenu, setShowMaterializeMenu] = useState(false);
   const [showLaunchpad, setShowLaunchpad] = useState(false);
   const [showBackfillModal, setShowBackfillModal] = useState(false);
+  const [showDataPreview, setShowDataPreview] = useState(false);
   const [isPartitioned, setIsPartitioned] = useState(false);
+
+  // Compute asset key for API calls
+  const assetKey = node.data.asset_key || node.id;
   const [checkingPartitions, setCheckingPartitions] = useState(false);
   const [assetConfigSchema, setAssetConfigSchema] = useState<any>(null);
   const [assetDefaultConfig, setAssetDefaultConfig] = useState<any>(null);
@@ -623,6 +628,16 @@ export function PropertyPanel({ nodeId, onConfigureComponent, onOpenFile }: Prop
                           Launch Backfill
                         </button>
                       )}
+                      <button
+                        onClick={() => {
+                          setShowDataPreview(true);
+                          setShowMaterializeMenu(false);
+                        }}
+                        className="w-full flex items-center gap-2 px-4 py-2 text-sm text-gray-700 hover:bg-gray-50 text-left"
+                      >
+                        <Table className="w-4 h-4" />
+                        View Data
+                      </button>
                     </div>
                   </>
                 )}
@@ -1624,6 +1639,17 @@ export function PropertyPanel({ nodeId, onConfigureComponent, onOpenFile }: Prop
             projectId={currentProject.id}
             assetKey={node.data.asset_key || node.id}
             onLaunch={handleBackfillSubmit}
+          />
+        )}
+
+        {/* Data Preview Modal */}
+        {showDataPreview && currentProject && (
+          <DataPreviewModal
+            isOpen={showDataPreview}
+            onClose={() => setShowDataPreview(false)}
+            projectId={currentProject.id}
+            assetKey={assetKey}
+            assetName={node.data.label || node.id}
           />
         )}
       </div>
