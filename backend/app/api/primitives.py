@@ -262,6 +262,7 @@ async def list_all_primitives(project_id: str):
                     "jobs": cached_defs.get("jobs", []),
                     "sensors": cached_defs.get("sensors", []),
                     "asset_checks": cached_defs.get("asset_checks", []),
+                    "freshness_policies": cached_defs.get("freshness_policies", []),
                 }
                 return {
                     "project_id": project_id,
@@ -280,6 +281,7 @@ async def list_all_primitives(project_id: str):
             "sensors": project.discovered_primitives.get("sensors", []) if project and project.discovered_primitives else [],
             "jobs": project.discovered_primitives.get("jobs", []) if project and project.discovered_primitives else [],
             "asset_checks": [],
+            "freshness_policies": primitives_service.list_primitives(project_id, "freshness_policy"),
         }
 
         # Add asset checks from stored graph
@@ -302,7 +304,8 @@ async def list_all_primitives(project_id: str):
 
         print(f"[Primitives/all] Found {len(primitives['schedules'])} schedules, "
               f"{len(primitives['sensors'])} sensors, {len(primitives['jobs'])} jobs, "
-              f"{len(primitives['asset_checks'])} asset checks from stored project", file=sys.stderr, flush=True)
+              f"{len(primitives['asset_checks'])} asset checks, "
+              f"{len(primitives['freshness_policies'])} freshness policies from stored project", file=sys.stderr, flush=True)
 
         return {
             "project_id": project_id,

@@ -14,6 +14,7 @@ import {
   RefreshCw,
   X,
   FileCode,
+  Timer,
 } from 'lucide-react';
 import { primitivesApi, pipelinesApi, type PrimitiveCategory, type PrimitiveItem } from '@/services/api';
 import { useProjectStore } from '@/hooks/useProject';
@@ -146,7 +147,11 @@ export function PrimitivesManager({ onNavigateToTemplates, onOpenFile }: Primiti
 
   // Merge template-created primitives with discovered definitions
   const getMergedPrimitives = (category: PrimitiveCategory): Array<PrimitiveItem & { isManaged: boolean }> => {
-    const categoryKey = category === 'schedule' ? 'schedules' : category === 'job' ? 'jobs' : category === 'sensor' ? 'sensors' : 'asset_checks';
+    const categoryKey = category === 'schedule' ? 'schedules'
+      : category === 'job' ? 'jobs'
+      : category === 'sensor' ? 'sensors'
+      : category === 'asset_check' ? 'asset_checks'
+      : 'freshness_policies';
 
     // Get primitives from the fast /list endpoint (includes template-created + stored graph data)
     const primitives = allPrimitives?.primitives?.[categoryKey] || [];
@@ -354,6 +359,13 @@ export function PrimitivesManager({ onNavigateToTemplates, onOpenFile }: Primiti
             <CheckCircle className="w-4 h-4" />
             <span>Asset Checks</span>
           </Tabs.Trigger>
+          <Tabs.Trigger
+            value="freshness_policy"
+            className="flex items-center space-x-2 px-4 py-3 text-sm text-gray-600 hover:text-gray-900 border-b-2 border-transparent data-[state=active]:border-blue-600 data-[state=active]:text-blue-600"
+          >
+            <Timer className="w-4 h-4" />
+            <span>Freshness Policies</span>
+          </Tabs.Trigger>
         </Tabs.List>
           <button
             onClick={() => refetch()}
@@ -378,6 +390,10 @@ export function PrimitivesManager({ onNavigateToTemplates, onOpenFile }: Primiti
 
         <Tabs.Content value="asset_check" className="flex-1 overflow-y-auto">
           {renderPrimitivesList(getMergedPrimitives('asset_check'), 'asset_check')}
+        </Tabs.Content>
+
+        <Tabs.Content value="freshness_policy" className="flex-1 overflow-y-auto">
+          {renderPrimitivesList(getMergedPrimitives('freshness_policy'), 'freshness_policy')}
         </Tabs.Content>
       </Tabs.Root>
 

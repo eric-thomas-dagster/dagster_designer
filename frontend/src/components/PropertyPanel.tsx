@@ -1002,6 +1002,433 @@ export function PropertyPanel({ nodeId, onConfigureComponent, onOpenFile }: Prop
                 />
               )}
 
+              {/* Freshness Policy Configuration */}
+              <div className="border-t border-gray-200 pt-4 mt-4">
+                <label className="block text-sm font-medium text-gray-700 mb-3">
+                  Freshness Policy
+                </label>
+
+                {/* Mode Selection - Three Radio Buttons */}
+                <div className="space-y-3">
+                  {/* Mode: None */}
+                  <div className="flex items-start space-x-2">
+                    <input
+                      type="radio"
+                      id={`${nodeId}-freshness-none`}
+                      name={`${nodeId}-freshness-mode`}
+                      checked={node.data.freshness_policy?.mode === 'none' || !node.data.freshness_policy?.mode && !node.data.freshness_policy?.enabled}
+                      onChange={() => {
+                        if (!currentProject) return;
+
+                        const updatedNodes = currentProject.graph.nodes.map((n) =>
+                          n.id === nodeId
+                            ? {
+                                ...n,
+                                data: {
+                                  ...n.data,
+                                  freshness_policy: {
+                                    mode: 'none',
+                                    enabled: false,
+                                  },
+                                },
+                              }
+                            : n
+                        );
+
+                        updateGraph(updatedNodes, currentProject.graph.edges);
+                      }}
+                      className="w-4 h-4 text-blue-600 mt-0.5"
+                    />
+                    <label htmlFor={`${nodeId}-freshness-none`} className="text-sm text-gray-700 cursor-pointer">
+                      None
+                    </label>
+                  </div>
+
+                  {/* Mode: Template */}
+                  <div className="space-y-2">
+                    <div className="flex items-start space-x-2">
+                      <input
+                        type="radio"
+                        id={`${nodeId}-freshness-template`}
+                        name={`${nodeId}-freshness-mode`}
+                        checked={node.data.freshness_policy?.mode === 'template'}
+                        onChange={() => {
+                          if (!currentProject) return;
+
+                          const updatedNodes = currentProject.graph.nodes.map((n) =>
+                            n.id === nodeId
+                              ? {
+                                  ...n,
+                                  data: {
+                                    ...n.data,
+                                    freshness_policy: {
+                                      mode: 'template',
+                                      template_name: n.data.freshness_policy?.template_name || '',
+                                      enabled: true,
+                                    },
+                                  },
+                                }
+                              : n
+                          );
+
+                          updateGraph(updatedNodes, currentProject.graph.edges);
+                        }}
+                        className="w-4 h-4 text-blue-600 mt-0.5"
+                      />
+                      <div className="flex-1">
+                        <label htmlFor={`${nodeId}-freshness-template`} className="text-sm text-gray-700 cursor-pointer">
+                          Use Template
+                        </label>
+                        {node.data.freshness_policy?.mode === 'template' && (
+                          <input
+                            type="text"
+                            value={node.data.freshness_policy?.template_name || ''}
+                            onChange={(e) => {
+                              if (!currentProject) return;
+
+                              const updatedNodes = currentProject.graph.nodes.map((n) =>
+                                n.id === nodeId
+                                  ? {
+                                      ...n,
+                                      data: {
+                                        ...n.data,
+                                        freshness_policy: {
+                                          ...n.data.freshness_policy,
+                                          template_name: e.target.value,
+                                        },
+                                      },
+                                    }
+                                  : n
+                              );
+
+                              updateGraph(updatedNodes, currentProject.graph.edges);
+                            }}
+                            className="w-full mt-1 px-2 py-1.5 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                            placeholder="Select or enter template name..."
+                          />
+                        )}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Mode: Inline */}
+                  <div className="space-y-2">
+                    <div className="flex items-start space-x-2">
+                      <input
+                        type="radio"
+                        id={`${nodeId}-freshness-inline`}
+                        name={`${nodeId}-freshness-mode`}
+                        checked={node.data.freshness_policy?.mode === 'inline' || !node.data.freshness_policy?.mode && node.data.freshness_policy?.enabled}
+                        onChange={() => {
+                          if (!currentProject) return;
+
+                          const updatedNodes = currentProject.graph.nodes.map((n) =>
+                            n.id === nodeId
+                              ? {
+                                  ...n,
+                                  data: {
+                                    ...n.data,
+                                    freshness_policy: {
+                                      mode: 'inline',
+                                      enabled: true,
+                                      maximum_lag_minutes: n.data.freshness_policy?.maximum_lag_minutes || 60,
+                                      maximum_lag_env_var: n.data.freshness_policy?.maximum_lag_env_var || null,
+                                      cron_schedule: n.data.freshness_policy?.cron_schedule || '',
+                                      cron_env_var: n.data.freshness_policy?.cron_env_var || null,
+                                    },
+                                  },
+                                }
+                              : n
+                          );
+
+                          updateGraph(updatedNodes, currentProject.graph.edges);
+                        }}
+                        className="w-4 h-4 text-blue-600 mt-0.5"
+                      />
+                      <label htmlFor={`${nodeId}-freshness-inline`} className="text-sm text-gray-700 cursor-pointer">
+                        Define Inline
+                      </label>
+                    </div>
+
+                    {/* Inline Configuration - Only show when mode is 'inline' or backwards compatibility */}
+                    {(node.data.freshness_policy?.mode === 'inline' || (!node.data.freshness_policy?.mode && node.data.freshness_policy?.enabled)) && (
+                      <div className="ml-6 space-y-4 mt-3 pl-4 border-l-2 border-gray-200">
+                        {/* Maximum Data Age Section */}
+                        <div className="space-y-2">
+                          <label className="block text-sm font-medium text-gray-700">
+                            Maximum Data Age
+                          </label>
+
+                          {/* Radio: Static Value */}
+                          <div className="flex items-start space-x-2">
+                            <input
+                              type="radio"
+                              id={`${nodeId}-lag-static`}
+                              name={`${nodeId}-lag-mode`}
+                              checked={node.data.freshness_policy?.maximum_lag_env_var === null}
+                              onChange={() => {
+                                if (!currentProject) return;
+
+                                const updatedNodes = currentProject.graph.nodes.map((n) =>
+                                  n.id === nodeId
+                                    ? {
+                                        ...n,
+                                        data: {
+                                          ...n.data,
+                                          freshness_policy: {
+                                            ...n.data.freshness_policy,
+                                            maximum_lag_env_var: null,
+                                          },
+                                        },
+                                      }
+                                    : n
+                                );
+
+                                updateGraph(updatedNodes, currentProject.graph.edges);
+                              }}
+                              className="w-4 h-4 text-blue-600 mt-0.5"
+                            />
+                            <div className="flex-1">
+                              <label htmlFor={`${nodeId}-lag-static`} className="text-sm text-gray-700 cursor-pointer">
+                                Static value (minutes)
+                              </label>
+                              <input
+                                type="number"
+                                min="1"
+                                value={node.data.freshness_policy?.maximum_lag_minutes || 60}
+                                disabled={node.data.freshness_policy?.maximum_lag_env_var !== null}
+                                onChange={(e) => {
+                                  if (!currentProject) return;
+
+                                  const updatedNodes = currentProject.graph.nodes.map((n) =>
+                                    n.id === nodeId
+                                      ? {
+                                          ...n,
+                                          data: {
+                                            ...n.data,
+                                            freshness_policy: {
+                                              ...n.data.freshness_policy,
+                                              maximum_lag_minutes: parseInt(e.target.value) || 60,
+                                            },
+                                          },
+                                        }
+                                      : n
+                                  );
+
+                                  updateGraph(updatedNodes, currentProject.graph.edges);
+                                }}
+                                className="w-full mt-1 px-2 py-1.5 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:bg-gray-100 disabled:text-gray-500 disabled:cursor-not-allowed"
+                              />
+                            </div>
+                          </div>
+
+                          {/* Radio: Environment Variable */}
+                          <div className="flex items-start space-x-2">
+                            <input
+                              type="radio"
+                              id={`${nodeId}-lag-env`}
+                              name={`${nodeId}-lag-mode`}
+                              checked={node.data.freshness_policy?.maximum_lag_env_var !== null}
+                              onChange={() => {
+                                if (!currentProject) return;
+
+                                const updatedNodes = currentProject.graph.nodes.map((n) =>
+                                  n.id === nodeId
+                                    ? {
+                                        ...n,
+                                        data: {
+                                          ...n.data,
+                                          freshness_policy: {
+                                            ...n.data.freshness_policy,
+                                            maximum_lag_env_var: n.data.freshness_policy?.maximum_lag_env_var || 'FRESHNESS_LAG_MINUTES',
+                                          },
+                                        },
+                                      }
+                                    : n
+                                );
+
+                                updateGraph(updatedNodes, currentProject.graph.edges);
+                              }}
+                              className="w-4 h-4 text-blue-600 mt-0.5"
+                            />
+                            <div className="flex-1">
+                              <label htmlFor={`${nodeId}-lag-env`} className="text-sm text-gray-700 cursor-pointer">
+                                Environment variable
+                              </label>
+                              <input
+                                type="text"
+                                value={node.data.freshness_policy?.maximum_lag_env_var || ''}
+                                disabled={node.data.freshness_policy?.maximum_lag_env_var === null}
+                                onChange={(e) => {
+                                  if (!currentProject) return;
+
+                                  const updatedNodes = currentProject.graph.nodes.map((n) =>
+                                    n.id === nodeId
+                                      ? {
+                                          ...n,
+                                          data: {
+                                            ...n.data,
+                                            freshness_policy: {
+                                              ...n.data.freshness_policy,
+                                              maximum_lag_env_var: e.target.value,
+                                            },
+                                          },
+                                        }
+                                      : n
+                                  );
+
+                                  updateGraph(updatedNodes, currentProject.graph.edges);
+                                }}
+                                className="w-full mt-1 px-2 py-1.5 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:bg-gray-100 disabled:text-gray-500 disabled:cursor-not-allowed"
+                                placeholder="FRESHNESS_LAG_MINUTES"
+                              />
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* Expected Update Schedule Section */}
+                        <div className="space-y-2">
+                          <label className="block text-sm font-medium text-gray-700">
+                            Expected Update Schedule
+                          </label>
+
+                          {/* Radio: Static Value (cron) */}
+                          <div className="flex items-start space-x-2">
+                            <input
+                              type="radio"
+                              id={`${nodeId}-cron-static`}
+                              name={`${nodeId}-cron-mode`}
+                              checked={node.data.freshness_policy?.cron_env_var === null}
+                              onChange={() => {
+                                if (!currentProject) return;
+
+                                const updatedNodes = currentProject.graph.nodes.map((n) =>
+                                  n.id === nodeId
+                                    ? {
+                                        ...n,
+                                        data: {
+                                          ...n.data,
+                                          freshness_policy: {
+                                            ...n.data.freshness_policy,
+                                            cron_env_var: null,
+                                          },
+                                        },
+                                      }
+                                    : n
+                                );
+
+                                updateGraph(updatedNodes, currentProject.graph.edges);
+                              }}
+                              className="w-4 h-4 text-blue-600 mt-0.5"
+                            />
+                            <div className="flex-1">
+                              <label htmlFor={`${nodeId}-cron-static`} className="text-sm text-gray-700 cursor-pointer">
+                                Static value (cron)
+                              </label>
+                              <input
+                                type="text"
+                                value={node.data.freshness_policy?.cron_schedule || ''}
+                                disabled={node.data.freshness_policy?.cron_env_var !== null}
+                                onChange={(e) => {
+                                  if (!currentProject) return;
+
+                                  const updatedNodes = currentProject.graph.nodes.map((n) =>
+                                    n.id === nodeId
+                                      ? {
+                                          ...n,
+                                          data: {
+                                            ...n.data,
+                                            freshness_policy: {
+                                              ...n.data.freshness_policy,
+                                              cron_schedule: e.target.value,
+                                            },
+                                          },
+                                        }
+                                      : n
+                                  );
+
+                                  updateGraph(updatedNodes, currentProject.graph.edges);
+                                }}
+                                className="w-full mt-1 px-2 py-1.5 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:bg-gray-100 disabled:text-gray-500 disabled:cursor-not-allowed"
+                                placeholder="0 */6 * * *"
+                              />
+                            </div>
+                          </div>
+
+                          {/* Radio: Environment Variable */}
+                          <div className="flex items-start space-x-2">
+                            <input
+                              type="radio"
+                              id={`${nodeId}-cron-env`}
+                              name={`${nodeId}-cron-mode`}
+                              checked={node.data.freshness_policy?.cron_env_var !== null}
+                              onChange={() => {
+                                if (!currentProject) return;
+
+                                const updatedNodes = currentProject.graph.nodes.map((n) =>
+                                  n.id === nodeId
+                                    ? {
+                                        ...n,
+                                        data: {
+                                          ...n.data,
+                                          freshness_policy: {
+                                            ...n.data.freshness_policy,
+                                            cron_env_var: n.data.freshness_policy?.cron_env_var || 'FRESHNESS_CRON_SCHEDULE',
+                                          },
+                                        },
+                                      }
+                                    : n
+                                );
+
+                                updateGraph(updatedNodes, currentProject.graph.edges);
+                              }}
+                              className="w-4 h-4 text-blue-600 mt-0.5"
+                            />
+                            <div className="flex-1">
+                              <label htmlFor={`${nodeId}-cron-env`} className="text-sm text-gray-700 cursor-pointer">
+                                Environment variable
+                              </label>
+                              <input
+                                type="text"
+                                value={node.data.freshness_policy?.cron_env_var || ''}
+                                disabled={node.data.freshness_policy?.cron_env_var === null}
+                                onChange={(e) => {
+                                  if (!currentProject) return;
+
+                                  const updatedNodes = currentProject.graph.nodes.map((n) =>
+                                    n.id === nodeId
+                                      ? {
+                                          ...n,
+                                          data: {
+                                            ...n.data,
+                                            freshness_policy: {
+                                              ...n.data.freshness_policy,
+                                              cron_env_var: e.target.value,
+                                            },
+                                          },
+                                        }
+                                      : n
+                                  );
+
+                                  updateGraph(updatedNodes, currentProject.graph.edges);
+                                }}
+                                className="w-full mt-1 px-2 py-1.5 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:bg-gray-100 disabled:text-gray-500 disabled:cursor-not-allowed"
+                                placeholder="FRESHNESS_CRON_SCHEDULE"
+                              />
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* Help Text */}
+                        <div className="text-xs text-gray-500 bg-gray-50 border border-gray-200 rounded-md p-2">
+                          Freshness policies define SLAs for data freshness. Dagster will alert if data becomes stale.
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+
               {/* Delete Component Instance Button - only for non-factory components */}
               {!sourceComponent.is_asset_factory && (
                 <div className="border-t border-red-200 pt-4 mt-4">

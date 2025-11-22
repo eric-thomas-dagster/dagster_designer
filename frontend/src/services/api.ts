@@ -374,7 +374,7 @@ export const filesApi = {
 };
 
 // Templates API
-export type PrimitiveType = 'python_asset' | 'sql_asset' | 'schedule' | 'job' | 'sensor' | 'asset_check' | 'io_manager' | 'resource';
+export type PrimitiveType = 'python_asset' | 'sql_asset' | 'schedule' | 'job' | 'sensor' | 'asset_check' | 'io_manager' | 'resource' | 'freshness_policy';
 
 export interface PythonAssetParams {
   asset_name: string;
@@ -467,6 +467,15 @@ export interface AssetCheckParams {
   max_age_hours?: number;
 }
 
+export interface FreshnessPolicyParams {
+  policy_name: string;
+  description?: string;
+  maximum_lag_minutes?: number;
+  maximum_lag_env_var?: string;
+  cron_schedule?: string;
+  cron_env_var?: string;
+}
+
 export interface IOManagerParams {
   io_manager_name: string;
   io_manager_type: 'filesystem' | 'duckdb' | 'duckdb_pandas' | 'duckdb_polars' | 'duckdb_pyspark' |
@@ -554,6 +563,11 @@ export const templatesApi = {
 
   generateAssetCheck: async (params: AssetCheckParams): Promise<TemplateResponse> => {
     const response = await api.post<TemplateResponse>('/templates/asset-check', params);
+    return response.data;
+  },
+
+  generateFreshnessPolicy: async (params: FreshnessPolicyParams): Promise<TemplateResponse> => {
+    const response = await api.post<TemplateResponse>('/templates/freshness-policy', params);
     return response.data;
   },
 
@@ -649,7 +663,7 @@ export interface ComponentAttribute {
 }
 
 // Primitives API
-export type PrimitiveCategory = 'schedule' | 'job' | 'sensor' | 'asset_check';
+export type PrimitiveCategory = 'schedule' | 'job' | 'sensor' | 'asset_check' | 'freshness_policy';
 
 export interface PrimitiveItem {
   name: string;

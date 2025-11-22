@@ -16,7 +16,7 @@ from .sensor_templates import (
 )
 
 
-PrimitiveType = Literal["python_asset", "sql_asset", "schedule", "job", "sensor", "asset_check", "io_manager", "resource"]
+PrimitiveType = Literal["python_asset", "sql_asset", "schedule", "job", "sensor", "asset_check", "io_manager", "resource", "freshness_policy"]
 
 
 class TemplateService:
@@ -548,6 +548,62 @@ from typing import Any
 
         return yaml.dump(config, default_flow_style=False, sort_keys=False)
 
+    def generate_freshness_policy(
+        self,
+        policy_name: str,
+        description: str = "",
+        maximum_lag_minutes: int = 60,
+        maximum_lag_env_var: str = "",
+        cron_schedule: str = "",
+        cron_env_var: str = "",
+    ) -> str:
+        """
+        Generate a freshness policy template as Python code.
+
+        Args:
+            policy_name: Name of the freshness policy
+            description: Policy description
+            maximum_lag_minutes: Maximum acceptable lag in minutes
+            maximum_lag_env_var: Environment variable name for maximum lag
+            cron_schedule: Expected update cadence (cron expression)
+            cron_env_var: Environment variable name for cron schedule
+
+        Returns:
+            Generated Python code
+        """
+        import_lines = ["from dagster import FreshnessPolicy"]
+
+        # Determine which type of freshness policy to use
+        if cron_schedule or cron_env_var:
+            # Use cron-based policy
+            if cron_env_var:
+                import_lines.append("import os")
+                cron_expr = f'os.getenv("{cron_env_var}", "{cron_schedule or "0 0 * * *"}")'
+            else:
+                cron_expr = f'"{cron_schedule}"'
+
+            policy_def = f'FreshnessPolicy.cron(cron_schedule={cron_expr})'
+        else:
+            # Use time window policy
+            import_lines.append("from datetime import timedelta")
+
+            if maximum_lag_env_var:
+                import_lines.append("import os")
+                lag_minutes = f'int(os.getenv("{maximum_lag_env_var}", "{maximum_lag_minutes}"))'
+            else:
+                lag_minutes = str(maximum_lag_minutes)
+
+            policy_def = f'FreshnessPolicy.time_window(fail_window=timedelta(minutes={lag_minutes}))'
+
+        # Build the template
+        template = "\n".join(import_lines) + "\n\n"
+
+        if description:
+            template += f'# {description}\n'
+        template += f'{policy_name} = {policy_def}\n'
+
+        return template
+
     def save_python_asset_to_project(
         self,
         project_id: str,
@@ -604,7 +660,7 @@ from typing import Any
         """
         project_path = self._get_project_path(project_id)
 
-        # For jobs and schedules, fix the module path in the YAML if needed
+        # For jobs, schedules, sensors, and asset_checks, fix the module path in the YAML if needed
         if primitive_type in ["job", "schedule", "sensor", "asset_check"]:
             import yaml
             try:
@@ -660,6 +716,23 @@ from typing import Any
                 resources_file.write_text(existing_content + "\n\n" + code)
 
             return resources_file
+        elif primitive_type == "freshness_policy":
+            # Freshness policies go in a freshness_policies.py file
+            file_dir = defs_dir
+            file_dir.mkdir(parents=True, exist_ok=True)
+
+            freshness_file = file_dir / "freshness_policies.py"
+
+            # If freshness_policies.py doesn't exist, create it with a header
+            if not freshness_file.exists():
+                freshness_file.write_text('"""Freshness policy templates for this project."""\n\n')
+
+            # Append the new code to freshness_policies.py
+            existing_content = freshness_file.read_text()
+            if code not in existing_content:  # Avoid duplicates
+                freshness_file.write_text(existing_content + "\n\n" + code)
+
+            return freshness_file
         else:
             # Primitives (schedule, job, sensor, asset_check) use component instance pattern
             # Create instance folder: defs/<component_name>/defs.yaml
@@ -814,6 +887,8 @@ from typing import Any
             return self.generate_io_manager(**params)
         elif primitive_type == "resource":
             return self.generate_resource(**params)
+        elif primitive_type == "freshness_policy":
+            return self.generate_freshness_policy(**params)
         else:
             raise ValueError(f"Unknown primitive type: {primitive_type}")
 

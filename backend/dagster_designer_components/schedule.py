@@ -3,8 +3,6 @@
 from typing import Optional
 
 import dagster as dg
-from dagster._core.definitions.asset_selection import AssetSelection
-from dagster._core.definitions.partition import PartitionsDefinition
 
 
 class ScheduleComponent(dg.Component, dg.Model, dg.Resolvable):
@@ -31,7 +29,7 @@ class ScheduleComponent(dg.Component, dg.Model, dg.Resolvable):
         elif self.asset_selection:
             # Create an implicit job from asset selection
             job_name = f"{self.schedule_name}_job"
-            asset_sel = AssetSelection.keys(*self.asset_selection)
+            asset_sel = dg.AssetSelection.keys(*self.asset_selection)
             target_job = dg.define_asset_job(
                 name=job_name,
                 selection=asset_sel,

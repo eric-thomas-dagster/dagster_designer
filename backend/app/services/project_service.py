@@ -15,8 +15,10 @@ from typing import Dict, Tuple
 from ..core.config import settings
 from ..models.project import Project, ProjectCreate, ProjectUpdate
 from ..models.partition import PartitionConfig
+from ..models.freshness import FreshnessPolicy
 from .component_registry import component_registry
 from .partition_service import partition_service
+from .freshness_service import freshness_service
 
 # Track dependency installation status for each project
 # {project_id: {'status': 'installing|success|error', 'error': str|None, 'output': str|None}}
@@ -708,6 +710,40 @@ class ProjectService:
                 print(f"[update_project] Partition config application completed", flush=True)
             else:
                 print(f"[update_project] No partition configs found in graph", flush=True)
+
+            # Apply freshness policies from node data
+            nodes_with_freshness_policies = []
+            for node in project.graph.nodes:
+                if node.data and node.data.get("freshness_policy"):
+                    nodes_with_freshness_policies.append(node)
+                    print(f"[update_project] Found freshness policy on node: {node.id}", flush=True)
+
+            if nodes_with_freshness_policies:
+                print(f"[update_project] Applying freshness policies to {len(nodes_with_freshness_policies)} component(s)...", flush=True)
+                # Find matching components and apply freshness policies
+                for node in nodes_with_freshness_policies:
+                    # Find the component instance that matches this node
+                    component_found = False
+                    for component in project.components:
+                        if component.id == node.id:
+                            print(f"[update_project] Applying freshness policy to registered component: {component.id}", flush=True)
+                            self._apply_component_freshness_policy(project, component, node)
+                            component_found = True
+                            break
+
+                    # If not found in registered components, it might be a community component
+                    if not component_found:
+                        print(f"[update_project] Applying freshness policy to community component: {node.id}", flush=True)
+                        # Create a simple object with just an id attribute
+                        class PseudoComponent:
+                            def __init__(self, component_id):
+                                self.id = component_id
+
+                        pseudo_component = PseudoComponent(node.id)
+                        self._apply_component_freshness_policy(project, pseudo_component, node)
+                print(f"[update_project] Freshness policy application completed", flush=True)
+            else:
+                print(f"[update_project] No freshness policies found in graph", flush=True)
         else:
             print(f"[update_project] Neither components nor graph in update_data, skipping generation", flush=True)
 
@@ -1461,6 +1497,49 @@ if custom_lineage_edges:
 
         except Exception as e:
             print(f"[Partition] Error applying partition config to {component.id}: {e}")
+
+    def _apply_component_freshness_policy(self, project: Project, component, node):
+        """
+        Apply freshness policy configuration to a component from its node data.
+
+        Args:
+            project: The project containing the component
+            component: Component instance to apply freshness policy to
+            node: The graph node containing the freshness_policy data
+        """
+        try:
+            if not node.data:
+                return
+
+            # Check if freshness_policy exists in node data
+            freshness_policy_data = node.data.get("freshness_policy")
+            if not freshness_policy_data:
+                return
+
+            # Parse freshness policy
+            freshness_policy = FreshnessPolicy(**freshness_policy_data)
+
+            # Get component directory
+            project_dir = self._get_project_dir(project)
+            component_dir = project_dir / "src" / project.directory_name / "defs" / component.id
+
+            if not component_dir.exists():
+                print(f"[Freshness] Component directory not found: {component_dir}")
+                return
+
+            # Extract asset_key from node data for env var naming
+            asset_key = node.data.get("asset_key", node.id)
+
+            # Apply freshness policy configuration (including .env.example generation)
+            freshness_service.apply_freshness_policy(
+                component_dir,
+                freshness_policy,
+                asset_key=asset_key,
+                project_dir=project_dir
+            )
+
+        except Exception as e:
+            print(f"[Freshness] Error applying freshness policy to {component.id}: {e}")
 
     async def install_dependencies_async(self, project: Project):
         """Install dependencies asynchronously in the background.

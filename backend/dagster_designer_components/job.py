@@ -3,7 +3,6 @@
 from typing import Optional
 
 import dagster as dg
-from dagster._core.definitions.asset_selection import AssetSelection
 
 
 class JobComponent(dg.Component, dg.Model, dg.Resolvable):
@@ -25,14 +24,14 @@ class JobComponent(dg.Component, dg.Model, dg.Resolvable):
         for key_str in self.asset_selection:
             if key_str.endswith(".*"):
                 # Wildcard pattern - select all assets
-                asset_selections.append(AssetSelection.all())
+                asset_selections.append(dg.AssetSelection.all())
             elif "/" in key_str:
                 # Multi-part key like "path/to/asset"
                 parts = key_str.split("/")
-                asset_selections.append(AssetSelection.keys(dg.AssetKey(parts)))
+                asset_selections.append(dg.AssetSelection.keys(dg.AssetKey(parts)))
             else:
                 # Single-part key like "my_model"
-                asset_selections.append(AssetSelection.keys(dg.AssetKey([key_str])))
+                asset_selections.append(dg.AssetSelection.keys(dg.AssetKey([key_str])))
 
         # Combine all selections
         if len(asset_selections) == 1:

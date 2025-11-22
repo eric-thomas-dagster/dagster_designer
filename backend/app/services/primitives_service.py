@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 
-PrimitiveCategory = Literal["schedule", "job", "sensor", "asset_check"]
+PrimitiveCategory = Literal["schedule", "job", "sensor", "asset_check", "freshness_policy"]
 
 
 class PrimitivesService:
@@ -192,6 +192,52 @@ class PrimitivesService:
 
         return checks
 
+    def _discover_freshness_policies(self, project_path: Path) -> list[dict[str, Any]]:
+        """Discover freshness policies from Python files."""
+        policies = []
+        # Try new structure first: src/{project_name}/defs
+        defs_dir = project_path / "src" / project_path.name / "defs"
+
+        if not defs_dir.exists():
+            # Fallback to old structure for backwards compatibility
+            defs_dir = project_path / f"{project_path.name}_defs"
+            if not defs_dir.exists():
+                return policies
+
+        # Look for freshness_policies.py file
+        freshness_file = defs_dir / "freshness_policies.py"
+        if not freshness_file.exists():
+            return policies
+
+        try:
+            content = freshness_file.read_text()
+            tree = ast.parse(content)
+
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Assign):
+                    # Check if this is a FreshnessPolicy assignment
+                    if (isinstance(node.value, ast.Call) and
+                        isinstance(node.value.func, ast.Attribute) and
+                        isinstance(node.value.func.value, ast.Name) and
+                        node.value.func.value.id == "FreshnessPolicy"):
+
+                        # Get the variable name
+                        if node.targets and isinstance(node.targets[0], ast.Name):
+                            policy_name = node.targets[0].id
+
+                            # Extract method (time_window or cron)
+                            method = node.value.func.attr
+
+                            policies.append({
+                                "name": policy_name,
+                                "file": str(freshness_file.relative_to(project_path)),
+                                "method": method,
+                            })
+        except Exception as e:
+            print(f"Error parsing {freshness_file}: {e}")
+
+        return policies
+
     def list_primitives(
         self,
         project_id: str,
@@ -217,6 +263,8 @@ class PrimitivesService:
             return self._discover_sensors(project_path)
         elif category == "asset_check":
             return self._discover_asset_checks(project_path)
+        elif category == "freshness_policy":
+            return self._discover_freshness_policies(project_path)
         else:
             return []
 
@@ -235,6 +283,7 @@ class PrimitivesService:
             "jobs": self.list_primitives(project_id, "job"),
             "sensors": self.list_primitives(project_id, "sensor"),
             "asset_checks": self.list_primitives(project_id, "asset_check"),
+            "freshness_policies": self.list_primitives(project_id, "freshness_policy"),
         }
 
     def get_primitive_details(
@@ -317,10 +366,12 @@ class PrimitivesService:
             "jobs": len(all_primitives["jobs"]),
             "sensors": len(all_primitives["sensors"]),
             "asset_checks": len(all_primitives["asset_checks"]),
+            "freshness_policies": len(all_primitives["freshness_policies"]),
             "total": sum([
                 len(all_primitives["schedules"]),
                 len(all_primitives["jobs"]),
                 len(all_primitives["sensors"]),
                 len(all_primitives["asset_checks"]),
+                len(all_primitives["freshness_policies"]),
             ]),
         }

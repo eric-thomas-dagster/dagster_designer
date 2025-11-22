@@ -113,6 +113,17 @@ class AssetCheckRequest(BaseModel):
     max_age_hours: int | None = None
 
 
+class FreshnessPolicyRequest(BaseModel):
+    """Request to generate a freshness policy."""
+
+    policy_name: str
+    description: str = ""
+    maximum_lag_minutes: int = 60
+    maximum_lag_env_var: str = ""
+    cron_schedule: str = ""
+    cron_env_var: str = ""
+
+
 class IOManagerRequest(BaseModel):
     """Request to generate an IO manager."""
 
@@ -459,6 +470,33 @@ async def generate_asset_check(request: AssetCheckRequest):
     except Exception as e:
         raise HTTPException(
             status_code=500, detail=f"Failed to generate asset check: {str(e)}"
+        )
+
+
+@router.post("/freshness-policy")
+async def generate_freshness_policy(request: FreshnessPolicyRequest):
+    """
+    Generate a freshness policy template.
+
+    Args:
+        request: Freshness policy parameters
+
+    Returns:
+        Generated Python code
+    """
+    try:
+        code = template_service.generate_freshness_policy(
+            policy_name=request.policy_name,
+            description=request.description,
+            maximum_lag_minutes=request.maximum_lag_minutes,
+            maximum_lag_env_var=request.maximum_lag_env_var,
+            cron_schedule=request.cron_schedule,
+            cron_env_var=request.cron_env_var,
+        )
+        return {"code": code, "policy_name": request.policy_name}
+    except Exception as e:
+        raise HTTPException(
+            status_code=500, detail=f"Failed to generate freshness policy: {str(e)}"
         )
 
 
