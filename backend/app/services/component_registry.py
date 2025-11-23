@@ -4,7 +4,7 @@ import importlib
 import inspect
 import pkgutil
 import sys
-from typing import Any
+from typing import Any, Optional, Dict, List
 from pydantic import BaseModel
 
 from ..models.component import ComponentSchema
@@ -940,7 +940,7 @@ class ComponentRegistry:
 
         self._components[component_type] = component_schema
 
-    def _extract_schema(self, component_class: type) -> dict[str, Any] | None:
+    def _extract_schema(self, component_class: type) -> Optional[Dict[str, Any]]:
         """Extract JSON schema from a component's Pydantic model."""
         try:
             # Check if it's a Pydantic model
@@ -951,22 +951,22 @@ class ComponentRegistry:
 
         return None
 
-    def get_all_components(self) -> list[ComponentSchema]:
+    def get_all_components(self) -> List[ComponentSchema]:
         """Get all registered components."""
         self.initialize()
         return list(self._components.values())
 
-    def get_component(self, component_type: str) -> ComponentSchema | None:
+    def get_component(self, component_type: str) -> Optional[ComponentSchema]:
         """Get a specific component by type."""
         self.initialize()
         return self._components.get(component_type)
 
-    def get_components_by_category(self, category: str) -> list[ComponentSchema]:
+    def get_components_by_category(self, category: str) -> List[ComponentSchema]:
         """Get all components in a category."""
         self.initialize()
         return [c for c in self._components.values() if c.category == category]
 
-    def get_dependencies(self, component_type: str) -> list[str]:
+    def get_dependencies(self, component_type: str) -> List[str]:
         """Get the required dependencies for a component type.
 
         Args:

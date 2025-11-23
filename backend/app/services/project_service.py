@@ -2282,14 +2282,19 @@ if custom_lineage_edges:
 import json
 import dagster as dg
 
-# Import custom components to register them with Dagster
+# Import custom components to register them with Dagster (if they exist)
 # The @component_type decorator registers them when imported
-from .dagster_designer_components import (
-    JobComponent,
-    ScheduleComponent,
-    SensorComponent,
-    AssetCheckComponent,
-)
+try:
+    from .dagster_designer_components import (
+        JobComponent,
+        ScheduleComponent,
+        SensorComponent,
+        AssetCheckComponent,
+    )
+except ImportError:
+    # dagster_designer_components module not yet created
+    # This is normal for new projects without any primitives (jobs, schedules, sensors, checks)
+    pass
 
 # Load base definitions from components
 defs = dg.load_from_defs_folder(path_within_project=Path(__file__).parent)

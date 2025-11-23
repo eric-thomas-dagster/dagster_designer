@@ -1647,12 +1647,11 @@ export function PropertyPanel({ nodeId, onConfigureComponent, onOpenFile }: Prop
               c.component_type?.includes('DataFrameTransformerComponent')
             ) || false}
             onTransformerCreated={(updatedProject) => {
-              // Update the graph with the new project data
-              if (updatedProject?.graph) {
-                updateGraph(updatedProject.graph);
+              // Use the updated project data from the API response
+              // This avoids a race condition from reloading the project
+              if (updatedProject) {
+                updateGraph(updatedProject.graph.nodes, updatedProject.graph.edges);
               }
-              // Also refresh the entire project to ensure everything is in sync
-              loadProject(currentProject.id);
             }}
           />
         )}

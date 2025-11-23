@@ -169,7 +169,9 @@ async def create_transformer_asset(project_id: str, request: CreateTransformerRe
     import yaml
     from pathlib import Path
 
-    print(f"[Create Transformer] Creating transformer asset '{request.newAssetName}' from '{request.sourceAssetKey}'", flush=True)
+    print(f"[Create Transformer] ========== START ==========", flush=True)
+    print(f"[Create Transformer] Request data: sourceAssetKey='{request.sourceAssetKey}', newAssetName='{request.newAssetName}'", flush=True)
+    print(f"[Create Transformer] Transform config: {request.transformConfig}", flush=True)
 
     # Get project
     project = project_service.get_project(project_id)
@@ -290,6 +292,9 @@ async def create_transformer_asset(project_id: str, request: CreateTransformerRe
         "type": transformer_component_type,
         "attributes": attributes
     }
+
+    print(f"[Create Transformer] About to write YAML with attributes: {attributes}", flush=True)
+    print(f"[Create Transformer] upstream_asset_keys value: '{attributes.get('upstream_asset_keys')}'", flush=True)
 
     with open(defs_dir / "defs.yaml", "w") as f:
         yaml.dump(defs_yaml, f, default_flow_style=False, sort_keys=False)

@@ -544,6 +544,8 @@ export function DataPreviewModal({
       };
 
       // Call API to create new transformer asset
+      console.log('[DataPreviewModal] Creating transformer with sourceAssetKey:', assetKey);
+      console.log('[DataPreviewModal] Transform config:', transformConfig);
       const updatedProject = await assetsApi.createTransformerAsset(projectId, {
         sourceAssetKey: assetKey,
         newAssetName: newAssetName.trim(),

@@ -122,6 +122,20 @@ def component_freshness_policy():
             # Read existing content
             content = template_vars_path.read_text()
 
+            # Ensure timedelta is imported (freshness policies need it)
+            if "from datetime import timedelta" not in content:
+                # Add timedelta import after the docstring but before other imports
+                import re
+                # Try to add after docstring
+                docstring_pattern = r'(""".*?"""\s*\n)'
+                match = re.search(docstring_pattern, content, re.DOTALL)
+                if match:
+                    # Insert after docstring
+                    content = content[:match.end()] + 'from datetime import timedelta\n' + content[match.end():]
+                else:
+                    # No docstring, add at the top
+                    content = 'from datetime import timedelta\n' + content
+
             # Check if freshness function already exists
             if "def component_freshness_policy(" in content:
                 # Replace existing function
@@ -142,8 +156,10 @@ def component_freshness_policy():
             needs_os_import = freshness_policy.maximum_lag_env_var or freshness_policy.cron_env_var
             os_import = '\nimport os' if needs_os_import else ''
 
+            # Always import timedelta since freshness policies use it
             header = f'''"""Template variables for this component."""
 
+from datetime import timedelta
 import dagster as dg{os_import}
 '''
             template_vars_path.write_text(header + freshness_function)

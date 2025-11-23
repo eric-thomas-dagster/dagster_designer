@@ -907,6 +907,50 @@ async def add_custom_lineage(project_id: str, request: CustomLineageRequest):
                 print(f"⚠️  Warning: Failed to write custom_lineage.json: {write_err}", flush=True)
                 # Continue anyway - the lineage is saved in the DB
 
+            # If component wasn't found in project.components, try to update YAML file directly
+            if not target_component:
+                print(f"[Custom Lineage] Component '{request.target}' not in project.components list, updating YAML directly...", flush=True)
+                try:
+                    project_dir = project_service._get_project_dir(updated_project)
+                    module_name = updated_project.directory_name.replace("-", "_")
+
+                    # Try both flat and src layouts
+                    flat_defs_dir = project_dir / module_name / "defs" / request.target
+                    src_defs_dir = project_dir / "src" / module_name / "defs" / request.target
+
+                    yaml_path = None
+                    if (flat_defs_dir / "defs.yaml").exists():
+                        yaml_path = flat_defs_dir / "defs.yaml"
+                    elif (src_defs_dir / "defs.yaml").exists():
+                        yaml_path = src_defs_dir / "defs.yaml"
+
+                    if yaml_path:
+                        import yaml
+                        with open(yaml_path, 'r') as f:
+                            yaml_data = yaml.safe_load(f)
+
+                        if 'attributes' not in yaml_data:
+                            yaml_data['attributes'] = {}
+
+                        # Get existing upstream keys
+                        existing_keys = []
+                        if 'upstream_asset_keys' in yaml_data['attributes']:
+                            existing_str = yaml_data['attributes']['upstream_asset_keys']
+                            if existing_str:
+                                existing_keys = [k.strip() for k in existing_str.split(",")]
+
+                        # Add new source key if not already present
+                        if request.source not in existing_keys:
+                            existing_keys.append(request.source)
+                            yaml_data['attributes']['upstream_asset_keys'] = ", ".join(existing_keys)
+
+                            with open(yaml_path, 'w') as f:
+                                yaml.dump(yaml_data, f, default_flow_style=False, sort_keys=False)
+
+                            print(f"[Custom Lineage] Updated YAML for '{request.target}' with upstream_asset_keys: {existing_keys}", flush=True)
+                except Exception as yaml_err:
+                    print(f"⚠️  Warning: Failed to update YAML for '{request.target}': {yaml_err}", flush=True)
+
             return updated_project
 
         return project
