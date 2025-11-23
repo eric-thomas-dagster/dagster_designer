@@ -46,7 +46,9 @@ export function ComponentConfigModal({
   const [adapterInfo, setAdapterInfo] = useState<AdapterInfo[]>([]);
   const [loadingAdapterStatus, setLoadingAdapterStatus] = useState(false);
   const [installingAdapter, setInstallingAdapter] = useState<string | null>(null);
-  const isDbtComponent = type.toLowerCase().includes('dbt');
+  // Check if this is a DBT component (not DuckDB or other components containing "db")
+  // Match patterns like "dbt_project", "DbtProject", "dagster_dbt.X", but not "duckdb_table_writer"
+  const isDbtComponent = /\bdbt[_\.]|^dbt/i.test(type);
 
   // Get list of available assets for dependencies dropdown
   const availableAssets = currentProject?.graph.nodes

@@ -19,7 +19,8 @@ export function ProjectComponentsList({ onEditComponent, onDeleteComponent }: Pr
   }
 
   const getIconForComponentType = (type: string): string => {
-    if (type.includes('dbt')) return '🗄️';
+    // Check for dbt components (not duckdb - use word boundary)
+    if (/\bdbt[_\.]|^dbt/i.test(type)) return '🗄️';
     if (type.includes('fivetran')) return '🔄';
     if (type.includes('sling')) return '➡️';
     if (type.includes('dlt')) return '⬇️';

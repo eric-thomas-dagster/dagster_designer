@@ -1751,7 +1751,8 @@ function GroupOverlay({ nodes, setNodes }: { nodes: Node[]; setNodes: React.Disp
 function getCategoryFromType(type: string): string {
   if (type === 'dagster.PythonScriptComponent') return 'primitives';
   if (type === 'dagster.TemplatedSqlComponent') return 'primitives';
-  if (type.includes('dbt')) return 'dbt';
+  // Check for dbt components (not duckdb - use word boundary)
+  if (/\bdbt[_\.]|^dbt/i.test(type)) return 'dbt';
   if (type.includes('fivetran')) return 'fivetran';
   if (type.includes('sling')) return 'sling';
   if (type.includes('dlt')) return 'dlt';
