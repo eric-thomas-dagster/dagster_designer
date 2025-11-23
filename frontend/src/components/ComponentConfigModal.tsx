@@ -502,6 +502,98 @@ export function ComponentConfigModal({
       );
     }
 
+    // Special handling for upstream_asset_keys - show multi-select dropdown filtered by output type
+    if (fieldName === 'upstream_asset_keys') {
+      // Parse current value (comma-separated string to array)
+      const selectedValues = value ? value.split(',').map((s: string) => s.trim()).filter(Boolean) : [];
+
+      // Check if component only accepts DataFrame inputs
+      const acceptsDataFrames = componentSchema?.['x-dagster-io']?.inputs?.type === 'dataframe' ||
+                                 componentSchema?.['x-dagster-io']?.inputs?.accepts?.includes('dataframe');
+
+      // Filter available assets based on what the component accepts
+      let filteredAssets = availableAssets;
+      if (acceptsDataFrames) {
+        // For now, use heuristics to identify DataFrame-producing assets
+        // TODO: Could be enhanced by checking each asset's component schema
+        filteredAssets = availableAssets.filter((assetKey: string) => {
+          const assetNode = currentProject?.graph.nodes.find(
+            (n: any) => (n.data.asset_key === assetKey || n.data.label === assetKey || n.id === assetKey)
+          );
+          if (!assetNode) return false;
+
+          // Check if it's a known DataFrame-producing component type
+          const componentType = assetNode.data.component_type || '';
+          const isDataFrameProducer =
+            componentType.includes('synthetic_data_generator') ||
+            componentType.includes('dataframe_transformer') ||
+            componentType.includes('csv_file') ||
+            componentType.includes('database_query') ||
+            componentType.includes('rest_api') ||
+            componentType.includes('duckdb_query') ||
+            componentType.includes('time_series');
+
+          return isDataFrameProducer;
+        });
+      }
+
+      return (
+        <div className="space-y-2">
+          <select
+            multiple
+            value={selectedValues}
+            onChange={(e) => {
+              const selected = Array.from(e.target.selectedOptions, (option) => option.value);
+              // Convert array back to comma-separated string
+              handleFieldChange(fieldName, selected.join(', '));
+            }}
+            className="w-full px-3 py-2 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+            size={Math.min(6, Math.max(3, filteredAssets.length))}
+          >
+            {filteredAssets.length === 0 ? (
+              <option disabled>
+                {acceptsDataFrames
+                  ? 'No DataFrame-producing assets available. Add a data source component first.'
+                  : 'No assets available'}
+              </option>
+            ) : (
+              filteredAssets.map((assetKey: string) => (
+                <option key={assetKey} value={assetKey}>
+                  {assetKey}
+                </option>
+              ))
+            )}
+          </select>
+          <p className="text-xs text-gray-500">
+            {acceptsDataFrames
+              ? 'Hold Cmd/Ctrl to select multiple DataFrame assets. Only showing assets that output DataFrames.'
+              : 'Hold Cmd/Ctrl to select multiple assets'}
+          </p>
+          {selectedValues.length > 0 && (
+            <div className="flex flex-wrap gap-1">
+              {selectedValues.map((assetKey: string) => (
+                <span
+                  key={assetKey}
+                  className="inline-flex items-center gap-1 px-2 py-0.5 text-xs bg-blue-50 border border-blue-200 rounded text-blue-700"
+                >
+                  {assetKey}
+                  <button
+                    onClick={() => {
+                      const newSelected = selectedValues.filter((k: string) => k !== assetKey);
+                      handleFieldChange(fieldName, newSelected.join(', '));
+                    }}
+                    className="hover:text-blue-900"
+                  >
+                    <X className="w-3 h-3" />
+                  </button>
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
+      );
+    }
+
     // Check if field has enum values - render as dropdown
     if (fieldSchema.enum && Array.isArray(fieldSchema.enum) && fieldSchema.enum.length > 0) {
       return (
