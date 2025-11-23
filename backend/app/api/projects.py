@@ -863,10 +863,42 @@ async def add_custom_lineage(project_id: str, request: CustomLineageRequest):
 
         if not exists:
             updated_lineage = project.custom_lineage + [new_edge]
-            updated_project = project_service.update_project(
-                project_id,
-                ProjectUpdate(custom_lineage=updated_lineage)
-            )
+
+            # Also update the target component's upstream_asset_keys if it's a component
+            # Find the target component by matching the asset key to component id/label
+            target_component = None
+            for component in project.components:
+                # Match by ID or label (components create assets with their ID)
+                if component.id == request.target or component.label == request.target:
+                    target_component = component
+                    break
+
+            # If we found a matching component, update its upstream_asset_keys
+            updated_components = None
+            if target_component:
+                # Get all existing upstream keys from the target component
+                existing_keys = []
+                if target_component.attributes and "upstream_asset_keys" in target_component.attributes:
+                    existing_str = target_component.attributes["upstream_asset_keys"]
+                    if existing_str:
+                        existing_keys = [k.strip() for k in existing_str.split(",")]
+
+                # Add the new source key if not already present
+                if request.source not in existing_keys:
+                    existing_keys.append(request.source)
+                    # Update the component's attributes
+                    if not target_component.attributes:
+                        target_component.attributes = {}
+                    target_component.attributes["upstream_asset_keys"] = ", ".join(existing_keys)
+                    updated_components = project.components
+                    print(f"[Custom Lineage] Updated upstream_asset_keys for '{target_component.label}': {existing_keys}", flush=True)
+
+            # Update project with both lineage and possibly updated components
+            update_data = ProjectUpdate(custom_lineage=updated_lineage)
+            if updated_components:
+                update_data.components = updated_components
+
+            updated_project = project_service.update_project(project_id, update_data)
 
             # Write custom_lineage.json to project directory
             try:
@@ -903,10 +935,37 @@ async def remove_custom_lineage(project_id: str, request: CustomLineageRequest):
             if not (edge.source == request.source and edge.target == request.target)
         ]
 
-        updated_project = project_service.update_project(
-            project_id,
-            ProjectUpdate(custom_lineage=updated_lineage)
-        )
+        # Also update the target component's upstream_asset_keys if it's a component
+        target_component = None
+        for component in project.components:
+            if component.id == request.target or component.label == request.target:
+                target_component = component
+                break
+
+        updated_components = None
+        if target_component and target_component.attributes and "upstream_asset_keys" in target_component.attributes:
+            # Get existing upstream keys
+            existing_str = target_component.attributes["upstream_asset_keys"]
+            if existing_str:
+                existing_keys = [k.strip() for k in existing_str.split(",")]
+                # Remove the source key
+                if request.source in existing_keys:
+                    existing_keys.remove(request.source)
+                    # Update the attribute
+                    if existing_keys:
+                        target_component.attributes["upstream_asset_keys"] = ", ".join(existing_keys)
+                    else:
+                        # Remove the field entirely if no keys left
+                        del target_component.attributes["upstream_asset_keys"]
+                    updated_components = project.components
+                    print(f"[Custom Lineage] Removed '{request.source}' from upstream_asset_keys for '{target_component.label}': {existing_keys}", flush=True)
+
+        # Update project with both lineage and possibly updated components
+        update_data = ProjectUpdate(custom_lineage=updated_lineage)
+        if updated_components:
+            update_data.components = updated_components
+
+        updated_project = project_service.update_project(project_id, update_data)
 
         # Update custom_lineage.json file
         try:

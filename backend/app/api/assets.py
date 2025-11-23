@@ -191,7 +191,8 @@ async def create_transformer_asset(project_id: str, request: CreateTransformerRe
     # Build transformation configuration for the transformer component
     # The DataFrameTransformerComponent expects specific attributes, not a transforms array
     attributes = {
-        "asset_name": component_id
+        "asset_name": component_id,
+        "upstream_asset_keys": request.sourceAssetKey  # Set upstream dependency immediately
     }
 
     # Convert columnsToKeep to filter_columns (comma-separated string)
@@ -357,43 +358,51 @@ async def create_transformer_asset(project_id: str, request: CreateTransformerRe
     print(f"[Create Transformer] Regenerating assets...", flush=True)
     asset_introspection_service.clear_cache(project.id)
 
-    asset_nodes, asset_edges = await asset_introspection_service.get_assets_for_project_async(project, recalculate_layout=True)
+    try:
+        asset_nodes, asset_edges = await asset_introspection_service.get_assets_for_project_async(project, recalculate_layout=True)
 
-    # Find the new transformer asset node
-    transformer_node = None
-    for node in asset_nodes:
-        if node.id == component_id or node.data.get('asset_key') == component_id:
-            transformer_node = node
-            break
+        # Find the new transformer asset node
+        transformer_node = None
+        for node in asset_nodes:
+            if node.id == component_id or node.data.get('asset_key') == component_id:
+                transformer_node = node
+                break
 
-    if not transformer_node:
-        raise HTTPException(status_code=500, detail=f"Failed to find generated transformer asset '{component_id}'")
-
-    # Update project graph with the new assets
-    non_asset_nodes = [n for n in project.graph.nodes if n.node_kind != "asset"]
-    project.graph.nodes = non_asset_nodes + asset_nodes
-
-    # Merge introspected edges with custom lineage edges (same pattern as delete_component_instance)
-    edge_map = {edge.id: edge for edge in asset_edges}
-
-    # Process custom lineage edges
-    for custom_lineage in project.custom_lineage:
-        edge_id = f"{custom_lineage.source}_to_{custom_lineage.target}"
-
-        if edge_id in edge_map:
-            # Edge already exists from introspection, just mark it as custom
-            edge_map[edge_id].is_custom = True
+        if not transformer_node:
+            print(f"[Create Transformer] Warning: Could not find transformer node '{component_id}' in regenerated assets", flush=True)
         else:
-            # Edge doesn't exist, create a new custom edge
-            edge_map[edge_id] = GraphEdge(
-                id=edge_id,
-                source=custom_lineage.source,
-                target=custom_lineage.target,
-                is_custom=True
-            )
+            # Update project graph with the new assets
+            non_asset_nodes = [n for n in project.graph.nodes if n.node_kind != "asset"]
+            project.graph.nodes = non_asset_nodes + asset_nodes
 
-    # Convert edge map back to list
-    project.graph.edges = list(edge_map.values())
+            # Merge introspected edges with custom lineage edges (same pattern as delete_component_instance)
+            edge_map = {edge.id: edge for edge in asset_edges}
+
+            # Process custom lineage edges
+            for custom_lineage in project.custom_lineage:
+                edge_id = f"{custom_lineage.source}_to_{custom_lineage.target}"
+
+                if edge_id in edge_map:
+                    # Edge already exists from introspection, just mark it as custom
+                    edge_map[edge_id].is_custom = True
+                else:
+                    # Edge doesn't exist, create a new custom edge
+                    edge_map[edge_id] = GraphEdge(
+                        id=edge_id,
+                        source=custom_lineage.source,
+                        target=custom_lineage.target,
+                        is_custom=True
+                    )
+
+            # Convert edge map back to list
+            project.graph.edges = list(edge_map.values())
+
+            print(f"[Create Transformer] Successfully updated graph with {len(asset_nodes)} asset nodes", flush=True)
+
+    except Exception as e:
+        print(f"[Create Transformer] Warning: Failed to regenerate assets, but transformer files were created: {e}", flush=True)
+        # Don't fail the request - the files were created successfully
+        # The user can manually regenerate the graph later
 
     # Save updated project with components, graph, and custom lineage in a single update
     updated_project = project_service.update_project(
