@@ -803,6 +803,30 @@ export function ComponentConfigModal({
             </div>
           )}
 
+          {/* Visual Editor Notice for DataFrameTransformerComponent */}
+          {type.includes('DataFrameTransformerComponent') && (
+            <div className="bg-gradient-to-r from-purple-50 to-blue-50 border-2 border-purple-300 rounded-lg p-4">
+              <div className="flex items-start space-x-3">
+                <div className="flex-shrink-0">
+                  <svg className="w-6 h-6 text-purple-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
+                  </svg>
+                </div>
+                <div className="flex-1">
+                  <h4 className="text-sm font-semibold text-purple-900 mb-1">
+                    Visual Editor Available
+                  </h4>
+                  <p className="text-sm text-purple-800 mb-3">
+                    This transformer has a powerful visual editor with drag-and-drop configuration for all transformations including pivot/unpivot, aggregations, and more.
+                  </p>
+                  <div className="text-xs text-purple-700 bg-purple-100 border border-purple-200 rounded px-3 py-2">
+                    <strong>To access:</strong> Click on the asset in the graph → Click the "View Data" button in the dropdown menu → Configure transformations visually
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
           {/* DBT Adapter Status */}
           {isDbtComponent && currentProject && (
             <div className="border border-gray-200 rounded-md p-4 space-y-3">

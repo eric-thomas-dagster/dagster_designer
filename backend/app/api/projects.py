@@ -1175,9 +1175,12 @@ async def get_asset_partitions(project_id: str, asset_key: str):
         else:
             env["PYTHONPATH"] = str(project_src_dir)
 
+        # Get the project's Python executable
+        project_python = project_service._get_project_python_path(project)
+
         result = subprocess.run(
             [
-                sys.executable,
+                str(project_python),
                 "-m",
                 "scripts.show_partitions",
                 project_module,
@@ -1272,9 +1275,12 @@ async def get_asset_config_schema(project_id: str, asset_key: str):
         else:
             env["PYTHONPATH"] = str(project_src_dir)
 
+        # Get the project's Python executable
+        project_python = project_service._get_project_python_path(project)
+
         result = subprocess.run(
             [
-                sys.executable,
+                str(project_python),
                 "-m",
                 "scripts.show_config",
                 project_module,

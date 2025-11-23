@@ -1110,10 +1110,31 @@ export interface AssetDataPreview {
   sample_limit: number | null;
 }
 
+export interface CreateTransformerRequest {
+  sourceAssetKey: string;
+  newAssetName: string;
+  transformConfig: {
+    columnsToKeep: string[] | null;
+    filters: {
+      column: string;
+      operator: string;
+      value: string;
+    }[];
+  };
+}
+
 export const assetsApi = {
   previewData: async (projectId: string, assetKey: string): Promise<AssetDataPreview> => {
     const response = await api.get<AssetDataPreview>(
       `/assets/${projectId}/${encodeURIComponent(assetKey)}/preview`
+    );
+    return response.data;
+  },
+
+  createTransformerAsset: async (projectId: string, request: CreateTransformerRequest): Promise<Project> => {
+    const response = await api.post<Project>(
+      `/assets/${projectId}/create-transformer`,
+      request
     );
     return response.data;
   },

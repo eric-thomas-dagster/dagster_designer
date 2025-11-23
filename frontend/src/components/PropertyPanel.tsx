@@ -55,6 +55,17 @@ export function PropertyPanel({ nodeId, onConfigureComponent, onOpenFile }: Prop
   const { currentProject, updateGraph, loadProject } = useProjectStore();
   const node = currentProject?.graph.nodes.find((n) => n.id === nodeId);
 
+  // Return early if node is not found
+  if (!node) {
+    return (
+      <aside className="property-panel">
+        <div className="p-4 text-sm text-gray-500">
+          Node not found
+        </div>
+      </aside>
+    );
+  }
+
   // Handle both backend structure (node_kind at top level) and React Flow structure (node_kind in data)
   const nodeKind = (node as any)?.node_kind || node?.data?.node_kind;
   const sourceComponentId = (node as any)?.source_component || node?.data?.source_component;
@@ -198,7 +209,7 @@ export function PropertyPanel({ nodeId, onConfigureComponent, onOpenFile }: Prop
   const [isPartitioned, setIsPartitioned] = useState(false);
 
   // Compute asset key for API calls
-  const assetKey = node.data.asset_key || node.id;
+  const assetKey = node?.data?.asset_key || node?.id || '';
   const [checkingPartitions, setCheckingPartitions] = useState(false);
   const [assetConfigSchema, setAssetConfigSchema] = useState<any>(null);
   const [assetDefaultConfig, setAssetDefaultConfig] = useState<any>(null);
@@ -755,38 +766,6 @@ export function PropertyPanel({ nodeId, onConfigureComponent, onOpenFile }: Prop
               <p className="text-xs text-gray-500 mt-1">
                 Click to open in code editor
               </p>
-            </div>
-          )}
-
-          {/* Source Component (Read-only) */}
-          {(sourceComponent || loadingCommunityComponent) && (
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">
-                Source Component
-              </label>
-              {loadingCommunityComponent ? (
-                <div className="px-3 py-2 text-sm bg-gray-50 border border-gray-200 rounded-md text-gray-500 italic">
-                  Loading component...
-                </div>
-              ) : sourceComponent ? (
-                <>
-                  <div className="px-3 py-2 text-sm bg-gray-50 border border-gray-200 rounded-md text-gray-900 mb-2">
-                    {sourceComponent.label}
-                  </div>
-                  {onConfigureComponent && (
-                    <button
-                      onClick={() => onConfigureComponent(sourceComponent)}
-                      className="w-full flex items-center justify-center space-x-1 px-3 py-2 text-sm bg-purple-600 text-white rounded-md hover:bg-purple-700"
-                    >
-                      <Settings className="w-4 h-4" />
-                      <span>Configure Component</span>
-                    </button>
-                  )}
-                  <p className="text-xs text-gray-500 mt-1">
-                    Edit component configuration to update this asset
-                  </p>
-                </>
-              ) : null}
             </div>
           )}
 
@@ -1650,6 +1629,17 @@ export function PropertyPanel({ nodeId, onConfigureComponent, onOpenFile }: Prop
             projectId={currentProject.id}
             assetKey={assetKey}
             assetName={node.data.label || node.id}
+            hasTransformerComponent={currentProject.components?.some(c =>
+              c.component_type.includes('DataFrameTransformerComponent')
+            ) || false}
+            onTransformerCreated={(updatedProject) => {
+              // Update the graph with the new project data
+              if (updatedProject?.graph) {
+                updateGraph(updatedProject.graph);
+              }
+              // Also refresh the entire project to ensure everything is in sync
+              loadProject(currentProject.id);
+            }}
           />
         )}
       </div>

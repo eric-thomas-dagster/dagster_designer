@@ -1,6 +1,8 @@
 """API endpoints for asset operations."""
 
 import sys
+import json
+import subprocess
 import importlib.util
 from pathlib import Path
 from fastapi import APIRouter, HTTPException
@@ -31,8 +33,7 @@ async def preview_asset_data(project_id: str, asset_key: str):
     """
     Execute an asset function and return its dataframe data for preview.
 
-    This directly executes the asset function to get data for local development
-    preview, bypassing Dagster's IO manager persistence.
+    Runs the asset execution in the project's Python environment to support custom components.
 
     Args:
         project_id: Project ID
@@ -41,341 +42,373 @@ async def preview_asset_data(project_id: str, asset_key: str):
     Returns:
         Asset data in JSON format suitable for table display
     """
+    # Get project
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    # Get project directory
+    project_dir = project_service._get_project_dir(project)
+    if not project_dir.exists():
+        raise HTTPException(status_code=404, detail="Project directory not found")
+
+    # Get project module name
+    project_module = project.directory_name
+
+    # Set up environment
+    import os
+    env = os.environ.copy()
+    project_src_dir = project_dir / "src"
+    if "PYTHONPATH" in env:
+        env["PYTHONPATH"] = f"{project_src_dir}:{env['PYTHONPATH']}"
+    else:
+        env["PYTHONPATH"] = str(project_src_dir)
+
+    # Get the project's Python executable
+    project_python = project_service._get_project_python_path(project)
+
     try:
-        # Get project
-        project = project_service.get_project(project_id)
-        if not project:
-            raise HTTPException(status_code=404, detail="Project not found")
+        # Run the preview script in the project's Python environment
+        result = subprocess.run(
+            [
+                str(project_python),
+                "-m",
+                "scripts.preview_asset",
+                project_module,
+                asset_key,
+            ],
+            cwd=Path.cwd(),  # Run from backend directory
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=60,  # 60 second timeout for asset execution
+        )
 
-        # Get project directory
-        project_dir = project_service._get_project_dir(project)
-        if not project_dir.exists():
-            raise HTTPException(status_code=404, detail="Project directory not found")
-
-        # Add project src to path
-        src_dir = project_dir / "src"
-        if not src_dir.exists():
-            raise HTTPException(status_code=404, detail="Project src directory not found")
-
-        sys.path.insert(0, str(src_dir))
-
-        try:
-            # Import the definitions module
-            module_name = project.directory_name
-            definitions_module = importlib.import_module(f"{module_name}.definitions")
-            defs = definitions_module.defs
-
-            # Find the asset by key
-            target_asset_key = asset_key
-            found_asset = None
-            asset_def = None
-
-            # Get all assets from definitions
-            all_assets = []
-            if hasattr(defs, 'assets') and defs.assets:
-                all_assets.extend(defs.assets)
-
-            # Iterate through all asset definitions
-            for assets_def in all_assets:
-                # Handle both AssetsDefinition and multi-asset cases
-                if hasattr(assets_def, 'keys'):
-                    keys = assets_def.keys
-                elif hasattr(assets_def, 'key'):
-                    keys = [assets_def.key]
-                else:
-                    continue
-
-                for key in keys:
-                    key_str = key.to_user_string()
-                    if key_str == target_asset_key:
-                        found_asset = key
-                        asset_def = assets_def
-                        break
-                if found_asset:
-                    break
-
-            if not found_asset or not asset_def:
-                return AssetDataResponse(
-                    success=False,
-                    error=f"Asset '{asset_key}' not found in project definitions"
-                )
-
-            # Check if this asset can be executed directly
-            if not hasattr(asset_def, 'op') or not hasattr(asset_def.op, 'compute_fn'):
-                return AssetDataResponse(
-                    success=False,
-                    error="This asset cannot be previewed directly. It may require dependencies or a Dagster context."
-                )
-
-            # Get the compute function - handle DecoratedOpFunction
-            compute_fn = asset_def.op.compute_fn
-
-            # If it's a DecoratedOpFunction, get the underlying function
-            if hasattr(compute_fn, 'decorated_fn'):
-                actual_fn = compute_fn.decorated_fn
-            else:
-                actual_fn = compute_fn
-
-            # Helper function to create mock context
-            def create_mock_context():
-                class SimpleMockContext:
-                    class SimpleLogger:
-                        def info(self, msg): pass
-                        def warning(self, msg): pass
-                        def error(self, msg): pass
-                        def debug(self, msg): pass
-
-                    def __init__(self):
-                        self.log = self.SimpleLogger()
-                        self.run_id = "preview"
-                        self.op_execution_context = None
-                        # Partition-related attributes for partitioned assets
-                        self.has_partition_key = False
-                        self.partition_key = None
-                        self.asset_partition_key_for_output = lambda x=None: None
-                        self._output_metadata = {}
-
-                    def add_output_metadata(self, metadata, output_name=None):
-                        """Mock method for adding output metadata."""
-                        if output_name:
-                            self._output_metadata[output_name] = metadata
-                        else:
-                            self._output_metadata.update(metadata)
-
-                return SimpleMockContext()
-
-            # Helper function to execute an asset by key
-            def execute_asset_by_key(asset_key_to_exec):
-                """Recursively execute an asset and return its result."""
-                # Find the asset definition
-                for assets_def in all_assets:
-                    if hasattr(assets_def, 'keys'):
-                        keys = assets_def.keys
-                    elif hasattr(assets_def, 'key'):
-                        keys = [assets_def.key]
-                    else:
-                        continue
-
-                    for key in keys:
-                        if key.to_user_string() == asset_key_to_exec:
-                            # Found the dependency asset
-                            dep_compute_fn = assets_def.op.compute_fn
-                            if hasattr(dep_compute_fn, 'decorated_fn'):
-                                dep_actual_fn = dep_compute_fn.decorated_fn
-                            else:
-                                dep_actual_fn = dep_compute_fn
-
-                            # Execute the dependency
-                            import inspect
-                            dep_sig = inspect.signature(dep_actual_fn)
-                            dep_params = list(dep_sig.parameters.values())
-
-                            # Check if dependency itself has dependencies
-                            context_param = None
-                            dep_dependency_params = []
-                            for p in dep_params:
-                                if p.name in ['context', 'ctx']:
-                                    context_param = p
-                                else:
-                                    dep_dependency_params.append(p)
-
-                            # Build args for dependency
-                            dep_args = []
-                            if context_param:
-                                dep_args.append(create_mock_context())
-
-                            # Recursively execute dependencies of this dependency
-                            for dep_param in dep_dependency_params:
-                                # Find the upstream asset key from the asset's deps
-                                if hasattr(assets_def, 'keys_by_input_name'):
-                                    dep_key = assets_def.keys_by_input_name.get(dep_param.name)
-                                    if dep_key:
-                                        dep_result = execute_asset_by_key(dep_key.to_user_string())
-                                        dep_args.append(dep_result)
-
-                            return dep_actual_fn(*dep_args)
-
-                raise ValueError(f"Dependency asset '{asset_key_to_exec}' not found")
-
-            # Check parameters and identify dependencies
-            import inspect
-            sig = inspect.signature(actual_fn)
-            params = list(sig.parameters.values())
-
-            # Separate context param from dependency params
-            context_param = None
-            dependency_params = []
-            has_var_keyword = False  # **kwargs
-            has_var_positional = False  # *args
-
-            for param in params:
-                if param.name in ['context', 'ctx']:
-                    context_param = param
-                elif param.kind == inspect.Parameter.VAR_KEYWORD:
-                    has_var_keyword = True
-                    dependency_params.append(param)
-                elif param.kind == inspect.Parameter.VAR_POSITIONAL:
-                    has_var_positional = True
-                else:
-                    dependency_params.append(param)
-
-            # Build arguments for the target asset
-            args = []
-            kwargs = {}
-
-            # Add context if needed
-            if context_param:
-                args.append(create_mock_context())
-
-            # Execute dependencies and add their results
-            if dependency_params:
-                print(f"[Asset Preview] Asset '{asset_key}' has {len(dependency_params)} dependencies, executing upstream assets...", flush=True)
-
-                # Get the list of dependency asset keys from the asset definition
-                dep_keys = []
-                if hasattr(asset_def, 'dependency_asset_keys'):
-                    dep_keys = [k.to_user_string() for k in asset_def.dependency_asset_keys]
-                elif hasattr(asset_def, 'asset_deps'):
-                    for dep_dict in asset_def.asset_deps.values():
-                        dep_keys.extend([k.to_user_string() for k in dep_dict])
-
-                print(f"[Asset Preview] Found {len(dep_keys)} dependency keys: {dep_keys}", flush=True)
-
-                for i, dep_param in enumerate(dependency_params):
-                    dep_key_str = None
-
-                    # Try method 1: Use keys_by_input_name if available
-                    if hasattr(asset_def, 'keys_by_input_name'):
-                        dep_asset_key = asset_def.keys_by_input_name.get(dep_param.name)
-                        if dep_asset_key:
-                            dep_key_str = dep_asset_key.to_user_string()
-
-                    # Try method 2: If single param and single dep, assume they match
-                    if not dep_key_str and len(dependency_params) == 1 and len(dep_keys) == 1:
-                        dep_key_str = dep_keys[0]
-                        print(f"[Asset Preview] Single dependency match: param '{dep_param.name}' -> asset '{dep_key_str}'", flush=True)
-
-                    # Try method 3: Match by index if we have enough deps
-                    if not dep_key_str and i < len(dep_keys):
-                        dep_key_str = dep_keys[i]
-                        print(f"[Asset Preview] Index-based match: param '{dep_param.name}' -> asset '{dep_key_str}'", flush=True)
-
-                    if dep_key_str:
-                        print(f"[Asset Preview] Executing upstream asset: {dep_key_str}", flush=True)
-                        try:
-                            dep_result = execute_asset_by_key(dep_key_str)
-
-                            # If the function uses **kwargs, add as keyword argument
-                            # Otherwise add as positional argument
-                            if has_var_keyword:
-                                # Use the dependency asset key as the kwarg name
-                                kwarg_name = dep_key_str.replace('/', '_').replace('-', '_')
-                                kwargs[kwarg_name] = dep_result
-                                print(f"[Asset Preview] Added dependency as kwarg: {kwarg_name}", flush=True)
-                            else:
-                                args.append(dep_result)
-
-                            print(f"[Asset Preview] Successfully executed upstream asset: {dep_key_str}", flush=True)
-                        except Exception as e:
-                            return AssetDataResponse(
-                                success=False,
-                                error=f"Failed to execute upstream asset '{dep_key_str}': {str(e)}"
-                            )
-                    else:
-                        return AssetDataResponse(
-                            success=False,
-                            error=f"Could not find upstream asset for dependency parameter '{dep_param.name}'. Available deps: {dep_keys}"
-                        )
-
-            # Execute the target asset with all dependencies
+        if result.returncode != 0:
+            # Try to parse error from output
             try:
-                print(f"[Asset Preview] Executing target asset '{asset_key}' with {len(args)} args and {len(kwargs)} kwargs", flush=True)
-                result = actual_fn(*args, **kwargs)
-            except Exception as e:
+                # Get the last line which should be JSON
+                stdout_lines = result.stdout.strip().split('\n')
+                last_line = stdout_lines[-1] if stdout_lines else ""
+                error_data = json.loads(last_line or result.stderr)
                 return AssetDataResponse(
                     success=False,
-                    error=f"Failed to execute asset: {str(e)}"
+                    error=error_data.get("error", "Failed to execute asset")
                 )
-
-            # Check if result is a dataframe
-            has_dataframe = False
-            try:
-                import pandas as pd
-                if isinstance(result, pd.DataFrame):
-                    has_dataframe = True
-                    df_type = "pandas"
-            except ImportError:
-                pass
-
-            if not has_dataframe:
-                try:
-                    import polars as pl
-                    if isinstance(result, pl.DataFrame):
-                        has_dataframe = True
-                        df_type = "polars"
-                except ImportError:
-                    pass
-
-            if not has_dataframe:
+            except json.JSONDecodeError:
                 return AssetDataResponse(
                     success=False,
-                    error="Asset does not return a DataFrame (pandas or polars)"
+                    error=f"Failed to execute asset: {result.stderr}"
                 )
 
-            # Convert dataframe to dict for JSON serialization
-            sample_limit = 1000  # Limit rows for performance
+        # Parse the JSON output from the script (last line)
+        stdout_lines = result.stdout.strip().split('\n')
+        last_line = stdout_lines[-1] if stdout_lines else ""
+        output_data = json.loads(last_line)
+        return AssetDataResponse(**output_data)
 
-            if df_type == "pandas":
-                # Limit rows if too large
-                if len(result) > sample_limit:
-                    sample_df = result.head(sample_limit)
-                else:
-                    sample_df = result
-
-                # Convert to dict
-                data = sample_df.to_dict('records')
-                columns = list(sample_df.columns)
-                dtypes = {col: str(dtype) for col, dtype in sample_df.dtypes.items()}
-                shape = result.shape
-
-            else:  # polars
-                # Limit rows if too large
-                if len(result) > sample_limit:
-                    sample_df = result.head(sample_limit)
-                else:
-                    sample_df = result
-
-                # Convert to dict
-                data = sample_df.to_dicts()
-                columns = list(sample_df.columns)
-                dtypes = {col: str(dtype) for col, dtype in sample_df.schema.items()}
-                shape = result.shape
-
-            return AssetDataResponse(
-                success=True,
-                data=data,
-                columns=columns,
-                dtypes=dtypes,
-                shape=shape,
-                row_count=shape[0],
-                column_count=shape[1],
-                sample_limit=sample_limit if shape[0] > sample_limit else None
-            )
-
-        except ImportError as e:
-            return AssetDataResponse(
-                success=False,
-                error=f"Failed to import project definitions: {str(e)}"
-            )
-        except Exception as e:
-            return AssetDataResponse(
-                success=False,
-                error=f"Failed to execute asset: {str(e)}"
-            )
-        finally:
-            # Clean up sys.path
-            if str(src_dir) in sys.path:
-                sys.path.remove(str(src_dir))
-
+    except json.JSONDecodeError as e:
+        return AssetDataResponse(
+            success=False,
+            error=f"Failed to parse output: {str(e)}"
+        )
+    except subprocess.TimeoutExpired:
+        return AssetDataResponse(
+            success=False,
+            error="Asset execution timed out (60 seconds)"
+        )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Unexpected error: {str(e)}")
+        return AssetDataResponse(
+            success=False,
+            error=f"Unexpected error: {str(e)}"
+        )
+
+
+class FilterCondition(BaseModel):
+    column: str
+    operator: str
+    value: str
+
+
+class TransformConfig(BaseModel):
+    columnsToKeep: list[str] | None = None
+    columnsToDrop: list[str] | None = None
+    columnRenames: dict[str, str] | None = None  # e.g., {"old_name": "new_name"}
+    filters: list[FilterCondition] = []
+    dropDuplicates: bool = False
+    dropNA: bool = False
+    fillNAValue: str | None = None
+    sortBy: list[str] | None = None
+    sortAscending: bool = True
+    groupBy: list[str] | None = None
+    aggregations: dict[str, str] | None = None  # e.g., {"amount": "sum", "id": "count"}
+    stringOperations: list[dict[str, str]] | None = None  # e.g., [{"column": "name", "operation": "upper"}]
+    stringReplace: dict[str, dict[str, str]] | None = None
+    calculatedColumns: dict[str, str] | None = None  # e.g., {"total": "price * quantity"}
+    pivotConfig: dict[str, str] | None = None
+    unpivotConfig: dict[str, Any] | None = None
+
+
+class CreateTransformerRequest(BaseModel):
+    sourceAssetKey: str
+    newAssetName: str
+    transformConfig: TransformConfig
+
+
+@router.post("/{project_id}/create-transformer")
+async def create_transformer_asset(project_id: str, request: CreateTransformerRequest):
+    """Create a new transformer asset that applies transformations to a source asset.
+
+    This endpoint creates a new DataFrameTransformerComponent instance with the
+    specified transformation configuration and adds it to the project.
+    """
+    from ..services.project_service import project_service
+    from ..models.project import ProjectUpdate
+    from ..models.graph import GraphNode, GraphEdge
+    import uuid
+    import yaml
+    from pathlib import Path
+
+    print(f"[Create Transformer] Creating transformer asset '{request.newAssetName}' from '{request.sourceAssetKey}'", flush=True)
+
+    # Get project
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    project_dir = project_service._get_project_dir(project)
+    if not project_dir.exists():
+        raise HTTPException(status_code=404, detail="Project directory not found")
+
+    # Generate component ID
+    component_id = request.newAssetName.replace('-', '_').replace(' ', '_').lower()
+
+    # Create component directory structure in the correct location
+    src_dir = project_dir / "src" / project.directory_name
+    defs_dir = src_dir / "defs" / component_id
+    defs_dir.mkdir(parents=True, exist_ok=True)
+
+    # Build transformation configuration for the transformer component
+    # The DataFrameTransformerComponent expects specific attributes, not a transforms array
+    attributes = {
+        "asset_name": component_id
+    }
+
+    # Convert columnsToKeep to filter_columns (comma-separated string)
+    if request.transformConfig.columnsToKeep:
+        attributes["filter_columns"] = ",".join(request.transformConfig.columnsToKeep)
+
+    # Convert columnsToDrop to drop_columns (comma-separated string)
+    if request.transformConfig.columnsToDrop:
+        attributes["drop_columns"] = ",".join(request.transformConfig.columnsToDrop)
+
+    # Convert columnRenames to rename_columns (JSON string)
+    if request.transformConfig.columnRenames:
+        attributes["rename_columns"] = json.dumps(request.transformConfig.columnRenames)
+
+    # Convert filter operations to filter_expression (pandas query)
+    if request.transformConfig.filters:
+        filter_parts = []
+        for filter_cond in request.transformConfig.filters:
+            column = filter_cond.column
+            operator = filter_cond.operator
+            value = filter_cond.value
+
+            # Convert operator to pandas query syntax
+            if operator == "equals":
+                # Properly quote string values
+                if value.lower() in ['true', 'false']:
+                    filter_parts.append(f"{column} == {value.capitalize()}")
+                else:
+                    filter_parts.append(f"{column} == '{value}'")
+            elif operator == "not_equals":
+                if value.lower() in ['true', 'false']:
+                    filter_parts.append(f"{column} != {value.capitalize()}")
+                else:
+                    filter_parts.append(f"{column} != '{value}'")
+            elif operator == "greater_than":
+                filter_parts.append(f"{column} > {value}")
+            elif operator == "less_than":
+                filter_parts.append(f"{column} < {value}")
+            elif operator == "contains":
+                filter_parts.append(f"{column}.str.contains('{value}')")
+
+        if filter_parts:
+            attributes["filter_expression"] = " and ".join(filter_parts)
+
+    # Add row operations
+    if request.transformConfig.dropDuplicates:
+        attributes["drop_duplicates"] = True
+
+    if request.transformConfig.dropNA:
+        attributes["drop_na"] = True
+
+    if request.transformConfig.fillNAValue:
+        attributes["fill_na_value"] = request.transformConfig.fillNAValue
+
+    # Add sorting
+    if request.transformConfig.sortBy:
+        attributes["sort_by"] = ",".join(request.transformConfig.sortBy)
+        attributes["sort_ascending"] = request.transformConfig.sortAscending
+
+    # Add grouping/aggregation
+    if request.transformConfig.groupBy:
+        attributes["group_by"] = ",".join(request.transformConfig.groupBy)
+
+    if request.transformConfig.aggregations:
+        attributes["agg_functions"] = json.dumps(request.transformConfig.aggregations)
+
+    # Add string operations
+    if request.transformConfig.stringOperations:
+        attributes["string_operations"] = json.dumps(request.transformConfig.stringOperations)
+
+    if request.transformConfig.stringReplace:
+        attributes["string_replace"] = json.dumps(request.transformConfig.stringReplace)
+
+    # Add calculated columns
+    if request.transformConfig.calculatedColumns:
+        attributes["calculated_columns"] = json.dumps(request.transformConfig.calculatedColumns)
+
+    # Add pivot/unpivot
+    if request.transformConfig.pivotConfig:
+        attributes["pivot_config"] = json.dumps(request.transformConfig.pivotConfig)
+
+    if request.transformConfig.unpivotConfig:
+        attributes["unpivot_config"] = json.dumps(request.transformConfig.unpivotConfig)
+
+    # Create defs.yaml for the transformer component
+    transformer_component_type = f"{project.directory_name}.components.dataframe_transformer.DataFrameTransformerComponent"
+
+    defs_yaml = {
+        "type": transformer_component_type,
+        "attributes": attributes
+    }
+
+    # Write YAML - component now accepts dicts/lists and converts them to JSON strings
+    defs_yaml = {
+        "type": transformer_component_type,
+        "attributes": attributes
+    }
+
+    with open(defs_dir / "defs.yaml", "w") as f:
+        yaml.dump(defs_yaml, f, default_flow_style=False, sort_keys=False)
+
+    print(f"[Create Transformer] Created defs.yaml with attributes: {list(attributes.keys())}", flush=True)
+
+    # Add custom lineage edge to project model
+    from ..models.project import CustomLineageEdge
+
+    new_edge = CustomLineageEdge(
+        source=request.sourceAssetKey,
+        target=component_id
+    )
+
+    # Check if edge already exists
+    edge_exists = any(
+        e.source == new_edge.source and e.target == new_edge.target
+        for e in project.custom_lineage
+    )
+
+    if not edge_exists:
+        project.custom_lineage.append(new_edge)
+        print(f"[Create Transformer] Added custom lineage: {request.sourceAssetKey} -> {component_id}", flush=True)
+
+    # Also write to custom_lineage.json for Dagster to load
+    custom_lineage_file = src_dir / "defs" / "custom_lineage.json"
+    custom_lineage_data = {
+        "edges": [
+            {"source": e.source, "target": e.target}
+            for e in project.custom_lineage
+        ]
+    }
+
+    with open(custom_lineage_file, "w") as f:
+        json.dump(custom_lineage_data, f, indent=2)
+    print(f"[Create Transformer] Updated custom_lineage.json with {len(project.custom_lineage)} edges", flush=True)
+
+    # Add component to project's components list if not already there
+    transformer_component_type = f"{project.directory_name}.components.dataframe_transformer.DataFrameTransformerComponent"
+
+    component_exists = any(
+        c.component_type == transformer_component_type and c.id == component_id
+        for c in project.components
+    )
+
+    if not component_exists:
+        from ..models.project import ComponentInstance
+
+        new_component = ComponentInstance(
+            id=component_id,
+            component_type=transformer_component_type,
+            label=request.newAssetName,
+            attributes={"asset_name": component_id},
+            translation=None,
+            post_processing=None,
+            is_asset_factory=False
+        )
+        project.components.append(new_component)
+        print(f"[Create Transformer] Added component to project", flush=True)
+
+    # Don't update yet - we'll do one update at the end with all changes
+
+    # Regenerate assets to get the new asset node
+    from ..services.asset_introspection_service import asset_introspection_service
+
+    print(f"[Create Transformer] Regenerating assets...", flush=True)
+    asset_introspection_service.clear_cache(project.id)
+
+    asset_nodes, asset_edges = await asset_introspection_service.get_assets_for_project_async(project, recalculate_layout=True)
+
+    # Find the new transformer asset node
+    transformer_node = None
+    for node in asset_nodes:
+        if node.id == component_id or node.data.get('asset_key') == component_id:
+            transformer_node = node
+            break
+
+    if not transformer_node:
+        raise HTTPException(status_code=500, detail=f"Failed to find generated transformer asset '{component_id}'")
+
+    # Update project graph with the new assets
+    non_asset_nodes = [n for n in project.graph.nodes if n.node_kind != "asset"]
+    project.graph.nodes = non_asset_nodes + asset_nodes
+
+    # Merge introspected edges with custom lineage edges (same pattern as delete_component_instance)
+    edge_map = {edge.id: edge for edge in asset_edges}
+
+    # Process custom lineage edges
+    for custom_lineage in project.custom_lineage:
+        edge_id = f"{custom_lineage.source}_to_{custom_lineage.target}"
+
+        if edge_id in edge_map:
+            # Edge already exists from introspection, just mark it as custom
+            edge_map[edge_id].is_custom = True
+        else:
+            # Edge doesn't exist, create a new custom edge
+            edge_map[edge_id] = GraphEdge(
+                id=edge_id,
+                source=custom_lineage.source,
+                target=custom_lineage.target,
+                is_custom=True
+            )
+
+    # Convert edge map back to list
+    project.graph.edges = list(edge_map.values())
+
+    # Save updated project with components, graph, and custom lineage in a single update
+    updated_project = project_service.update_project(
+        project_id,
+        ProjectUpdate(
+            components=project.components,
+            graph=project.graph,
+            custom_lineage=project.custom_lineage
+        )
+    )
+
+    print(f"[Create Transformer] Successfully created transformer asset '{component_id}'", flush=True)
+    print(f"[Create Transformer] Returning project with {len(updated_project.graph.nodes)} nodes and {len(updated_project.graph.edges)} edges", flush=True)
+    print(f"[Create Transformer] Node IDs: {[n.id for n in updated_project.graph.nodes if n.node_kind == 'asset']}", flush=True)
+    print(f"[Create Transformer] Edge IDs: {[e.id for e in updated_project.graph.edges]}", flush=True)
+    print(f"[Create Transformer] Custom lineage count: {len(updated_project.custom_lineage)}", flush=True)
+
+    return updated_project if updated_project else project
