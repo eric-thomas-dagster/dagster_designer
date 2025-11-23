@@ -371,11 +371,43 @@ async def regenerate_assets(project_id: str, recalculate_layout: bool = False):
         project.graph.edges = list(edge_map.values())
 
         print(f"[regenerate_assets] Updated project.graph: {len(project.graph.nodes)} nodes, {len(asset_edges)} introspected edges + {custom_edges_added} new custom edges = {len(project.graph.edges)} total", flush=True)
+
+        # Auto-populate upstream_asset_keys for components based on graph edges
+        components_updated = 0
+        for component in project.components:
+            # Find the component's node in the graph
+            component_node = next((n for n in project.graph.nodes
+                                 if n.id == component.id or n.data.get("label") == component.label), None)
+
+            if component_node:
+                # Find all incoming edges to this component's node
+                incoming_edges = [e for e in project.graph.edges if e.target == component_node.id]
+
+                if incoming_edges:
+                    # Extract source asset keys from incoming edges
+                    upstream_keys = []
+                    for edge in incoming_edges:
+                        source_node = next((n for n in project.graph.nodes if n.id == edge.source), None)
+                        if source_node:
+                            asset_key = source_node.data.get("asset_key") or source_node.data.get("label") or edge.source
+                            upstream_keys.append(asset_key)
+
+                    if upstream_keys:
+                        # Set upstream_asset_keys in component attributes
+                        if not component.attributes:
+                            component.attributes = {}
+                        component.attributes["upstream_asset_keys"] = ", ".join(upstream_keys)
+                        components_updated += 1
+                        print(f"[regenerate_assets] Auto-populated upstream_asset_keys for '{component.label}': {upstream_keys}", flush=True)
+
+        if components_updated > 0:
+            print(f"[regenerate_assets] Auto-populated upstream_asset_keys for {components_updated} component(s)", flush=True)
+
         print(f"[regenerate_assets] Calling update_project to save...", flush=True)
         sys.stdout.flush()
 
-        # Save updated project
-        updated_project = project_service.update_project(project_id, ProjectUpdate(graph=project.graph))
+        # Save updated project (with both graph and component changes)
+        updated_project = project_service.update_project(project_id, ProjectUpdate(graph=project.graph, components=project.components))
 
         print(f"[regenerate_assets] update_project returned project with {len(updated_project.graph.nodes if updated_project else 0)} nodes", flush=True)
         print(f"[regenerate_assets] ====== END ======\n", flush=True)
