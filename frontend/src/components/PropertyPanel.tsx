@@ -9,7 +9,7 @@ import { Launchpad } from './Launchpad';
 import { PartitionBackfill } from './PartitionBackfill';
 import { PartitionConfig, type PartitionConfig as PartitionConfigType } from './PartitionConfig';
 import { DataPreviewModal } from './DataPreviewModal';
-import { projectsApi, primitivesApi, partitionsApi, type BackfillRequest } from '@/services/api';
+import { projectsApi, primitivesApi, partitionsApi, templatesApi, type BackfillRequest } from '@/services/api';
 import type { ComponentInstance } from '@/types';
 
 // Icon mapping for component icons
@@ -55,7 +55,33 @@ export function PropertyPanel({ nodeId, onConfigureComponent, onOpenFile }: Prop
   const { currentProject, updateGraph, loadProject } = useProjectStore();
   const node = currentProject?.graph.nodes.find((n) => n.id === nodeId);
 
-  // Return early if node is not found
+  // Fetch component templates manifest to check partition support
+  // IMPORTANT: All hooks must be called before any conditional returns
+  const { data: manifest } = useQuery({
+    queryKey: ['community-templates-manifest'],
+    queryFn: async () => {
+      const response = await fetch('/api/v1/templates/manifest');
+      if (!response.ok) {
+        throw new Error('Failed to fetch manifest');
+      }
+      return response.json() as Promise<TemplateManifest>;
+    },
+    staleTime: Infinity, // Never refetch automatically
+    gcTime: Infinity, // Keep in cache forever (formerly cacheTime)
+  });
+
+  // Fetch installed templates for this project
+  const { data: installedTemplates } = useQuery({
+    queryKey: ['installed-templates', currentProject?.id],
+    queryFn: async () => {
+      if (!currentProject?.id) return { components: [] };
+      return templatesApi.getInstalled(currentProject.id);
+    },
+    enabled: !!currentProject?.id,
+    staleTime: 30000, // Refetch after 30 seconds
+  });
+
+  // Return early if node is not found (AFTER all hooks have been called)
   if (!node) {
     return (
       <aside className="property-panel">
@@ -70,20 +96,6 @@ export function PropertyPanel({ nodeId, onConfigureComponent, onOpenFile }: Prop
   const nodeKind = (node as any)?.node_kind || node?.data?.node_kind;
   const sourceComponentId = (node as any)?.source_component || node?.data?.source_component;
   const isAssetNode = nodeKind === 'asset';
-
-  // Fetch component templates manifest to check partition support
-  const { data: manifest } = useQuery({
-    queryKey: ['community-templates-manifest'],
-    queryFn: async () => {
-      const response = await fetch('/api/v1/templates/manifest');
-      if (!response.ok) {
-        throw new Error('Failed to fetch manifest');
-      }
-      return response.json() as Promise<TemplateManifest>;
-    },
-    staleTime: Infinity, // Never refetch automatically
-    gcTime: Infinity, // Keep in cache forever (formerly cacheTime)
-  });
 
   // Check if current component supports partitions (memoized for performance)
   const componentType = node?.data.component_type;
@@ -1629,8 +1641,10 @@ export function PropertyPanel({ nodeId, onConfigureComponent, onOpenFile }: Prop
             projectId={currentProject.id}
             assetKey={assetKey}
             assetName={node.data.label || node.id}
-            hasTransformerComponent={currentProject.components?.some(c =>
-              c.component_type.includes('DataFrameTransformerComponent')
+            hasTransformerComponent={installedTemplates?.components?.some(c =>
+              c.id === 'dataframe_transformer' ||
+              c.component_type?.includes('dataframe_transformer') ||
+              c.component_type?.includes('DataFrameTransformerComponent')
             ) || false}
             onTransformerCreated={(updatedProject) => {
               // Update the graph with the new project data

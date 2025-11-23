@@ -38,6 +38,27 @@ class ProjectImportRequest(BaseModel):
     path: str = Field(..., description="Absolute path to existing Dagster project directory")
 
 
+async def _install_dependencies_and_generate_assets(project: Project):
+    """Install dependencies and then generate assets automatically."""
+    # Install dependencies first
+    await project_service.install_dependencies_async(project)
+
+    # After dependencies are installed, regenerate assets
+    print(f"[Background] Dependencies installed for {project.name}. Generating assets...")
+    try:
+        asset_introspection_service.clear_cache(project.id)
+        asset_nodes, asset_edges = await asset_introspection_service.get_assets_for_project_async(project, recalculate_layout=True)
+
+        # Save the generated assets to the project
+        project.graph.nodes = asset_nodes
+        project.graph.edges = asset_edges
+        project_service._save_project(project)
+
+        print(f"[Background] ✅ Assets generated and saved for {project.name}: {len(asset_nodes)} nodes, {len(asset_edges)} edges")
+    except Exception as e:
+        print(f"[Background] ❌ Failed to generate assets for {project.name}: {e}")
+
+
 @router.post("", response_model=Project, status_code=201)
 async def create_project(project_create: ProjectCreate, background_tasks: BackgroundTasks):
     """Create a new pipeline project.
@@ -47,11 +68,11 @@ async def create_project(project_create: ProjectCreate, background_tasks: Backgr
     """
     project = project_service.create_project(project_create)
 
-    # Return project immediately - dependencies will be installed in background
-    print(f"✅ Project created: {project.name}. Starting background dependency installation...")
+    # Return project immediately - dependencies will be installed and assets generated in background
+    print(f"✅ Project created: {project.name}. Starting background dependency installation and asset generation...")
 
-    # Start dependency installation in background
-    background_tasks.add_task(project_service.install_dependencies_async, project)
+    # Start dependency installation and asset generation in background
+    background_tasks.add_task(_install_dependencies_and_generate_assets, project)
 
     return project
 

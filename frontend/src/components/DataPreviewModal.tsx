@@ -1137,7 +1137,7 @@ export function DataPreviewModal({
                                   </select>
                                 </div>
                                 <div>
-                                  <label className="text-xs text-gray-600 mb-1 block">Columns (Headers):</label>
+                                  <label className="text-xs text-gray-600 mb-1 block">Columns:</label>
                                   <select
                                     value={pivotConfig?.columns || ''}
                                     onChange={(e) => setPivotConfig(e.target.value ? { ...pivotConfig, columns: e.target.value } : null)}

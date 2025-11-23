@@ -68,13 +68,15 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   createProject: async (name: string, description?: string, gitRepo?: string, gitBranch?: string) => {
     set({ isLoading: true, error: null });
     try {
-      // Create project (returns immediately without asset generation)
+      // Create project (returns immediately, but dependencies and assets generate in background)
       const project = await projectsApi.create({
         name,
         description,
         git_repo: gitRepo,
         git_branch: gitBranch || 'main',
       });
+
+      // Set as current project and navigate (canvas will show loading state)
       set({
         currentProject: project,
         projects: [project, ...get().projects],
@@ -82,8 +84,8 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
       });
 
       // Start polling for dependency installation status
-      // Dependencies install in background, then we'll trigger asset generation
-      console.log('🔄 Starting dependency installation polling...');
+      // Backend will install dependencies and generate assets automatically
+      console.log('🔄 Starting dependency and asset generation...');
       set({ dependencyInstallStatus: 'installing', dependencyInstallError: null });
       get().pollDependencyStatus(project.id);
 
@@ -246,8 +248,8 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
           // Continue polling every 2 seconds
           setTimeout(poll, 2000);
         } else if (status === 'success') {
-          // Dependencies installed! Now trigger asset generation
-          console.log('✅ Dependencies installed, triggering asset generation...');
+          // Dependencies installed! Backend is automatically generating assets
+          console.log('✅ Dependencies installed, waiting for automatic asset generation...');
 
           // Auto-dismiss dependency success after 2 seconds
           setTimeout(() => {
@@ -256,26 +258,43 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
             }
           }, 2000);
 
-          // Start asset generation
+          // Poll for assets to be ready (backend generates them automatically)
           set({ assetGenerationStatus: 'generating', assetGenerationError: null });
 
-          projectsApi.regenerateAssets(projectId, true).then(() => {
-            console.log('✅ Assets generated successfully');
-            set({ assetGenerationStatus: 'success', assetGenerationError: null });
-            get().loadProject(projectId);
-            setTimeout(() => {
-              if (get().assetGenerationStatus === 'success') {
-                set({ assetGenerationStatus: 'idle' });
+          const checkAssets = async (attempts = 0) => {
+            try {
+              const project = await projectsApi.get(projectId);
+              const hasAssets = project.graph?.nodes && project.graph.nodes.length > 0;
+
+              if (hasAssets) {
+                console.log('✅ Assets generated successfully');
+                set({ assetGenerationStatus: 'success', assetGenerationError: null });
+                get().loadProject(projectId);
+                setTimeout(() => {
+                  if (get().assetGenerationStatus === 'success') {
+                    set({ assetGenerationStatus: 'idle' });
+                  }
+                }, 3000);
+              } else if (attempts < 30) {
+                // Try again in 1 second (max 30 attempts = 30 seconds)
+                setTimeout(() => checkAssets(attempts + 1), 1000);
+              } else {
+                console.warn('⚠️  Asset generation timed out');
+                set({
+                  assetGenerationStatus: 'error',
+                  assetGenerationError: 'Asset generation timed out'
+                });
+                // Still load the project even if no assets
+                get().loadProject(projectId);
               }
-            }, 3000);
-          }).catch(error => {
-            console.error('⚠️  Asset generation failed:', error);
-            const errorMessage = error?.response?.data?.detail || error?.message || 'Unknown error';
-            set({
-              assetGenerationStatus: 'error',
-              assetGenerationError: errorMessage
-            });
-          });
+            } catch (error) {
+              console.error('⚠️  Failed to check for assets:', error);
+              // Still load the project even on error
+              get().loadProject(projectId);
+            }
+          };
+
+          checkAssets();
         }
       } catch (error) {
         console.error('Failed to poll dependency status:', error);
