@@ -57,7 +57,35 @@ export function ComponentConfigModal({
 
   useEffect(() => {
     if (component) {
-      setFormData(component.attributes || {});
+      const updatedFormData = { ...component.attributes };
+
+      // Populate upstream_asset_keys from graph edges if not already set
+      if (currentProject) {
+        const componentNode = currentProject.graph.nodes.find(
+          (n: any) => n.id === component.id || n.data.label === component.label
+        );
+
+        if (componentNode) {
+          // Find all edges that target this component
+          const incomingEdges = currentProject.graph.edges.filter(
+            (edge: any) => edge.target === componentNode.id
+          );
+
+          // Extract source asset keys from incoming edges
+          const upstreamKeys = incomingEdges.map((edge: any) => {
+            const sourceNode = currentProject.graph.nodes.find((n: any) => n.id === edge.source);
+            return sourceNode?.data?.asset_key || sourceNode?.data?.label || edge.source;
+          }).filter(Boolean);
+
+          // Only set upstream_asset_keys if there are upstream dependencies
+          if (upstreamKeys.length > 0) {
+            updatedFormData.upstream_asset_keys = upstreamKeys.join(', ');
+            console.log('[ComponentConfigModal] Populated upstream_asset_keys from graph edges:', upstreamKeys);
+          }
+        }
+      }
+
+      setFormData(updatedFormData);
       setLabel(component.label || '');
       setDescription(component.description || '');
       setTranslation(component.translation || {});
@@ -70,7 +98,7 @@ export function ComponentConfigModal({
         setSqlMode('inline');
       }
     }
-  }, [component]);
+  }, [component, currentProject]);
 
   // Fetch adapter status for dbt components
   useEffect(() => {
