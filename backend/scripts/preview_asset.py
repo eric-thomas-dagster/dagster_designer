@@ -39,9 +39,13 @@ def create_mock_context():
 
 def execute_asset_dependencies(defs, asset_key: str, executed_results: dict):
     """
-    Recursively execute upstream dependencies of an asset.
+    Recursively execute upstream dependencies of an asset AND the asset itself.
     Returns a dict of asset_key -> result.
     """
+    # Skip if already executed
+    if asset_key in executed_results:
+        return executed_results
+
     # Get all assets
     all_assets = []
     if hasattr(defs, 'assets') and defs.assets:
@@ -61,62 +65,98 @@ def execute_asset_dependencies(defs, asset_key: str, executed_results: dict):
     if not target_asset_def:
         return executed_results
 
-    # Get dependencies
+    # First, execute all dependencies of this asset
     if hasattr(target_asset_def, 'dependency_keys'):
         dep_keys = target_asset_def.dependency_keys or set()
 
-        # Execute each dependency
+        # Execute each dependency recursively
         for dep_key in dep_keys:
             dep_key_str = dep_key.to_user_string()
-
-            # Skip if already executed
-            if dep_key_str in executed_results:
-                continue
-
-            # Recursively execute upstream dependencies first
+            # Recursively execute this dependency and its dependencies
             execute_asset_dependencies(defs, dep_key_str, executed_results)
 
-            # Find and execute this dependency
-            for asset_group in all_assets:
-                if hasattr(asset_group, 'keys'):
-                    for key in asset_group.keys:
-                        if key == dep_key:
-                            # Execute the asset
-                            try:
-                                # Get the function
-                                if hasattr(asset_group, 'op'):
-                                    func = asset_group.op.compute_fn
-                                    # Unwrap DecoratedOpFunction or other wrappers
-                                    if hasattr(func, 'decorated_fn'):
-                                        func = func.decorated_fn
-                                    # Continue unwrapping if there are more layers
-                                    while hasattr(func, '__wrapped__'):
-                                        func = func.__wrapped__
+    # Now execute the target asset itself
+    if hasattr(target_asset_def, 'op'):
+        try:
+            # Get the function
+            func = target_asset_def.op.compute_fn
+            # Unwrap DecoratedOpFunction or other wrappers
+            if hasattr(func, 'decorated_fn'):
+                func = func.decorated_fn
+            # Continue unwrapping if there are more layers
+            while hasattr(func, '__wrapped__'):
+                func = func.__wrapped__
 
-                                    # Execute with mock context
-                                    context = create_mock_context()
+            # Execute with mock context
+            context = create_mock_context()
 
-                                    # Build kwargs from already executed dependencies
-                                    import inspect
-                                    sig = inspect.signature(func)
-                                    kwargs = {}
+            # Build kwargs from already executed dependencies
+            import inspect
+            sig = inspect.signature(func)
+            kwargs = {}
 
-                                    for param_name in sig.parameters:
-                                        if param_name == 'context':
-                                            continue
-                                        # Look for this param in executed results
-                                        for exec_key, exec_result in executed_results.items():
-                                            if param_name == exec_key.replace('/', '_') or param_name == exec_key:
-                                                kwargs[param_name] = exec_result
-                                                break
+            # Check if function has **kwargs parameter (VAR_KEYWORD)
+            has_var_keyword = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
 
-                                    result = func(context, **kwargs)
-                                    executed_results[dep_key_str] = result
-                            except Exception as e:
-                                print(f"Warning: Failed to execute dependency {dep_key_str}: {e}")
+            if has_var_keyword:
+                # Function accepts **kwargs - pass all executed results
+                for exec_key, exec_result in executed_results.items():
+                    param_name = exec_key.replace('/', '_')
+                    kwargs[param_name] = exec_result
+            else:
+                # Function has specific parameters - match them individually
+                for param_name in sig.parameters:
+                    if param_name == 'context':
+                        continue
+                    # Look for this param in executed results
+                    for exec_key, exec_result in executed_results.items():
+                        if param_name == exec_key.replace('/', '_') or param_name == exec_key:
+                            kwargs[param_name] = exec_result
                             break
 
+            result = func(context, **kwargs)
+            executed_results[asset_key] = result
+        except Exception as e:
+            print(f"Warning: Failed to execute asset {asset_key}: {e}", file=sys.stderr)
+
     return executed_results
+
+
+def get_upstream_asset_keys_from_config(project_module, asset_key):
+    """
+    Check if the asset has upstream_asset_keys configured in its defs.yaml.
+    Returns a list of upstream asset keys if configured, None otherwise.
+    """
+    try:
+        import yaml
+        from pathlib import Path
+
+        # Normalize asset key for directory name
+        asset_dir_name = asset_key.replace('/', '_')
+
+        # Try to find the defs.yaml file
+        defs_yaml_path = Path(f"projects/{project_module}/src/{project_module}/defs/{asset_dir_name}/defs.yaml")
+        if not defs_yaml_path.exists():
+            # Try without projects prefix (might be running from different location)
+            defs_yaml_path = Path(f"{project_module}/defs/{asset_dir_name}/defs.yaml")
+            if not defs_yaml_path.exists():
+                return None
+
+        with open(defs_yaml_path, 'r') as f:
+            config = yaml.safe_load(f)
+
+        if not config or 'attributes' not in config:
+            return None
+
+        upstream_keys_str = config['attributes'].get('upstream_asset_keys')
+        if upstream_keys_str:
+            # Parse comma-separated list
+            return [k.strip() for k in upstream_keys_str.split(',')]
+
+        return None
+    except Exception as e:
+        # Silently ignore errors - asset might not have config file
+        return None
 
 
 def main():
@@ -162,9 +202,20 @@ def main():
             }))
             sys.exit(1)
 
+        # Check if asset has upstream_asset_keys configuration
+        configured_upstream_keys = get_upstream_asset_keys_from_config(project_module, asset_key)
+
         # Execute dependencies first
         executed_results = {}
-        execute_asset_dependencies(defs, asset_key, executed_results)
+
+        if configured_upstream_keys:
+            # Asset has explicit upstream_asset_keys - materialize those specific assets
+            for upstream_key in configured_upstream_keys:
+                if upstream_key not in executed_results:
+                    execute_asset_dependencies(defs, upstream_key, executed_results)
+        else:
+            # Fall back to automatic dependency resolution
+            execute_asset_dependencies(defs, asset_key, executed_results)
 
         # Now execute the target asset
         if hasattr(asset_def, 'op'):
@@ -186,17 +237,52 @@ def main():
             sig = inspect.signature(func)
             kwargs = {}
 
-            for param_name in sig.parameters:
-                if param_name == 'context':
-                    continue
-                # Look for this param in executed results
+            # Check if function has **kwargs parameter (VAR_KEYWORD)
+            has_var_keyword = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
+
+            if has_var_keyword:
+                # Function accepts **kwargs - pass all executed results as keyword arguments
                 for exec_key, exec_result in executed_results.items():
-                    if param_name == exec_key.replace('/', '_') or param_name == exec_key:
-                        kwargs[param_name] = exec_result
-                        break
+                    # Normalize key for use as Python identifier
+                    param_name = exec_key.replace('/', '_')
+                    kwargs[param_name] = exec_result
+            else:
+                # Function has specific parameters - match them individually
+                for param_name in sig.parameters:
+                    if param_name == 'context':
+                        continue
+                    # Look for this param in executed results
+                    for exec_key, exec_result in executed_results.items():
+                        if param_name == exec_key.replace('/', '_') or param_name == exec_key:
+                            kwargs[param_name] = exec_result
+                            break
 
             # Execute the asset
-            result = func(context, **kwargs)
+            try:
+                result = func(context, **kwargs)
+            except Exception as e:
+                # If it's a pandas UndefinedVariableError, add helpful context about available columns
+                import pandas as pd
+                if "UndefinedVariableError" in str(type(e).__name__) or "is not defined" in str(e):
+                    # Try to find DataFrames in kwargs to show available columns
+                    available_columns = {}
+                    for key, value in kwargs.items():
+                        if isinstance(value, pd.DataFrame):
+                            available_columns[key] = list(value.columns)
+
+                    error_msg = f"Column reference error in filter/transform: {str(e)}"
+                    if available_columns:
+                        error_msg += f"\n\nAvailable columns in upstream DataFrames:"
+                        for df_name, cols in available_columns.items():
+                            error_msg += f"\n  {df_name}: {cols}"
+
+                    print(json.dumps({
+                        "success": False,
+                        "error": error_msg
+                    }))
+                    sys.exit(1)
+                else:
+                    raise
 
             # Convert result to JSON-serializable format
             if result is not None:
