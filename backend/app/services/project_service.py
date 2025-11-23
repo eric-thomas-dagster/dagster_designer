@@ -673,43 +673,38 @@ class ProjectService:
             self._generate_definitions_with_asset_customizations(project)
             print(f"[update_project] YAML generation and definitions completed", flush=True)
         elif "graph" in update_data:
-            # If graph was updated, check if any nodes have partition_config and apply them
-            print(f"[update_project] Graph updated! Checking for partition configs...", flush=True)
+            # If graph was updated, process partition configs for ALL nodes (including removals)
+            print(f"[update_project] Graph updated! Processing partition configs...", flush=True)
             sys.stdout.flush()
 
-            nodes_with_partition_configs = []
+            # Process ALL nodes to handle both additions and removals of partition configs
+            print(f"[update_project] Processing partition configs for {len(project.graph.nodes)} node(s)...", flush=True)
             for node in project.graph.nodes:
-                if node.data and node.data.get("partition_config"):
-                    nodes_with_partition_configs.append(node)
-                    print(f"[update_project] Found partition config on node: {node.id}", flush=True)
+                # Skip nodes without data
+                if not node.data:
+                    continue
 
-            if nodes_with_partition_configs:
-                print(f"[update_project] Applying partition configs to {len(nodes_with_partition_configs)} component(s)...", flush=True)
-                # Find matching components and apply partition configs
-                for node in nodes_with_partition_configs:
-                    # Find the component instance that matches this node
-                    component_found = False
-                    for component in project.components:
-                        if component.id == node.id:
-                            print(f"[update_project] Applying partition config to registered component: {component.id}", flush=True)
-                            self._apply_component_partition_config(project, component)
-                            component_found = True
-                            break
+                # Process partition config (including null/disabled)
+                # Find the component instance that matches this node
+                component_found = False
+                for component in project.components:
+                    if component.id == node.id:
+                        print(f"[update_project] Processing partition config for registered component: {component.id}", flush=True)
+                        self._apply_component_partition_config(project, component)
+                        component_found = True
+                        break
 
-                    # If not found in registered components, it might be a community component
-                    # Create a pseudo-component object for the partition service
-                    if not component_found:
-                        print(f"[update_project] Applying partition config to community component: {node.id}", flush=True)
-                        # Create a simple object with just an id attribute
-                        class PseudoComponent:
-                            def __init__(self, component_id):
-                                self.id = component_id
+                # If not found in registered components, it might be a community component
+                if not component_found:
+                    print(f"[update_project] Processing partition config for community component: {node.id}", flush=True)
+                    # Create a simple object with just an id attribute
+                    class PseudoComponent:
+                        def __init__(self, component_id):
+                            self.id = component_id
 
-                        pseudo_component = PseudoComponent(node.id)
-                        self._apply_component_partition_config(project, pseudo_component)
-                print(f"[update_project] Partition config application completed", flush=True)
-            else:
-                print(f"[update_project] No partition configs found in graph", flush=True)
+                    pseudo_component = PseudoComponent(node.id)
+                    self._apply_component_partition_config(project, pseudo_component)
+            print(f"[update_project] Partition config processing completed", flush=True)
 
             # Apply freshness policies from node data
             nodes_with_freshness_policies = []
@@ -1476,15 +1471,7 @@ if custom_lineage_edges:
             if not component_node or not component_node.data:
                 return
 
-            # Check if partition_config exists in node data
-            partition_config_data = component_node.data.get("partition_config")
-            if not partition_config_data:
-                return
-
-            # Parse partition config
-            partition_config = PartitionConfig(**partition_config_data)
-
-            # Get component directory
+            # Get component directory first
             project_dir = self._get_project_dir(project)
             component_dir = project_dir / "src" / project.directory_name / "defs" / component.id
 
@@ -1492,7 +1479,30 @@ if custom_lineage_edges:
                 print(f"[Partition] Component directory not found: {component_dir}")
                 return
 
-            # Apply partition configuration
+            # Check if partition_config exists in node data
+            partition_config_data = component_node.data.get("partition_config")
+
+            if not partition_config_data:
+                # No partition config means partitions are disabled
+                # Create a disabled partition config to remove partition files
+                partition_config = PartitionConfig(
+                    enabled=False,
+                    partition_type="daily",
+                    start_date=None,
+                    end_date=None,
+                    timezone="UTC",
+                    cron_schedule=None,
+                    fmt=None,
+                    partition_keys=[],
+                    var_name="component_partitions_def"
+                )
+                print(f"[Partition] Removing partition config from {component.id}")
+            else:
+                # Parse partition config from node data
+                partition_config = PartitionConfig(**partition_config_data)
+                print(f"[Partition] Applying partition config to {component.id}")
+
+            # Apply partition configuration (will remove if disabled)
             partition_service.apply_partition_config(component_dir, partition_config)
 
         except Exception as e:
