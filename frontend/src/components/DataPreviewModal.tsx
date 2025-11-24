@@ -70,6 +70,7 @@ export function DataPreviewModal({
   const [columnRenames, setColumnRenames] = useState<Record<string, string>>({});
   const [columnsToDrop, setColumnsToDrop] = useState<Set<string>>(new Set());
   const [openColumnMenu, setOpenColumnMenu] = useState<string | null>(null);
+  const [columnOrder, setColumnOrder] = useState<string[]>([]);
 
   // New advanced features
   const [stringOperations, setStringOperations] = useState<Array<{column: string, operation: string}>>([]);
@@ -385,6 +386,15 @@ export function DataPreviewModal({
       }
     }
 
+    // Apply column ordering if specified
+    if (columnOrder.length > 0) {
+      // Reorder finalColumns based on columnOrder
+      const orderedColumns = columnOrder.filter(col => finalColumns.includes(col));
+      // Add any columns that weren't in columnOrder at the end
+      const remainingColumns = finalColumns.filter(col => !columnOrder.includes(col));
+      finalColumns = [...orderedColumns, ...remainingColumns];
+    }
+
     return {
       ...data,
       data: result,
@@ -392,7 +402,7 @@ export function DataPreviewModal({
       row_count: result.length,
       column_count: finalColumns.length,
     };
-  }, [data, mode, filters, selectedColumns, dropDuplicates, dropNA, fillNAValue, sortColumns, sortAscending, groupByColumns, aggregations, columnRenames, columnsToDrop, stringOperations, calculatedColumns]);
+  }, [data, mode, filters, selectedColumns, dropDuplicates, dropNA, fillNAValue, sortColumns, sortAscending, groupByColumns, aggregations, columnRenames, columnsToDrop, stringOperations, calculatedColumns, columnOrder]);
 
   const toggleColumn = (column: string) => {
     const newSelected = new Set(selectedColumns);
@@ -504,6 +514,43 @@ export function DataPreviewModal({
       setNewCalcColName('');
       setNewCalcColExpr('');
     }
+  };
+
+  // Column reordering handlers
+  const handleMoveColumnToBeginning = (column: string) => {
+    const currentOrder = columnOrder.length > 0 ? columnOrder : (data?.columns || []);
+    const newOrder = [column, ...currentOrder.filter(c => c !== column)];
+    setColumnOrder(newOrder);
+    setOpenColumnMenu(null);
+  };
+
+  const handleMoveColumnToEnd = (column: string) => {
+    const currentOrder = columnOrder.length > 0 ? columnOrder : (data?.columns || []);
+    const newOrder = [...currentOrder.filter(c => c !== column), column];
+    setColumnOrder(newOrder);
+    setOpenColumnMenu(null);
+  };
+
+  const handleShiftColumnLeft = (column: string) => {
+    const currentOrder = columnOrder.length > 0 ? columnOrder : (data?.columns || []);
+    const currentIndex = currentOrder.indexOf(column);
+    if (currentIndex > 0) {
+      const newOrder = [...currentOrder];
+      [newOrder[currentIndex - 1], newOrder[currentIndex]] = [newOrder[currentIndex], newOrder[currentIndex - 1]];
+      setColumnOrder(newOrder);
+    }
+    setOpenColumnMenu(null);
+  };
+
+  const handleShiftColumnRight = (column: string) => {
+    const currentOrder = columnOrder.length > 0 ? columnOrder : (data?.columns || []);
+    const currentIndex = currentOrder.indexOf(column);
+    if (currentIndex < currentOrder.length - 1 && currentIndex !== -1) {
+      const newOrder = [...currentOrder];
+      [newOrder[currentIndex], newOrder[currentIndex + 1]] = [newOrder[currentIndex + 1], newOrder[currentIndex]];
+      setColumnOrder(newOrder);
+    }
+    setOpenColumnMenu(null);
   };
 
   const toggleSection = (sectionId: string) => {
@@ -1444,6 +1491,46 @@ export function DataPreviewModal({
                                           <Trash2 className="w-4 h-4 mr-2" />
                                           {columnsToDrop.has(col) ? 'Undrop Column' : 'Drop Column'}
                                         </DropdownMenu.Item>
+
+                                        <DropdownMenu.Separator className="h-px bg-gray-200 my-1" />
+
+                                        {/* Column Reordering */}
+                                        <DropdownMenu.Sub>
+                                          <DropdownMenu.SubTrigger className="flex items-center px-3 py-2 text-sm text-gray-700 rounded hover:bg-gray-100 cursor-pointer outline-none">
+                                            <ArrowDownUp className="w-4 h-4 mr-2" /> Reorder →
+                                          </DropdownMenu.SubTrigger>
+                                          <DropdownMenu.Portal>
+                                            <DropdownMenu.SubContent
+                                              className="min-w-[180px] bg-white rounded-lg shadow-lg border border-gray-200 p-1 z-[100]"
+                                              sideOffset={2}
+                                            >
+                                              <DropdownMenu.Item
+                                                className="px-3 py-2 text-sm text-gray-700 rounded hover:bg-gray-100 cursor-pointer outline-none"
+                                                onSelect={() => handleMoveColumnToBeginning(col)}
+                                              >
+                                                Move to Beginning
+                                              </DropdownMenu.Item>
+                                              <DropdownMenu.Item
+                                                className="px-3 py-2 text-sm text-gray-700 rounded hover:bg-gray-100 cursor-pointer outline-none"
+                                                onSelect={() => handleShiftColumnLeft(col)}
+                                              >
+                                                Shift Left
+                                              </DropdownMenu.Item>
+                                              <DropdownMenu.Item
+                                                className="px-3 py-2 text-sm text-gray-700 rounded hover:bg-gray-100 cursor-pointer outline-none"
+                                                onSelect={() => handleShiftColumnRight(col)}
+                                              >
+                                                Shift Right
+                                              </DropdownMenu.Item>
+                                              <DropdownMenu.Item
+                                                className="px-3 py-2 text-sm text-gray-700 rounded hover:bg-gray-100 cursor-pointer outline-none"
+                                                onSelect={() => handleMoveColumnToEnd(col)}
+                                              >
+                                                Move to End
+                                              </DropdownMenu.Item>
+                                            </DropdownMenu.SubContent>
+                                          </DropdownMenu.Portal>
+                                        </DropdownMenu.Sub>
 
                                         <DropdownMenu.Separator className="h-px bg-gray-200 my-1" />
 
