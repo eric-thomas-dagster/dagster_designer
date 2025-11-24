@@ -12,6 +12,8 @@ interface DataPreviewModalProps {
   assetName: string;
   onTransformerCreated?: (updatedProject: any) => void;
   hasTransformerComponent?: boolean;
+  existingComponentAttributes?: Record<string, any>;
+  existingComponentId?: string; // ID of component being edited (if editing)
 }
 
 interface FilterCondition {
@@ -47,6 +49,8 @@ export function DataPreviewModal({
   assetName,
   onTransformerCreated,
   hasTransformerComponent = true, // Default to true for backward compatibility
+  existingComponentAttributes,
+  existingComponentId,
 }: DataPreviewModalProps) {
   const [data, setData] = useState<AssetDataPreview | null>(null);
   const [loading, setLoading] = useState(false);
@@ -92,10 +96,100 @@ export function DataPreviewModal({
 
   // Initialize selected columns when data loads
   React.useEffect(() => {
-    if (data && data.columns && selectedColumns.size === 0) {
+    if (data && data.columns && selectedColumns.size === 0 && !existingComponentAttributes) {
       setSelectedColumns(new Set(data.columns));
     }
   }, [data]);
+
+  // Load existing component configuration for editing
+  React.useEffect(() => {
+    if (existingComponentAttributes && data) {
+      console.log('[DataPreviewModal] Loading existing config:', existingComponentAttributes);
+
+      // Set the mode to transform so user can see/edit transformations
+      setMode('transform');
+
+      // Set the asset name from existing config (for editing mode)
+      if (existingComponentAttributes.asset_name && existingComponentId) {
+        setNewAssetName(existingComponentAttributes.asset_name);
+      }
+
+      // Load filter_columns (columns to keep)
+      if (existingComponentAttributes.filter_columns) {
+        const columns = existingComponentAttributes.filter_columns.split(',').map((c: string) => c.trim());
+        setSelectedColumns(new Set(columns));
+      }
+
+      // Load rename_columns
+      if (existingComponentAttributes.rename_columns) {
+        try {
+          const renames = JSON.parse(existingComponentAttributes.rename_columns);
+          setColumnRenames(renames);
+        } catch (e) {
+          console.error('[DataPreviewModal] Failed to parse rename_columns:', e);
+        }
+      }
+
+      // Load calculated_columns
+      if (existingComponentAttributes.calculated_columns) {
+        try {
+          const calcs = JSON.parse(existingComponentAttributes.calculated_columns);
+          setCalculatedColumns(calcs);
+        } catch (e) {
+          console.error('[DataPreviewModal] Failed to parse calculated_columns:', e);
+        }
+      }
+
+      // Load drop_duplicates
+      if (existingComponentAttributes.drop_duplicates !== undefined) {
+        setDropDuplicates(existingComponentAttributes.drop_duplicates);
+      }
+
+      // Load filter_expression (pandas query)
+      // Note: filter_expression is a pandas query string, which is different from our FilterCondition[]
+      // For now, we'll show a message that complex filters need to be edited in the component config
+      // In the future, we could parse simple expressions back into FilterCondition objects
+
+      // Load sort_by
+      if (existingComponentAttributes.sort_by) {
+        const sortCols = existingComponentAttributes.sort_by.split(',').map((c: string) => c.trim());
+        setSortColumns(sortCols);
+      }
+
+      // Load sort_ascending
+      if (existingComponentAttributes.sort_ascending !== undefined) {
+        setSortAscending(existingComponentAttributes.sort_ascending);
+      }
+
+      // Load group_by
+      if (existingComponentAttributes.group_by) {
+        const groupCols = existingComponentAttributes.group_by.split(',').map((c: string) => c.trim());
+        setGroupByColumns(groupCols);
+      }
+
+      // Load aggregations
+      if (existingComponentAttributes.aggregations) {
+        try {
+          const aggs = JSON.parse(existingComponentAttributes.aggregations);
+          setAggregations(aggs);
+        } catch (e) {
+          console.error('[DataPreviewModal] Failed to parse aggregations:', e);
+        }
+      }
+
+      // Load drop_na
+      if (existingComponentAttributes.drop_na !== undefined) {
+        setDropNA(existingComponentAttributes.drop_na);
+      }
+
+      // Load fill_na_value
+      if (existingComponentAttributes.fill_na_value) {
+        setFillNAValue(existingComponentAttributes.fill_na_value);
+      }
+
+      console.log('[DataPreviewModal] Loaded existing config successfully');
+    }
+  }, [existingComponentAttributes, data]);
 
   const loadData = async () => {
     setLoading(true);
@@ -1347,14 +1441,15 @@ export function DataPreviewModal({
                     <div className="space-y-3">
                       <h3 className="text-sm font-semibold text-gray-900 flex items-center">
                         <Save className="w-4 h-4 mr-2 text-green-600" />
-                        Save Transformation
+                        {existingComponentId ? 'Update Transformation' : 'Save Transformation'}
                       </h3>
                       <input
                         type="text"
                         value={newAssetName}
                         onChange={(e) => setNewAssetName(e.target.value)}
                         placeholder="e.g., transformed_customers"
-                        className="w-full text-sm border border-gray-300 rounded-lg px-3 py-2.5 focus:ring-2 focus:ring-green-500 focus:border-transparent"
+                        disabled={!!existingComponentId}
+                        className="w-full text-sm border border-gray-300 rounded-lg px-3 py-2.5 focus:ring-2 focus:ring-green-500 focus:border-transparent disabled:bg-gray-100 disabled:cursor-not-allowed"
                       />
                       <button
                         onClick={handleSaveAsNewAsset}
@@ -1364,10 +1459,10 @@ export function DataPreviewModal({
                         {saving ? (
                           <span className="flex items-center justify-center">
                             <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white mr-2"></div>
-                            Creating...
+                            {existingComponentId ? 'Saving...' : 'Creating...'}
                           </span>
                         ) : (
-                          'Create New Asset'
+                          existingComponentId ? 'Save Changes' : 'Create New Asset'
                         )}
                       </button>
                     </div>

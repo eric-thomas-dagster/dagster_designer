@@ -40,6 +40,8 @@ function App() {
   const [showDataPreview, setShowDataPreview] = useState(false);
   const [dataPreviewAssetKey, setDataPreviewAssetKey] = useState<string>('');
   const [dataPreviewAssetName, setDataPreviewAssetName] = useState<string>('');
+  const [dataPreviewComponentAttributes, setDataPreviewComponentAttributes] = useState<Record<string, any> | undefined>(undefined);
+  const [dataPreviewComponentId, setDataPreviewComponentId] = useState<string | undefined>(undefined);
   const {
     currentProject,
     updateComponents,
@@ -134,13 +136,29 @@ function App() {
 
   // Handler to open visual editor (data preview) for an asset
   const handleOpenVisualEditor = (upstreamAssetKey: string) => {
-    // Find the node in the graph to get the display name
-    const node = currentProject?.graph.nodes.find(n =>
+    // Find the upstream node in the graph to get the display name
+    const upstreamNode = currentProject?.graph.nodes.find(n =>
       n.data.asset_key === upstreamAssetKey || n.id === upstreamAssetKey
     );
 
+    // Get the component being edited to pass its attributes to the visual editor
+    // This allows the user to edit existing transformations
+    let componentAttributes: Record<string, any> | undefined = undefined;
+    let componentId: string | undefined = undefined;
+    if (editingComponent) {
+      // Find the node for the component being edited
+      const editingNode = currentProject?.graph.nodes.find(n => n.id === editingComponent.id);
+      if (editingNode?.data?.component_attributes) {
+        componentAttributes = editingNode.data.component_attributes;
+        componentId = editingComponent.id;
+        console.log('[App] Opening visual editor for editing component:', componentId, componentAttributes);
+      }
+    }
+
     setDataPreviewAssetKey(upstreamAssetKey);
-    setDataPreviewAssetName(node?.data?.label || upstreamAssetKey);
+    setDataPreviewAssetName(upstreamNode?.data?.label || upstreamAssetKey);
+    setDataPreviewComponentAttributes(componentAttributes);
+    setDataPreviewComponentId(componentId);
     setShowDataPreview(true);
 
     // Close the component config modal
@@ -965,6 +983,8 @@ function App() {
           projectId={currentProject.id}
           assetKey={dataPreviewAssetKey}
           assetName={dataPreviewAssetName}
+          existingComponentAttributes={dataPreviewComponentAttributes}
+          existingComponentId={dataPreviewComponentId}
         />
       )}
     </div>
