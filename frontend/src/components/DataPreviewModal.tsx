@@ -87,6 +87,10 @@ export function DataPreviewModal({
   // Accordion state for transform sections
   const [expandedSections, setExpandedSections] = useState<Set<string>>(new Set(['columns', 'filters']));
 
+  // Track if a filter_expression exists that can't be edited in the visual editor
+  const [hasFilterExpression, setHasFilterExpression] = useState(false);
+  const [filterExpressionValue, setFilterExpressionValue] = useState<string>('');
+
   // Load data when modal opens
   React.useEffect(() => {
     if (isOpen && !data && !loading) {
@@ -147,8 +151,45 @@ export function DataPreviewModal({
 
       // Load filter_expression (pandas query)
       // Note: filter_expression is a pandas query string, which is different from our FilterCondition[]
-      // For now, we'll show a message that complex filters need to be edited in the component config
-      // In the future, we could parse simple expressions back into FilterCondition objects
+      // We can't automatically convert complex pandas queries back to FilterCondition objects
+      // But we should at least log that it exists so the user knows
+      if (existingComponentAttributes.filter_expression) {
+        setHasFilterExpression(true);
+        setFilterExpressionValue(existingComponentAttributes.filter_expression);
+        console.warn('[DataPreviewModal] filter_expression exists but cannot be loaded into visual editor:',
+                     existingComponentAttributes.filter_expression);
+        console.warn('[DataPreviewModal] To edit filter expressions, use the component config modal or create new filters in the visual editor');
+      }
+
+      // Load string_operations
+      if (existingComponentAttributes.string_operations) {
+        try {
+          const ops = JSON.parse(existingComponentAttributes.string_operations);
+          setStringOperations(ops);
+        } catch (e) {
+          console.error('[DataPreviewModal] Failed to parse string_operations:', e);
+        }
+      }
+
+      // Load pivot_config
+      if (existingComponentAttributes.pivot_config) {
+        try {
+          const pivot = JSON.parse(existingComponentAttributes.pivot_config);
+          setPivotConfig(pivot);
+        } catch (e) {
+          console.error('[DataPreviewModal] Failed to parse pivot_config:', e);
+        }
+      }
+
+      // Load unpivot_config
+      if (existingComponentAttributes.unpivot_config) {
+        try {
+          const unpivot = JSON.parse(existingComponentAttributes.unpivot_config);
+          setUnpivotConfig(unpivot);
+        } catch (e) {
+          console.error('[DataPreviewModal] Failed to parse unpivot_config:', e);
+        }
+      }
 
       // Load sort_by
       if (existingComponentAttributes.sort_by) {
@@ -876,6 +917,27 @@ export function DataPreviewModal({
                         >
                           + Add Filter
                         </button>
+                        {hasFilterExpression && (
+                          <div className="mb-3 p-3 bg-yellow-50 border border-yellow-200 rounded-lg">
+                            <div className="flex items-start space-x-2">
+                              <AlertCircle className="w-4 h-4 text-yellow-600 mt-0.5 flex-shrink-0" />
+                              <div className="flex-1">
+                                <p className="text-xs font-semibold text-yellow-900 mb-1">
+                                  Existing Filter Expression Detected
+                                </p>
+                                <p className="text-xs text-yellow-800 mb-2">
+                                  This component has a filter expression that cannot be edited in the visual editor:
+                                </p>
+                                <code className="block text-xs bg-yellow-100 text-yellow-900 px-2 py-1 rounded border border-yellow-300 mb-2 font-mono">
+                                  {filterExpressionValue}
+                                </code>
+                                <p className="text-xs text-yellow-800">
+                                  To modify this filter, edit it in the component config modal. Any new filters created here will be separate.
+                                </p>
+                              </div>
+                            </div>
+                          </div>
+                        )}
                         <div className="space-y-3">
                           {filters.map((filter, idx) => (
                             <div key={idx} className="border border-gray-200 rounded-lg p-3 bg-gray-50 space-y-2">
