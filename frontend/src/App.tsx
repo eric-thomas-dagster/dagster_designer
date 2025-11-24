@@ -15,6 +15,7 @@ import { IntegrationCatalog } from './components/IntegrationCatalog';
 import { ResourcesManager } from './components/ResourcesManager';
 import { PipelineBuilder } from './components/PipelineBuilder';
 import { DagsterStartupModal } from './components/DagsterStartupModal';
+import { DataPreviewModal } from './components/DataPreviewModal';
 import { useProjectStore } from './hooks/useProject';
 import { Network, FileCode, Wand2, Zap, Package, ExternalLink, Settings, Workflow, ChevronDown, Skull, AlertTriangle, X, Loader2, CheckCircle, XCircle } from 'lucide-react';
 import { dagsterUIApi, projectsApi, filesApi, primitivesApi } from './services/api';
@@ -36,6 +37,9 @@ function App() {
   const [dismissedValidationError, setDismissedValidationError] = useState(false);
   const [enableValidationCheck, setEnableValidationCheck] = useState(false);
   const [showDependencyOutputDialog, setShowDependencyOutputDialog] = useState(false);
+  const [showDataPreview, setShowDataPreview] = useState(false);
+  const [dataPreviewAssetKey, setDataPreviewAssetKey] = useState<string>('');
+  const [dataPreviewAssetName, setDataPreviewAssetName] = useState<string>('');
   const {
     currentProject,
     updateComponents,
@@ -126,6 +130,22 @@ function App() {
   const handleOpenFile = (filePath: string) => {
     setActiveMainTab('code');
     setFileToOpen(filePath);
+  };
+
+  // Handler to open visual editor (data preview) for an asset
+  const handleOpenVisualEditor = (upstreamAssetKey: string) => {
+    // Find the node in the graph to get the display name
+    const node = currentProject?.graph.nodes.find(n =>
+      n.data.asset_key === upstreamAssetKey || n.id === upstreamAssetKey
+    );
+
+    setDataPreviewAssetKey(upstreamAssetKey);
+    setDataPreviewAssetName(node?.data?.label || upstreamAssetKey);
+    setShowDataPreview(true);
+
+    // Close the component config modal
+    setEditingComponent(null);
+    setAddingComponentType(null);
   };
 
   // Prefetch file tree when hovering over Code tab
@@ -803,6 +823,7 @@ function App() {
             setEditingComponent(null);
             setAddingComponentType(null);
           }}
+          onOpenVisualEditor={handleOpenVisualEditor}
         />
       )}
 
@@ -934,6 +955,17 @@ function App() {
             </div>
           </div>
         </div>
+      )}
+
+      {/* Data Preview Modal (Visual Editor) */}
+      {showDataPreview && currentProject && (
+        <DataPreviewModal
+          isOpen={showDataPreview}
+          onClose={() => setShowDataPreview(false)}
+          projectId={currentProject.id}
+          assetKey={dataPreviewAssetKey}
+          assetName={dataPreviewAssetName}
+        />
       )}
     </div>
   );

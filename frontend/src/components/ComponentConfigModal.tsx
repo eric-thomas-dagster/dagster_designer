@@ -12,6 +12,7 @@ interface ComponentConfigModalProps {
   componentType?: string; // For new components
   onSave: (component: ComponentInstance) => void;
   onClose: () => void;
+  onOpenVisualEditor?: (upstreamAssetKey: string) => void;
 }
 
 export function ComponentConfigModal({
@@ -19,6 +20,7 @@ export function ComponentConfigModal({
   componentType,
   onSave,
   onClose,
+  onOpenVisualEditor,
 }: ComponentConfigModalProps) {
   const isNew = !component;
   const type = component?.component_type || componentType || '';
@@ -935,15 +937,38 @@ export function ComponentConfigModal({
                   </svg>
                 </div>
                 <div className="flex-1">
-                  <h4 className="text-sm font-semibold text-purple-900 mb-1">
+                  <h4 className="text-sm font-semibold text-purple-900 mb-2">
                     Visual Editor Available
                   </h4>
                   <p className="text-sm text-purple-800 mb-3">
                     This transformer has a powerful visual editor with drag-and-drop configuration for all transformations including pivot/unpivot, aggregations, and more.
                   </p>
-                  <div className="text-xs text-purple-700 bg-purple-100 border border-purple-200 rounded px-3 py-2">
-                    <strong>To access:</strong> Click on the asset in the graph → Click the "View Data" button in the dropdown menu → Configure transformations visually
-                  </div>
+                  {(() => {
+                    // Get upstream asset key from attributes
+                    const upstreamKeys = formData.upstream_asset_keys?.split(',').map((k: string) => k.trim()).filter(Boolean) || [];
+                    const firstUpstreamKey = upstreamKeys[0];
+
+                    if (firstUpstreamKey && onOpenVisualEditor) {
+                      return (
+                        <button
+                          onClick={() => onOpenVisualEditor(firstUpstreamKey)}
+                          className="w-full px-4 py-2 bg-purple-600 hover:bg-purple-700 text-white text-sm font-medium rounded-md transition-colors flex items-center justify-center space-x-2"
+                        >
+                          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+                          </svg>
+                          <span>Open Visual Editor for "{firstUpstreamKey}"</span>
+                        </button>
+                      );
+                    }
+
+                    return (
+                      <div className="text-xs text-purple-700 bg-purple-100 border border-purple-200 rounded px-3 py-2">
+                        <strong>To access:</strong> Click on the upstream asset in the graph → Click the "View Data" button in the dropdown menu → Configure transformations visually
+                      </div>
+                    );
+                  })()}
                 </div>
               </div>
             </div>
