@@ -1482,8 +1482,8 @@ if custom_lineage_edges:
             # Check if partition_config exists in node data
             partition_config_data = component_node.data.get("partition_config")
 
-            if not partition_config_data:
-                # No partition config means partitions are disabled
+            if not partition_config_data or (isinstance(partition_config_data, dict) and not partition_config_data.get("enabled", True)):
+                # No partition config OR enabled=false means partitions are disabled
                 # Create a disabled partition config to remove partition files
                 partition_config = PartitionConfig(
                     enabled=False,
@@ -1496,11 +1496,11 @@ if custom_lineage_edges:
                     partition_keys=[],
                     var_name="component_partitions_def"
                 )
-                print(f"[Partition] Removing partition config from {component.id}")
+                print(f"[Partition] Removing partition config from {component.id} (enabled=false or null)")
             else:
                 # Parse partition config from node data
                 partition_config = PartitionConfig(**partition_config_data)
-                print(f"[Partition] Applying partition config to {component.id}")
+                print(f"[Partition] Applying partition config to {component.id} (enabled=true)")
 
             # Apply partition configuration (will remove if disabled)
             partition_service.apply_partition_config(component_dir, partition_config)
