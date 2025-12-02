@@ -1018,6 +1018,58 @@ function GraphEditorInner({ onNodeSelect }: GraphEditorProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [nodes, edges, syncDependencyGraph]); // Only depend on nodes and edges - currentProject and updateGraph are stable
 
+  // Validate column compatibility between source and target nodes
+  const validateColumnCompatibility = useCallback(
+    (sourceNode: GraphNode, targetNode: GraphNode): { valid: boolean; errors: string[]; warnings: string[] } => {
+      const errors: string[] = [];
+      const warnings: string[] = [];
+
+      const sourceOutputColumns = sourceNode.data?.io_output_columns;
+      const targetExpectedColumns = targetNode.data?.io_expected_columns;
+
+      // If target doesn't specify expected columns, validation passes
+      if (!targetExpectedColumns || targetExpectedColumns.length === 0) {
+        return { valid: true, errors, warnings };
+      }
+
+      // If source doesn't specify output columns, show warning but allow (backward compatibility)
+      if (!sourceOutputColumns || sourceOutputColumns.length === 0) {
+        warnings.push('Source component does not declare output columns - compatibility cannot be verified');
+        return { valid: true, errors, warnings };
+      }
+
+      // Build a map of source output columns (including name + alternatives)
+      const sourceColumnMap = new Map<string, any>();
+      sourceOutputColumns.forEach((col: any) => {
+        sourceColumnMap.set(col.name.toLowerCase(), col);
+      });
+
+      // Check each required column in target
+      for (const expectedCol of targetExpectedColumns) {
+        if (expectedCol.required === false) {
+          continue; // Skip optional columns
+        }
+
+        // Check if source provides this column (or any alternative)
+        const possibleNames = [expectedCol.name, ...(expectedCol.alternatives || [])];
+        const found = possibleNames.some(name => sourceColumnMap.has(name.toLowerCase()));
+
+        if (!found) {
+          errors.push(`Missing required column: "${expectedCol.name}"${expectedCol.alternatives && expectedCol.alternatives.length > 0 ? ` (alternatives: ${expectedCol.alternatives.join(', ')})` : ''}`);
+        } else {
+          // Found the column - optionally check type compatibility
+          const sourceCol = possibleNames.map(n => sourceColumnMap.get(n.toLowerCase())).find(c => c);
+          if (sourceCol && sourceCol.type && expectedCol.type && sourceCol.type !== expectedCol.type) {
+            warnings.push(`Type mismatch for column "${expectedCol.name}": source provides ${sourceCol.type}, target expects ${expectedCol.type}`);
+          }
+        }
+      }
+
+      return { valid: errors.length === 0, errors, warnings };
+    },
+    []
+  );
+
   // Validate DataFrame connections based on IO metadata
   const isValidConnection = useCallback(
     (connection: Connection): boolean => {
@@ -1077,9 +1129,9 @@ function GraphEditorInner({ onNodeSelect }: GraphEditorProps) {
       }
 
       // Check if types match
-      const isValid = sourceOutputType === targetInputType;
+      const typesMatch = sourceOutputType === targetInputType;
 
-      if (!isValid) {
+      if (!typesMatch) {
         console.warn(
           `[GraphEditor] Connection validation failed: ` +
             `Source outputs '${sourceOutputType}' but target requires '${targetInputType}'`
@@ -1095,11 +1147,62 @@ function GraphEditorInner({ onNodeSelect }: GraphEditorProps) {
             `- Connect a ${targetInputType}-producing asset to the target\n` +
             `- Or use a different target component that accepts ${sourceOutputType}`
         );
+        return false;
       }
 
-      return isValid;
+      // Types match - now validate column compatibility
+      const columnValidation = validateColumnCompatibility(sourceNode, targetNode);
+
+      if (!columnValidation.valid) {
+        console.warn('[GraphEditor] Column validation failed:', columnValidation.errors);
+
+        // Build detailed error message
+        let errorMessage = `⚠️ Column Schema Mismatch\n\n`;
+        errorMessage += `Cannot connect these components:\n\n`;
+        errorMessage += `• Source: "${sourceNode.data?.label || sourceNode.id}"\n`;
+        errorMessage += `• Target: "${targetNode.data?.label || targetNode.id}"\n\n`;
+        errorMessage += `Missing Required Columns:\n`;
+        columnValidation.errors.forEach(err => {
+          errorMessage += `  ❌ ${err}\n`;
+        });
+
+        if (columnValidation.warnings.length > 0) {
+          errorMessage += `\nWarnings:\n`;
+          columnValidation.warnings.forEach(warn => {
+            errorMessage += `  ⚠️ ${warn}\n`;
+          });
+        }
+
+        errorMessage += `\nTo fix this:\n`;
+        errorMessage += `- Ensure the source component outputs all required columns\n`;
+        errorMessage += `- Or add a transformation component to map/create missing columns\n`;
+        errorMessage += `- Or connect a different source that provides the required data`;
+
+        alert(errorMessage);
+        return false;
+      }
+
+      // Show warnings if any (but still allow connection)
+      if (columnValidation.warnings.length > 0) {
+        console.warn('[GraphEditor] Column validation warnings:', columnValidation.warnings);
+
+        let warningMessage = `⚠️ Column Compatibility Warnings\n\n`;
+        warningMessage += `Connecting:\n`;
+        warningMessage += `• Source: "${sourceNode.data?.label || sourceNode.id}"\n`;
+        warningMessage += `• Target: "${targetNode.data?.label || targetNode.id}"\n\n`;
+        warningMessage += `Warnings:\n`;
+        columnValidation.warnings.forEach(warn => {
+          warningMessage += `  ⚠️ ${warn}\n`;
+        });
+        warningMessage += `\nThe connection will be allowed, but you may encounter runtime issues.`;
+
+        // Use console.warn instead of alert for warnings to not be too disruptive
+        console.warn(warningMessage);
+      }
+
+      return true;
     },
-    [nodes, edges]
+    [nodes, edges, validateColumnCompatibility]
   );
 
   const onConnect = useCallback(

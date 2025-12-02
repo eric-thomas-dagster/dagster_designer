@@ -721,18 +721,30 @@ class AssetIntrospectionService:
                                 schema_data = json.load(f)
 
                             io_metadata = schema_data.get('x-dagster-io', {})
+                            io_expected_columns = None
+                            io_output_columns = None
+                            io_compatible_upstream = None
+
                             if io_metadata:
-                                # Extract input type
+                                # Extract input type and expected columns
                                 if 'inputs' in io_metadata:
                                     io_input_type = io_metadata['inputs'].get('type')
                                     io_input_required = io_metadata['inputs'].get('required', False)
+                                    io_expected_columns = io_metadata['inputs'].get('expected_columns')
+                                    io_compatible_upstream = io_metadata['inputs'].get('compatible_upstream')
 
-                                # Extract output type
+                                # Extract output type and columns
                                 if 'outputs' in io_metadata:
                                     io_output_type = io_metadata['outputs'].get('type')
+                                    io_output_columns = io_metadata['outputs'].get('columns')
 
                                 if io_input_type or io_output_type:
-                                    print(f"[Asset Introspection] Found IO metadata for {asset_key}: input={io_input_type} (required={io_input_required}), output={io_output_type}", flush=True)
+                                    col_info = ""
+                                    if io_expected_columns:
+                                        col_info += f", expects {len(io_expected_columns)} columns"
+                                    if io_output_columns:
+                                        col_info += f", outputs {len(io_output_columns)} columns"
+                                    print(f"[Asset Introspection] Found IO metadata for {asset_key}: input={io_input_type} (required={io_input_required}), output={io_output_type}{col_info}", flush=True)
                         except Exception as e:
                             print(f"[Asset Introspection] Failed to read schema for {asset_key}: {e}", flush=True)
 
@@ -764,6 +776,9 @@ class AssetIntrospectionService:
                         "io_input_type": io_input_type,  # Input type from schema x-dagster-io
                         "io_output_type": io_output_type,  # Output type from schema x-dagster-io
                         "io_input_required": io_input_required,  # Whether input is required
+                        "io_expected_columns": io_expected_columns,  # Expected input columns with schema
+                        "io_output_columns": io_output_columns,  # Output columns with schema
+                        "io_compatible_upstream": io_compatible_upstream,  # List of compatible upstream component IDs
                     }
                 )
                 nodes.append(node)

@@ -1,3 +1,12 @@
+export interface ColumnSchema {
+  name: string;
+  type: 'string' | 'number' | 'datetime' | 'boolean';
+  required?: boolean;
+  alternatives?: string[];
+  description?: string;
+  optional?: boolean;
+}
+
 export interface ComponentSchema {
   name: string;
   module: string;
@@ -39,6 +48,9 @@ export interface GraphNode {
     io_input_type?: string | null;
     io_output_type?: string | null;
     io_input_required?: boolean;
+    io_expected_columns?: ColumnSchema[] | null;
+    io_output_columns?: ColumnSchema[] | null;
+    io_compatible_upstream?: string[] | null;
     onDelete?: (id: string) => void;
   };
   position: { x: number; y: number };
