@@ -306,26 +306,49 @@ async def install_pipeline_template(
         created_instances = []
         errors = []
 
-        # Step 1: Ensure all required components are installed
+        # Step 1: Auto-install any missing components
+        from .templates_registry import get_manifest as get_component_manifest, InstallComponentRequest
+
+        component_manifest = await get_component_manifest()
+
         for pipeline_component in pipeline_template.components:
             component_id = pipeline_component.component_id
             component_dir = components_dir / component_id
 
             if not component_dir.exists():
-                print(f"[InstallPipeline] Component {component_id} not found, need to install it")
-                # Component not installed - we need to install it first
-                # This would require fetching from the component manifest
-                # For now, return an error asking user to install components first
-                errors.append(f"Component '{component_id}' is not installed. Please install it first from the Component Library.")
-                continue
+                print(f"[InstallPipeline] Component {component_id} not found, installing it automatically...")
 
-            print(f"[InstallPipeline] Component {component_id} found at {component_dir}")
+                # Find component in manifest
+                component_template = next(
+                    (c for c in component_manifest.components if c.id == component_id),
+                    None
+                )
 
-        # If there are missing components, stop here
+                if not component_template:
+                    errors.append(f"Component '{component_id}' not found in component library")
+                    continue
+
+                # Auto-install the component
+                try:
+                    from .templates_registry import install_component
+                    install_request = InstallComponentRequest(
+                        project_id=request.project_id,
+                        config={}  # No config needed for component installation
+                    )
+                    await install_component(component_id, install_request)
+                    installed_components.append(component_id)
+                    print(f"[InstallPipeline] Component {component_id} installed successfully")
+                except Exception as e:
+                    errors.append(f"Failed to install component '{component_id}': {str(e)}")
+                    continue
+            else:
+                print(f"[InstallPipeline] Component {component_id} already installed at {component_dir}")
+
+        # If there were any errors during auto-installation, stop here
         if errors:
             raise HTTPException(
                 status_code=400,
-                detail="Missing required components:\n" + "\n".join(errors)
+                detail="Failed to install required components:\n" + "\n".join(errors)
             )
 
         # Step 2: Expand dynamic components and create instances
