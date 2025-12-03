@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Search, Workflow, X, ChevronRight, TrendingUp, DollarSign, Target, Package } from 'lucide-react';
 import { useProjectStore } from '@/hooks/useProject';
+import { PipelineConfigForm } from './PipelineConfigForm';
 
 interface PipelineComponent {
   component_id: string;
@@ -25,10 +26,15 @@ interface PipelineTemplate {
   pipeline_params: Record<string, {
     type: string;
     default?: any;
-    description: string;
-    required: boolean;
+    description?: string;
+    required?: boolean;
+    enum?: string[];
+    sensitive?: boolean;
+    environment_specific?: boolean;
+    show_if?: Record<string, string | string[]>;
+    placeholder?: string;
     items?: {
-      type: string;
+      type?: string;
       enum?: string[];
     };
   }>;
@@ -320,69 +326,11 @@ export function PipelineTemplates() {
               ) : pipelineDetails ? (
                 <div className="space-y-6">
                   {/* Configuration Form */}
-                  <div>
-                    <h3 className="text-lg font-semibold mb-3">Configuration</h3>
-                    <div className="bg-gray-50 rounded-lg p-4 space-y-4">
-                      {Object.entries(selectedPipeline.pipeline_params).map(([key, param]) => (
-                        <div key={key}>
-                          <label className="block text-sm font-medium text-gray-700 mb-1">
-                            {key.split('_').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ')}
-                            {param.required && <span className="text-red-500 ml-1">*</span>}
-                          </label>
-                          {param.type === 'array' && param.items?.enum ? (
-                            <div className="space-y-2">
-                              {param.items.enum.map((option) => {
-                                const currentValue = (pipelineConfig[key] || param.default || []) as string[];
-                                const isChecked = currentValue.includes(option);
-                                return (
-                                  <label key={option} className="flex items-center gap-2 cursor-pointer">
-                                    <input
-                                      type="checkbox"
-                                      checked={isChecked}
-                                      onChange={(e) => {
-                                        const newValue = e.target.checked
-                                          ? [...currentValue, option]
-                                          : currentValue.filter(v => v !== option);
-                                        setPipelineConfig({ ...pipelineConfig, [key]: newValue });
-                                      }}
-                                      className="w-4 h-4 text-blue-600 border-gray-300 rounded focus:ring-2 focus:ring-blue-500"
-                                    />
-                                    <span className="text-sm capitalize">{option.replace('_', ' ')}</span>
-                                  </label>
-                                );
-                              })}
-                            </div>
-                          ) : param.type === 'string' ? (
-                            <input
-                              type="text"
-                              value={pipelineConfig[key] || param.default || ''}
-                              onChange={(e) => setPipelineConfig({ ...pipelineConfig, [key]: e.target.value })}
-                              placeholder={param.description}
-                              className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-                            />
-                          ) : param.type === 'integer' ? (
-                            <input
-                              type="number"
-                              value={pipelineConfig[key] || param.default || 0}
-                              onChange={(e) => setPipelineConfig({ ...pipelineConfig, [key]: parseInt(e.target.value) })}
-                              placeholder={param.description}
-                              className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-                            />
-                          ) : param.type === 'number' ? (
-                            <input
-                              type="number"
-                              step="0.01"
-                              value={pipelineConfig[key] || param.default || 0}
-                              onChange={(e) => setPipelineConfig({ ...pipelineConfig, [key]: parseFloat(e.target.value) })}
-                              placeholder={param.description}
-                              className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-                            />
-                          ) : null}
-                          <p className="text-xs text-gray-500 mt-1">{param.description}</p>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
+                  <PipelineConfigForm
+                    params={selectedPipeline.pipeline_params}
+                    onConfigChange={(config) => setPipelineConfig(config)}
+                    initialConfig={pipelineConfig}
+                  />
 
                   {/* Components */}
                   <div>
