@@ -49,12 +49,16 @@ export function CommunityTemplates() {
   const { data: manifest, isLoading, error } = useQuery({
     queryKey: ['community-templates-manifest'],
     queryFn: async () => {
-      const response = await fetch('/api/v1/templates/manifest');
+      const response = await fetch('/api/v1/templates/manifest', {
+        cache: 'no-store', // Disable browser caching
+      });
       if (!response.ok) {
         throw new Error('Failed to fetch manifest');
       }
       return response.json() as Promise<TemplateManifest>;
     },
+    staleTime: 0, // Always fetch fresh data
+    gcTime: 0, // Don't keep old data in cache (formerly cacheTime)
   });
 
   const { data: componentDetails, isLoading: isLoadingDetails } = useQuery({
