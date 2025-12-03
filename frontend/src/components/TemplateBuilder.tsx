@@ -577,7 +577,7 @@ ${generateYamlAttributes(communityAssetCheckAttributes, 1)}`;
               className="flex items-center space-x-2 px-4 py-3 text-sm text-gray-600 hover:text-gray-900 border-b-2 border-transparent data-[state=active]:border-blue-600 data-[state=active]:text-blue-600"
             >
               <Workflow className="w-4 h-4" />
-              <span>CDP Pipelines</span>
+              <span>Pipeline Templates</span>
             </Tabs.Trigger>
           </Tabs.List>
 

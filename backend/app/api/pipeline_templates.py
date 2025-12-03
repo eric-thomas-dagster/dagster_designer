@@ -12,7 +12,7 @@ Example: "Customer LTV Pipeline" installs:
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Any
 import httpx
 import yaml
 import json
@@ -35,7 +35,7 @@ class PipelineComponent(BaseModel):
     """A component within a pipeline template."""
     component_id: str
     instance_name: str
-    config_mapping: Dict[str, str]  # Maps pipeline params to component params
+    config_mapping: Dict[str, Any]  # Maps pipeline params to component params (can be literals or ${var} references)
     depends_on: Optional[List[str]] = []  # List of instance names this depends on
 
 
@@ -66,7 +66,7 @@ class PipelineManifest(BaseModel):
 class InstallPipelineRequest(BaseModel):
     """Request model for installing a pipeline template."""
     project_id: str
-    config: Dict[str, any]  # High-level pipeline configuration
+    config: Dict[str, Any]  # High-level pipeline configuration
 
 
 @router.get("/manifest")
@@ -126,7 +126,7 @@ async def get_pipeline_details(pipeline_id: str):
         )
 
 
-def resolve_config_value(value: str, pipeline_config: Dict) -> any:
+def resolve_config_value(value: str, pipeline_config: Dict) -> Any:
     """
     Resolve a configuration value that may reference pipeline-level params.
 

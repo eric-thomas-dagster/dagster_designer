@@ -156,9 +156,9 @@ export function PipelineTemplates() {
     <div className="flex-1 flex flex-col min-h-0">
       {/* Header */}
       <div className="p-4 border-b bg-white flex-shrink-0">
-        <h2 className="text-xl font-semibold mb-2">CDP Pipeline Templates</h2>
+        <h2 className="text-xl font-semibold mb-2">Pipeline Templates</h2>
         <p className="text-sm text-gray-600">
-          Pre-built multi-component pipelines for common use cases. Install complete CDP workflows in one click.
+          Pre-built multi-component pipelines for common use cases. Install complete workflows in one click.
         </p>
       </div>
 
