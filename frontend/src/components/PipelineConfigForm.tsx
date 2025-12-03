@@ -56,7 +56,8 @@ export const PipelineConfigForm: React.FC<PipelineConfigFormProps> = ({
     if (!param.show_if) return true;
 
     return Object.entries(param.show_if).every(([condKey, condValue]) => {
-      const actualValue = currentConfig[condKey];
+      // Check both current config and shared config (condition keys might be in either)
+      const actualValue = currentConfig[condKey] ?? sharedConfig[condKey];
       if (Array.isArray(condValue)) {
         return condValue.includes(actualValue);
       }
