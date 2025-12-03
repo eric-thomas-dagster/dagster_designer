@@ -24,6 +24,7 @@ from .templates_registry import (
     validate_component_config,
     InstallComponentRequest
 )
+from .environment_config import resolve_environment_config, validate_environment_config
 
 router = APIRouter(prefix="/pipeline-templates", tags=["pipeline-templates"])
 
@@ -268,6 +269,15 @@ async def install_pipeline_template(
         if not pipeline_template:
             raise HTTPException(status_code=404, detail="Pipeline template not found")
 
+        # Resolve environment-specific configuration
+        # If config has "environments" structure, this merges shared + current environment
+        # If config is flat (legacy), this returns it as-is
+        resolved_config = resolve_environment_config(request.config)
+        print(f"[InstallPipeline] Resolved config for current environment: {json.dumps(resolved_config, indent=2)}")
+
+        # Use resolved config instead of request.config from here on
+        pipeline_config = resolved_config
+
         # Get project
         project = project_service.get_project(request.project_id)
         if not project:
@@ -322,7 +332,7 @@ async def install_pipeline_template(
         all_expanded_components = []
         for pipeline_component in pipeline_template.components:
             # Expand component if it uses repeat_for
-            expanded = expand_dynamic_components(pipeline_component, request.config)
+            expanded = expand_dynamic_components(pipeline_component, pipeline_config)
             all_expanded_components.extend(expanded)
 
             if len(expanded) > 1:
@@ -339,7 +349,7 @@ async def install_pipeline_template(
             # Resolve configuration from pipeline params (already resolved in expand_dynamic_components)
             component_config = {}
             for component_param, pipeline_param in config_mapping.items():
-                resolved_value = resolve_config_value(pipeline_param, request.config)
+                resolved_value = resolve_config_value(pipeline_param, pipeline_config)
                 component_config[component_param] = resolved_value
                 print(f"[InstallPipeline]   {component_param} = {resolved_value}")
 
