@@ -265,6 +265,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
             try {
               const project = await projectsApi.get(projectId);
               const hasAssets = project.graph?.nodes && project.graph.nodes.length > 0;
+              const hasComponents = project.components && project.components.length > 0;
 
               if (hasAssets) {
                 console.log('✅ Assets generated successfully');
@@ -275,8 +276,18 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
                     set({ assetGenerationStatus: 'idle' });
                   }
                 }, 3000);
+              } else if (!hasComponents) {
+                // Blank project with no components - no assets expected, this is success
+                console.log('✅ Blank project ready (no components, no assets)');
+                set({ assetGenerationStatus: 'success', assetGenerationError: null });
+                get().loadProject(projectId);
+                setTimeout(() => {
+                  if (get().assetGenerationStatus === 'success') {
+                    set({ assetGenerationStatus: 'idle' });
+                  }
+                }, 2000);
               } else if (attempts < 30) {
-                // Try again in 1 second (max 30 attempts = 30 seconds)
+                // Has components but no assets yet - keep trying
                 setTimeout(() => checkAssets(attempts + 1), 1000);
               } else {
                 console.warn('⚠️  Asset generation timed out');
