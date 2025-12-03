@@ -289,7 +289,7 @@ export const PipelineConfigForm: React.FC<PipelineConfigFormProps> = ({
           </div>
 
           {/* Active Environment Form */}
-          <div className="bg-gray-50 rounded-lg p-4">
+          <div className="bg-gray-50 rounded-lg p-4" key={`env-form-${activeEnv}-${JSON.stringify(sharedConfig)}`}>
             {activeEnv === 'local' && (
               <div className="mb-4 p-3 bg-blue-50 border border-blue-200 rounded-md text-xs text-blue-800">
                 <strong>Local Development:</strong> Use DuckDB and test credentials for safe local testing
