@@ -28,11 +28,11 @@ export const PipelineConfigForm: React.FC<PipelineConfigFormProps> = ({
 }) => {
   // State for multi-environment configuration
   const [activeEnv, setActiveEnv] = useState<Environment>('local');
-  const [sharedConfig, setSharedConfig] = useState<Record<string, any>>({});
+  const [sharedConfig, setSharedConfig] = useState<Record<string, any>>(initialConfig.shared || {});
   const [envConfigs, setEnvConfigs] = useState<Record<Environment, Record<string, any>>>({
-    local: {},
-    branch: {},
-    production: {}
+    local: initialConfig.environments?.local || {},
+    branch: initialConfig.environments?.branch || {},
+    production: initialConfig.environments?.production || {}
   });
 
   // Separate params into shared and environment-specific
