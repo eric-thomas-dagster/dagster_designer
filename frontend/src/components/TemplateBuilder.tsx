@@ -16,9 +16,11 @@ import {
   ArrowLeftRight,
   AlertTriangle,
   Timer,
+  Workflow,
 } from 'lucide-react';
 import { primitivesApi } from '@/services/api';
 import { CommunityTemplates } from './CommunityTemplates';
+import { PipelineTemplates } from './PipelineTemplates';
 import { CronBuilder } from './CronBuilder';
 import { EnhancedDataQualityChecksBuilder } from './EnhancedDataQualityChecksBuilder';
 import {
@@ -510,7 +512,7 @@ ${generateYamlAttributes(communityAssetCheckAttributes, 1)}`;
   return (
     <div className="h-full flex bg-white">
       {/* Left Panel - Form */}
-      <div className={`${activeTab === 'community' ? 'w-full' : 'w-1/2 border-r border-gray-200'} flex flex-col`}>
+      <div className={`${activeTab === 'community' || activeTab === 'pipelines' ? 'w-full' : 'w-1/2 border-r border-gray-200'} flex flex-col`}>
         <Tabs.Root value={activeTab} onValueChange={handleTabChange} className="flex-1 min-h-0 flex flex-col">
           {/* Tab List */}
           <Tabs.List className="flex flex-shrink-0 border-b border-gray-200 overflow-x-auto">
@@ -569,6 +571,13 @@ ${generateYamlAttributes(communityAssetCheckAttributes, 1)}`;
             >
               <Users className="w-4 h-4" />
               <span>Community</span>
+            </Tabs.Trigger>
+            <Tabs.Trigger
+              value="pipelines"
+              className="flex items-center space-x-2 px-4 py-3 text-sm text-gray-600 hover:text-gray-900 border-b-2 border-transparent data-[state=active]:border-blue-600 data-[state=active]:text-blue-600"
+            >
+              <Workflow className="w-4 h-4" />
+              <span>CDP Pipelines</span>
             </Tabs.Trigger>
           </Tabs.List>
 
@@ -2408,11 +2417,16 @@ ${generateYamlAttributes(communityAssetCheckAttributes, 1)}`;
           <Tabs.Content value="community" className="flex-1 min-h-0 overflow-hidden flex flex-col">
             <CommunityTemplates />
           </Tabs.Content>
+
+          {/* Pipeline Templates Tab */}
+          <Tabs.Content value="pipelines" className="flex-1 min-h-0 overflow-hidden flex flex-col">
+            <PipelineTemplates />
+          </Tabs.Content>
         </Tabs.Root>
       </div>
 
       {/* Right Panel - Code Preview */}
-      {activeTab !== 'community' && (
+      {activeTab !== 'community' && activeTab !== 'pipelines' && (
       <div className="w-1/2 flex flex-col">
         <div className="p-4 border-b border-gray-200 flex items-center justify-between">
           <h3 className="text-sm font-semibold text-gray-900">Generated Code</h3>
