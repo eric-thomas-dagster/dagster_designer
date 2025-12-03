@@ -37,6 +37,8 @@ class PipelineComponent(BaseModel):
     instance_name: str
     config_mapping: Dict[str, Any]  # Maps pipeline params to component params (can be literals or ${var} references)
     depends_on: Optional[List[str]] = []  # List of instance names this depends on
+    repeat_for: Optional[str] = None  # Pipeline param to iterate over (e.g., "${data_sources}")
+    instance_name_template: Optional[str] = None  # Template for dynamic names (e.g., "{source}_data")
 
 
 class PipelineTemplate(BaseModel):
@@ -126,22 +128,108 @@ async def get_pipeline_details(pipeline_id: str):
         )
 
 
-def resolve_config_value(value: str, pipeline_config: Dict) -> Any:
+def resolve_config_value(value: Any, pipeline_config: Dict, iteration_value: str = None) -> Any:
     """
     Resolve a configuration value that may reference pipeline-level params.
 
     Examples:
         "${data_source}" -> looks up pipeline_config["data_source"]
         "standardized_orders" -> returns as-is
+        "{source}_data" with iteration_value="google_ads" -> "google_ads_data"
         "${prediction_period_months}" -> looks up pipeline_config["prediction_period_months"]
     """
-    if isinstance(value, str) and value.startswith("${") and value.endswith("}"):
+    if not isinstance(value, str):
+        return value
+
+    # Handle template strings like {source}_data
+    if iteration_value and "{" in value:
+        value = value.replace("{source}", iteration_value)
+        value = value.replace("{item}", iteration_value)
+
+    # Handle pipeline parameter references like ${data_source}
+    if value.startswith("${") and value.endswith("}"):
         param_name = value[2:-1]
+
+        # Special syntax: ${param:*_suffix} means get all items from array and apply suffix
+        if ":" in param_name:
+            base_param, suffix_pattern = param_name.split(":", 1)
+            if base_param in pipeline_config:
+                param_value = pipeline_config[base_param]
+                if isinstance(param_value, list):
+                    # Return list of values with pattern applied
+                    return [suffix_pattern.replace("*", item) for item in param_value]
+
         if param_name in pipeline_config:
             return pipeline_config[param_name]
         else:
             raise ValueError(f"Pipeline parameter '{param_name}' not provided in configuration")
+
     return value
+
+
+def expand_dynamic_components(
+    pipeline_component: PipelineComponent,
+    pipeline_config: Dict
+) -> List[Dict[str, Any]]:
+    """
+    Expand a component that uses repeat_for into multiple component instances.
+
+    Args:
+        pipeline_component: Component definition that may have repeat_for
+        pipeline_config: Pipeline configuration
+
+    Returns:
+        List of expanded component instances
+    """
+    # If no repeat_for, return single component as-is
+    if not pipeline_component.repeat_for:
+        return [{
+            "component_id": pipeline_component.component_id,
+            "instance_name": pipeline_component.instance_name,
+            "config_mapping": pipeline_component.config_mapping,
+            "depends_on": pipeline_component.depends_on
+        }]
+
+    # Extract parameter name from ${param_name} syntax
+    repeat_param = pipeline_component.repeat_for
+    if repeat_param.startswith("${") and repeat_param.endswith("}"):
+        repeat_param = repeat_param[2:-1]
+
+    if repeat_param not in pipeline_config:
+        raise ValueError(f"repeat_for parameter '{repeat_param}' not found in pipeline config")
+
+    repeat_values = pipeline_config[repeat_param]
+    if not isinstance(repeat_values, list):
+        repeat_values = [repeat_values]
+
+    # Create one component instance per value
+    expanded_components = []
+    for value in repeat_values:
+        # Use template if provided, otherwise use instance_name
+        instance_name = pipeline_component.instance_name_template or pipeline_component.instance_name
+        instance_name = instance_name.replace("{source}", value).replace("{item}", value)
+
+        # Resolve config with iteration value
+        resolved_config = {}
+        for key, config_value in pipeline_component.config_mapping.items():
+            resolved_config[key] = resolve_config_value(config_value, pipeline_config, iteration_value=value)
+
+        # Resolve depends_on with iteration value
+        resolved_depends_on = []
+        for dep in (pipeline_component.depends_on or []):
+            if "{" in dep:
+                resolved_depends_on.append(dep.replace("{source}", value).replace("{item}", value))
+            else:
+                resolved_depends_on.append(dep)
+
+        expanded_components.append({
+            "component_id": pipeline_component.component_id,
+            "instance_name": instance_name,
+            "config_mapping": resolved_config,
+            "depends_on": resolved_depends_on
+        })
+
+    return expanded_components
 
 
 @router.post("/install/{pipeline_id}")
@@ -230,16 +318,27 @@ async def install_pipeline_template(
                 detail="Missing required components:\n" + "\n".join(errors)
             )
 
-        # Step 2: Create component instances with resolved configuration
+        # Step 2: Expand dynamic components and create instances
+        all_expanded_components = []
         for pipeline_component in pipeline_template.components:
-            component_id = pipeline_component.component_id
-            instance_name = pipeline_component.instance_name
+            # Expand component if it uses repeat_for
+            expanded = expand_dynamic_components(pipeline_component, request.config)
+            all_expanded_components.extend(expanded)
+
+            if len(expanded) > 1:
+                print(f"[InstallPipeline] Expanded {pipeline_component.component_id} into {len(expanded)} instances")
+
+        # Step 3: Create component instances with resolved configuration
+        for expanded_component in all_expanded_components:
+            component_id = expanded_component["component_id"]
+            instance_name = expanded_component["instance_name"]
+            config_mapping = expanded_component["config_mapping"]
 
             print(f"[InstallPipeline] Creating instance '{instance_name}' of component '{component_id}'")
 
-            # Resolve configuration from pipeline params
+            # Resolve configuration from pipeline params (already resolved in expand_dynamic_components)
             component_config = {}
-            for component_param, pipeline_param in pipeline_component.config_mapping.items():
+            for component_param, pipeline_param in config_mapping.items():
                 resolved_value = resolve_config_value(pipeline_param, request.config)
                 component_config[component_param] = resolved_value
                 print(f"[InstallPipeline]   {component_param} = {resolved_value}")

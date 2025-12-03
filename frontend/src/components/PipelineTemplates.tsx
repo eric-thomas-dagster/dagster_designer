@@ -27,6 +27,10 @@ interface PipelineTemplate {
     default?: any;
     description: string;
     required: boolean;
+    items?: {
+      type: string;
+      enum?: string[];
+    };
   }>;
 }
 
@@ -325,7 +329,30 @@ export function PipelineTemplates() {
                             {key.split('_').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ')}
                             {param.required && <span className="text-red-500 ml-1">*</span>}
                           </label>
-                          {param.type === 'string' ? (
+                          {param.type === 'array' && param.items?.enum ? (
+                            <div className="space-y-2">
+                              {param.items.enum.map((option) => {
+                                const currentValue = (pipelineConfig[key] || param.default || []) as string[];
+                                const isChecked = currentValue.includes(option);
+                                return (
+                                  <label key={option} className="flex items-center gap-2 cursor-pointer">
+                                    <input
+                                      type="checkbox"
+                                      checked={isChecked}
+                                      onChange={(e) => {
+                                        const newValue = e.target.checked
+                                          ? [...currentValue, option]
+                                          : currentValue.filter(v => v !== option);
+                                        setPipelineConfig({ ...pipelineConfig, [key]: newValue });
+                                      }}
+                                      className="w-4 h-4 text-blue-600 border-gray-300 rounded focus:ring-2 focus:ring-blue-500"
+                                    />
+                                    <span className="text-sm capitalize">{option.replace('_', ' ')}</span>
+                                  </label>
+                                );
+                              })}
+                            </div>
+                          ) : param.type === 'string' ? (
                             <input
                               type="text"
                               value={pipelineConfig[key] || param.default || ''}
