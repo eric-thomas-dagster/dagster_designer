@@ -19,6 +19,7 @@ from ..models.freshness import FreshnessPolicy
 from .component_registry import component_registry
 from .partition_service import partition_service
 from .freshness_service import freshness_service
+from .dependency_manager import dependency_manager
 
 # Track dependency installation status for each project
 # {project_id: {'status': 'installing|success|error', 'error': str|None, 'output': str|None}}
@@ -2239,6 +2240,24 @@ if custom_lineage_edges:
                 print(f"❌ Error generating YAML for component {component.id}: {e}", flush=True)
 
             sys.stdout.flush()
+
+        # Sync dependencies after generating all component YAML files
+        # This ensures any dlt destination packages are installed
+        try:
+            print(f"[_generate_component_yaml_files] Checking for required dependencies...", flush=True)
+            dependencies_added, added_packages = dependency_manager.sync_project_dependencies(
+                project.id,
+                auto_install=True
+            )
+            if dependencies_added:
+                print(f"[_generate_component_yaml_files] Added dependencies: {added_packages}", flush=True)
+            else:
+                print(f"[_generate_component_yaml_files] All required dependencies already present", flush=True)
+        except Exception as e:
+            print(f"[_generate_component_yaml_files] ⚠️  Error checking dependencies: {e}", flush=True)
+            # Don't fail the whole operation if dependency check fails
+            import traceback
+            traceback.print_exc()
 
         print(f"[_generate_component_yaml_files] ====== END ======\n", flush=True)
         sys.stdout.flush()
