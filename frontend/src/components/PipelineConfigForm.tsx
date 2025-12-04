@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 
 interface PipelineParam {
   type: string;
@@ -26,14 +26,43 @@ export const PipelineConfigForm: React.FC<PipelineConfigFormProps> = ({
   onConfigChange,
   initialConfig = {}
 }) => {
+  // Initialize config with defaults from params
+  const initialSharedConfig = useMemo(() => {
+    const config: Record<string, any> = { ...initialConfig.shared };
+
+    // Add default values for shared params that aren't in initialConfig
+    Object.entries(params).forEach(([key, param]) => {
+      if (!param.environment_specific && config[key] === undefined && param.default !== undefined) {
+        config[key] = param.default;
+      }
+    });
+
+    return config;
+  }, [params, initialConfig.shared]);
+
+  const initialEnvConfigs = useMemo(() => {
+    const configs: Record<Environment, Record<string, any>> = {
+      local: { ...initialConfig.environments?.local },
+      branch: { ...initialConfig.environments?.branch },
+      production: { ...initialConfig.environments?.production }
+    };
+
+    // Add default values for environment-specific params that aren't in initialConfig
+    (['local', 'branch', 'production'] as Environment[]).forEach(env => {
+      Object.entries(params).forEach(([key, param]) => {
+        if (param.environment_specific && configs[env][key] === undefined && param.default !== undefined) {
+          configs[env][key] = param.default;
+        }
+      });
+    });
+
+    return configs;
+  }, [params, initialConfig.environments]);
+
   // State for multi-environment configuration
   const [activeEnv, setActiveEnv] = useState<Environment>('local');
-  const [sharedConfig, setSharedConfig] = useState<Record<string, any>>(initialConfig.shared || {});
-  const [envConfigs, setEnvConfigs] = useState<Record<Environment, Record<string, any>>>({
-    local: initialConfig.environments?.local || {},
-    branch: initialConfig.environments?.branch || {},
-    production: initialConfig.environments?.production || {}
-  });
+  const [sharedConfig, setSharedConfig] = useState<Record<string, any>>(initialSharedConfig);
+  const [envConfigs, setEnvConfigs] = useState<Record<Environment, Record<string, any>>>(initialEnvConfigs);
 
   // Separate params into shared and environment-specific
   const { sharedParams, envSpecificParams } = useMemo(() => {
@@ -50,6 +79,16 @@ export const PipelineConfigForm: React.FC<PipelineConfigFormProps> = ({
 
     return { sharedParams: shared, envSpecificParams: envSpecific };
   }, [params]);
+
+  // Notify parent with initialized config (including defaults) on mount
+  useEffect(() => {
+    onConfigChange({
+      shared: sharedConfig,
+      environments: envConfigs
+    });
+    // Only run once on mount
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Helper to check if a field should be shown based on show_if condition
   const shouldShowField = (param: PipelineParam, currentConfig: Record<string, any>): boolean => {
