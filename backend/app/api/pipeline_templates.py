@@ -77,7 +77,12 @@ async def get_pipeline_manifest() -> PipelineManifest:
     """Fetch the pipeline templates manifest from GitHub."""
     try:
         async with httpx.AsyncClient() as client:
-            response = await client.get(PIPELINE_MANIFEST_URL, timeout=10.0)
+            # Add cache-busting headers to ensure fresh content from GitHub
+            headers = {
+                'Cache-Control': 'no-cache, no-store, must-revalidate',
+                'Pragma': 'no-cache'
+            }
+            response = await client.get(PIPELINE_MANIFEST_URL, headers=headers, timeout=10.0)
             response.raise_for_status()
             data = response.json()
             return PipelineManifest(**data)
