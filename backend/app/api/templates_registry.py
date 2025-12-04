@@ -88,7 +88,7 @@ class ComponentTemplate(BaseModel):
     dependencies: dict
     readme_url: str
     component_url: str
-    schema_url: str
+    schema_url: Optional[str] = None  # Optional - not all components have schema.json
     example_url: str
     requirements_url: Optional[str] = None
     manifest_url: Optional[str] = None
