@@ -534,7 +534,38 @@ async def get_manifest() -> TemplateManifest:
             response = await client.get(MANIFEST_URL, headers=headers, timeout=10.0)
             response.raise_for_status()
             data = response.json()
-            return TemplateManifest(**data)
+
+            # Validate components individually to gracefully handle invalid entries
+            valid_components = []
+            invalid_components = []
+
+            for component_data in data.get('components', []):
+                try:
+                    # Validate individual component
+                    component = ComponentTemplate(**component_data)
+                    valid_components.append(component)
+                except Exception as e:
+                    # Log warning but don't fail entire manifest
+                    component_id = component_data.get('id', 'unknown')
+                    print(f"[WARNING] Invalid component '{component_id}' in manifest: {str(e)}")
+                    invalid_components.append({
+                        'id': component_id,
+                        'error': str(e)
+                    })
+
+            # Log summary if any components were invalid
+            if invalid_components:
+                print(f"[WARNING] Filtered out {len(invalid_components)} invalid components from manifest:")
+                for invalid in invalid_components:
+                    print(f"  - {invalid['id']}: {invalid['error']}")
+
+            # Return manifest with only valid components
+            return TemplateManifest(
+                version=data.get('version', '1.0.0'),
+                repository=data.get('repository', ''),
+                last_updated=data.get('last_updated', ''),
+                components=valid_components
+            )
     except httpx.HTTPError as e:
         raise HTTPException(
             status_code=502,

@@ -85,7 +85,38 @@ async def get_pipeline_manifest() -> PipelineManifest:
             response = await client.get(PIPELINE_MANIFEST_URL, headers=headers, timeout=10.0)
             response.raise_for_status()
             data = response.json()
-            return PipelineManifest(**data)
+
+            # Validate pipelines individually to gracefully handle invalid entries
+            valid_pipelines = []
+            invalid_pipelines = []
+
+            for pipeline_data in data.get('pipelines', []):
+                try:
+                    # Validate individual pipeline
+                    pipeline = PipelineTemplate(**pipeline_data)
+                    valid_pipelines.append(pipeline)
+                except Exception as e:
+                    # Log warning but don't fail entire manifest
+                    pipeline_id = pipeline_data.get('id', 'unknown')
+                    print(f"[WARNING] Invalid pipeline '{pipeline_id}' in manifest: {str(e)}")
+                    invalid_pipelines.append({
+                        'id': pipeline_id,
+                        'error': str(e)
+                    })
+
+            # Log summary if any pipelines were invalid
+            if invalid_pipelines:
+                print(f"[WARNING] Filtered out {len(invalid_pipelines)} invalid pipelines from manifest:")
+                for invalid in invalid_pipelines:
+                    print(f"  - {invalid['id']}: {invalid['error']}")
+
+            # Return manifest with only valid pipelines
+            return PipelineManifest(
+                version=data.get('version', '1.0.0'),
+                repository=data.get('repository', ''),
+                last_updated=data.get('last_updated', ''),
+                pipelines=valid_pipelines
+            )
     except httpx.HTTPError as e:
         raise HTTPException(
             status_code=502,
