@@ -45,6 +45,8 @@ export function CodeEditor({ projectId, fileToOpen, onFileOpened }: CodeEditorPr
   const [hasSelection, setHasSelection] = useState(false);
   const [editorInstance, setEditorInstance] = useState<any>(null);
   const [aiPanelOpen, setAiPanelOpen] = useState(false);
+  const [sidebarWidth, setSidebarWidth] = useState(256);
+  const [isResizing, setIsResizing] = useState(false);
 
   const queryClient = useQueryClient();
 
@@ -413,6 +415,37 @@ export function CodeEditor({ projectId, fileToOpen, onFileOpened }: CodeEditorPr
     setTimeout(() => findAndSubmit(), 300);
   };
 
+  // Resize handlers for sidebar
+  const handleMouseDown = (e: React.MouseEvent) => {
+    setIsResizing(true);
+    e.preventDefault();
+  };
+
+  useEffect(() => {
+    const handleMouseMove = (e: MouseEvent) => {
+      if (isResizing) {
+        const newWidth = e.clientX;
+        if (newWidth >= 200 && newWidth <= 600) {
+          setSidebarWidth(newWidth);
+        }
+      }
+    };
+
+    const handleMouseUp = () => {
+      setIsResizing(false);
+    };
+
+    if (isResizing) {
+      document.addEventListener('mousemove', handleMouseMove);
+      document.addEventListener('mouseup', handleMouseUp);
+    }
+
+    return () => {
+      document.removeEventListener('mousemove', handleMouseMove);
+      document.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, [isResizing]);
+
   const renderFileTree = (nodes: FileTreeNode[], parentPath: string = '') => {
     return nodes.map((node) => {
       const fullPath = parentPath ? `${parentPath}/${node.name}` : node.name;
@@ -425,27 +458,27 @@ export function CodeEditor({ projectId, fileToOpen, onFileOpened }: CodeEditorPr
               className="flex items-center justify-between group px-2 py-1 hover:bg-gray-100"
             >
               <div
-                className="flex items-center space-x-1 flex-1 cursor-pointer"
+                className="flex items-center space-x-1 flex-1 min-w-0 cursor-pointer"
                 onClick={() => handleDirToggle(fullPath)}
               >
                 {isExpanded ? (
-                  <ChevronDown className="w-3 h-3 text-gray-500" />
+                  <ChevronDown className="w-3 h-3 text-gray-500 flex-shrink-0" />
                 ) : (
-                  <ChevronRight className="w-3 h-3 text-gray-500" />
+                  <ChevronRight className="w-3 h-3 text-gray-500 flex-shrink-0" />
                 )}
                 {isExpanded ? (
-                  <FolderOpen className="w-4 h-4 text-blue-500" />
+                  <FolderOpen className="w-4 h-4 text-blue-500 flex-shrink-0" />
                 ) : (
-                  <Folder className="w-4 h-4 text-blue-500" />
+                  <Folder className="w-4 h-4 text-blue-500 flex-shrink-0" />
                 )}
-                <span className="text-sm text-gray-700">{node.name}</span>
+                <span className="text-sm text-gray-700 truncate">{node.name}</span>
               </div>
               <button
                 onClick={(e) => {
                   e.stopPropagation();
                   handleDeleteDirectory(fullPath);
                 }}
-                className="opacity-0 group-hover:opacity-100 p-1 hover:bg-red-100 rounded transition-opacity"
+                className="flex-shrink-0 p-1 hover:bg-red-100 rounded opacity-60 hover:opacity-100 transition-opacity"
                 title="Delete folder and all contents"
               >
                 <Trash2 className="w-3 h-3 text-red-600" />
@@ -465,16 +498,16 @@ export function CodeEditor({ projectId, fileToOpen, onFileOpened }: CodeEditorPr
             activeFilePath === node.path ? 'bg-blue-50' : ''
           }`}
         >
-          <div className="flex items-center space-x-1 flex-1 cursor-pointer" onClick={() => handleFileClick(node.path)}>
-            <FileCode className="w-4 h-4 text-gray-400" />
-            <span className="text-sm text-gray-700">{node.name}</span>
+          <div className="flex items-center space-x-1 flex-1 min-w-0 cursor-pointer" onClick={() => handleFileClick(node.path)}>
+            <FileCode className="w-4 h-4 text-gray-400 flex-shrink-0" />
+            <span className="text-sm text-gray-700 truncate">{node.name}</span>
           </div>
           <button
             onClick={(e) => {
               e.stopPropagation();
               handleDeleteFile(node.path);
             }}
-            className="opacity-0 group-hover:opacity-100 p-1 hover:bg-red-100 rounded transition-opacity"
+            className="flex-shrink-0 p-1 hover:bg-red-100 rounded opacity-60 hover:opacity-100 transition-opacity"
             title="Delete file"
           >
             <Trash2 className="w-3 h-3 text-red-600" />
@@ -509,7 +542,10 @@ export function CodeEditor({ projectId, fileToOpen, onFileOpened }: CodeEditorPr
   return (
     <div className="flex h-full bg-white relative">
       {/* File Browser - Left Sidebar */}
-      <div className="w-64 border-r border-gray-200 flex flex-col shrink-0" style={{ minWidth: '256px' }}>
+      <div
+        className="border-r border-gray-200 flex flex-col shrink-0 relative"
+        style={{ width: `${sidebarWidth}px`, minWidth: '200px', maxWidth: '600px' }}
+      >
         <div className="p-2 border-b border-gray-200 flex items-center justify-between">
           <span className="text-sm font-semibold text-gray-700">Files</span>
           <div className="flex items-center space-x-1">
@@ -539,6 +575,15 @@ export function CodeEditor({ projectId, fileToOpen, onFileOpened }: CodeEditorPr
         <div className="flex-1 overflow-y-auto">
           {fileTree && renderFileTree(fileTree.tree.children)}
         </div>
+
+        {/* Resize Handle */}
+        <div
+          className={`absolute top-0 right-0 w-1 h-full cursor-col-resize hover:bg-blue-400 transition-colors ${
+            isResizing ? 'bg-blue-500' : ''
+          }`}
+          onMouseDown={handleMouseDown}
+          title="Drag to resize"
+        />
       </div>
 
       {/* Editor Area - Center */}
