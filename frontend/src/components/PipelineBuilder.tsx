@@ -209,8 +209,8 @@ export function PipelineBuilder() {
     setSelectedAssets(newSelection);
   };
 
-  // Layout nodes vertically using topological sort
-  const layoutNodesVertically = (nodes: Node[], edges: Edge[]) => {
+  // Layout nodes horizontally using topological sort (left-to-right flow)
+  const layoutNodesHorizontally = (nodes: Node[], edges: Edge[]) => {
     if (nodes.length === 0) return nodes;
 
     // Build adjacency list and in-degree map
@@ -227,7 +227,7 @@ export function PipelineBuilder() {
       inDegree.set(edge.target, (inDegree.get(edge.target) || 0) + 1);
     });
 
-    // Topological sort to determine vertical levels
+    // Topological sort to determine horizontal levels (left-to-right)
     const levels = new Map<string, number>();
     const queue: string[] = [];
 
@@ -273,9 +273,9 @@ export function PipelineBuilder() {
       nodesByLevel.get(level)!.push(nodeId);
     });
 
-    // Layout parameters
-    const verticalSpacing = 150;
-    const horizontalSpacing = 250;
+    // Layout parameters for horizontal flow (left-to-right)
+    const horizontalSpacing = 300;  // Spacing between levels (left-to-right)
+    const verticalSpacing = 150;    // Spacing between nodes at same level (top-to-bottom)
     const nodeWidth = 200;
 
     // Position nodes
@@ -285,15 +285,15 @@ export function PipelineBuilder() {
       const indexInLevel = nodesAtLevel.indexOf(node.id);
       const totalAtLevel = nodesAtLevel.length;
 
-      // Center nodes at each level
-      const totalWidth = (totalAtLevel - 1) * horizontalSpacing;
-      const startX = -totalWidth / 2;
+      // Center nodes at each level vertically
+      const totalHeight = (totalAtLevel - 1) * verticalSpacing;
+      const startY = -totalHeight / 2;
 
       return {
         ...node,
         position: {
-          x: startX + indexInLevel * horizontalSpacing,
-          y: level * verticalSpacing,
+          x: level * horizontalSpacing,                    // Horizontal position based on level (left-to-right)
+          y: startY + indexInLevel * verticalSpacing,      // Vertical position based on index (center multiple nodes)
         },
         data: {
           ...node.data,
@@ -413,8 +413,8 @@ export function PipelineBuilder() {
 
     setEdges(newEdges);
 
-    // Re-layout nodes with the new edges
-    const layoutedNodes = layoutNodesVertically(currentNodes, newEdges);
+    // Re-layout nodes with the new edges (horizontal left-to-right layout)
+    const layoutedNodes = layoutNodesHorizontally(currentNodes, newEdges);
     setNodes(layoutedNodes);
   }, [currentProject, selectedAssets, allAssets, setEdges, setNodes]);
 
