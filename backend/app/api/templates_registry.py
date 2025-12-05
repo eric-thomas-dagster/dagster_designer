@@ -159,11 +159,11 @@ def validate_component_config(component_dir: Path, attributes: dict) -> tuple[di
         prop_type = prop.get('type')
         print(f"[Validation] Validating field '{key}' of type '{prop_type}'")
 
-        # Handle empty string values based on type
-        if value == '' or value is None:
+        # Handle None values (but preserve empty strings as valid values)
+        if value is None:
             # Check if field is required
             if key in required_fields:
-                validation_errors.append(f"Required field '{key}' cannot be empty")
+                validation_errors.append(f"Required field '{key}' cannot be None")
                 continue
 
             # For optional fields, check if there's a default
@@ -171,7 +171,12 @@ def validate_component_config(component_dir: Path, attributes: dict) -> tuple[di
                 # Skip field to use default value
                 continue
 
-            # For optional fields without defaults, skip empty values
+            # For optional fields without defaults, skip None values
+            continue
+
+        # Handle required fields that are empty strings
+        if value == '' and key in required_fields:
+            validation_errors.append(f"Required field '{key}' cannot be empty")
             continue
 
         # Type validation
