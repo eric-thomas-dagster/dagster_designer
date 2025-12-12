@@ -27,6 +27,7 @@ class Project(BaseModel):
     git_repo: str | None = Field(None, description="Git repository URL")
     git_branch: str = Field("main", description="Git branch")
     is_imported: bool = Field(False, description="Whether this project was imported from an existing codebase")
+    dagster_package_subdir: str | None = Field(None, description="Subdirectory containing the Dagster package (pyproject.toml) for imported projects")
 
 
 class ProjectCreate(BaseModel):

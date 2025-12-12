@@ -465,7 +465,61 @@ async def install_pipeline_template(
                 detail="Errors occurred during pipeline installation:\n" + "\n".join(errors)
             )
 
-        # Step 3: Auto-regenerate assets so all components appear
+        # Step 3: Create custom lineage based on depends_on relationships
+        print(f"[InstallPipeline] Creating custom lineage connections...")
+        lineage_edges = []
+
+        for expanded_component in all_expanded_components:
+            instance_name = expanded_component["instance_name"]
+            depends_on = expanded_component.get("depends_on", [])
+            config_mapping = expanded_component.get("config_mapping", {})
+
+            # Create lineage edges for each dependency
+            for dep_instance in depends_on:
+                # Check if there's a specific target_column in config_mapping
+                target_column = None
+                for param_name, param_value in config_mapping.items():
+                    # Check if this maps to the dependency (e.g., "transaction_data_asset": "standardized_orders")
+                    if isinstance(param_value, str) and param_value == dep_instance:
+                        # Extract the column name from the parameter (e.g., "transaction_data_asset" -> "transaction_data")
+                        if param_name.endswith("_asset"):
+                            target_column = param_name.replace("_asset", "")
+                        break
+
+                lineage_edges.append({
+                    "source": dep_instance,
+                    "target": instance_name,
+                    "source_column": None,
+                    "target_column": target_column
+                })
+                print(f"[InstallPipeline]   {dep_instance} -> {instance_name}" + (f" (target: {target_column})" if target_column else ""))
+
+        # Write custom_lineage.json
+        if lineage_edges:
+            lineage_file = defs_dir / "custom_lineage.json"
+
+            # Load existing lineage if present
+            existing_lineage = {"edges": []}
+            if lineage_file.exists():
+                with open(lineage_file, 'r') as f:
+                    existing_lineage = json.load(f)
+
+            # Merge new edges with existing edges (avoid duplicates)
+            existing_edge_keys = {(e.get("source"), e.get("target")) for e in existing_lineage.get("edges", [])}
+            for new_edge in lineage_edges:
+                edge_key = (new_edge["source"], new_edge["target"])
+                if edge_key not in existing_edge_keys:
+                    existing_lineage["edges"].append(new_edge)
+
+            # Write back
+            with open(lineage_file, 'w') as f:
+                json.dump(existing_lineage, f, indent=2)
+
+            print(f"[InstallPipeline] Created {len(lineage_edges)} lineage connections in custom_lineage.json")
+        else:
+            print(f"[InstallPipeline] No lineage connections to create")
+
+        # Step 4: Auto-regenerate assets so all components appear
         try:
             from ..services.asset_introspection_service import AssetIntrospectionService
             asset_introspection_service = AssetIntrospectionService()

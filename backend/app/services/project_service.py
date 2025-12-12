@@ -207,7 +207,7 @@ class ProjectService:
                     print(f"Successfully cloned repository to {analyze_dir}")
 
                     # Auto-detect project type
-                    project_type = self._detect_project_type(analyze_dir)
+                    project_type, dagster_project_dir = self._detect_project_type(analyze_dir)
                     print(f"🔍 Detected project type: {project_type}")
 
                     # Now set the proper directory_name
@@ -217,14 +217,29 @@ class ProjectService:
                     project.directory_name = f"project_{project.id.split('-')[0]}_{module_name}"
 
                     if project_type == "dagster":
-                        print(f"ℹ️  Detected existing Dagster project - using as-is")
+                        print(f"ℹ️  Detected existing Dagster project - importing full repo")
                         is_existing_dagster_project = True
 
-                        # Move the cloned Dagster project to final location
+                        # Always move the entire repo (not just the subdirectory) so user can modify and push back
+                        # This preserves the full repo structure including any dbt projects, docs, etc.
                         project_dir = self._get_project_dir(project)
-                        print(f"📁 Moving Dagster project to {project_dir}")
+                        print(f"📁 Moving entire repository from {analyze_dir} to {project_dir}")
                         shutil.move(str(analyze_dir), str(project_dir))
-                        print(f"✅ Dagster project moved to {project_dir}")
+                        print(f"✅ Repository moved to {project_dir}")
+
+                        # If Dagster code is in a subdirectory, store it in project metadata
+                        if dagster_project_dir and dagster_project_dir != analyze_dir:
+                            subdir_name = dagster_project_dir.name
+                            project.dagster_package_subdir = subdir_name
+                            print(f"ℹ️  Dagster code located in subdirectory: {subdir_name}/")
+                            print(f"   Stored in project metadata for dependency installation")
+
+                            # Patch pyproject.toml to add [tool.dg] configuration if missing
+                            dagster_subdir_path = project_dir / subdir_name
+                            self._patch_pyproject_for_dg(dagster_subdir_path, subdir_name)
+                        else:
+                            # Patch pyproject.toml at root level
+                            self._patch_pyproject_for_dg(project_dir, project_dir.name)
 
                         # Save project metadata
                         self._save_project(project)
@@ -1214,6 +1229,11 @@ if custom_lineage_edges:
 
     def _update_project_dependencies(self, project: Project):
         """Update pyproject.toml with dependencies for all project components."""
+        # Skip for imported Dagster projects - they manage their own dependencies
+        if project.dagster_package_subdir:
+            print(f"⏭️  Skipping dependency update for imported Dagster project (code in {project.dagster_package_subdir}/)")
+            return
+
         project_dir = self._get_project_dir(project)
         pyproject_path = project_dir / "pyproject.toml"
 
@@ -1273,6 +1293,11 @@ if custom_lineage_edges:
 
     def _install_project_dependencies(self, project: Project):
         """Install dependencies into the project's virtualenv."""
+        # Skip for imported Dagster projects - they manage their own dependencies
+        if project.dagster_package_subdir:
+            print(f"⏭️  Skipping dependency installation for imported Dagster project (code in {project.dagster_package_subdir}/)")
+            return
+
         project_dir = self._get_project_dir(project).resolve()
         venv_dir = project_dir / ".venv"
 
@@ -1609,6 +1634,89 @@ if custom_lineage_edges:
         log(f"📦 UV cache: ~/.cache/uv/ (730+ packages cached)")
 
         try:
+            # For imported Dagster projects with subdirectory structure, handle differently
+            if project.is_imported and project.dagster_package_subdir:
+                log(f"ℹ️  Detected imported Dagster project with package in subdirectory: {project.dagster_package_subdir}/")
+
+                # Create venv at project root
+                venv_dir = project_dir / ".venv"
+                if not venv_dir.exists():
+                    log(f"📦 Creating virtual environment at {venv_dir}...")
+                    import subprocess
+                    result = subprocess.run(
+                        ["/Users/ericthomas/.local/bin/uv", "venv", ".venv"],
+                        cwd=str(project_dir),
+                        capture_output=True,
+                        text=True
+                    )
+                    if result.returncode != 0:
+                        raise subprocess.CalledProcessError(result.returncode, result.args, result.stdout, result.stderr)
+                    log(f"✅ Virtual environment created")
+
+                # Install dagster-dg-cli and dagster-dg-core (provides the dg CLI)
+                log(f"📦 Step 1/3: Installing dagster-dg-cli and dagster-dg-core...")
+                import subprocess
+                import time
+
+                # Use uv pip install with --python flag
+                venv_python = str((venv_dir / "bin" / "python3").absolute())
+                result = subprocess.run(
+                    ["/Users/ericthomas/.local/bin/uv", "pip", "install", "--python", venv_python, "dagster-dg-cli", "dagster-dg-core"],
+                    cwd=str(project_dir),
+                    capture_output=True,
+                    text=True
+                )
+                if result.returncode != 0:
+                    log(f"❌ Failed to install dagster-dg-cli: {result.stderr}")
+                    raise subprocess.CalledProcessError(result.returncode, result.args, result.stdout, result.stderr)
+                log(f"✅ dagster-dg-cli installed")
+
+                # Install the project from subdirectory (includes all dependencies)
+                log(f"📦 Step 2/3: Installing project and dependencies from {project.dagster_package_subdir}/...")
+                install_dir = project_dir / project.dagster_package_subdir
+
+                start_time = time.time()
+                # Use --python flag to target the venv (same approach as Steps 1 and 3)
+                process = subprocess.Popen(
+                    ["/Users/ericthomas/.local/bin/uv", "pip", "install", "--python", venv_python, "-e", ".[dev]"],
+                    cwd=str(install_dir),
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    bufsize=1,
+                )
+
+                for line in process.stdout:
+                    line = line.rstrip()
+                    if line:
+                        output_lines.append(f"   {line}")
+                        _dependency_status[project.id]['output'] = '\n'.join(output_lines)
+
+                process.wait(timeout=300)
+                elapsed = time.time() - start_time
+                log(f"✅ Project and dependencies installed in {elapsed:.1f}s")
+
+                if process.returncode != 0:
+                    raise subprocess.CalledProcessError(process.returncode, process.args)
+
+                # Step 3: Install core Dagster packages explicitly with correct versions
+                log(f"📦 Step 3/3: Installing core Dagster packages...")
+                venv_python = str((venv_dir / "bin" / "python3").absolute())
+                result = subprocess.run(
+                    ["/Users/ericthomas/.local/bin/uv", "pip", "install", "--python", venv_python,
+                     "dagster", "dagster-webserver", "dagster-cloud", "dagster-dbt"],
+                    cwd=str(project_dir),
+                    capture_output=True,
+                    text=True
+                )
+                if result.returncode != 0:
+                    log(f"⚠️  Warning: Failed to install some Dagster packages: {result.stderr}")
+                else:
+                    log(f"✅ Core Dagster packages installed")
+
+                log("✅ Project setup complete (dg CLI available)")
+                return '\n'.join(output_lines)
+
             # First install dagster-dbt and the detected dbt adapter if we have dbt components
             # Check for both standard and custom dbt components
             has_dbt = any(
@@ -1757,13 +1865,21 @@ if custom_lineage_edges:
             log("⏳ This allows `dg list defs` to import the project module...")
             _dependency_status[project.id]['output'] = '\n'.join(output_lines)
 
+            # Determine install directory - use subdirectory if Dagster package is there
+            install_dir = project_dir
+            venv_path = ".venv"
+            if project.dagster_package_subdir:
+                install_dir = project_dir / project.dagster_package_subdir
+                venv_path = "../.venv"  # Point back to parent's venv
+                log(f"ℹ️  Installing from subdirectory: {project.dagster_package_subdir}/")
+
             # Use subprocess.Popen for real-time output streaming
             import time
             start_time = time.time()
             # Use UV directly (not uvx) for much faster performance
             process = subprocess.Popen(
-                ["bash", "-c", f"UV_PROJECT_ENVIRONMENT=.venv /Users/ericthomas/.local/bin/uv pip install -e ."],
-                cwd=str(project_dir),
+                ["bash", "-c", f"UV_PROJECT_ENVIRONMENT={venv_path} /Users/ericthomas/.local/bin/uv pip install -e ."],
+                cwd=str(install_dir),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
@@ -1974,6 +2090,11 @@ if custom_lineage_edges:
 
         print(f"\n[_generate_component_yaml_files] ====== START ======", flush=True)
         sys.stdout.flush()
+
+        # Skip YAML generation for imported Dagster projects - they have their own structure
+        if project.dagster_package_subdir:
+            print(f"⏭️  Skipping component YAML generation for imported Dagster project (code in {project.dagster_package_subdir}/)")
+            return
 
         # First ensure component classes are available
         self._copy_component_classes_to_project(project)
@@ -2268,6 +2389,11 @@ if custom_lineage_edges:
         from pathlib import Path
         from collections import defaultdict
 
+        # Skip code generation for imported Dagster projects - they have their own structure
+        if project.dagster_package_subdir:
+            print(f"⏭️  Skipping definitions.py generation for imported Dagster project (code in {project.dagster_package_subdir}/)")
+            return
+
         project_dir = self._get_project_dir(project)
         module_name = project.directory_name.replace("-", "_")
         module_dir = project_dir / "src" / module_name
@@ -2417,6 +2543,52 @@ if customizations_path.exists():
             f.write(definitions_content)
         print(f"✅ Generated definitions.py with asset customization support")
 
+    def _patch_pyproject_for_dg(self, project_path: Path, root_module: str):
+        """Patch pyproject.toml to add [tool.dg] configuration if missing.
+
+        Args:
+            project_path: Path to the directory containing pyproject.toml
+            root_module: Name of the root Python module (e.g., 'jaffle_shop')
+        """
+        pyproject_file = project_path / "pyproject.toml"
+        if not pyproject_file.exists():
+            print(f"⚠️  pyproject.toml not found at {pyproject_file}, skipping dg patch")
+            return
+
+        try:
+            import toml
+            config = toml.load(pyproject_file)
+
+            # Check if [tool.dg] already exists
+            if "tool" in config and "dg" in config["tool"]:
+                print(f"✓ [tool.dg] already exists in pyproject.toml")
+                return
+
+            # Add [tool.dg] configuration
+            if "tool" not in config:
+                config["tool"] = {}
+
+            config["tool"]["dg"] = {
+                "directory_type": "project"
+            }
+
+            # Add [tool.dg.project] with root_module
+            config["tool"]["dg"]["project"] = {
+                "root_module": root_module
+            }
+
+            # Write back to file
+            with open(pyproject_file, 'w') as f:
+                toml.dump(config, f)
+
+            print(f"✅ Patched pyproject.toml with [tool.dg] configuration")
+            print(f"   - directory_type = \"project\"")
+            print(f"   - root_module = \"{root_module}\"")
+
+        except Exception as e:
+            print(f"⚠️  Failed to patch pyproject.toml: {e}")
+            # Non-fatal error - continue with project creation
+
     def _detect_dbt_adapter(self, repo_dir: Path) -> str:
         """Detect the dbt adapter type from the cloned repo.
 
@@ -2472,17 +2644,16 @@ if customizations_path.exists():
         print("No adapter detected, defaulting to duckdb")
         return 'duckdb'
 
-    def _detect_project_type(self, repo_dir: Path) -> str:
+    def _detect_project_type(self, repo_dir: Path) -> tuple[str, Path | None]:
         """Detect the type of project in the given directory.
 
         Args:
             repo_dir: Path to the cloned repository directory
 
         Returns:
-            "multi-dbt" if multiple dbt projects are found in subdirectories
-            "dbt" if dbt_project.yml is found
-            "dagster" if it's an existing Dagster project (definitions.py or pyproject.toml with dagster)
-            "unknown" otherwise
+            Tuple of (project_type, dagster_project_dir) where:
+            - project_type: "multi-dbt", "dbt", "dagster", or "unknown"
+            - dagster_project_dir: Path to the root of the Dagster project if found, otherwise None
         """
         print(f"🔍 Detecting project type in {repo_dir}...")
 
@@ -2490,26 +2661,45 @@ if customizations_path.exists():
         dbt_projects = self._find_dbt_projects_recursive(repo_dir)
         if len(dbt_projects) > 1:
             print(f"   Found {len(dbt_projects)} dbt projects in subdirectories - this is a multi-dbt project")
-            return "multi-dbt"
+            return ("multi-dbt", None)
 
-        # Check for single dbt project in root
-        if (repo_dir / "dbt_project.yml").exists():
-            print(f"   Found dbt_project.yml - this is a dbt project")
-            return "dbt"
-
-        # Check for Dagster project - look for definitions.py
+        # Check for Dagster project BEFORE dbt - many Dagster projects contain dbt projects
+        # Check for definitions.py at root
         if (repo_dir / "definitions.py").exists():
             print(f"   Found definitions.py - this is a Dagster project")
-            return "dagster"
+            return ("dagster", repo_dir)
 
-        # Check for Dagster project - look in subdirectories for definitions.py
-        # (common pattern: repo/project_name/definitions.py)
+        # Check for Dagster project - look in subdirectories for definitions.py or pyproject.toml
+        # (common pattern: repo/project_name/definitions.py or repo/project_name/project_name/definitions.py)
         for subdir in repo_dir.iterdir():
-            if subdir.is_dir() and (subdir / "definitions.py").exists():
-                print(f"   Found definitions.py in {subdir.name}/ - this is a Dagster project")
-                return "dagster"
+            if subdir.is_dir():
+                # Check if this subdirectory has pyproject.toml with dagster (strongest signal)
+                subdir_pyproject = subdir / "pyproject.toml"
+                if subdir_pyproject.exists():
+                    try:
+                        content = subdir_pyproject.read_text()
+                        if "dagster" in content.lower():
+                            print(f"   Found 'dagster' in {subdir.name}/pyproject.toml - this is a Dagster project")
+                            return ("dagster", subdir)
+                    except Exception as e:
+                        pass
 
-        # Check pyproject.toml for dagster dependencies
+                # Check direct subdirectory for definitions.py
+                if (subdir / "definitions.py").exists():
+                    print(f"   Found definitions.py in {subdir.name}/ - this is a Dagster project")
+                    return ("dagster", subdir)
+
+                # Check nested subdirectory (e.g., jaffle_shop/jaffle_shop/definitions.py)
+                # But return the parent with pyproject.toml as the project root
+                try:
+                    for nested_subdir in subdir.iterdir():
+                        if nested_subdir.is_dir() and (nested_subdir / "definitions.py").exists():
+                            print(f"   Found definitions.py in {subdir.name}/{nested_subdir.name}/ - this is a Dagster project")
+                            return ("dagster", subdir)  # Return parent dir with pyproject.toml
+                except Exception:
+                    pass
+
+        # Check pyproject.toml at root for dagster dependencies
         pyproject_file = repo_dir / "pyproject.toml"
         if pyproject_file.exists():
             try:
@@ -2517,12 +2707,17 @@ if customizations_path.exists():
                 # Simple check - if "dagster" appears in dependencies
                 if "dagster" in content.lower():
                     print(f"   Found 'dagster' in pyproject.toml - this is a Dagster project")
-                    return "dagster"
+                    return ("dagster", repo_dir)
             except Exception as e:
                 print(f"   Could not read pyproject.toml: {e}")
 
+        # Only check for standalone dbt project AFTER confirming it's not a Dagster project
+        if (repo_dir / "dbt_project.yml").exists():
+            print(f"   Found dbt_project.yml - this is a dbt project")
+            return ("dbt", None)
+
         print(f"   No dbt or Dagster project markers found - unknown project type")
-        return "unknown"
+        return ("unknown", None)
 
     def _find_dbt_projects_recursive(self, repo_dir: Path, max_depth: int = 3) -> list[Path]:
         """Recursively search for dbt projects (dbt_project.yml files) in subdirectories.

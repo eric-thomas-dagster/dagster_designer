@@ -237,6 +237,50 @@ class FileService:
             "message": "Directory deleted successfully",
         }
 
+    def rename_file(
+        self, project_id: str, old_path: str, new_path: str
+    ) -> dict[str, Any]:
+        """
+        Rename a file or directory.
+
+        Args:
+            project_id: The project ID
+            old_path: Current path of the file/directory
+            new_path: New path for the file/directory
+
+        Returns:
+            Success message with old and new paths
+        """
+        project_path = self._get_project_path(project_id)
+        old_target = project_path / old_path
+        new_target = project_path / new_path
+
+        # Security checks
+        if not self._is_safe_path(project_path, old_target):
+            raise ValueError("Invalid old path: directory traversal detected")
+
+        if not self._is_safe_path(project_path, new_target):
+            raise ValueError("Invalid new path: directory traversal detected")
+
+        if not old_target.exists():
+            raise FileNotFoundError(f"File or directory not found: {old_path}")
+
+        if new_target.exists():
+            raise ValueError(f"Target path already exists: {new_path}")
+
+        # Create parent directories if they don't exist
+        new_target.parent.mkdir(parents=True, exist_ok=True)
+
+        # Perform the rename
+        old_target.rename(new_target)
+
+        return {
+            "project_id": project_id,
+            "old_path": old_path,
+            "new_path": new_path,
+            "message": "File renamed successfully",
+        }
+
     def execute_command(
         self, project_id: str, command: str, timeout: int = 30
     ) -> dict[str, Any]:

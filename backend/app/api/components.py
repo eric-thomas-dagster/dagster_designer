@@ -51,6 +51,19 @@ async def get_component(component_type: str, project_id: str | None = None):
                 component = comp
                 break
 
+    # If project_id not provided but component_type looks project-specific, try to extract project from type
+    if not project_id and '.' in component_type and 'components' in component_type:
+        # Extract directory name from component type like "project_xxx_yyy.components.foo.FooComponent"
+        parts = component_type.split('.')
+        if parts[0].startswith('project_'):
+            directory_name = parts[0]
+            # Find project by directory_name
+            from ..services.project_service import project_service
+            for proj in project_service.projects.values():
+                if proj.directory_name == directory_name:
+                    project_id = proj.id
+                    break
+
     if not component and project_id:
         # Check for installed community component
         from ..services.project_service import project_service
@@ -99,15 +112,30 @@ async def get_component(component_type: str, project_id: str | None = None):
                                     with open(manifest_file, 'r') as f:
                                         manifest_data = yaml.safe_load(f)
 
+                                # Transform schema format: convert "attributes" to "properties" for JSON Schema compatibility
+                                transformed_schema = {}
+                                if 'attributes' in schema_data:
+                                    transformed_schema['properties'] = schema_data['attributes']
+                                    # Extract required fields
+                                    required = []
+                                    for field_name, field_def in schema_data['attributes'].items():
+                                        if field_def.get('required'):
+                                            required.append(field_name)
+                                    if required:
+                                        transformed_schema['required'] = required
+                                else:
+                                    # If already in correct format, use as-is
+                                    transformed_schema = schema_data.get('schema', schema_data)
+
                                 from ..models.component import ComponentSchema
                                 return ComponentSchema(
-                                    name=manifest_data.get('name', component_id),
+                                    name=manifest_data.get('name', schema_data.get('name', component_id)),
                                     type=component_type,
-                                    category=manifest_data.get('category', 'unknown'),
+                                    category=manifest_data.get('category', schema_data.get('category', 'unknown')),
                                     module='community',
-                                    description=manifest_data.get('description', ''),
-                                    icon='package',
-                                    schema=schema_data
+                                    description=manifest_data.get('description', schema_data.get('description', '')),
+                                    icon=schema_data.get('icon', 'package'),
+                                    schema=transformed_schema
                                 )
                             except Exception as e:
                                 print(f"Error loading schema.json for {component_id}: {e}")

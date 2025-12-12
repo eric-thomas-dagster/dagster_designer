@@ -22,6 +22,12 @@ class CreateDirectoryRequest(BaseModel):
     pass  # Path comes from URL
 
 
+class RenameFileRequest(BaseModel):
+    """Request to rename a file or directory."""
+
+    new_path: str
+
+
 class ExecuteCommandRequest(BaseModel):
     """Request to execute a command."""
 
@@ -171,6 +177,32 @@ async def delete_directory(project_id: str, dir_path: str):
     except Exception as e:
         raise HTTPException(
             status_code=500, detail=f"Failed to delete directory: {str(e)}"
+        )
+
+
+@router.post("/rename/{project_id}/{old_path:path}")
+async def rename_file(project_id: str, old_path: str, request: RenameFileRequest):
+    """
+    Rename a file or directory.
+
+    Args:
+        project_id: The project ID
+        old_path: Current path of the file/directory
+        request: Request containing new path
+
+    Returns:
+        Success message with old and new paths
+    """
+    try:
+        result = file_service.rename_file(project_id, old_path, request.new_path)
+        return result
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(
+            status_code=500, detail=f"Failed to rename file: {str(e)}"
         )
 
 

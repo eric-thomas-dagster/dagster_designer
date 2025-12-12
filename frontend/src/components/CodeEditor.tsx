@@ -16,6 +16,8 @@ import {
   Trash2,
   X,
   Sparkles,
+  Edit,
+  Search,
 } from 'lucide-react';
 import { filesApi, type FileTreeNode } from '@/services/api';
 import { useProjectStore } from '@/hooks/useProject';
@@ -47,6 +49,10 @@ export function CodeEditor({ projectId, fileToOpen, onFileOpened }: CodeEditorPr
   const [aiPanelOpen, setAiPanelOpen] = useState(false);
   const [sidebarWidth, setSidebarWidth] = useState(256);
   const [isResizing, setIsResizing] = useState(false);
+  const [renamingPath, setRenamingPath] = useState<string | null>(null);
+  const [renameValue, setRenameValue] = useState('');
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; path: string; type: 'file' | 'directory' } | null>(null);
+  const [searchQuery, setSearchQuery] = useState('');
 
   const queryClient = useQueryClient();
 
@@ -262,6 +268,44 @@ export function CodeEditor({ projectId, fileToOpen, onFileOpened }: CodeEditorPr
     },
   });
 
+  const renameMutation = useMutation({
+    mutationFn: ({ projectId, oldPath, newPath }: { projectId: string; oldPath: string; newPath: string }) =>
+      filesApi.rename(projectId, oldPath, newPath),
+    onSuccess: (data, variables) => {
+      // Update open files if the renamed file was open
+      setOpenFiles((prev) =>
+        prev.map((f) => {
+          if (f.path === variables.oldPath) {
+            return { ...f, path: variables.newPath };
+          }
+          // Also update files that are in renamed directory
+          if (f.path.startsWith(variables.oldPath + '/')) {
+            const relativePath = f.path.substring(variables.oldPath.length + 1);
+            return { ...f, path: `${variables.newPath}/${relativePath}` };
+          }
+          return f;
+        })
+      );
+
+      // Update active file path if it was renamed
+      if (activeFilePath === variables.oldPath) {
+        setActiveFilePath(variables.newPath);
+      } else if (activeFilePath && activeFilePath.startsWith(variables.oldPath + '/')) {
+        const relativePath = activeFilePath.substring(variables.oldPath.length + 1);
+        setActiveFilePath(`${variables.newPath}/${relativePath}`);
+      }
+
+      refetchFileTree();
+      setRenamingPath(null);
+      setRenameValue('');
+    },
+    onError: (error: any) => {
+      alert(`Failed to rename: ${error.response?.data?.detail || error.message}`);
+      setRenamingPath(null);
+      setRenameValue('');
+    },
+  });
+
   const activeFile = openFiles.find((f) => f.path === activeFilePath);
 
   const handleFileClick = (filePath: string) => {
@@ -347,6 +391,43 @@ export function CodeEditor({ projectId, fileToOpen, onFileOpened }: CodeEditorPr
       projectId,
       dirPath,
     });
+  };
+
+  const handleStartRename = (path: string) => {
+    const fileName = path.split('/').pop() || '';
+    setRenamingPath(path);
+    setRenameValue(fileName);
+    setContextMenu(null);
+  };
+
+  const handleRenameSubmit = (oldPath: string) => {
+    if (!renameValue.trim() || renameValue === oldPath.split('/').pop()) {
+      setRenamingPath(null);
+      setRenameValue('');
+      return;
+    }
+
+    // Calculate new path (replace only the file/folder name, keep the directory path)
+    const pathParts = oldPath.split('/');
+    pathParts[pathParts.length - 1] = renameValue.trim();
+    const newPath = pathParts.join('/');
+
+    renameMutation.mutate({
+      projectId,
+      oldPath,
+      newPath,
+    });
+  };
+
+  const handleRenameCancel = () => {
+    setRenamingPath(null);
+    setRenameValue('');
+  };
+
+  const handleContextMenu = (e: React.MouseEvent, path: string, type: 'file' | 'directory') => {
+    e.preventDefault();
+    e.stopPropagation();
+    setContextMenu({ x: e.clientX, y: e.clientY, path, type });
   };
 
   const handleAskDagsterAI = () => {
@@ -446,20 +527,99 @@ export function CodeEditor({ projectId, fileToOpen, onFileOpened }: CodeEditorPr
     };
   }, [isResizing]);
 
+  // Close context menu when clicking elsewhere
+  useEffect(() => {
+    const handleClick = () => setContextMenu(null);
+    if (contextMenu) {
+      document.addEventListener('click', handleClick);
+      return () => document.removeEventListener('click', handleClick);
+    }
+  }, [contextMenu]);
+
+  // Handle F2 keyboard shortcut for renaming (when file tree has focus)
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'F2' && activeFilePath && !renamingPath) {
+        e.preventDefault();
+        handleStartRename(activeFilePath);
+      } else if (e.key === 'Escape' && renamingPath) {
+        e.preventDefault();
+        handleRenameCancel();
+      }
+    };
+
+    document.addEventListener('keydown', handleKeyDown);
+    return () => document.removeEventListener('keydown', handleKeyDown);
+  }, [activeFilePath, renamingPath]);
+
+  // Auto-expand directories when searching
+  useEffect(() => {
+    if (!fileTree || !searchQuery.trim()) return;
+
+    const collectAllPaths = (nodes: FileTreeNode[], parentPath: string = ''): string[] => {
+      const paths: string[] = [];
+      nodes.forEach(node => {
+        const fullPath = parentPath ? `${parentPath}/${node.name}` : node.name;
+        if (node.type === 'directory') {
+          paths.push(fullPath);
+          if (node.children) {
+            paths.push(...collectAllPaths(node.children, fullPath));
+          }
+        }
+      });
+      return paths;
+    };
+
+    // Expand all directories when searching
+    const allPaths = collectAllPaths(fileTree.tree.children);
+    setExpandedDirs(new Set(allPaths));
+  }, [searchQuery, fileTree]);
+
+  // Filter file tree based on search query
+  const filterFileTree = (nodes: FileTreeNode[]): FileTreeNode[] => {
+    if (!searchQuery.trim()) return nodes;
+
+    const query = searchQuery.toLowerCase();
+
+    return nodes.reduce<FileTreeNode[]>((acc, node) => {
+      if (node.type === 'directory') {
+        // Recursively filter children
+        const filteredChildren = node.children ? filterFileTree(node.children) : [];
+
+        // Include directory if name matches or if it has matching children
+        if (node.name.toLowerCase().includes(query) || filteredChildren.length > 0) {
+          acc.push({
+            ...node,
+            children: filteredChildren
+          });
+        }
+      } else {
+        // Include file if name matches
+        if (node.name.toLowerCase().includes(query)) {
+          acc.push(node);
+        }
+      }
+      return acc;
+    }, []);
+  };
+
   const renderFileTree = (nodes: FileTreeNode[], parentPath: string = '') => {
     return nodes.map((node) => {
       const fullPath = parentPath ? `${parentPath}/${node.name}` : node.name;
       const isExpanded = expandedDirs.has(fullPath);
 
       if (node.type === 'directory') {
+        const isRenaming = renamingPath === fullPath;
+
         return (
           <div key={fullPath} className="select-none">
             <div
               className="flex items-center justify-between group px-2 py-1 hover:bg-gray-100"
+              onContextMenu={(e) => handleContextMenu(e, fullPath, 'directory')}
             >
               <div
                 className="flex items-center space-x-1 flex-1 min-w-0 cursor-pointer"
-                onClick={() => handleDirToggle(fullPath)}
+                onClick={() => !isRenaming && handleDirToggle(fullPath)}
               >
                 {isExpanded ? (
                   <ChevronDown className="w-3 h-3 text-gray-500 flex-shrink-0" />
@@ -471,18 +631,49 @@ export function CodeEditor({ projectId, fileToOpen, onFileOpened }: CodeEditorPr
                 ) : (
                   <Folder className="w-4 h-4 text-blue-500 flex-shrink-0" />
                 )}
-                <span className="text-sm text-gray-700 truncate">{node.name}</span>
+                {isRenaming ? (
+                  <input
+                    type="text"
+                    value={renameValue}
+                    onChange={(e) => setRenameValue(e.target.value)}
+                    onBlur={() => handleRenameSubmit(fullPath)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        handleRenameSubmit(fullPath);
+                      } else if (e.key === 'Escape') {
+                        handleRenameCancel();
+                      }
+                    }}
+                    autoFocus
+                    className="text-sm text-gray-700 px-1 py-0 border border-blue-500 rounded focus:outline-none focus:ring-1 focus:ring-blue-500"
+                    onClick={(e) => e.stopPropagation()}
+                  />
+                ) : (
+                  <span className="text-sm text-gray-700 truncate">{node.name}</span>
+                )}
               </div>
-              <button
-                onClick={(e) => {
-                  e.stopPropagation();
-                  handleDeleteDirectory(fullPath);
-                }}
-                className="flex-shrink-0 p-1 hover:bg-red-100 rounded opacity-60 hover:opacity-100 transition-opacity"
-                title="Delete folder and all contents"
-              >
-                <Trash2 className="w-3 h-3 text-red-600" />
-              </button>
+              <div className="flex items-center space-x-1">
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    handleStartRename(fullPath);
+                  }}
+                  className="flex-shrink-0 p-1 hover:bg-blue-100 rounded opacity-60 hover:opacity-100 transition-opacity"
+                  title="Rename folder"
+                >
+                  <Edit className="w-3 h-3 text-blue-600" />
+                </button>
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    handleDeleteDirectory(fullPath);
+                  }}
+                  className="flex-shrink-0 p-1 hover:bg-red-100 rounded opacity-60 hover:opacity-100 transition-opacity"
+                  title="Delete folder and all contents"
+                >
+                  <Trash2 className="w-3 h-3 text-red-600" />
+                </button>
+              </div>
             </div>
             {isExpanded && node.children && (
               <div className="ml-4">{renderFileTree(node.children, fullPath)}</div>
@@ -491,27 +682,61 @@ export function CodeEditor({ projectId, fileToOpen, onFileOpened }: CodeEditorPr
         );
       }
 
+      const isRenaming = renamingPath === node.path;
+
       return (
         <div
           key={fullPath}
           className={`flex items-center justify-between group px-2 py-1 ml-4 hover:bg-gray-100 ${
             activeFilePath === node.path ? 'bg-blue-50' : ''
           }`}
+          onContextMenu={(e) => handleContextMenu(e, node.path, 'file')}
         >
-          <div className="flex items-center space-x-1 flex-1 min-w-0 cursor-pointer" onClick={() => handleFileClick(node.path)}>
+          <div className="flex items-center space-x-1 flex-1 min-w-0 cursor-pointer" onClick={() => !isRenaming && handleFileClick(node.path)}>
             <FileCode className="w-4 h-4 text-gray-400 flex-shrink-0" />
-            <span className="text-sm text-gray-700 truncate">{node.name}</span>
+            {isRenaming ? (
+              <input
+                type="text"
+                value={renameValue}
+                onChange={(e) => setRenameValue(e.target.value)}
+                onBlur={() => handleRenameSubmit(node.path)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    handleRenameSubmit(node.path);
+                  } else if (e.key === 'Escape') {
+                    handleRenameCancel();
+                  }
+                }}
+                autoFocus
+                className="text-sm text-gray-700 px-1 py-0 border border-blue-500 rounded focus:outline-none focus:ring-1 focus:ring-blue-500"
+                onClick={(e) => e.stopPropagation()}
+              />
+            ) : (
+              <span className="text-sm text-gray-700 truncate">{node.name}</span>
+            )}
           </div>
-          <button
-            onClick={(e) => {
-              e.stopPropagation();
-              handleDeleteFile(node.path);
-            }}
-            className="flex-shrink-0 p-1 hover:bg-red-100 rounded opacity-60 hover:opacity-100 transition-opacity"
-            title="Delete file"
-          >
-            <Trash2 className="w-3 h-3 text-red-600" />
-          </button>
+          <div className="flex items-center space-x-1">
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                handleStartRename(node.path);
+              }}
+              className="flex-shrink-0 p-1 hover:bg-blue-100 rounded opacity-60 hover:opacity-100 transition-opacity"
+              title="Rename file"
+            >
+              <Edit className="w-3 h-3 text-blue-600" />
+            </button>
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                handleDeleteFile(node.path);
+              }}
+              className="flex-shrink-0 p-1 hover:bg-red-100 rounded opacity-60 hover:opacity-100 transition-opacity"
+              title="Delete file"
+            >
+              <Trash2 className="w-3 h-3 text-red-600" />
+            </button>
+          </div>
         </div>
       );
     });
@@ -572,8 +797,32 @@ export function CodeEditor({ projectId, fileToOpen, onFileOpened }: CodeEditorPr
             </button>
           </div>
         </div>
+
+        {/* Search Input */}
+        <div className="px-2 py-2 border-b border-gray-200">
+          <div className="relative">
+            <Search className="absolute left-2 top-1/2 transform -translate-y-1/2 w-4 h-4 text-gray-400" />
+            <input
+              type="text"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              placeholder="Search files..."
+              className="w-full pl-8 pr-3 py-1.5 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+            />
+            {searchQuery && (
+              <button
+                onClick={() => setSearchQuery('')}
+                className="absolute right-2 top-1/2 transform -translate-y-1/2 text-gray-400 hover:text-gray-600"
+                title="Clear search"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            )}
+          </div>
+        </div>
+
         <div className="flex-1 overflow-y-auto">
-          {fileTree && renderFileTree(fileTree.tree.children)}
+          {fileTree && renderFileTree(filterFileTree(fileTree.tree.children))}
         </div>
 
         {/* Resize Handle */}
@@ -622,9 +871,24 @@ export function CodeEditor({ projectId, fileToOpen, onFileOpened }: CodeEditorPr
         {/* Editor Controls */}
         {activeFile && (
           <div className="flex items-center justify-between px-4 py-3 border-b border-gray-200 bg-gray-50">
-            <div className="flex items-center space-x-2">
-              <FileCode className="w-4 h-4 text-gray-500" />
-              <span className="text-sm text-gray-700">{activeFile.path}</span>
+            {/* Breadcrumbs */}
+            <div className="flex items-center space-x-2 flex-1 min-w-0">
+              <FileCode className="w-4 h-4 text-gray-500 flex-shrink-0" />
+              <div className="flex items-center space-x-1 overflow-x-auto">
+                {activeFile.path.split('/').map((part, index, arr) => (
+                  <div key={index} className="flex items-center space-x-1">
+                    <span className={`text-sm ${index === arr.length - 1 ? 'text-gray-900 font-medium' : 'text-gray-500'}`}>
+                      {part}
+                    </span>
+                    {index < arr.length - 1 && (
+                      <ChevronRight className="w-3 h-3 text-gray-400 flex-shrink-0" />
+                    )}
+                  </div>
+                ))}
+                {activeFile.isDirty && (
+                  <span className="text-sm text-gray-500 ml-1">•</span>
+                )}
+              </div>
             </div>
             <div className="flex items-center space-x-2">
               <button
@@ -867,6 +1131,37 @@ export function CodeEditor({ projectId, fileToOpen, onFileOpened }: CodeEditorPr
             width="100%"
             height="100%"
           ></scout-copilot>
+        </div>
+      )}
+
+      {/* Context Menu */}
+      {contextMenu && (
+        <div
+          className="fixed bg-white border border-gray-300 rounded-md shadow-lg py-1 z-50"
+          style={{ top: contextMenu.y, left: contextMenu.x }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <button
+            onClick={() => handleStartRename(contextMenu.path)}
+            className="w-full px-4 py-2 text-sm text-left hover:bg-gray-100 flex items-center space-x-2"
+          >
+            <Edit className="w-4 h-4" />
+            <span>Rename</span>
+          </button>
+          <button
+            onClick={() => {
+              setContextMenu(null);
+              if (contextMenu.type === 'file') {
+                handleDeleteFile(contextMenu.path);
+              } else {
+                handleDeleteDirectory(contextMenu.path);
+              }
+            }}
+            className="w-full px-4 py-2 text-sm text-left hover:bg-gray-100 flex items-center space-x-2 text-red-600"
+          >
+            <Trash2 className="w-4 h-4" />
+            <span>Delete</span>
+          </button>
         </div>
       )}
     </div>

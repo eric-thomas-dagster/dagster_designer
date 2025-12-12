@@ -248,17 +248,23 @@ class AssetIntrospectionService:
             try:
                 print(f"[Asset Introspection] Running dg list defs ASYNC for project {project.id}...", flush=True)
 
-                # If using project venv, we need to activate it first
+                # Determine working directory - use subdirectory if Dagster package is there
+                work_dir = project_dir
+                if project.dagster_package_subdir:
+                    work_dir = project_dir / project.dagster_package_subdir
+                    print(f"[Asset Introspection] Running from subdirectory: {project.dagster_package_subdir}/", flush=True)
+
+                # If using project venv, we need to set PATH to include venv bin
                 if dg_path.exists():
-                    # Run with venv activated using bash -c (use absolute paths for both)
-                    dg_abs_path = str(dg_path.resolve())
-                    cmd = f"source {str(venv_dir.resolve())}/bin/activate && {dg_abs_path} list defs --json"
+                    # Use export PATH to ensure dbt and other tools are available
+                    venv_bin = str((venv_dir / "bin").resolve())
+                    cmd = f"export PATH=\"{venv_bin}:$PATH\" && dg list defs --json"
 
                     proc = await asyncio.create_subprocess_shell(
                         cmd,
                         stdout=asyncio.subprocess.PIPE,
                         stderr=asyncio.subprocess.PIPE,
-                        cwd=str(project_dir.resolve())
+                        cwd=str(work_dir.resolve())
                     )
                 else:
                     # Fallback to system dg (already in PATH)
@@ -266,7 +272,7 @@ class AssetIntrospectionService:
                         dg_cmd, "list", "defs", "--json",
                         stdout=asyncio.subprocess.PIPE,
                         stderr=asyncio.subprocess.PIPE,
-                        cwd=str(project_dir.resolve())
+                        cwd=str(work_dir.resolve())
                     )
 
                 # Wait for completion with timeout
@@ -694,6 +700,9 @@ class AssetIntrospectionService:
                 io_input_type = None
                 io_output_type = None
                 io_input_required = False
+                io_expected_columns = None
+                io_output_columns = None
+                io_compatible_upstream = None
 
                 if component_type and components_dir:
                     # Extract component folder name from component_type

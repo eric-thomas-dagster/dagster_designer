@@ -293,7 +293,7 @@ async def clone_repo(project_id: str, request: CloneRepoRequest):
 
 
 @router.post("/{project_id}/regenerate-assets", response_model=Project)
-async def regenerate_assets(project_id: str, recalculate_layout: bool = False):
+async def regenerate_assets(project_id: str, recalculate_layout: bool = True):
     """Regenerate assets for a project by running dg list defs.
 
     This introspects the Dagster components and updates the project graph
@@ -301,7 +301,7 @@ async def regenerate_assets(project_id: str, recalculate_layout: bool = False):
 
     Args:
         project_id: The project ID
-        recalculate_layout: If True, recalculates all node positions instead of preserving existing ones
+        recalculate_layout: If True, recalculates all node positions instead of preserving existing ones (default: True for proper left-to-right layout)
     """
     import sys
     print(f"\n[regenerate_assets] ====== START ======", flush=True)

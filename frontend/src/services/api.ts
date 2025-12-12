@@ -360,6 +360,14 @@ export const filesApi = {
     return response.data;
   },
 
+  rename: async (projectId: string, oldPath: string, newPath: string): Promise<{ message: string; old_path: string; new_path: string }> => {
+    const response = await api.post<{ message: string; old_path: string; new_path: string }>(
+      `/files/rename/${projectId}/${oldPath}`,
+      { new_path: newPath }
+    );
+    return response.data;
+  },
+
   execute: async (
     projectId: string,
     command: string,
