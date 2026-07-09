@@ -216,11 +216,21 @@ def _keyword_prefilter(components: list[dict[str, Any]], task: str, cap: int = 2
     return picked
 
 
-def _catalog_lines(components: list[dict[str, Any]], description_max: int = 180) -> list[str]:
+def _catalog_lines(components: list[dict[str, Any]], description_max: int = 240) -> list[str]:
     """Render the filtered catalog into terse lines for the prompt.
 
     Includes agent_hints (inputs/outputs/side_effects/anti_uses) inline when
     present so the planner has explicit guidance on when to pick a component.
+
+    Truncation caps are per-field:
+      - `outputs` is the most information-dense field for many components
+        (e.g. synthetic_data_generator lists 5 schemas here, ~550 chars).
+        Cap of 120 chars used to slice mid-schema and the planner would
+        hallucinate column names — bumped to 900.
+      - `side_effects` / `anti_uses` often carry critical constraints
+        ("group_by columns MUST exist in upstream") — bumped to 600.
+      - `inputs` bumped to 400.
+    Total prompt size grows but stays well under Sonnet/GPT-4o's context.
     """
     lines: list[str] = []
     for c in components:
@@ -230,13 +240,13 @@ def _catalog_lines(components: list[dict[str, Any]], description_max: int = 180)
         parts = [f'- id="{c["id"]}" category={cat} tags=[{tags}]', desc]
         hints = c.get("agent_hints") or {}
         if hints.get("inputs"):
-            parts.append(f"in: {str(hints['inputs'])[:120]}")
+            parts.append(f"in: {str(hints['inputs'])[:400]}")
         if hints.get("outputs"):
-            parts.append(f"out: {str(hints['outputs'])[:120]}")
+            parts.append(f"out: {str(hints['outputs'])[:900]}")
         if hints.get("side_effects"):
-            parts.append(f"use_when: {str(hints['side_effects'])[:120]}")
+            parts.append(f"use_when: {str(hints['side_effects'])[:600]}")
         if hints.get("anti_uses"):
-            parts.append(f"avoid_when: {str(hints['anti_uses'])[:120]}")
+            parts.append(f"avoid_when: {str(hints['anti_uses'])[:600]}")
         lines.append(" :: ".join(parts))
     return lines
 
@@ -284,6 +294,18 @@ SYSTEM_PROMPT = (
     "  (e.g. `valid == True`, `amount > 0`).\n"
     "- If a required field's value is truly not derivable from the task, use "
     "  `TODO_<field_name>` so the incomplete-asset UI can surface it.\n"
+    "\n"
+    "COLUMN REFERENCES (critical):\n"
+    "- Every column name your config references (group_by, sort_by, filter, "
+    "  agg source cols, calculated_columns operands, etc.) MUST appear in the "
+    "  upstream component's `out:` schema hint above. Do NOT guess.\n"
+    "- If the upstream is a multi-schema component (like synthetic_data_generator "
+    "  with `schema_type`), USE the schema listed under the picked schema_type — "
+    "  not columns from a different schema. Example: schema_type=orders emits "
+    "  `total` (not `amount`); schema_type=transactions emits `amount`.\n"
+    "- If the exact column you need is not present in the upstream's outputs, "
+    "  either (a) pick a different column that IS present, or (b) chain a "
+    "  formula/calculated-column step first that produces it.\n"
 )
 
 
