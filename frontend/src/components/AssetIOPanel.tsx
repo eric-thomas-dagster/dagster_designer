@@ -144,22 +144,23 @@ export function AssetIOPanel({
             </button>
           </div>
 
-          {/* Sample-size selector — only shown in Profile view. Bigger
-              samples give more accurate distributions but take longer. */}
-          {activeView === 'profile' && (
-            <select
-              value={sampleLimit}
-              onChange={(e) => setSampleLimit(parseInt(e.target.value, 10))}
-              className="text-[11px] border border-gray-300 rounded px-1 py-0.5 mr-1"
-              title="Sample size for the profile"
-            >
-              <option value={100}>100 rows</option>
-              <option value={500}>500 rows</option>
-              <option value={1000}>1k rows</option>
-              <option value={5000}>5k rows</option>
-              <option value={10000}>10k rows</option>
-            </select>
-          )}
+          {/* Sample-size selector — always visible so buttons don't shift
+              when toggling between Table and Profile. Bigger samples give
+              more accurate distributions but take longer to load. Also
+              useful in Table mode: the mini-profile strips in the column
+              headers get more data to work with. */}
+          <select
+            value={sampleLimit}
+            onChange={(e) => setSampleLimit(parseInt(e.target.value, 10))}
+            className="text-[11px] border border-gray-300 rounded px-1 py-0.5 mr-1"
+            title="Sample size fetched from the backend"
+          >
+            <option value={100}>100 rows</option>
+            <option value={500}>500 rows</option>
+            <option value={1000}>1k rows</option>
+            <option value={5000}>5k rows</option>
+            <option value={10000}>10k rows</option>
+          </select>
 
           <button
             onClick={() => onOpenPreview(currentAssetKey, 'transform')}
@@ -368,7 +369,9 @@ function PreviewTable({
     );
   }
 
-  const previewRows = data.data.slice(0, 50);
+  // Show whatever was sampled — the user picked the size via the header
+  // selector. The panel is scrollable so bigger samples are fine.
+  const previewRows = data.data;
 
   return (
     <div className="p-2">
