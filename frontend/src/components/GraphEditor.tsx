@@ -27,6 +27,7 @@ import { AssetNode } from './nodes/AssetNode';
 import { Launchpad } from './Launchpad';
 import { DataPreviewModal } from './DataPreviewModal';
 import { AssetIOPanel } from './AssetIOPanel';
+import { DagsterAIBar } from './DagsterAIBar';
 import { notify } from './Notifications';
 import { useProjectStore } from '@/hooks/useProject';
 import { projectsApi, componentsApi } from '@/services/api';
@@ -1921,6 +1922,9 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick }: GraphEditorProps) 
         <Controls />
         <MiniMap />
       </ReactFlow>
+      {/* Docked at the bottom of the graph pane (above the I/O panel when
+          it's open) so the AI bar never covers input/output previews. */}
+      <DagsterAIBar />
       </div>
 
       {/* Docked I/O preview panel — appears when the user selects an asset

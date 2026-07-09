@@ -16,7 +16,6 @@ import { ResourcesManager } from './components/ResourcesManager';
 import { PipelineBuilder } from './components/PipelineBuilder';
 import { DagsterStartupModal } from './components/DagsterStartupModal';
 import { DataPreviewModal } from './components/DataPreviewModal';
-import { DagsterAIBar } from './components/DagsterAIBar';
 import { DagsterCloudChip } from './components/DagsterCloudChip';
 import { NotificationHost, notify, confirmDialog } from './components/Notifications';
 import { useProjectStore } from './hooks/useProject';
@@ -861,7 +860,6 @@ function App() {
                   setPrimitiveToOpen({ category, name });
                 }}
               />
-              <DagsterAIBar />
             </main>
 
             {/* Property Panel */}
