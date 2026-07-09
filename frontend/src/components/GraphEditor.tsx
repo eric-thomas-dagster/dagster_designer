@@ -949,23 +949,42 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick }: GraphEditorProps) 
     };
     Array.from(buckets.keys()).forEach(computeGroup);
 
-    // Bucket groups by column (layer) and lay out.
+    // Bucket groups by column (layer).
     const groupsByCol = new Map<number, string[]>();
     for (const g of buckets.keys()) {
       const l = groupLayer.get(g) ?? 0;
       if (!groupsByCol.has(l)) groupsByCol.set(l, []);
       groupsByCol.get(l)!.push(g);
     }
-    for (const arr of groupsByCol.values()) arr.sort();
-
-    // Compute each column's total width (max group width in that column).
     const cols = Array.from(groupsByCol.keys()).sort((a, b) => a - b);
+    // Groups with a downstream cross-group edge come first — this preserves
+    // dependency alignment across columns so an edge from col N's last group
+    // doesn't have to cross col N's first group to reach col N+1.
+    for (const arr of groupsByCol.values()) {
+      arr.sort((a, b) => {
+        const aHasDown = Array.from(groupPreds.entries()).some(([_g, preds]) => preds.has(a));
+        const bHasDown = Array.from(groupPreds.entries()).some(([_g, preds]) => preds.has(b));
+        if (aHasDown !== bHasDown) return aHasDown ? -1 : 1;
+        return a.localeCompare(b);
+      });
+    }
+
+    // Equalize width across each column: every group in column N is padded
+    // to the widest group in that column. Ensures every source node's right
+    // edge sits at the same X as the column's boundary, so edges to N+1 exit
+    // cleanly into inter-column empty space instead of clipping through a
+    // wider neighbor group's box.
     const colWidths = new Map<number, number>();
     for (const c of cols) {
       const maxW = Math.max(...groupsByCol.get(c)!.map((g) => groupBoxes.get(g)!.w));
       colWidths.set(c, maxW);
+      // Extend each narrow group's box to the column's max width so their
+      // right edge lines up (visual GroupOverlay will match).
+      for (const g of groupsByCol.get(c)!) {
+        const box = groupBoxes.get(g)!;
+        groupBoxes.set(g, { w: maxW, h: box.h });
+      }
     }
-    // Column X = cumulative sum of prior column widths + gaps.
     const colX = new Map<number, number>();
     let runX = 0;
     for (const c of cols) {
@@ -973,13 +992,64 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick }: GraphEditorProps) 
       runX += (colWidths.get(c) ?? 0) + GROUP_H_GAP;
     }
 
-    // Group anchor positions: column X + accumulated Y within column.
+    // Initial anchor placement — top-down within each column.
     const groupAnchor = new Map<string, { x: number; y: number }>();
     for (const c of cols) {
       let y = 0;
       for (const g of groupsByCol.get(c)!) {
         groupAnchor.set(g, { x: colX.get(c) ?? 0, y });
         y += (groupBoxes.get(g)!.h) + GROUP_V_GAP;
+      }
+    }
+
+    // Barycenter refinement: for each column (right-to-left then left-to-
+    // right, a few passes), sort groups by the mean Y of their neighbors in
+    // the adjacent column. This aligns each group vertically with its
+    // upstream/downstream group so cross-group edges travel roughly
+    // horizontally instead of cutting diagonally across other groups.
+    const groupsDownstream = (g: string): string[] => {
+      const out: string[] = [];
+      for (const [target, preds] of groupPreds) {
+        if (preds.has(g)) out.push(target);
+      }
+      return out;
+    };
+    const relayoutCol = (c: number, list: string[]) => {
+      let y = 0;
+      for (const g of list) {
+        groupAnchor.set(g, { x: colX.get(c) ?? 0, y });
+        y += (groupBoxes.get(g)!.h) + GROUP_V_GAP;
+      }
+    };
+    for (let pass = 0; pass < 3; pass++) {
+      // Right-to-left: order each col by mean Y of DOWNSTREAM groups.
+      for (let i = cols.length - 1; i >= 0; i--) {
+        const c = cols[i];
+        const list = groupsByCol.get(c)!;
+        list.sort((a, b) => {
+          const yA = groupsDownstream(a).map((d) => groupAnchor.get(d)?.y ?? 0);
+          const yB = groupsDownstream(b).map((d) => groupAnchor.get(d)?.y ?? 0);
+          const ba = yA.length ? yA.reduce((x, y) => x + y, 0) / yA.length : Infinity;
+          const bb = yB.length ? yB.reduce((x, y) => x + y, 0) / yB.length : Infinity;
+          if (ba !== bb) return ba - bb;
+          return a.localeCompare(b);
+        });
+        relayoutCol(c, list);
+      }
+      // Left-to-right: order each col by mean Y of UPSTREAM groups.
+      for (const c of cols) {
+        const list = groupsByCol.get(c)!;
+        list.sort((a, b) => {
+          const upA = Array.from(groupPreds.get(a) ?? []);
+          const upB = Array.from(groupPreds.get(b) ?? []);
+          const yA = upA.map((u) => groupAnchor.get(u)?.y ?? 0);
+          const yB = upB.map((u) => groupAnchor.get(u)?.y ?? 0);
+          const ba = yA.length ? yA.reduce((x, y) => x + y, 0) / yA.length : Infinity;
+          const bb = yB.length ? yB.reduce((x, y) => x + y, 0) / yB.length : Infinity;
+          if (ba !== bb) return ba - bb;
+          return a.localeCompare(b);
+        });
+        relayoutCol(c, list);
       }
     }
 
