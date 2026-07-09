@@ -1,5 +1,4 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
-import { createPortal } from 'react-dom';
 import { X, ChevronDown, Check } from 'lucide-react';
 
 interface MultiColumnSelectProps {
@@ -18,10 +17,11 @@ interface MultiColumnSelectProps {
 }
 
 /**
- * Chip-based multi-column picker with a portaled dropdown. Handles overflow
- * clipping (the trigger's parent may have overflow-y-auto), avoids the
- * open/measure race by computing position synchronously on click, and stops
- * click propagation on the dropdown so clicks inside don't close it.
+ * Chip-based multi-column picker. Dropdown uses `position: fixed` (viewport-
+ * relative) to escape overflow clipping, but stays in the trigger's DOM tree
+ * so it participates in any surrounding focus trap (e.g. Radix Dialog).
+ * A separate portal would break focus in modals because Dialog's focus-trap
+ * treats document.body siblings as "outside".
  */
 export function MultiColumnSelect({
   columns,
@@ -58,7 +58,6 @@ export function MultiColumnSelect({
     setFreeText('');
   }, []);
 
-  // Reposition on scroll / resize while open.
   useEffect(() => {
     if (!open) return;
     const reposition = () => {
@@ -73,9 +72,6 @@ export function MultiColumnSelect({
     };
   }, [open, measure]);
 
-  // Close on outside pointerdown. Use pointerdown (fires before click) so we
-  // don't miss the input's focus event. Contains-check honors portals since
-  // .contains() walks the actual DOM.
   useEffect(() => {
     if (!open) return;
     function onDown(e: PointerEvent) {
@@ -105,7 +101,6 @@ export function MultiColumnSelect({
     if (!trimmed || value.includes(trimmed)) return;
     onChange([...value, trimmed]);
     setFreeText('');
-    // Keep the input focused so users can chain-add names.
     inputRef.current?.focus();
   };
 
@@ -115,7 +110,7 @@ export function MultiColumnSelect({
     : columns.filter((c) => !excludedSet.has(c));
 
   return (
-    <>
+    <div className="relative">
       <div
         ref={triggerRef}
         onClick={() => (open ? closeDropdown() : openDropdown())}
@@ -146,7 +141,7 @@ export function MultiColumnSelect({
         <ChevronDown className="w-3 h-3 text-gray-400 ml-auto flex-shrink-0" />
       </div>
 
-      {open && pos && createPortal(
+      {open && pos && (
         <div
           ref={dropdownRef}
           style={{
@@ -156,9 +151,6 @@ export function MultiColumnSelect({
             width: Math.max(pos.width, 220),
             zIndex: 10000,
           }}
-          // Stop clicks inside from bubbling to document listeners that
-          // might close overlaying modals.
-          onMouseDown={(e) => e.stopPropagation()}
           className="bg-white border border-gray-200 rounded-md shadow-xl flex flex-col overflow-hidden"
         >
           {allowFreeText && (
@@ -228,9 +220,8 @@ export function MultiColumnSelect({
               })}
             </div>
           )}
-        </div>,
-        document.body,
+        </div>
       )}
-    </>
+    </div>
   );
 }
