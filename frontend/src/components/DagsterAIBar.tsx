@@ -189,13 +189,58 @@ export function DagsterAIBar() {
       // user would have to refresh the browser to see the new assets. Trigger
       // asset introspection (preserving existing positions) so the response
       // includes the freshly discovered assets, then swap the project in.
-      try {
-        const updated = await import('@/services/api').then((m) =>
-          m.projectsApi.regenerateAssets(currentProject.id, false),
+      //
+      // Retry loop: `uvx dagster-component add` sometimes returns before its
+      // downstream `uv sync` fully registers the component with Dagster, so
+      // the first `dg list defs` misses the fresh picks and downstream assets
+      // "eventually show up" on manual refresh. Poll until either all
+      // expected asset names are present or we've exhausted retries.
+      const expectedNames = new Set(
+        plan.picks
+          .map((p) => (p.config?.asset_name as string) || p.asset_name)
+          .filter(Boolean),
+      );
+      const { projectsApi } = await import('@/services/api');
+      let updated: any = null;
+      const MAX_RETRIES = 4;
+      const RETRY_DELAY_MS = 1500;
+      for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+        try {
+          updated = await projectsApi.regenerateAssets(currentProject.id, false);
+        } catch (e) {
+          console.warn(`[DagsterAI] regenerate attempt ${attempt + 1} failed:`, e);
+          break;
+        }
+        const foundNames = new Set(
+          (updated?.graph?.nodes ?? [])
+            .filter((n: any) => n.node_kind === 'asset')
+            .map((n: any) => n.id),
         );
+        const missing = [...expectedNames].filter((n) => !foundNames.has(n));
+        if (missing.length === 0) {
+          if (attempt > 0) {
+            console.log(`[DagsterAI] All picks visible after ${attempt} retry(ies).`);
+          }
+          break;
+        }
+        if (attempt === MAX_RETRIES) {
+          console.warn(
+            `[DagsterAI] Gave up after ${MAX_RETRIES + 1} tries; still missing:`,
+            missing,
+          );
+          break;
+        }
+        console.log(
+          `[DagsterAI] Retry ${attempt + 1}/${MAX_RETRIES}: still missing`,
+          missing,
+          `— waiting ${RETRY_DELAY_MS}ms`,
+        );
+        await new Promise((r) => setTimeout(r, RETRY_DELAY_MS));
+      }
+      if (updated) {
         useProjectStore.getState().setCurrentProject(updated);
-      } catch (e) {
-        console.warn('[DagsterAI] regenerate after apply failed, falling back to loadProject:', e);
+      } else {
+        console.warn('[DagsterAI] regenerate failed entirely, falling back to loadProject');
         await loadProject(currentProject.id);
       }
       if (failed === 0) {
