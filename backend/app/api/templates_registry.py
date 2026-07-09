@@ -955,13 +955,61 @@ async def install_component_via_cli(
         )
 
     # If the caller supplied attributes (e.g. Dagster AI's proposed config),
-    # merge them into the stub defs.yaml the CLI wrote. Otherwise the CLI's
-    # placeholder attributes stand, and the user configures via the UI.
+    # merge them into the stub defs.yaml the CLI wrote. LLMs love to guess
+    # attribute names (e.g. `path` instead of `file_path`, plural
+    # `upstream_asset_keys` instead of singular `upstream_asset_key`) — a
+    # blind merge lands both variants in the yaml and schema validation
+    # fails ("Additional properties not allowed"). Filter caller attributes
+    # against the component's schema.json when it's available so we only
+    # keep valid keys.
     if request.attributes:
         existing_attrs = parsed.get("attributes") or {}
         if not isinstance(existing_attrs, dict):
             existing_attrs = {}
-        parsed["attributes"] = {**existing_attrs, **request.attributes}
+
+        allowed_keys: Optional[set] = None
+        # Common name-variant aliases we can rewrite silently so the LLM's
+        # near-miss doesn't get dropped when there's an obvious mapping.
+        alias_map = {
+            'path': 'file_path',
+            'upstream_asset_keys': 'upstream_asset_key',
+            'upstream_asset_key': 'upstream_asset_keys',  # reverse direction
+            'output_path': 'file_path',
+            'input_asset': 'upstream_asset_key',
+        }
+        # Resolve the schema.json under the installed component dir.
+        try:
+            candidate_dirs = list(project_dir.glob(f"src/*/components/{component_id}/schema.json"))
+            if candidate_dirs:
+                import json as _json
+                schema = _json.loads(candidate_dirs[0].read_text())
+                props = schema.get('properties') or schema.get('attributes') or {}
+                if isinstance(props, dict):
+                    allowed_keys = set(props.keys())
+        except Exception as e:
+            print(f"[CLI Install] Warning: couldn't read schema.json for {component_id}: {e}")
+
+        merged: dict = {**existing_attrs}
+        dropped: list = []
+        for k, v in request.attributes.items():
+            if allowed_keys is None:
+                # No schema — trust the caller.
+                merged[k] = v
+                continue
+            if k in allowed_keys:
+                merged[k] = v
+                continue
+            # Try aliasing.
+            aliased = alias_map.get(k)
+            if aliased and aliased in allowed_keys:
+                merged[aliased] = v
+                print(f"[CLI Install] Aliased attribute '{k}' → '{aliased}' for {component_id}")
+                continue
+            dropped.append(k)
+        if dropped:
+            print(f"[CLI Install] Dropped unknown attributes for {component_id}: {dropped} (schema keys: {sorted(allowed_keys or [])})")
+
+        parsed["attributes"] = merged
         try:
             defs_yaml_path.write_text(yaml.safe_dump(parsed, sort_keys=False))
         except Exception as e:

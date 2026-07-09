@@ -1816,6 +1816,14 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick }: GraphEditorProps) 
           assetKey={previewAssetKey}
           assetName={previewAssetKey}
           initialMode={previewInitialMode}
+          onTransformerCreated={(updatedProject) => {
+            // Response from create-transformer includes the freshly-generated
+            // nodes/edges. Sync into the graph store so the new node appears
+            // immediately without a manual refresh.
+            if (updatedProject?.graph) {
+              updateGraph(updatedProject.graph.nodes, updatedProject.graph.edges);
+            }
+          }}
         />
       )}
     </div>
