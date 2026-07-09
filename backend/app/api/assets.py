@@ -458,6 +458,54 @@ async def create_transformer_asset(project_id: str, request: CreateTransformerRe
         print(f"[Create Transformer] Using SqlTransformerComponent for warehouse upstream {request.sourceAssetKey}", flush=True)
     else:
         transformer_component_type = f"{project.directory_name}.components.dataframe_transformer.DataFrameTransformerComponent"
+        # DataFrameTransformerComponent is a community template. If the user
+        # hasn't installed it yet, the defs.yaml we're about to write will
+        # reference a module that doesn't exist and Dagster's next reload
+        # will error. Install it via the CLI on demand.
+        dft_dir = src_dir / "components" / "dataframe_transformer"
+        if not dft_dir.exists():
+            print(f"[Create Transformer] dataframe_transformer template not installed; auto-installing via CLI…", flush=True)
+            import subprocess
+            try:
+                cli_result = subprocess.run(
+                    [
+                        "uvx", "--from", "dagster-community-components-cli",
+                        "dagster-component", "add", "dataframe_transformer",
+                        "--auto-install", "--manager", "uv", "--force",
+                    ],
+                    cwd=str(project_dir),
+                    capture_output=True, text=True, timeout=300,
+                )
+                if cli_result.returncode != 0:
+                    tail = (cli_result.stderr or cli_result.stdout or "").strip().splitlines()[-5:]
+                    raise HTTPException(
+                        status_code=500,
+                        detail=(
+                            "Couldn't install DataFrameTransformerComponent (community template). "
+                            "Please install it manually via the Library tab, or use a warehouse-mode "
+                            f"upstream (dbt model / sink). CLI output: {' | '.join(tail)}"
+                        ),
+                    )
+                print(f"[Create Transformer] Installed dataframe_transformer template", flush=True)
+                # dg's `add` also writes its own defs.yaml stub at
+                # defs/dataframe_transformer/defs.yaml — we're about to write
+                # our own instance elsewhere, so nuke the stub to avoid a
+                # duplicate 0-config instance that would break validation.
+                stub_defs = src_dir / "defs" / "dataframe_transformer" / "defs.yaml"
+                if stub_defs.exists():
+                    try:
+                        import shutil as _sh
+                        _sh.rmtree(stub_defs.parent)
+                        print(f"[Create Transformer] Cleaned up stub defs at {stub_defs.parent}", flush=True)
+                    except Exception as e:
+                        print(f"[Create Transformer] Warning: couldn't remove stub defs: {e}", flush=True)
+            except subprocess.TimeoutExpired:
+                raise HTTPException(status_code=504, detail="Auto-install of dataframe_transformer timed out.")
+            except FileNotFoundError:
+                raise HTTPException(
+                    status_code=500,
+                    detail="uvx not found — install `uv` to enable auto-install of community components.",
+                )
 
     defs_yaml = {
         "type": transformer_component_type,
