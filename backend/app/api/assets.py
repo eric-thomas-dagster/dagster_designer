@@ -181,6 +181,9 @@ class TransformConfig(BaseModel):
     splitOps: list[dict[str, str]] | None = None  # [{column, delimiter, into}]
     windowOps: list[dict[str, Any]] | None = None  # [{kind, orderBy, partitionBy, orderAsc, into}]
     countMatchOps: list[dict[str, Any]] | None = None  # [{column, operator, value, into, partitionBy}]
+    caseWhenOps: list[dict[str, Any]] | None = None  # [{branches, else, into}]
+    concatOps: list[dict[str, str]] | None = None  # [{columns, separator, into}]
+    dateExtractOps: list[dict[str, str]] | None = None  # [{column, part, into}]
 
 
 class CreateTransformerRequest(BaseModel):
@@ -342,6 +345,12 @@ async def create_transformer_asset(project_id: str, request: CreateTransformerRe
         attributes["window_ops"] = json.dumps(request.transformConfig.windowOps)
     if request.transformConfig.countMatchOps:
         attributes["count_match_ops"] = json.dumps(request.transformConfig.countMatchOps)
+    if request.transformConfig.caseWhenOps:
+        attributes["case_when_ops"] = json.dumps(request.transformConfig.caseWhenOps)
+    if request.transformConfig.concatOps:
+        attributes["concat_ops"] = json.dumps(request.transformConfig.concatOps)
+    if request.transformConfig.dateExtractOps:
+        attributes["date_extract_ops"] = json.dumps(request.transformConfig.dateExtractOps)
 
     # Pick the right transformer backend based on upstream type.
     if upstream_is_warehouse:
@@ -382,6 +391,12 @@ async def create_transformer_asset(project_id: str, request: CreateTransformerRe
             sql_attrs["window_ops"] = json.dumps(request.transformConfig.windowOps)
         if request.transformConfig.countMatchOps:
             sql_attrs["count_match_ops"] = json.dumps(request.transformConfig.countMatchOps)
+        if request.transformConfig.caseWhenOps:
+            sql_attrs["case_when_ops"] = json.dumps(request.transformConfig.caseWhenOps)
+        if request.transformConfig.concatOps:
+            sql_attrs["concat_ops"] = json.dumps(request.transformConfig.concatOps)
+        if request.transformConfig.dateExtractOps:
+            sql_attrs["date_extract_ops"] = json.dumps(request.transformConfig.dateExtractOps)
         # Filter translation: pandas query → SQL WHERE. Basic operators only;
         # anything involving `.str.contains` or method chains falls through
         # unchanged and may fail at run time.

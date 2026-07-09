@@ -71,6 +71,13 @@ class SqlTransformerComponent(dg.Component, dg.Model, dg.Resolvable):
     # Emits COUNT(CASE WHEN … END) OVER (PARTITION BY …) so the count is
     # scoped per-partition (or global when no partition).
     count_match_ops: Optional[str] = None
+    # JSON list: [{"branches":[{column,operator,value,then}], "else", "into"}]
+    # Compiles to CASE WHEN cond1 THEN t1 WHEN cond2 THEN t2 ELSE e END.
+    case_when_ops: Optional[str] = None
+    # JSON list: [{"columns" (csv), "separator", "into"}] — CONCAT with sep.
+    concat_ops: Optional[str] = None
+    # JSON list: [{"column", "part", "into"}] — EXTRACT(part FROM col).
+    date_extract_ops: Optional[str] = None
 
     group_name: Optional[str] = None
     description: Optional[str] = None
@@ -138,6 +145,9 @@ class SqlTransformerComponent(dg.Component, dg.Model, dg.Resolvable):
             "split_ops": self.split_ops,
             "window_ops": self.window_ops,
             "count_match_ops": self.count_match_ops,
+            "case_when_ops": self.case_when_ops,
+            "concat_ops": self.concat_ops,
+            "date_extract_ops": self.date_extract_ops,
         }
 
 
@@ -358,6 +368,71 @@ def _build_select_sql(cfg: dict[str, Any], dialect_name: str) -> str:
                     select_items.append(
                         literal_column(f"SPLIT_PART(\"{col}\", '{escaped_delim}', {idx})").label(t)
                     )
+
+    # Case-When ops → CASE WHEN c1 THEN t1 WHEN c2 THEN t2 ELSE e END AS into
+    case_when_ops = _json_list(cfg.get("case_when_ops"))
+    if case_when_ops:
+        for op in case_when_ops:
+            into = op.get("into")
+            branches = op.get("branches") or []
+            if not into or not branches:
+                continue
+            parts = []
+            for b in branches:
+                col = b.get("column")
+                bv = b.get("value")
+                then = b.get("then")
+                if not col or bv is None:
+                    continue
+                v_str = str(bv).replace("'", "''")
+                then_str = str(then).replace("'", "''")
+                cond = {
+                    "equals": f'"{col}" = \'{v_str}\'',
+                    "not_equals": f'"{col}" <> \'{v_str}\'',
+                    "greater_than": f'"{col}" > {v_str}',
+                    "less_than": f'"{col}" < {v_str}',
+                    "contains": f'"{col}" LIKE \'%{v_str}%\'',
+                }.get(str(b.get("operator", "equals")), f'"{col}" = \'{v_str}\'')
+                parts.append(f"WHEN {cond} THEN '{then_str}'")
+            else_val = str(op.get("else", "")).replace("'", "''")
+            expr = f"CASE {' '.join(parts)} ELSE '{else_val}' END"
+            select_items.append(literal_column(expr).label(into))
+
+    # Concat ops → col1 || sep || col2 || sep || col3 …
+    concat_ops = _json_list(cfg.get("concat_ops"))
+    if concat_ops:
+        for op in concat_ops:
+            cols = str(op.get("columns", "")).split(",")
+            cols = [c.strip() for c in cols if c.strip()]
+            into = op.get("into")
+            sep = str(op.get("separator", "")).replace("'", "''")
+            if not cols or not into:
+                continue
+            # CAST each column to VARCHAR so numeric/date types don't fail on ||.
+            wrapped = [f'CAST("{c}" AS VARCHAR)' for c in cols]
+            expr = wrapped[0]
+            for w in wrapped[1:]:
+                expr = f"{expr} || '{sep}' || {w}"
+            select_items.append(literal_column(expr).label(into))
+
+    # Date Extract ops → EXTRACT(part FROM col)
+    date_extract_ops = _json_list(cfg.get("date_extract_ops"))
+    if date_extract_ops:
+        for op in date_extract_ops:
+            col = op.get("column")
+            part = str(op.get("part", "year")).lower()
+            into = op.get("into")
+            if not col or not into:
+                continue
+            # DAYOFWEEK isn't standard EXTRACT — most dialects use DOW.
+            part_sql = {
+                "year": "YEAR",
+                "month": "MONTH",
+                "day": "DAY",
+                "dayofweek": "DOW",
+                "hour": "HOUR",
+            }.get(part, "YEAR")
+            select_items.append(literal_column(f'EXTRACT({part_sql} FROM "{col}")').label(into))
 
     # Count-matching ops → COUNT(CASE WHEN cond THEN 1 END) OVER (PARTITION BY ...)
     count_match_ops = _json_list(cfg.get("count_match_ops"))

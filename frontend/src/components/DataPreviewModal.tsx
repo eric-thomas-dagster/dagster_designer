@@ -7,6 +7,7 @@ import { notify } from './Notifications';
 import { CommunityTransformPicker } from './CommunityTransformPicker';
 import { ColumnProfileStrip } from './ColumnProfileStrip';
 import { MultiColumnSelect } from './MultiColumnSelect';
+import { RecipePanel, type RecipeStep } from './RecipePanel';
 
 interface DataPreviewModalProps {
   isOpen: boolean;
@@ -119,6 +120,28 @@ export function DataPreviewModal({
     value: string;
     into: string;
     partitionBy: string;
+  }>>([]);
+  // Case-When: {branches: [{condition, then}], else, into}. Universal
+  // conditional column. Preview evaluates the condition as a pandas-query-
+  // style expression; backend compiles to SQL CASE WHEN … END.
+  const [caseWhenOps, setCaseWhenOps] = useState<Array<{
+    branches: Array<{ column: string; operator: string; value: string; then: string }>;
+    else: string;
+    into: string;
+  }>>([]);
+  // Concat: {columns[], separator, into}. Joins multiple columns into one
+  // string column with a separator.
+  const [concatOps, setConcatOps] = useState<Array<{
+    columns: string;  // comma-separated column names, order-preserving
+    separator: string;
+    into: string;
+  }>>([]);
+  // Date Extract: {column, part, into}. EXTRACT(YEAR/MONTH/DAY/DAYOFWEEK/HOUR
+  // FROM col). part ∈ {year, month, day, dayofweek, hour}.
+  const [dateExtractOps, setDateExtractOps] = useState<Array<{
+    column: string;
+    part: 'year' | 'month' | 'day' | 'dayofweek' | 'hour';
+    into: string;
   }>>([]);
 
   // Accordion state for transform sections
@@ -539,6 +562,76 @@ export function DataPreviewModal({
       });
     }
 
+    // Apply Case-When ops. For each op we walk branches in order; first
+    // matching branch's `then` becomes the value, otherwise `else`.
+    if (caseWhenOps.length > 0) {
+      for (const op of caseWhenOps) {
+        if (!op.into) continue;
+        result = result.map(row => {
+          let out: any = op.else;
+          for (const b of op.branches) {
+            if (!b.column) continue;
+            const v = row[b.column];
+            const bv = b.value ?? '';
+            const matches = (() => {
+              const s = String(v ?? '').toLowerCase();
+              const fv = bv.toLowerCase();
+              switch (b.operator) {
+                case 'equals': return s === fv;
+                case 'not_equals': return s !== fv;
+                case 'contains': return s.includes(fv);
+                case 'greater_than': return Number(v) > Number(bv);
+                case 'less_than': return Number(v) < Number(bv);
+                default: return false;
+              }
+            })();
+            if (matches) {
+              out = b.then;
+              break;
+            }
+          }
+          return { ...row, [op.into]: out };
+        });
+      }
+    }
+
+    // Apply Concat ops.
+    if (concatOps.length > 0) {
+      for (const op of concatOps) {
+        if (!op.into || !op.columns) continue;
+        const cols = op.columns.split(',').map(s => s.trim()).filter(Boolean);
+        if (cols.length === 0) continue;
+        result = result.map(row => {
+          const parts = cols.map(c => String(row[c] ?? ''));
+          return { ...row, [op.into]: parts.join(op.separator ?? '') };
+        });
+      }
+    }
+
+    // Apply Date Extract ops.
+    if (dateExtractOps.length > 0) {
+      for (const op of dateExtractOps) {
+        if (!op.column || !op.into) continue;
+        result = result.map(row => {
+          const raw = row[op.column];
+          if (raw === null || raw === undefined || raw === '') {
+            return { ...row, [op.into]: null };
+          }
+          const d = new Date(raw);
+          if (isNaN(d.getTime())) return { ...row, [op.into]: null };
+          let out: number | null = null;
+          switch (op.part) {
+            case 'year': out = d.getUTCFullYear(); break;
+            case 'month': out = d.getUTCMonth() + 1; break;
+            case 'day': out = d.getUTCDate(); break;
+            case 'dayofweek': out = d.getUTCDay(); break;
+            case 'hour': out = d.getUTCHours(); break;
+          }
+          return { ...row, [op.into]: out };
+        });
+      }
+    }
+
     // Apply Count Matching ops. For each op, compute a per-row column whose
     // value is the count of rows in the same partition where the condition
     // is true. Preview compute uses the same match semantics as the filter
@@ -764,7 +857,7 @@ export function DataPreviewModal({
       row_count: result.length,
       column_count: finalColumns.length,
     };
-  }, [data, mode, filters, selectedColumns, dropDuplicates, dropNA, fillNAValue, sortColumns, sortAscending, groupByColumns, aggregations, columnRenames, columnsToDrop, stringOperations, calculatedColumns, columnOrder, limitRows, replaceOps, splitOps, windowOps, countMatchOps]);
+  }, [data, mode, filters, selectedColumns, dropDuplicates, dropNA, fillNAValue, sortColumns, sortAscending, groupByColumns, aggregations, columnRenames, columnsToDrop, stringOperations, calculatedColumns, columnOrder, limitRows, replaceOps, splitOps, windowOps, countMatchOps, caseWhenOps, concatOps, dateExtractOps]);
 
   const toggleColumn = (column: string) => {
     const newSelected = new Set(selectedColumns);
@@ -959,6 +1052,12 @@ export function DataPreviewModal({
           ? windowOps.filter((o) => o.orderBy && o.into) : null,
         countMatchOps: countMatchOps.filter((o) => o.column && o.into && o.value).length > 0
           ? countMatchOps.filter((o) => o.column && o.into && o.value) : null,
+        caseWhenOps: caseWhenOps.filter((o) => o.into && o.branches.some(b => b.column && b.value)).length > 0
+          ? caseWhenOps.filter((o) => o.into && o.branches.some(b => b.column && b.value)) : null,
+        concatOps: concatOps.filter((o) => o.into && o.columns).length > 0
+          ? concatOps.filter((o) => o.into && o.columns) : null,
+        dateExtractOps: dateExtractOps.filter((o) => o.column && o.into).length > 0
+          ? dateExtractOps.filter((o) => o.column && o.into) : null,
       } as TransformConfig & Record<string, any>;
 
       // Call API to create new transformer asset
@@ -1011,6 +1110,205 @@ export function DataPreviewModal({
   };
 
   const displayData = mode === 'transform' ? transformedData : data;
+
+  // Recipe steps — flat, ordered list of every op currently configured, in
+  // the order they're applied. Each step has a delete handler that mutates
+  // the underlying state var. Rendered in the right-side RecipePanel.
+  const recipeSteps: RecipeStep[] = useMemo(() => {
+    const steps: RecipeStep[] = [];
+    filters.forEach((f, i) => {
+      if (!f.column || !(f.value ?? '').trim()) return;
+      const sym = { equals: '=', not_equals: '≠', contains: 'contains', not_contains: 'not contains', greater_than: '>', less_than: '<' }[f.operator] || f.operator;
+      steps.push({
+        id: `filter-${i}`,
+        icon: 'filter',
+        label: `Filter`,
+        detail: `${f.column} ${sym} ${f.value}`,
+        onRemove: () => setFilters((arr) => arr.filter((_, j) => j !== i)),
+      });
+    });
+    caseWhenOps.forEach((op, i) => {
+      if (!op.into) return;
+      steps.push({
+        id: `case-${i}`,
+        icon: 'filter',
+        label: `Case-When → ${op.into}`,
+        detail: `${op.branches.length} branch${op.branches.length === 1 ? '' : 'es'}`,
+        onRemove: () => setCaseWhenOps((arr) => arr.filter((_, j) => j !== i)),
+      });
+    });
+    concatOps.forEach((op, i) => {
+      if (!op.into) return;
+      steps.push({
+        id: `concat-${i}`,
+        icon: 'arrows',
+        label: `Concat → ${op.into}`,
+        detail: op.columns.replace(/,/g, ` [${op.separator}] `),
+        onRemove: () => setConcatOps((arr) => arr.filter((_, j) => j !== i)),
+      });
+    });
+    dateExtractOps.forEach((op, i) => {
+      if (!op.column || !op.into) return;
+      steps.push({
+        id: `date-${i}`,
+        icon: 'calc',
+        label: `Extract ${op.part} → ${op.into}`,
+        detail: `from ${op.column}`,
+        onRemove: () => setDateExtractOps((arr) => arr.filter((_, j) => j !== i)),
+      });
+    });
+    countMatchOps.forEach((op, i) => {
+      if (!op.into) return;
+      steps.push({
+        id: `count-${i}`,
+        icon: 'sigma',
+        label: `Count matching → ${op.into}`,
+        detail: `where ${op.column} ${op.operator} ${op.value}${op.partitionBy ? ` per (${op.partitionBy})` : ''}`,
+        onRemove: () => setCountMatchOps((arr) => arr.filter((_, j) => j !== i)),
+      });
+    });
+    replaceOps.forEach((op, i) => {
+      if (!op.column || !op.find) return;
+      steps.push({
+        id: `replace-${i}`,
+        icon: 'rotate',
+        label: `Replace in ${op.column}`,
+        detail: `"${op.find}" → "${op.replace}"`,
+        onRemove: () => setReplaceOps((arr) => arr.filter((_, j) => j !== i)),
+      });
+    });
+    splitOps.forEach((op, i) => {
+      if (!op.column || !op.delimiter || !op.into) return;
+      steps.push({
+        id: `split-${i}`,
+        icon: 'arrows',
+        label: `Split ${op.column}`,
+        detail: `on "${op.delimiter}" → ${op.into}`,
+        onRemove: () => setSplitOps((arr) => arr.filter((_, j) => j !== i)),
+      });
+    });
+    windowOps.forEach((op, i) => {
+      if (!op.orderBy || !op.into) return;
+      const kindLabel = { rank: 'Rank', dense_rank: 'Dense rank', row_number: 'Row number' }[op.kind] || op.kind;
+      steps.push({
+        id: `window-${i}`,
+        icon: 'rank',
+        label: `${kindLabel} → ${op.into}`,
+        detail: `by ${op.orderBy} ${op.orderAsc ? 'ASC' : 'DESC'}${op.partitionBy ? ` per (${op.partitionBy})` : ''}`,
+        onRemove: () => setWindowOps((arr) => arr.filter((_, j) => j !== i)),
+      });
+    });
+    if (dropDuplicates) {
+      steps.push({
+        id: 'dedupe',
+        icon: 'wand',
+        label: 'Drop duplicates',
+        onRemove: () => setDropDuplicates(false),
+      });
+    }
+    if (dropNA) {
+      steps.push({
+        id: 'dropna',
+        icon: 'wand',
+        label: 'Drop rows with NA',
+        onRemove: () => setDropNA(false),
+      });
+    }
+    if (fillNAValue) {
+      steps.push({
+        id: 'fillna',
+        icon: 'wand',
+        label: 'Fill NA',
+        detail: `with "${fillNAValue}"`,
+        onRemove: () => setFillNAValue(''),
+      });
+    }
+    if (sortColumns.length > 0) {
+      steps.push({
+        id: 'sort',
+        icon: 'sort',
+        label: `Sort ${sortAscending ? 'ASC' : 'DESC'}`,
+        detail: sortColumns.join(', '),
+        onRemove: () => setSortColumns([]),
+      });
+    }
+    if (groupByColumns.length > 0) {
+      steps.push({
+        id: 'group',
+        icon: 'group',
+        label: `Group by`,
+        detail: groupByColumns.join(', '),
+        onRemove: () => { setGroupByColumns([]); setAggregations({}); },
+      });
+    }
+    if (Object.keys(columnRenames).length > 0) {
+      steps.push({
+        id: 'rename',
+        icon: 'cols',
+        label: `Rename columns`,
+        detail: Object.entries(columnRenames).map(([k, v]) => `${k}→${v}`).join(', '),
+        onRemove: () => setColumnRenames({}),
+      });
+    }
+    if (columnsToDrop.size > 0) {
+      steps.push({
+        id: 'dropcols',
+        icon: 'cols',
+        label: `Drop columns`,
+        detail: Array.from(columnsToDrop).join(', '),
+        onRemove: () => setColumnsToDrop(new Set()),
+      });
+    }
+    stringOperations.forEach((op, i) => {
+      steps.push({
+        id: `strop-${i}`,
+        icon: 'wand',
+        label: `${op.operation} ${op.column}`,
+        onRemove: () => setStringOperations((arr) => arr.filter((_, j) => j !== i)),
+      });
+    });
+    Object.entries(calculatedColumns).forEach(([name, expr]) => {
+      steps.push({
+        id: `calc-${name}`,
+        icon: 'calc',
+        label: `Calc → ${name}`,
+        detail: expr,
+        onRemove: () => {
+          setCalculatedColumns((prev) => {
+            const next = { ...prev };
+            delete next[name];
+            return next;
+          });
+        },
+      });
+    });
+    if (pivotConfig) {
+      steps.push({
+        id: 'pivot',
+        icon: 'arrows',
+        label: 'Pivot',
+        onRemove: () => setPivotConfig(null),
+      });
+    }
+    if (unpivotConfig) {
+      steps.push({
+        id: 'unpivot',
+        icon: 'arrows',
+        label: 'Unpivot',
+        onRemove: () => setUnpivotConfig(null),
+      });
+    }
+    if (limitRows !== null && limitRows > 0) {
+      steps.push({
+        id: 'limit',
+        icon: 'play',
+        label: `Limit`,
+        detail: `${limitRows} rows`,
+        onRemove: () => setLimitRows(null),
+      });
+    }
+    return steps;
+  }, [filters, caseWhenOps, concatOps, dateExtractOps, countMatchOps, replaceOps, splitOps, windowOps, dropDuplicates, dropNA, fillNAValue, sortColumns, sortAscending, groupByColumns, columnRenames, columnsToDrop, stringOperations, calculatedColumns, pivotConfig, unpivotConfig, limitRows]);
 
   return (
     <Dialog.Root open={isOpen} onOpenChange={handleClose}>
@@ -1913,6 +2211,270 @@ export function DataPreviewModal({
                     )}
                   </div>
 
+                  {/* Accordion Section: Case-When */}
+                  <div className="border border-gray-200 rounded-lg bg-white overflow-hidden">
+                    <button
+                      onClick={() => toggleSection('caseWhen')}
+                      className="w-full px-4 py-3 flex items-center justify-between hover:bg-gray-50 transition-colors"
+                    >
+                      <div className="flex items-center space-x-2">
+                        <Filter className="w-4 h-4 text-blue-600" />
+                        <span className="text-sm font-semibold text-gray-900">Case-When</span>
+                        {caseWhenOps.length > 0 && <span className="text-xs text-gray-500">{caseWhenOps.length}</span>}
+                      </div>
+                      {expandedSections.has('caseWhen') ? (
+                        <ChevronDown className="w-4 h-4 text-gray-500" />
+                      ) : (
+                        <ChevronRight className="w-4 h-4 text-gray-500" />
+                      )}
+                    </button>
+                    {expandedSections.has('caseWhen') && (
+                      <div className="px-4 pb-3 border-t border-gray-100">
+                        <div className="space-y-2 mt-3">
+                          {caseWhenOps.map((op, i) => (
+                            <div key={i} className="bg-gray-50 border border-gray-200 rounded p-2 space-y-1.5">
+                              <div className="flex items-center justify-between">
+                                <input
+                                  type="text"
+                                  value={op.into}
+                                  onChange={(e) => setCaseWhenOps(ops => ops.map((o, j) => j === i ? { ...o, into: e.target.value } : o))}
+                                  placeholder="new column name"
+                                  className="text-xs border border-gray-300 rounded px-1.5 py-1 flex-1 mr-1"
+                                />
+                                <button
+                                  onClick={() => setCaseWhenOps(ops => ops.filter((_, j) => j !== i))}
+                                  className="p-1 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded flex-shrink-0"
+                                  title="Remove"
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                </button>
+                              </div>
+                              {op.branches.map((b, bi) => (
+                                <div key={bi} className="bg-white border border-gray-200 rounded p-1.5 space-y-1">
+                                  <div className="flex items-center justify-between">
+                                    <span className="text-[10px] text-gray-500">WHEN</span>
+                                    <button
+                                      onClick={() => setCaseWhenOps(ops => ops.map((o, j) => j === i ? { ...o, branches: o.branches.filter((_, k) => k !== bi) } : o))}
+                                      className="text-gray-300 hover:text-red-600"
+                                      title="Remove branch"
+                                    >
+                                      <X className="w-3 h-3" />
+                                    </button>
+                                  </div>
+                                  <div className="grid grid-cols-[1fr_auto_1fr] gap-1">
+                                    <select
+                                      value={b.column}
+                                      onChange={(e) => setCaseWhenOps(ops => ops.map((o, j) => j === i ? { ...o, branches: o.branches.map((br, k) => k === bi ? { ...br, column: e.target.value } : br) } : o))}
+                                      className="text-xs border border-gray-300 rounded px-1.5 py-1"
+                                    >
+                                      <option value="">Column…</option>
+                                      {data?.columns?.map(c => <option key={c} value={c}>{c}</option>)}
+                                    </select>
+                                    <select
+                                      value={b.operator}
+                                      onChange={(e) => setCaseWhenOps(ops => ops.map((o, j) => j === i ? { ...o, branches: o.branches.map((br, k) => k === bi ? { ...br, operator: e.target.value } : br) } : o))}
+                                      className="text-xs border border-gray-300 rounded px-1.5 py-1"
+                                    >
+                                      <option value="equals">=</option>
+                                      <option value="not_equals">≠</option>
+                                      <option value="greater_than">&gt;</option>
+                                      <option value="less_than">&lt;</option>
+                                      <option value="contains">contains</option>
+                                    </select>
+                                    <input
+                                      type="text"
+                                      value={b.value}
+                                      onChange={(e) => setCaseWhenOps(ops => ops.map((o, j) => j === i ? { ...o, branches: o.branches.map((br, k) => k === bi ? { ...br, value: e.target.value } : br) } : o))}
+                                      placeholder="value"
+                                      className="text-xs border border-gray-300 rounded px-1.5 py-1"
+                                    />
+                                  </div>
+                                  <div className="grid grid-cols-[auto_1fr] gap-1 items-center">
+                                    <span className="text-[10px] text-gray-500">THEN</span>
+                                    <input
+                                      type="text"
+                                      value={b.then}
+                                      onChange={(e) => setCaseWhenOps(ops => ops.map((o, j) => j === i ? { ...o, branches: o.branches.map((br, k) => k === bi ? { ...br, then: e.target.value } : br) } : o))}
+                                      placeholder="output value"
+                                      className="text-xs border border-gray-300 rounded px-1.5 py-1"
+                                    />
+                                  </div>
+                                </div>
+                              ))}
+                              <button
+                                onClick={() => setCaseWhenOps(ops => ops.map((o, j) => j === i ? { ...o, branches: [...o.branches, { column: data?.columns?.[0] || '', operator: 'equals', value: '', then: '' }] } : o))}
+                                className="text-[10px] text-primary hover:underline flex items-center gap-1"
+                              >
+                                <Plus className="w-2.5 h-2.5" /> Add WHEN branch
+                              </button>
+                              <div className="grid grid-cols-[auto_1fr] gap-1 items-center pt-1 border-t border-gray-200">
+                                <span className="text-[10px] text-gray-500">ELSE</span>
+                                <input
+                                  type="text"
+                                  value={op.else}
+                                  onChange={(e) => setCaseWhenOps(ops => ops.map((o, j) => j === i ? { ...o, else: e.target.value } : o))}
+                                  placeholder="default value"
+                                  className="text-xs border border-gray-300 rounded px-1.5 py-1"
+                                />
+                              </div>
+                            </div>
+                          ))}
+                          <button
+                            onClick={() => setCaseWhenOps(ops => [...ops, {
+                              branches: [{ column: data?.columns?.[0] || '', operator: 'equals', value: '', then: '' }],
+                              else: '',
+                              into: `case_${ops.length + 1}`,
+                            }])}
+                            className="text-xs text-primary hover:underline flex items-center gap-1"
+                          >
+                            <Plus className="w-3 h-3" /> Add case-when
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Accordion Section: Concat Columns */}
+                  <div className="border border-gray-200 rounded-lg bg-white overflow-hidden">
+                    <button
+                      onClick={() => toggleSection('concat')}
+                      className="w-full px-4 py-3 flex items-center justify-between hover:bg-gray-50 transition-colors"
+                    >
+                      <div className="flex items-center space-x-2">
+                        <ArrowDownUp className="w-4 h-4 text-blue-600" />
+                        <span className="text-sm font-semibold text-gray-900">Concat Columns</span>
+                        {concatOps.length > 0 && <span className="text-xs text-gray-500">{concatOps.length}</span>}
+                      </div>
+                      {expandedSections.has('concat') ? (
+                        <ChevronDown className="w-4 h-4 text-gray-500" />
+                      ) : (
+                        <ChevronRight className="w-4 h-4 text-gray-500" />
+                      )}
+                    </button>
+                    {expandedSections.has('concat') && (
+                      <div className="px-4 pb-3 border-t border-gray-100">
+                        <div className="space-y-2 mt-3">
+                          {concatOps.map((op, i) => (
+                            <div key={i} className="bg-gray-50 border border-gray-200 rounded p-2 space-y-1.5">
+                              <div className="flex items-center justify-between">
+                                <input
+                                  type="text"
+                                  value={op.into}
+                                  onChange={(e) => setConcatOps(ops => ops.map((o, j) => j === i ? { ...o, into: e.target.value } : o))}
+                                  placeholder="new column name (e.g. full_name)"
+                                  className="text-xs border border-gray-300 rounded px-1.5 py-1 flex-1 mr-1"
+                                />
+                                <button
+                                  onClick={() => setConcatOps(ops => ops.filter((_, j) => j !== i))}
+                                  className="p-1 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded flex-shrink-0"
+                                  title="Remove"
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                </button>
+                              </div>
+                              <MultiColumnSelect
+                                columns={data?.columns || []}
+                                value={op.columns ? op.columns.split(',').map(s => s.trim()).filter(Boolean) : []}
+                                onChange={(cols) =>
+                                  setConcatOps(ops => ops.map((o, j) => j === i ? { ...o, columns: cols.join(',') } : o))
+                                }
+                                placeholder="pick columns to concat (in order)…"
+                              />
+                              <div className="grid grid-cols-[auto_1fr] gap-1 items-center">
+                                <span className="text-[10px] text-gray-500">SEPARATOR</span>
+                                <input
+                                  type="text"
+                                  value={op.separator}
+                                  onChange={(e) => setConcatOps(ops => ops.map((o, j) => j === i ? { ...o, separator: e.target.value } : o))}
+                                  placeholder="e.g. space, comma, empty"
+                                  className="text-xs border border-gray-300 rounded px-1.5 py-1"
+                                />
+                              </div>
+                            </div>
+                          ))}
+                          <button
+                            onClick={() => setConcatOps(ops => [...ops, { columns: '', separator: ' ', into: `concat_${ops.length + 1}` }])}
+                            className="text-xs text-primary hover:underline flex items-center gap-1"
+                          >
+                            <Plus className="w-3 h-3" /> Add concat
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Accordion Section: Date Extract */}
+                  <div className="border border-gray-200 rounded-lg bg-white overflow-hidden">
+                    <button
+                      onClick={() => toggleSection('dateExtract')}
+                      className="w-full px-4 py-3 flex items-center justify-between hover:bg-gray-50 transition-colors"
+                    >
+                      <div className="flex items-center space-x-2">
+                        <Calculator className="w-4 h-4 text-blue-600" />
+                        <span className="text-sm font-semibold text-gray-900">Date Extract</span>
+                        {dateExtractOps.length > 0 && <span className="text-xs text-gray-500">{dateExtractOps.length}</span>}
+                      </div>
+                      {expandedSections.has('dateExtract') ? (
+                        <ChevronDown className="w-4 h-4 text-gray-500" />
+                      ) : (
+                        <ChevronRight className="w-4 h-4 text-gray-500" />
+                      )}
+                    </button>
+                    {expandedSections.has('dateExtract') && (
+                      <div className="px-4 pb-3 border-t border-gray-100">
+                        <div className="space-y-2 mt-3">
+                          {dateExtractOps.map((op, i) => (
+                            <div key={i} className="bg-gray-50 border border-gray-200 rounded p-2 space-y-1.5">
+                              <div className="flex items-center justify-between">
+                                <input
+                                  type="text"
+                                  value={op.into}
+                                  onChange={(e) => setDateExtractOps(ops => ops.map((o, j) => j === i ? { ...o, into: e.target.value } : o))}
+                                  placeholder="new column name"
+                                  className="text-xs border border-gray-300 rounded px-1.5 py-1 flex-1 mr-1"
+                                />
+                                <button
+                                  onClick={() => setDateExtractOps(ops => ops.filter((_, j) => j !== i))}
+                                  className="p-1 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded flex-shrink-0"
+                                  title="Remove"
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                </button>
+                              </div>
+                              <div className="grid grid-cols-[1fr_1fr] gap-1">
+                                <select
+                                  value={op.column}
+                                  onChange={(e) => setDateExtractOps(ops => ops.map((o, j) => j === i ? { ...o, column: e.target.value } : o))}
+                                  className="text-xs border border-gray-300 rounded px-1.5 py-1"
+                                >
+                                  <option value="">Date column…</option>
+                                  {data?.columns?.map(c => <option key={c} value={c}>{c}</option>)}
+                                </select>
+                                <select
+                                  value={op.part}
+                                  onChange={(e) => setDateExtractOps(ops => ops.map((o, j) => j === i ? { ...o, part: e.target.value as any } : o))}
+                                  className="text-xs border border-gray-300 rounded px-1.5 py-1"
+                                >
+                                  <option value="year">Year</option>
+                                  <option value="month">Month</option>
+                                  <option value="day">Day</option>
+                                  <option value="dayofweek">Day of week</option>
+                                  <option value="hour">Hour</option>
+                                </select>
+                              </div>
+                            </div>
+                          ))}
+                          <button
+                            onClick={() => setDateExtractOps(ops => [...ops, { column: data?.columns?.[0] || '', part: 'year', into: `date_part_${ops.length + 1}` }])}
+                            className="text-xs text-primary hover:underline flex items-center gap-1"
+                          >
+                            <Plus className="w-3 h-3" /> Add date extract
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
                   {/* Accordion Section: Advanced Reshaping */}
                   <div className="border border-gray-200 rounded-lg bg-white overflow-hidden">
                     <button
@@ -2467,6 +3029,34 @@ export function DataPreviewModal({
                 </div>
               )}
             </div>
+            {mode === 'transform' && (
+              <RecipePanel
+                steps={recipeSteps}
+                onClearAll={() => {
+                  setFilters([]);
+                  setCaseWhenOps([]);
+                  setConcatOps([]);
+                  setDateExtractOps([]);
+                  setCountMatchOps([]);
+                  setReplaceOps([]);
+                  setSplitOps([]);
+                  setWindowOps([]);
+                  setDropDuplicates(false);
+                  setDropNA(false);
+                  setFillNAValue('');
+                  setSortColumns([]);
+                  setGroupByColumns([]);
+                  setAggregations({});
+                  setColumnRenames({});
+                  setColumnsToDrop(new Set());
+                  setStringOperations([]);
+                  setCalculatedColumns({});
+                  setPivotConfig(null);
+                  setUnpivotConfig(null);
+                  setLimitRows(null);
+                }}
+              />
+            )}
           </div>
 
           {/* Footer */}
