@@ -392,7 +392,7 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick }: GraphEditorProps) 
   // and then auto-opens the DataPreviewModal on that asset. Simple Alteryx/Lakeflow
   // style ergonomic loop.
   const [previewAssetKey, setPreviewAssetKey] = useState<string | null>(null);
-  const [previewInitialMode, setPreviewInitialMode] = useState<'view' | 'transform'>('view');
+  const [previewInitialMode, setPreviewInitialMode] = useState<'view' | 'transform' | 'profile'>('view');
 
   // AssetIOPanel — Lakeflow-style docked bottom pane showing input/output
   // previews for the currently-selected asset. Tracks the asset key

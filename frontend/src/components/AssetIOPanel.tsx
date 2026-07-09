@@ -1,17 +1,19 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { X, Wand2, Maximize2, ChevronRight, Table as TableIcon, Play, Loader2, AlertCircle } from 'lucide-react';
+import { X, Wand2, Maximize2, ChevronRight, Table as TableIcon, Play, Loader2, AlertCircle, BarChart3 } from 'lucide-react';
 import { assetsApi, projectsApi, type AssetDataPreview } from '@/services/api';
 import { notify } from './Notifications';
 import { ColumnProfileStrip } from './ColumnProfileStrip';
+import { ColumnProfilePanel } from './ColumnProfilePanel';
 
 interface AssetIOPanelProps {
   projectId: string;
   selectedAssetKey: string | null;
   /** Upstream asset keys derived from the graph edges terminating at the selected node. */
   upstreamKeys: string[];
-  /** Open the full-screen DataPreviewModal on a specific asset (view or transform). */
-  onOpenPreview: (assetKey: string, mode: 'view' | 'transform') => void;
+  /** Open the full-screen DataPreviewModal on a specific asset in view /
+   *  transform / profile mode. */
+  onOpenPreview: (assetKey: string, mode: 'view' | 'transform' | 'profile') => void;
   /** User closed / dismissed the panel. */
   onClose: () => void;
 }
@@ -32,6 +34,8 @@ export function AssetIOPanel({
 }: AssetIOPanelProps) {
   const [activeSide, setActiveSide] = useState<'input' | 'output'>('output');
   const [activeInput, setActiveInput] = useState<string | null>(null);
+  const [activeView, setActiveView] = useState<'table' | 'profile'>('table');
+  const [sampleLimit, setSampleLimit] = useState<number>(100);
   const [height, setHeight] = useState<number>(280);
   const dragRef = useRef<{ startY: number; startH: number } | null>(null);
 
@@ -116,6 +120,47 @@ export function AssetIOPanel({
         </div>
 
         <div className="flex items-center gap-1 flex-shrink-0">
+          {/* Table / Profile view toggle — shares one preview fetch. */}
+          <div className="flex items-center gap-0.5 bg-gray-100 rounded p-0.5 mr-1">
+            <button
+              onClick={() => setActiveView('table')}
+              className={`flex items-center gap-1 px-2 py-0.5 text-[11px] rounded ${
+                activeView === 'table' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-600'
+              }`}
+              title="Rows and columns"
+            >
+              <TableIcon className="w-3 h-3" />
+              Table
+            </button>
+            <button
+              onClick={() => setActiveView('profile')}
+              className={`flex items-center gap-1 px-2 py-0.5 text-[11px] rounded ${
+                activeView === 'profile' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-600'
+              }`}
+              title="Column-by-column distribution profile"
+            >
+              <BarChart3 className="w-3 h-3" />
+              Profile
+            </button>
+          </div>
+
+          {/* Sample-size selector — only shown in Profile view. Bigger
+              samples give more accurate distributions but take longer. */}
+          {activeView === 'profile' && (
+            <select
+              value={sampleLimit}
+              onChange={(e) => setSampleLimit(parseInt(e.target.value, 10))}
+              className="text-[11px] border border-gray-300 rounded px-1 py-0.5 mr-1"
+              title="Sample size for the profile"
+            >
+              <option value={100}>100 rows</option>
+              <option value={500}>500 rows</option>
+              <option value={1000}>1k rows</option>
+              <option value={5000}>5k rows</option>
+              <option value={10000}>10k rows</option>
+            </select>
+          )}
+
           <button
             onClick={() => onOpenPreview(currentAssetKey, 'transform')}
             className="flex items-center gap-1 px-2 py-1 text-xs text-gray-700 hover:bg-gray-100 rounded"
@@ -125,7 +170,7 @@ export function AssetIOPanel({
             Transform
           </button>
           <button
-            onClick={() => onOpenPreview(currentAssetKey, 'view')}
+            onClick={() => onOpenPreview(currentAssetKey, activeView === 'profile' ? 'profile' : 'view')}
             className="flex items-center gap-1 px-2 py-1 text-xs text-gray-700 hover:bg-gray-100 rounded"
             title="Open the full preview modal (more rows, full detail)"
           >
@@ -161,9 +206,14 @@ export function AssetIOPanel({
         </div>
       )}
 
-      {/* Body — preview table for the current asset */}
+      {/* Body — preview table OR profile view for the current asset */}
       <div className="flex-1 overflow-auto min-h-0">
-        <PreviewTable projectId={projectId} assetKey={currentAssetKey} />
+        <PreviewTable
+          projectId={projectId}
+          assetKey={currentAssetKey}
+          view={activeView}
+          sampleLimit={sampleLimit}
+        />
       </div>
     </div>
   );
@@ -173,14 +223,24 @@ export function AssetIOPanel({
  * Compact preview table — reuses the same /assets/{id}/{key}/preview endpoint
  * that DataPreviewModal uses, so it hits the same backend cache.
  */
-function PreviewTable({ projectId, assetKey }: { projectId: string; assetKey: string }) {
+function PreviewTable({
+  projectId,
+  assetKey,
+  view,
+  sampleLimit,
+}: {
+  projectId: string;
+  assetKey: string;
+  view: 'table' | 'profile';
+  sampleLimit: number;
+}) {
   const [running, setRunning] = useState(false);
   const [materializeError, setMaterializeError] = useState<string | null>(null);
 
   const { data, isLoading, error, refetch } = useQuery({
-    queryKey: ['asset-preview', projectId, assetKey],
+    queryKey: ['asset-preview', projectId, assetKey, sampleLimit],
     queryFn: async (): Promise<AssetDataPreview> => {
-      const r = await assetsApi.previewData(projectId, assetKey);
+      const r = await assetsApi.previewData(projectId, assetKey, { sampleLimit });
       return r;
     },
     // Backend cache already handles TTL; keep react-query in sync by not
@@ -294,6 +354,17 @@ function PreviewTable({ projectId, assetKey }: { projectId: string; assetKey: st
       <div className="text-center py-8 text-gray-400 text-xs">
         No preview available.
       </div>
+    );
+  }
+
+  if (view === 'profile') {
+    return (
+      <ColumnProfilePanel
+        rows={data.data}
+        columns={data.columns}
+        dtypes={data.dtypes ?? undefined}
+        totalRows={data.row_count ?? data.data.length}
+      />
     );
   }
 
