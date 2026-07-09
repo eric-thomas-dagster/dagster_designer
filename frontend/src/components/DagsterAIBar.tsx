@@ -181,7 +181,22 @@ export function DagsterAIBar() {
       await queryClient.invalidateQueries({ queryKey: ['primitives', currentProject.id] });
       await queryClient.invalidateQueries({ queryKey: ['definitions', currentProject.id] });
       await queryClient.invalidateQueries({ queryKey: ['installed-resources', currentProject.id] });
-      await loadProject(currentProject.id);
+
+      // install-via-cli only writes defs.yaml files — it doesn't update the
+      // project's graph JSON with the new asset nodes. Without an explicit
+      // regenerate, loadProject would just return the stale graph and the
+      // user would have to refresh the browser to see the new assets. Trigger
+      // asset introspection (preserving existing positions) so the response
+      // includes the freshly discovered assets, then swap the project in.
+      try {
+        const updated = await import('@/services/api').then((m) =>
+          m.projectsApi.regenerateAssets(currentProject.id, false),
+        );
+        useProjectStore.getState().setCurrentProject(updated);
+      } catch (e) {
+        console.warn('[DagsterAI] regenerate after apply failed, falling back to loadProject:', e);
+        await loadProject(currentProject.id);
+      }
       if (failed === 0) {
         notify.success(`Dagster AI added ${installed} asset${installed === 1 ? '' : 's'} to the graph.`);
       } else if (installed === 0) {
