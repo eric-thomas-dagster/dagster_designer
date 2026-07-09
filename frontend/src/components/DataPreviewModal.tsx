@@ -143,6 +143,31 @@ export function DataPreviewModal({
     part: 'year' | 'month' | 'day' | 'dayofweek' | 'hour';
     into: string;
   }>>([]);
+  // Substring: {column, start (1-based), length, into}
+  const [substringOps, setSubstringOps] = useState<Array<{
+    column: string;
+    start: number;
+    length: number | null;
+    into: string;
+  }>>([]);
+  // Numeric: {column, op: 'round'|'floor'|'ceil'|'abs', digits, into}
+  const [numericOps, setNumericOps] = useState<Array<{
+    column: string;
+    op: 'round' | 'floor' | 'ceil' | 'abs';
+    digits: number;
+    into: string;
+  }>>([]);
+  // Sample: {n or fraction, random}. n takes precedence if > 0.
+  const [sampleConfig, setSampleConfig] = useState<{
+    n: number | null;
+    fraction: number | null;
+    random: boolean;
+  } | null>(null);
+
+  // Step-view: when set, applies only the first N ops (0-indexed) and shows
+  // that partial snapshot in the preview table. RecipePanel highlights the
+  // corresponding step. Null = show final result (apply everything).
+  const [previewAtStep, setPreviewAtStep] = useState<number | null>(null);
 
   // Accordion state for transform sections
   const [expandedSections, setExpandedSections] = useState<Set<string>>(new Set(['columns', 'filters']));
@@ -362,14 +387,20 @@ export function DataPreviewModal({
 
     let result = [...data.data];
 
-    // Apply filters — skip any filter that isn't fully configured yet
-    // (empty value or column). Clicking "Add filter" gives you a blank row
-    // to configure; treating it as an active `equals ''` would nuke every
-    // row and leave the user staring at 0-row preview with nothing to
-    // filter against.
+    // Step counter — increments once per op that ACTIVATES (matches
+    // recipeSteps.length exactly). previewAtStep=null → apply all; else
+    // apply only ops 0..previewAtStep (inclusive).
+    let stepIdx = -1;
+    const gate = () => {
+      stepIdx++;
+      return previewAtStep === null || stepIdx <= previewAtStep;
+    };
+
+    // 1. filters
     filters.forEach(filter => {
       const filterValue = (filter.value ?? '').trim();
       if (!filter.column || !filterValue) return;
+      if (!gate()) return;
       result = result.filter(row => {
         const value = row[filter.column];
         switch (filter.operator) {
@@ -391,8 +422,8 @@ export function DataPreviewModal({
       });
     });
 
-    // Drop duplicates
-    if (dropDuplicates) {
+    // 2. Drop duplicates
+    if (dropDuplicates && gate()) {
       const seen = new Set();
       result = result.filter(row => {
         const key = JSON.stringify(row);
@@ -404,15 +435,15 @@ export function DataPreviewModal({
       });
     }
 
-    // Drop NA
-    if (dropNA) {
+    // 3. Drop NA
+    if (dropNA && gate()) {
       result = result.filter(row => {
         return Object.values(row).every(val => val !== null && val !== undefined && val !== '');
       });
     }
 
-    // Fill NA
-    if (fillNAValue) {
+    // 4. Fill NA
+    if (fillNAValue && gate()) {
       result = result.map(row => {
         const newRow: any = {};
         Object.keys(row).forEach(key => {
@@ -423,8 +454,8 @@ export function DataPreviewModal({
       });
     }
 
-    // Group by and aggregate
-    if (groupByColumns.length > 0 && Object.keys(aggregations).length > 0) {
+    // 5. Group by and aggregate
+    if (groupByColumns.length > 0 && Object.keys(aggregations).length > 0 && gate()) {
       const groups: Record<string, any[]> = {};
 
       // Group rows
@@ -474,8 +505,8 @@ export function DataPreviewModal({
       });
     }
 
-    // Sorting
-    if (sortColumns.length > 0) {
+    // 6. Sorting
+    if (sortColumns.length > 0 && gate()) {
       result = [...result].sort((a, b) => {
         for (const col of sortColumns) {
           const aVal = a[col];
@@ -500,8 +531,8 @@ export function DataPreviewModal({
       });
     }
 
-    // Apply column renames
-    if (Object.keys(columnRenames).length > 0) {
+    // 7. Apply column renames
+    if (Object.keys(columnRenames).length > 0 && gate()) {
       result = result.map(row => {
         const newRow: any = {};
         Object.keys(row).forEach(key => {
@@ -512,62 +543,55 @@ export function DataPreviewModal({
       });
     }
 
-    // Apply column-level Replace ops
-    if (replaceOps.length > 0) {
+    // 8. Apply column-level Replace ops
+    // Per-op iteration so the step counter matches recipeSteps 1:1.
+    replaceOps.forEach(op => {
+      if (!op.column || !op.find) return;
+      if (!gate()) return;
       result = result.map(row => {
         const newRow = { ...row };
-        for (const op of replaceOps) {
-          if (!op.column || !op.find) continue;
-          const v = newRow[op.column];
-          if (v === null || v === undefined) continue;
-          const s = String(v);
-          // Replace all occurrences of the literal string. If find is a
-          // /regex/ literal we honor that too, but plain-text is the default.
-          const isRegex = op.find.startsWith('/') && op.find.lastIndexOf('/') > 0;
-          if (isRegex) {
-            const last = op.find.lastIndexOf('/');
-            try {
-              const re = new RegExp(op.find.slice(1, last), op.find.slice(last + 1) || 'g');
-              newRow[op.column] = s.replace(re, op.replace);
-            } catch {
-              // Bad regex — fall through to literal replace.
-              newRow[op.column] = s.split(op.find).join(op.replace);
-            }
-          } else {
+        const v = newRow[op.column];
+        if (v === null || v === undefined) return newRow;
+        const s = String(v);
+        const isRegex = op.find.startsWith('/') && op.find.lastIndexOf('/') > 0;
+        if (isRegex) {
+          const last = op.find.lastIndexOf('/');
+          try {
+            const re = new RegExp(op.find.slice(1, last), op.find.slice(last + 1) || 'g');
+            newRow[op.column] = s.replace(re, op.replace);
+          } catch {
             newRow[op.column] = s.split(op.find).join(op.replace);
           }
+        } else {
+          newRow[op.column] = s.split(op.find).join(op.replace);
         }
         return newRow;
       });
-    }
+    });
 
-    // Apply Split ops — split a column's string value by delimiter, write
-    // parts back into comma-separated destination columns. e.g. delimiter=","
-    // into="first_name,last_name" splits "Jane,Doe" into two new columns.
-    if (splitOps.length > 0) {
+    // 9. Split ops
+    splitOps.forEach(op => {
+      if (!op.column || !op.delimiter || !op.into) return;
+      if (!gate()) return;
+      const targets = op.into.split(',').map(s => s.trim()).filter(Boolean);
+      if (targets.length === 0) return;
       result = result.map(row => {
         const newRow = { ...row };
-        for (const op of splitOps) {
-          if (!op.column || !op.delimiter || !op.into) continue;
-          const targets = op.into.split(',').map(s => s.trim()).filter(Boolean);
-          if (targets.length === 0) continue;
-          const v = newRow[op.column];
-          const s = v === null || v === undefined ? '' : String(v);
-          const parts = s.split(op.delimiter);
-          targets.forEach((t, i) => {
-            newRow[t] = parts[i] ?? '';
-          });
-        }
+        const v = newRow[op.column];
+        const s = v === null || v === undefined ? '' : String(v);
+        const parts = s.split(op.delimiter);
+        targets.forEach((t, i) => {
+          newRow[t] = parts[i] ?? '';
+        });
         return newRow;
       });
-    }
+    });
 
-    // Apply Case-When ops. For each op we walk branches in order; first
-    // matching branch's `then` becomes the value, otherwise `else`.
-    if (caseWhenOps.length > 0) {
-      for (const op of caseWhenOps) {
-        if (!op.into) continue;
-        result = result.map(row => {
+    // 10. Case-When ops
+    caseWhenOps.forEach(op => {
+      if (!op.into) return;
+      if (!gate()) return;
+      result = result.map(row => {
           let out: any = op.else;
           for (const b of op.branches) {
             if (!b.column) continue;
@@ -592,53 +616,85 @@ export function DataPreviewModal({
           }
           return { ...row, [op.into]: out };
         });
-      }
-    }
+    });
 
-    // Apply Concat ops.
-    if (concatOps.length > 0) {
-      for (const op of concatOps) {
-        if (!op.into || !op.columns) continue;
-        const cols = op.columns.split(',').map(s => s.trim()).filter(Boolean);
-        if (cols.length === 0) continue;
-        result = result.map(row => {
-          const parts = cols.map(c => String(row[c] ?? ''));
-          return { ...row, [op.into]: parts.join(op.separator ?? '') };
-        });
-      }
-    }
+    // 11. Concat ops
+    concatOps.forEach(op => {
+      if (!op.into || !op.columns) return;
+      if (!gate()) return;
+      const cols = op.columns.split(',').map(s => s.trim()).filter(Boolean);
+      if (cols.length === 0) return;
+      result = result.map(row => {
+        const parts = cols.map(c => String(row[c] ?? ''));
+        return { ...row, [op.into]: parts.join(op.separator ?? '') };
+      });
+    });
 
-    // Apply Date Extract ops.
-    if (dateExtractOps.length > 0) {
-      for (const op of dateExtractOps) {
-        if (!op.column || !op.into) continue;
-        result = result.map(row => {
-          const raw = row[op.column];
-          if (raw === null || raw === undefined || raw === '') {
-            return { ...row, [op.into]: null };
+    // 12. Date Extract ops
+    dateExtractOps.forEach(op => {
+      if (!op.column || !op.into) return;
+      if (!gate()) return;
+      result = result.map(row => {
+        const raw = row[op.column];
+        if (raw === null || raw === undefined || raw === '') {
+          return { ...row, [op.into]: null };
+        }
+        const d = new Date(raw);
+        if (isNaN(d.getTime())) return { ...row, [op.into]: null };
+        let out: number | null = null;
+        switch (op.part) {
+          case 'year': out = d.getUTCFullYear(); break;
+          case 'month': out = d.getUTCMonth() + 1; break;
+          case 'day': out = d.getUTCDate(); break;
+          case 'dayofweek': out = d.getUTCDay(); break;
+          case 'hour': out = d.getUTCHours(); break;
+        }
+        return { ...row, [op.into]: out };
+      });
+    });
+
+    // 13. Substring ops
+    substringOps.forEach(op => {
+      if (!op.column || !op.into) return;
+      if (!gate()) return;
+      result = result.map(row => {
+        const raw = row[op.column];
+        if (raw === null || raw === undefined) return { ...row, [op.into]: null };
+        const s = String(raw);
+        const start = Math.max(0, (op.start || 1) - 1);  // 1-based → 0-based
+        const end = op.length === null || op.length === undefined ? s.length : start + op.length;
+        return { ...row, [op.into]: s.substring(start, end) };
+      });
+    });
+
+    // 14. Numeric ops (round / floor / ceil / abs)
+    numericOps.forEach(op => {
+      if (!op.column || !op.into) return;
+      if (!gate()) return;
+      result = result.map(row => {
+        const v = Number(row[op.column]);
+        if (isNaN(v)) return { ...row, [op.into]: null };
+        let out: number;
+        switch (op.op) {
+          case 'floor': out = Math.floor(v); break;
+          case 'ceil': out = Math.ceil(v); break;
+          case 'abs': out = Math.abs(v); break;
+          case 'round':
+          default: {
+            const digits = Math.max(0, op.digits ?? 0);
+            const factor = Math.pow(10, digits);
+            out = Math.round(v * factor) / factor;
           }
-          const d = new Date(raw);
-          if (isNaN(d.getTime())) return { ...row, [op.into]: null };
-          let out: number | null = null;
-          switch (op.part) {
-            case 'year': out = d.getUTCFullYear(); break;
-            case 'month': out = d.getUTCMonth() + 1; break;
-            case 'day': out = d.getUTCDate(); break;
-            case 'dayofweek': out = d.getUTCDay(); break;
-            case 'hour': out = d.getUTCHours(); break;
-          }
-          return { ...row, [op.into]: out };
-        });
-      }
-    }
+        }
+        return { ...row, [op.into]: out };
+      });
+    });
 
-    // Apply Count Matching ops. For each op, compute a per-row column whose
-    // value is the count of rows in the same partition where the condition
-    // is true. Preview compute uses the same match semantics as the filter
-    // panel so the results feel consistent.
-    if (countMatchOps.length > 0) {
-      for (const op of countMatchOps) {
-        if (!op.column || !op.into || !op.value.trim()) continue;
+    // 15. Count Matching ops
+    countMatchOps.forEach(op => {
+      if (!op.column || !op.into || !op.value.trim()) return;
+      if (!gate()) return;
+      {
         const partKeys = op.partitionBy
           ? op.partitionBy.split(',').map(s => s.trim()).filter(Boolean)
           : [];
@@ -669,113 +725,95 @@ export function DataPreviewModal({
           }
         }
       }
-    }
+    });
 
-    // Apply Window ops — rank / row_number / dense_rank. Client-side impl
-    // groups by partitionBy, sorts within each partition by orderBy, then
-    // assigns rank values. Backend does the same via SQL window functions.
-    if (windowOps.length > 0) {
-      for (const op of windowOps) {
-        if (!op.orderBy || !op.into) continue;
-        const partKeys = op.partitionBy
-          ? op.partitionBy.split(',').map(s => s.trim()).filter(Boolean)
-          : [];
-        // Group rows by partition key values.
-        const groups = new Map<string, number[]>();
-        result.forEach((row, i) => {
-          const key = partKeys.length > 0 ? partKeys.map(k => String(row[k])).join('|') : '__all__';
-          const arr = groups.get(key) ?? [];
-          arr.push(i);
-          groups.set(key, arr);
+    // 16. Window ops — rank / row_number / dense_rank
+    windowOps.forEach(op => {
+      if (!op.orderBy || !op.into) return;
+      if (!gate()) return;
+      const partKeys = op.partitionBy
+        ? op.partitionBy.split(',').map(s => s.trim()).filter(Boolean)
+        : [];
+      const groups = new Map<string, number[]>();
+      result.forEach((row, i) => {
+        const key = partKeys.length > 0 ? partKeys.map(k => String(row[k])).join('|') : '__all__';
+        const arr = groups.get(key) ?? [];
+        arr.push(i);
+        groups.set(key, arr);
+      });
+      for (const [, indices] of groups) {
+        const sorted = [...indices].sort((a, b) => {
+          const av = result[a][op.orderBy];
+          const bv = result[b][op.orderBy];
+          const cmp = av > bv ? 1 : av < bv ? -1 : 0;
+          return op.orderAsc ? cmp : -cmp;
         });
-        // For each group, sort indices by orderBy, then assign.
-        for (const [, indices] of groups) {
-          const sorted = [...indices].sort((a, b) => {
-            const av = result[a][op.orderBy];
-            const bv = result[b][op.orderBy];
-            const cmp = av > bv ? 1 : av < bv ? -1 : 0;
-            return op.orderAsc ? cmp : -cmp;
+        if (op.kind === 'row_number') {
+          sorted.forEach((idx, r) => {
+            result[idx] = { ...result[idx], [op.into]: r + 1 };
           });
-          if (op.kind === 'row_number') {
-            sorted.forEach((idx, r) => {
-              result[idx] = { ...result[idx], [op.into]: r + 1 };
-            });
-          } else {
-            // rank + dense_rank
-            let rank = 0;
-            let denseRank = 0;
-            let prevVal: any = Symbol('none');
-            sorted.forEach((idx, r) => {
-              const v = result[idx][op.orderBy];
-              if (v !== prevVal) {
-                rank = r + 1;
-                denseRank++;
-                prevVal = v;
-              }
-              result[idx] = { ...result[idx], [op.into]: op.kind === 'dense_rank' ? denseRank : rank };
-            });
-          }
+        } else {
+          let rank = 0;
+          let denseRank = 0;
+          let prevVal: any = Symbol('none');
+          sorted.forEach((idx, r) => {
+            const v = result[idx][op.orderBy];
+            if (v !== prevVal) {
+              rank = r + 1;
+              denseRank++;
+              prevVal = v;
+            }
+            result[idx] = { ...result[idx], [op.into]: op.kind === 'dense_rank' ? denseRank : rank };
+          });
         }
       }
-    }
+    });
 
-    // Apply string operations
-    if (stringOperations.length > 0) {
+    // 17. Apply string operations — one step per op
+    stringOperations.forEach(op => {
+      if (!gate()) return;
       result = result.map(row => {
         const newRow = { ...row };
-        stringOperations.forEach(op => {
-          if (newRow[op.column] !== undefined && newRow[op.column] !== null) {
-            const val = String(newRow[op.column]);
-            switch (op.operation) {
-              case 'upper':
-                newRow[op.column] = val.toUpperCase();
-                break;
-              case 'lower':
-                newRow[op.column] = val.toLowerCase();
-                break;
-              case 'title':
-                newRow[op.column] = val.replace(/\w\S*/g, txt =>
-                  txt.charAt(0).toUpperCase() + txt.substr(1).toLowerCase()
-                );
-                break;
-              case 'trim':
-                newRow[op.column] = val.trim();
-                break;
+        if (newRow[op.column] !== undefined && newRow[op.column] !== null) {
+          const val = String(newRow[op.column]);
+          switch (op.operation) {
+            case 'upper': newRow[op.column] = val.toUpperCase(); break;
+            case 'lower': newRow[op.column] = val.toLowerCase(); break;
+            case 'title':
+              newRow[op.column] = val.replace(/\w\S*/g, txt =>
+                txt.charAt(0).toUpperCase() + txt.substr(1).toLowerCase()
+              );
+              break;
+            case 'trim': newRow[op.column] = val.trim(); break;
+          }
+        }
+        return newRow;
+      });
+    });
+
+    // 18. Apply calculated columns — one step per column
+    Object.entries(calculatedColumns).forEach(([colName, expression]) => {
+      if (!gate()) return;
+      result = result.map(row => {
+        const newRow = { ...row };
+        try {
+          let expr = expression;
+          Object.keys(row).forEach(key => {
+            const value = Number(row[key]);
+            if (!isNaN(value)) {
+              expr = expr.replace(new RegExp(`\\b${key}\\b`, 'g'), String(value));
             }
-          }
-        });
+          });
+          newRow[colName] = eval(expr);
+        } catch {
+          newRow[colName] = null;
+        }
         return newRow;
       });
-    }
+    });
 
-    // Apply calculated columns
-    if (Object.keys(calculatedColumns).length > 0) {
-      result = result.map(row => {
-        const newRow = { ...row };
-        Object.entries(calculatedColumns).forEach(([colName, expression]) => {
-          try {
-            // Simple expression evaluation - replace column names with values
-            let expr = expression;
-            Object.keys(row).forEach(key => {
-              const value = Number(row[key]);
-              if (!isNaN(value)) {
-                // Replace column name with value, ensuring word boundaries
-                expr = expr.replace(new RegExp(`\\b${key}\\b`, 'g'), String(value));
-              }
-            });
-            // Evaluate the expression (basic math operations)
-            newRow[colName] = eval(expr);
-          } catch (e) {
-            // If evaluation fails, set to null
-            newRow[colName] = null;
-          }
-        });
-        return newRow;
-      });
-    }
-
-    // Drop columns
-    if (columnsToDrop.size > 0) {
+    // 19. Drop columns
+    if (columnsToDrop.size > 0 && gate()) {
       result = result.map(row => {
         const newRow: any = {};
         Object.keys(row).forEach(key => {
@@ -844,9 +882,25 @@ export function DataPreviewModal({
       finalColumns = [...orderedColumns, ...remainingColumns];
     }
 
-    // Apply row limit — takes precedence over row_count reporting. Applied
-    // last so it slices the already-filtered/sorted result.
-    if (limitRows !== null && limitRows > 0 && result.length > limitRows) {
+    // 21. Sample rows (before limit)
+    if (sampleConfig && (sampleConfig.n || sampleConfig.fraction) && gate()) {
+      const target = sampleConfig.n
+        ? Math.min(sampleConfig.n, result.length)
+        : Math.floor(result.length * (sampleConfig.fraction ?? 0));
+      if (sampleConfig.random) {
+        const arr = [...result];
+        for (let i = arr.length - 1; i > 0; i--) {
+          const j = Math.floor(Math.random() * (i + 1));
+          [arr[i], arr[j]] = [arr[j], arr[i]];
+        }
+        result = arr.slice(0, target);
+      } else {
+        result = result.slice(0, target);
+      }
+    }
+
+    // 22. Apply row limit
+    if (limitRows !== null && limitRows > 0 && result.length > limitRows && gate()) {
       result = result.slice(0, limitRows);
     }
 
@@ -857,7 +911,7 @@ export function DataPreviewModal({
       row_count: result.length,
       column_count: finalColumns.length,
     };
-  }, [data, mode, filters, selectedColumns, dropDuplicates, dropNA, fillNAValue, sortColumns, sortAscending, groupByColumns, aggregations, columnRenames, columnsToDrop, stringOperations, calculatedColumns, columnOrder, limitRows, replaceOps, splitOps, windowOps, countMatchOps, caseWhenOps, concatOps, dateExtractOps]);
+  }, [data, mode, previewAtStep, filters, selectedColumns, dropDuplicates, dropNA, fillNAValue, sortColumns, sortAscending, groupByColumns, aggregations, columnRenames, columnsToDrop, stringOperations, calculatedColumns, columnOrder, limitRows, replaceOps, splitOps, windowOps, countMatchOps, caseWhenOps, concatOps, dateExtractOps, substringOps, numericOps, sampleConfig]);
 
   const toggleColumn = (column: string) => {
     const newSelected = new Set(selectedColumns);
@@ -1058,6 +1112,12 @@ export function DataPreviewModal({
           ? concatOps.filter((o) => o.into && o.columns) : null,
         dateExtractOps: dateExtractOps.filter((o) => o.column && o.into).length > 0
           ? dateExtractOps.filter((o) => o.column && o.into) : null,
+        substringOps: substringOps.filter((o) => o.column && o.into).length > 0
+          ? substringOps.filter((o) => o.column && o.into) : null,
+        numericOps: numericOps.filter((o) => o.column && o.into).length > 0
+          ? numericOps.filter((o) => o.column && o.into) : null,
+        sampleConfig: sampleConfig && (sampleConfig.n || sampleConfig.fraction)
+          ? sampleConfig : null,
       } as TransformConfig & Record<string, any>;
 
       // Call API to create new transformer asset
@@ -1112,10 +1172,11 @@ export function DataPreviewModal({
   const displayData = mode === 'transform' ? transformedData : data;
 
   // Recipe steps — flat, ordered list of every op currently configured, in
-  // the order they're applied. Each step has a delete handler that mutates
-  // the underlying state var. Rendered in the right-side RecipePanel.
+  // the order they're actually applied by the preview useMemo. Order MUST
+  // match useMemo so the step counter (previewAtStep) lines up.
   const recipeSteps: RecipeStep[] = useMemo(() => {
     const steps: RecipeStep[] = [];
+    // 1. filters
     filters.forEach((f, i) => {
       if (!f.column || !(f.value ?? '').trim()) return;
       const sym = { equals: '=', not_equals: '≠', contains: 'contains', not_contains: 'not contains', greater_than: '>', less_than: '<' }[f.operator] || f.operator;
@@ -1127,188 +1188,123 @@ export function DataPreviewModal({
         onRemove: () => setFilters((arr) => arr.filter((_, j) => j !== i)),
       });
     });
-    caseWhenOps.forEach((op, i) => {
-      if (!op.into) return;
-      steps.push({
-        id: `case-${i}`,
-        icon: 'filter',
-        label: `Case-When → ${op.into}`,
-        detail: `${op.branches.length} branch${op.branches.length === 1 ? '' : 'es'}`,
-        onRemove: () => setCaseWhenOps((arr) => arr.filter((_, j) => j !== i)),
-      });
-    });
-    concatOps.forEach((op, i) => {
-      if (!op.into) return;
-      steps.push({
-        id: `concat-${i}`,
-        icon: 'arrows',
-        label: `Concat → ${op.into}`,
-        detail: op.columns.replace(/,/g, ` [${op.separator}] `),
-        onRemove: () => setConcatOps((arr) => arr.filter((_, j) => j !== i)),
-      });
-    });
-    dateExtractOps.forEach((op, i) => {
-      if (!op.column || !op.into) return;
-      steps.push({
-        id: `date-${i}`,
-        icon: 'calc',
-        label: `Extract ${op.part} → ${op.into}`,
-        detail: `from ${op.column}`,
-        onRemove: () => setDateExtractOps((arr) => arr.filter((_, j) => j !== i)),
-      });
-    });
-    countMatchOps.forEach((op, i) => {
-      if (!op.into) return;
-      steps.push({
-        id: `count-${i}`,
-        icon: 'sigma',
-        label: `Count matching → ${op.into}`,
-        detail: `where ${op.column} ${op.operator} ${op.value}${op.partitionBy ? ` per (${op.partitionBy})` : ''}`,
-        onRemove: () => setCountMatchOps((arr) => arr.filter((_, j) => j !== i)),
-      });
-    });
-    replaceOps.forEach((op, i) => {
-      if (!op.column || !op.find) return;
-      steps.push({
-        id: `replace-${i}`,
-        icon: 'rotate',
-        label: `Replace in ${op.column}`,
-        detail: `"${op.find}" → "${op.replace}"`,
-        onRemove: () => setReplaceOps((arr) => arr.filter((_, j) => j !== i)),
-      });
-    });
-    splitOps.forEach((op, i) => {
-      if (!op.column || !op.delimiter || !op.into) return;
-      steps.push({
-        id: `split-${i}`,
-        icon: 'arrows',
-        label: `Split ${op.column}`,
-        detail: `on "${op.delimiter}" → ${op.into}`,
-        onRemove: () => setSplitOps((arr) => arr.filter((_, j) => j !== i)),
-      });
-    });
-    windowOps.forEach((op, i) => {
-      if (!op.orderBy || !op.into) return;
-      const kindLabel = { rank: 'Rank', dense_rank: 'Dense rank', row_number: 'Row number' }[op.kind] || op.kind;
-      steps.push({
-        id: `window-${i}`,
-        icon: 'rank',
-        label: `${kindLabel} → ${op.into}`,
-        detail: `by ${op.orderBy} ${op.orderAsc ? 'ASC' : 'DESC'}${op.partitionBy ? ` per (${op.partitionBy})` : ''}`,
-        onRemove: () => setWindowOps((arr) => arr.filter((_, j) => j !== i)),
-      });
-    });
+    // 2. drop duplicates
     if (dropDuplicates) {
-      steps.push({
-        id: 'dedupe',
-        icon: 'wand',
-        label: 'Drop duplicates',
-        onRemove: () => setDropDuplicates(false),
-      });
+      steps.push({ id: 'dedupe', icon: 'wand', label: 'Drop duplicates', onRemove: () => setDropDuplicates(false) });
     }
+    // 3. drop NA
     if (dropNA) {
-      steps.push({
-        id: 'dropna',
-        icon: 'wand',
-        label: 'Drop rows with NA',
-        onRemove: () => setDropNA(false),
-      });
+      steps.push({ id: 'dropna', icon: 'wand', label: 'Drop rows with NA', onRemove: () => setDropNA(false) });
     }
+    // 4. fill NA
     if (fillNAValue) {
-      steps.push({
-        id: 'fillna',
-        icon: 'wand',
-        label: 'Fill NA',
-        detail: `with "${fillNAValue}"`,
-        onRemove: () => setFillNAValue(''),
-      });
+      steps.push({ id: 'fillna', icon: 'wand', label: 'Fill NA', detail: `with "${fillNAValue}"`, onRemove: () => setFillNAValue('') });
     }
-    if (sortColumns.length > 0) {
+    // 5. group by + aggregate (needs both to activate as a step)
+    if (groupByColumns.length > 0 && Object.keys(aggregations).length > 0) {
       steps.push({
-        id: 'sort',
-        icon: 'sort',
-        label: `Sort ${sortAscending ? 'ASC' : 'DESC'}`,
-        detail: sortColumns.join(', '),
-        onRemove: () => setSortColumns([]),
-      });
-    }
-    if (groupByColumns.length > 0) {
-      steps.push({
-        id: 'group',
-        icon: 'group',
-        label: `Group by`,
-        detail: groupByColumns.join(', '),
+        id: 'group', icon: 'group', label: 'Group by',
+        detail: `${groupByColumns.join(', ')} · ${Object.keys(aggregations).length} agg(s)`,
         onRemove: () => { setGroupByColumns([]); setAggregations({}); },
       });
     }
+    // 6. sort
+    if (sortColumns.length > 0) {
+      steps.push({ id: 'sort', icon: 'sort', label: `Sort ${sortAscending ? 'ASC' : 'DESC'}`, detail: sortColumns.join(', '), onRemove: () => setSortColumns([]) });
+    }
+    // 7. column renames
     if (Object.keys(columnRenames).length > 0) {
       steps.push({
-        id: 'rename',
-        icon: 'cols',
-        label: `Rename columns`,
+        id: 'rename', icon: 'cols', label: 'Rename columns',
         detail: Object.entries(columnRenames).map(([k, v]) => `${k}→${v}`).join(', '),
         onRemove: () => setColumnRenames({}),
       });
     }
-    if (columnsToDrop.size > 0) {
-      steps.push({
-        id: 'dropcols',
-        icon: 'cols',
-        label: `Drop columns`,
-        detail: Array.from(columnsToDrop).join(', '),
-        onRemove: () => setColumnsToDrop(new Set()),
-      });
-    }
-    stringOperations.forEach((op, i) => {
-      steps.push({
-        id: `strop-${i}`,
-        icon: 'wand',
-        label: `${op.operation} ${op.column}`,
-        onRemove: () => setStringOperations((arr) => arr.filter((_, j) => j !== i)),
-      });
+    // 8. replace
+    replaceOps.forEach((op, i) => {
+      if (!op.column || !op.find) return;
+      steps.push({ id: `replace-${i}`, icon: 'rotate', label: `Replace in ${op.column}`, detail: `"${op.find}" → "${op.replace}"`, onRemove: () => setReplaceOps((arr) => arr.filter((_, j) => j !== i)) });
     });
+    // 9. split
+    splitOps.forEach((op, i) => {
+      if (!op.column || !op.delimiter || !op.into) return;
+      steps.push({ id: `split-${i}`, icon: 'arrows', label: `Split ${op.column}`, detail: `on "${op.delimiter}" → ${op.into}`, onRemove: () => setSplitOps((arr) => arr.filter((_, j) => j !== i)) });
+    });
+    // 10. case-when
+    caseWhenOps.forEach((op, i) => {
+      if (!op.into) return;
+      steps.push({ id: `case-${i}`, icon: 'filter', label: `Case-When → ${op.into}`, detail: `${op.branches.length} branch${op.branches.length === 1 ? '' : 'es'}`, onRemove: () => setCaseWhenOps((arr) => arr.filter((_, j) => j !== i)) });
+    });
+    // 11. concat
+    concatOps.forEach((op, i) => {
+      if (!op.into) return;
+      steps.push({ id: `concat-${i}`, icon: 'arrows', label: `Concat → ${op.into}`, detail: op.columns.replace(/,/g, ` [${op.separator}] `), onRemove: () => setConcatOps((arr) => arr.filter((_, j) => j !== i)) });
+    });
+    // 12. date extract
+    dateExtractOps.forEach((op, i) => {
+      if (!op.column || !op.into) return;
+      steps.push({ id: `date-${i}`, icon: 'calc', label: `Extract ${op.part} → ${op.into}`, detail: `from ${op.column}`, onRemove: () => setDateExtractOps((arr) => arr.filter((_, j) => j !== i)) });
+    });
+    // 13. substring
+    substringOps.forEach((op, i) => {
+      if (!op.column || !op.into) return;
+      const lenPart = op.length === null || op.length === undefined ? 'to end' : `for ${op.length}`;
+      steps.push({ id: `substr-${i}`, icon: 'wand', label: `Substring → ${op.into}`, detail: `from ${op.column} @ ${op.start} ${lenPart}`, onRemove: () => setSubstringOps((arr) => arr.filter((_, j) => j !== i)) });
+    });
+    // 14. numeric ops
+    numericOps.forEach((op, i) => {
+      if (!op.column || !op.into) return;
+      const label = { round: 'Round', floor: 'Floor', ceil: 'Ceil', abs: 'Abs' }[op.op] || op.op;
+      const detail = op.op === 'round' ? `${op.column} @ ${op.digits}dp` : op.column;
+      steps.push({ id: `num-${i}`, icon: 'calc', label: `${label} → ${op.into}`, detail, onRemove: () => setNumericOps((arr) => arr.filter((_, j) => j !== i)) });
+    });
+    // 15. count matching
+    countMatchOps.forEach((op, i) => {
+      if (!op.into) return;
+      steps.push({ id: `count-${i}`, icon: 'sigma', label: `Count matching → ${op.into}`, detail: `where ${op.column} ${op.operator} ${op.value}${op.partitionBy ? ` per (${op.partitionBy})` : ''}`, onRemove: () => setCountMatchOps((arr) => arr.filter((_, j) => j !== i)) });
+    });
+    // 16. window
+    windowOps.forEach((op, i) => {
+      if (!op.orderBy || !op.into) return;
+      const kindLabel = { rank: 'Rank', dense_rank: 'Dense rank', row_number: 'Row number' }[op.kind] || op.kind;
+      steps.push({ id: `window-${i}`, icon: 'rank', label: `${kindLabel} → ${op.into}`, detail: `by ${op.orderBy} ${op.orderAsc ? 'ASC' : 'DESC'}${op.partitionBy ? ` per (${op.partitionBy})` : ''}`, onRemove: () => setWindowOps((arr) => arr.filter((_, j) => j !== i)) });
+    });
+    // 17. string ops
+    stringOperations.forEach((op, i) => {
+      steps.push({ id: `strop-${i}`, icon: 'wand', label: `${op.operation} ${op.column}`, onRemove: () => setStringOperations((arr) => arr.filter((_, j) => j !== i)) });
+    });
+    // 18. calculated columns
     Object.entries(calculatedColumns).forEach(([name, expr]) => {
       steps.push({
-        id: `calc-${name}`,
-        icon: 'calc',
-        label: `Calc → ${name}`,
-        detail: expr,
-        onRemove: () => {
-          setCalculatedColumns((prev) => {
-            const next = { ...prev };
-            delete next[name];
-            return next;
-          });
-        },
+        id: `calc-${name}`, icon: 'calc', label: `Calc → ${name}`, detail: expr,
+        onRemove: () => setCalculatedColumns((prev) => { const next = { ...prev }; delete next[name]; return next; }),
       });
     });
+    // 19. drop columns
+    if (columnsToDrop.size > 0) {
+      steps.push({ id: 'dropcols', icon: 'cols', label: 'Drop columns', detail: Array.from(columnsToDrop).join(', '), onRemove: () => setColumnsToDrop(new Set()) });
+    }
+    // 20. pivot / unpivot
     if (pivotConfig) {
-      steps.push({
-        id: 'pivot',
-        icon: 'arrows',
-        label: 'Pivot',
-        onRemove: () => setPivotConfig(null),
-      });
+      steps.push({ id: 'pivot', icon: 'arrows', label: 'Pivot', onRemove: () => setPivotConfig(null) });
     }
     if (unpivotConfig) {
+      steps.push({ id: 'unpivot', icon: 'arrows', label: 'Unpivot', onRemove: () => setUnpivotConfig(null) });
+    }
+    // 21. sample
+    if (sampleConfig && (sampleConfig.n || sampleConfig.fraction)) {
       steps.push({
-        id: 'unpivot',
-        icon: 'arrows',
-        label: 'Unpivot',
-        onRemove: () => setUnpivotConfig(null),
+        id: 'sample', icon: 'wand', label: 'Sample',
+        detail: sampleConfig.n ? `${sampleConfig.n} rows` : `${(sampleConfig.fraction ?? 0) * 100}%`,
+        onRemove: () => setSampleConfig(null),
       });
     }
+    // 22. limit
     if (limitRows !== null && limitRows > 0) {
-      steps.push({
-        id: 'limit',
-        icon: 'play',
-        label: `Limit`,
-        detail: `${limitRows} rows`,
-        onRemove: () => setLimitRows(null),
-      });
+      steps.push({ id: 'limit', icon: 'play', label: 'Limit', detail: `${limitRows} rows`, onRemove: () => setLimitRows(null) });
     }
     return steps;
-  }, [filters, caseWhenOps, concatOps, dateExtractOps, countMatchOps, replaceOps, splitOps, windowOps, dropDuplicates, dropNA, fillNAValue, sortColumns, sortAscending, groupByColumns, columnRenames, columnsToDrop, stringOperations, calculatedColumns, pivotConfig, unpivotConfig, limitRows]);
+  }, [filters, dropDuplicates, dropNA, fillNAValue, groupByColumns, aggregations, sortColumns, sortAscending, columnRenames, replaceOps, splitOps, caseWhenOps, concatOps, dateExtractOps, substringOps, numericOps, countMatchOps, windowOps, stringOperations, calculatedColumns, columnsToDrop, pivotConfig, unpivotConfig, sampleConfig, limitRows]);
 
   return (
     <Dialog.Root open={isOpen} onOpenChange={handleClose}>
@@ -2475,6 +2471,247 @@ export function DataPreviewModal({
                     )}
                   </div>
 
+                  {/* Accordion Section: Substring */}
+                  <div className="border border-gray-200 rounded-lg bg-white overflow-hidden">
+                    <button
+                      onClick={() => toggleSection('substring')}
+                      className="w-full px-4 py-3 flex items-center justify-between hover:bg-gray-50 transition-colors"
+                    >
+                      <div className="flex items-center space-x-2">
+                        <Wand2 className="w-4 h-4 text-blue-600" />
+                        <span className="text-sm font-semibold text-gray-900">Substring</span>
+                        {substringOps.length > 0 && <span className="text-xs text-gray-500">{substringOps.length}</span>}
+                      </div>
+                      {expandedSections.has('substring') ? <ChevronDown className="w-4 h-4 text-gray-500" /> : <ChevronRight className="w-4 h-4 text-gray-500" />}
+                    </button>
+                    {expandedSections.has('substring') && (
+                      <div className="px-4 pb-3 border-t border-gray-100">
+                        <div className="space-y-2 mt-3">
+                          {substringOps.map((op, i) => (
+                            <div key={i} className="bg-gray-50 border border-gray-200 rounded p-2 space-y-1.5">
+                              <div className="flex items-center justify-between">
+                                <input
+                                  type="text"
+                                  value={op.into}
+                                  onChange={(e) => setSubstringOps(ops => ops.map((o, j) => j === i ? { ...o, into: e.target.value } : o))}
+                                  placeholder="new column name"
+                                  className="text-xs border border-gray-300 rounded px-1.5 py-1 flex-1 mr-1"
+                                />
+                                <button
+                                  onClick={() => setSubstringOps(ops => ops.filter((_, j) => j !== i))}
+                                  className="p-1 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded flex-shrink-0"
+                                  title="Remove"
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                </button>
+                              </div>
+                              <div className="grid grid-cols-[1fr_auto_auto] gap-1 items-center">
+                                <select
+                                  value={op.column}
+                                  onChange={(e) => setSubstringOps(ops => ops.map((o, j) => j === i ? { ...o, column: e.target.value } : o))}
+                                  className="text-xs border border-gray-300 rounded px-1.5 py-1"
+                                >
+                                  <option value="">Column…</option>
+                                  {data?.columns?.map(c => <option key={c} value={c}>{c}</option>)}
+                                </select>
+                                <input
+                                  type="number"
+                                  min={1}
+                                  value={op.start}
+                                  onChange={(e) => setSubstringOps(ops => ops.map((o, j) => j === i ? { ...o, start: Math.max(1, parseInt(e.target.value, 10) || 1) } : o))}
+                                  placeholder="start"
+                                  className="w-16 text-xs border border-gray-300 rounded px-1.5 py-1"
+                                  title="Start position (1-based)"
+                                />
+                                <input
+                                  type="number"
+                                  min={0}
+                                  value={op.length ?? ''}
+                                  onChange={(e) => {
+                                    const raw = e.target.value.trim();
+                                    setSubstringOps(ops => ops.map((o, j) => j === i ? { ...o, length: raw === '' ? null : Math.max(0, parseInt(raw, 10) || 0) } : o));
+                                  }}
+                                  placeholder="len"
+                                  className="w-16 text-xs border border-gray-300 rounded px-1.5 py-1"
+                                  title="Length (blank = to end)"
+                                />
+                              </div>
+                            </div>
+                          ))}
+                          <button
+                            onClick={() => setSubstringOps(ops => [...ops, { column: data?.columns?.[0] || '', start: 1, length: null, into: `substr_${ops.length + 1}` }])}
+                            className="text-xs text-primary hover:underline flex items-center gap-1"
+                          >
+                            <Plus className="w-3 h-3" /> Add substring
+                          </button>
+                          <p className="text-[10px] text-gray-500">Start is 1-based. Blank length = to end of string.</p>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Accordion Section: Numeric Ops */}
+                  <div className="border border-gray-200 rounded-lg bg-white overflow-hidden">
+                    <button
+                      onClick={() => toggleSection('numeric')}
+                      className="w-full px-4 py-3 flex items-center justify-between hover:bg-gray-50 transition-colors"
+                    >
+                      <div className="flex items-center space-x-2">
+                        <Calculator className="w-4 h-4 text-blue-600" />
+                        <span className="text-sm font-semibold text-gray-900">Numeric (round / floor / ceil / abs)</span>
+                        {numericOps.length > 0 && <span className="text-xs text-gray-500">{numericOps.length}</span>}
+                      </div>
+                      {expandedSections.has('numeric') ? <ChevronDown className="w-4 h-4 text-gray-500" /> : <ChevronRight className="w-4 h-4 text-gray-500" />}
+                    </button>
+                    {expandedSections.has('numeric') && (
+                      <div className="px-4 pb-3 border-t border-gray-100">
+                        <div className="space-y-2 mt-3">
+                          {numericOps.map((op, i) => (
+                            <div key={i} className="bg-gray-50 border border-gray-200 rounded p-2 space-y-1.5">
+                              <div className="flex items-center justify-between">
+                                <input
+                                  type="text"
+                                  value={op.into}
+                                  onChange={(e) => setNumericOps(ops => ops.map((o, j) => j === i ? { ...o, into: e.target.value } : o))}
+                                  placeholder="new column name"
+                                  className="text-xs border border-gray-300 rounded px-1.5 py-1 flex-1 mr-1"
+                                />
+                                <button
+                                  onClick={() => setNumericOps(ops => ops.filter((_, j) => j !== i))}
+                                  className="p-1 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded flex-shrink-0"
+                                  title="Remove"
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                </button>
+                              </div>
+                              <div className="grid grid-cols-[1fr_auto_auto] gap-1">
+                                <select
+                                  value={op.column}
+                                  onChange={(e) => setNumericOps(ops => ops.map((o, j) => j === i ? { ...o, column: e.target.value } : o))}
+                                  className="text-xs border border-gray-300 rounded px-1.5 py-1"
+                                >
+                                  <option value="">Column…</option>
+                                  {data?.columns?.map(c => <option key={c} value={c}>{c}</option>)}
+                                </select>
+                                <select
+                                  value={op.op}
+                                  onChange={(e) => setNumericOps(ops => ops.map((o, j) => j === i ? { ...o, op: e.target.value as any } : o))}
+                                  className="text-xs border border-gray-300 rounded px-1.5 py-1"
+                                >
+                                  <option value="round">Round</option>
+                                  <option value="floor">Floor</option>
+                                  <option value="ceil">Ceil</option>
+                                  <option value="abs">Abs</option>
+                                </select>
+                                {op.op === 'round' && (
+                                  <input
+                                    type="number"
+                                    min={0}
+                                    value={op.digits}
+                                    onChange={(e) => setNumericOps(ops => ops.map((o, j) => j === i ? { ...o, digits: Math.max(0, parseInt(e.target.value, 10) || 0) } : o))}
+                                    placeholder="dp"
+                                    className="w-16 text-xs border border-gray-300 rounded px-1.5 py-1"
+                                    title="Decimal places"
+                                  />
+                                )}
+                              </div>
+                            </div>
+                          ))}
+                          <button
+                            onClick={() => setNumericOps(ops => [...ops, { column: data?.columns?.[0] || '', op: 'round', digits: 2, into: `num_${ops.length + 1}` }])}
+                            className="text-xs text-primary hover:underline flex items-center gap-1"
+                          >
+                            <Plus className="w-3 h-3" /> Add numeric op
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Accordion Section: Sample */}
+                  <div className="border border-gray-200 rounded-lg bg-white overflow-hidden">
+                    <button
+                      onClick={() => toggleSection('sample')}
+                      className="w-full px-4 py-3 flex items-center justify-between hover:bg-gray-50 transition-colors"
+                    >
+                      <div className="flex items-center space-x-2">
+                        <Wand2 className="w-4 h-4 text-blue-600" />
+                        <span className="text-sm font-semibold text-gray-900">Sample</span>
+                        {sampleConfig && (sampleConfig.n || sampleConfig.fraction) && <span className="text-xs text-gray-500">1</span>}
+                      </div>
+                      {expandedSections.has('sample') ? <ChevronDown className="w-4 h-4 text-gray-500" /> : <ChevronRight className="w-4 h-4 text-gray-500" />}
+                    </button>
+                    {expandedSections.has('sample') && (
+                      <div className="px-4 pb-3 border-t border-gray-100">
+                        <div className="space-y-2 mt-3">
+                          <div className="grid grid-cols-2 gap-2">
+                            <div>
+                              <label className="text-[10px] text-gray-600 block mb-1">N rows</label>
+                              <input
+                                type="number"
+                                min={0}
+                                value={sampleConfig?.n ?? ''}
+                                onChange={(e) => {
+                                  const raw = e.target.value.trim();
+                                  const n = raw === '' ? null : Math.max(0, parseInt(raw, 10) || 0);
+                                  setSampleConfig((prev) => ({
+                                    n,
+                                    fraction: n ? null : prev?.fraction ?? null,
+                                    random: prev?.random ?? true,
+                                  }));
+                                }}
+                                placeholder="e.g. 1000"
+                                className="w-full text-xs border border-gray-300 rounded px-1.5 py-1"
+                              />
+                            </div>
+                            <div>
+                              <label className="text-[10px] text-gray-600 block mb-1">or Fraction (0-1)</label>
+                              <input
+                                type="number"
+                                min={0}
+                                max={1}
+                                step={0.05}
+                                value={sampleConfig?.fraction ?? ''}
+                                onChange={(e) => {
+                                  const raw = e.target.value.trim();
+                                  const f = raw === '' ? null : Math.max(0, Math.min(1, parseFloat(raw) || 0));
+                                  setSampleConfig((prev) => ({
+                                    n: f ? null : prev?.n ?? null,
+                                    fraction: f,
+                                    random: prev?.random ?? true,
+                                  }));
+                                }}
+                                placeholder="0.10 = 10%"
+                                className="w-full text-xs border border-gray-300 rounded px-1.5 py-1"
+                              />
+                            </div>
+                          </div>
+                          <label className="flex items-center gap-2 text-xs cursor-pointer">
+                            <input
+                              type="checkbox"
+                              checked={sampleConfig?.random ?? true}
+                              onChange={(e) => setSampleConfig((prev) => ({
+                                n: prev?.n ?? null,
+                                fraction: prev?.fraction ?? null,
+                                random: e.target.checked,
+                              }))}
+                              className="w-4 h-4"
+                            />
+                            <span className="text-gray-700">Random sample (uncheck for top-N)</span>
+                          </label>
+                          {sampleConfig && (sampleConfig.n || sampleConfig.fraction) && (
+                            <button
+                              onClick={() => setSampleConfig(null)}
+                              className="text-xs text-red-600 hover:underline"
+                            >
+                              Clear sample
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
                   {/* Accordion Section: Advanced Reshaping */}
                   <div className="border border-gray-200 rounded-lg bg-white overflow-hidden">
                     <button
@@ -3032,7 +3269,10 @@ export function DataPreviewModal({
             {mode === 'transform' && (
               <RecipePanel
                 steps={recipeSteps}
+                previewAtStep={previewAtStep}
+                onSelectStep={setPreviewAtStep}
                 onClearAll={() => {
+                  setPreviewAtStep(null);
                   setFilters([]);
                   setCaseWhenOps([]);
                   setConcatOps([]);
@@ -3054,6 +3294,9 @@ export function DataPreviewModal({
                   setPivotConfig(null);
                   setUnpivotConfig(null);
                   setLimitRows(null);
+                  setSubstringOps([]);
+                  setNumericOps([]);
+                  setSampleConfig(null);
                 }}
               />
             )}

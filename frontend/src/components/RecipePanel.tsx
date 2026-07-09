@@ -37,9 +37,12 @@ const ICONS = {
 interface RecipePanelProps {
   steps: RecipeStep[];
   onClearAll?: () => void;
+  /** Click a step → preview shows data as of that step. null = show final result. */
+  previewAtStep?: number | null;
+  onSelectStep?: (index: number | null) => void;
 }
 
-export function RecipePanel({ steps, onClearAll }: RecipePanelProps) {
+export function RecipePanel({ steps, onClearAll, previewAtStep = null, onSelectStep }: RecipePanelProps) {
   return (
     <div className="w-72 border-l border-gray-200 bg-gray-50 flex flex-col overflow-hidden">
       <div className="flex-shrink-0 px-3 py-2 border-b border-gray-200 bg-white flex items-center justify-between">
@@ -70,12 +73,26 @@ export function RecipePanel({ steps, onClearAll }: RecipePanelProps) {
         )}
         {steps.map((step, i) => {
           const Icon = ICONS[step.icon] ?? Filter;
+          const isSelected = previewAtStep === i;
+          const isPast = previewAtStep !== null && i > previewAtStep;
           return (
             <div
               key={step.id}
-              className="group flex items-start gap-2 px-2 py-1.5 bg-white border border-gray-200 rounded hover:border-primary/30"
+              onClick={onSelectStep ? () => onSelectStep(isSelected ? null : i) : undefined}
+              className={`group flex items-start gap-2 px-2 py-1.5 border rounded ${
+                isSelected
+                  ? 'bg-primary/5 border-primary'
+                  : isPast
+                  ? 'bg-gray-50 border-gray-200 opacity-50'
+                  : 'bg-white border-gray-200 hover:border-primary/30'
+              } ${onSelectStep ? 'cursor-pointer' : ''}`}
+              title={onSelectStep ? 'Click to preview data at this step' : undefined}
             >
-              <div className="flex-shrink-0 w-5 h-5 rounded bg-primary/10 text-primary flex items-center justify-center text-[10px] font-semibold tabular-nums">
+              <div
+                className={`flex-shrink-0 w-5 h-5 rounded flex items-center justify-center text-[10px] font-semibold tabular-nums ${
+                  isSelected ? 'bg-primary text-white' : 'bg-primary/10 text-primary'
+                }`}
+              >
                 {i + 1}
               </div>
               <Icon className="w-3.5 h-3.5 text-gray-500 flex-shrink-0 mt-0.5" />
@@ -90,7 +107,7 @@ export function RecipePanel({ steps, onClearAll }: RecipePanelProps) {
                 )}
               </div>
               <button
-                onClick={step.onRemove}
+                onClick={(e) => { e.stopPropagation(); step.onRemove(); }}
                 className="opacity-0 group-hover:opacity-100 p-0.5 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded flex-shrink-0"
                 title="Remove step"
                 aria-label="Remove step"
@@ -100,6 +117,14 @@ export function RecipePanel({ steps, onClearAll }: RecipePanelProps) {
             </div>
           );
         })}
+        {previewAtStep !== null && onSelectStep && (
+          <button
+            onClick={() => onSelectStep(null)}
+            className="w-full mt-2 py-1 text-[11px] text-primary hover:underline"
+          >
+            ← Show final result (all steps applied)
+          </button>
+        )}
       </div>
 
       {steps.length > 0 && (

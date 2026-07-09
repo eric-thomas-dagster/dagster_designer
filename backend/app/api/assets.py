@@ -184,6 +184,9 @@ class TransformConfig(BaseModel):
     caseWhenOps: list[dict[str, Any]] | None = None  # [{branches, else, into}]
     concatOps: list[dict[str, str]] | None = None  # [{columns, separator, into}]
     dateExtractOps: list[dict[str, str]] | None = None  # [{column, part, into}]
+    substringOps: list[dict[str, Any]] | None = None  # [{column, start, length, into}]
+    numericOps: list[dict[str, Any]] | None = None  # [{column, op, digits, into}]
+    sampleConfig: dict[str, Any] | None = None  # {n, fraction, random}
 
 
 class CreateTransformerRequest(BaseModel):
@@ -351,6 +354,12 @@ async def create_transformer_asset(project_id: str, request: CreateTransformerRe
         attributes["concat_ops"] = json.dumps(request.transformConfig.concatOps)
     if request.transformConfig.dateExtractOps:
         attributes["date_extract_ops"] = json.dumps(request.transformConfig.dateExtractOps)
+    if request.transformConfig.substringOps:
+        attributes["substring_ops"] = json.dumps(request.transformConfig.substringOps)
+    if request.transformConfig.numericOps:
+        attributes["numeric_ops"] = json.dumps(request.transformConfig.numericOps)
+    if request.transformConfig.sampleConfig:
+        attributes["sample_config"] = json.dumps(request.transformConfig.sampleConfig)
 
     # Pick the right transformer backend based on upstream type.
     if upstream_is_warehouse:
@@ -397,6 +406,12 @@ async def create_transformer_asset(project_id: str, request: CreateTransformerRe
             sql_attrs["concat_ops"] = json.dumps(request.transformConfig.concatOps)
         if request.transformConfig.dateExtractOps:
             sql_attrs["date_extract_ops"] = json.dumps(request.transformConfig.dateExtractOps)
+        if request.transformConfig.substringOps:
+            sql_attrs["substring_ops"] = json.dumps(request.transformConfig.substringOps)
+        if request.transformConfig.numericOps:
+            sql_attrs["numeric_ops"] = json.dumps(request.transformConfig.numericOps)
+        if request.transformConfig.sampleConfig:
+            sql_attrs["sample_config"] = json.dumps(request.transformConfig.sampleConfig)
         # Filter translation: pandas query → SQL WHERE. Basic operators only;
         # anything involving `.str.contains` or method chains falls through
         # unchanged and may fail at run time.
