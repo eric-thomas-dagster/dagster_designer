@@ -177,6 +177,9 @@ class TransformConfig(BaseModel):
     pivotConfig: dict[str, str] | None = None
     unpivotConfig: dict[str, Any] | None = None
     limitRows: int | None = None  # LIMIT N — applied last after all other ops.
+    replaceOps: list[dict[str, str]] | None = None  # [{column, find, replace}]
+    splitOps: list[dict[str, str]] | None = None  # [{column, delimiter, into}]
+    windowOps: list[dict[str, Any]] | None = None  # [{kind, orderBy, partitionBy, orderAsc, into}]
 
 
 class CreateTransformerRequest(BaseModel):
@@ -326,6 +329,17 @@ async def create_transformer_asset(project_id: str, request: CreateTransformerRe
     if request.transformConfig.limitRows is not None and request.transformConfig.limitRows > 0:
         attributes["limit_rows"] = request.transformConfig.limitRows
 
+    # Add replace / split / window ops. The community DataFrameTransformer may
+    # not recognize these fields yet (its schema is external), but passing
+    # them through is harmless and lets it pick them up once its schema
+    # widens. Our own SqlTransformerComponent has first-class support.
+    if request.transformConfig.replaceOps:
+        attributes["replace_ops"] = json.dumps(request.transformConfig.replaceOps)
+    if request.transformConfig.splitOps:
+        attributes["split_ops"] = json.dumps(request.transformConfig.splitOps)
+    if request.transformConfig.windowOps:
+        attributes["window_ops"] = json.dumps(request.transformConfig.windowOps)
+
     # Pick the right transformer backend based on upstream type.
     if upstream_is_warehouse:
         # Translate the DF-style attributes we built above into SQL-style ones
@@ -357,6 +371,12 @@ async def create_transformer_asset(project_id: str, request: CreateTransformerRe
             sql_attrs["calculated_columns"] = json.dumps(request.transformConfig.calculatedColumns)
         if request.transformConfig.limitRows is not None and request.transformConfig.limitRows > 0:
             sql_attrs["limit_rows"] = request.transformConfig.limitRows
+        if request.transformConfig.replaceOps:
+            sql_attrs["replace_ops"] = json.dumps(request.transformConfig.replaceOps)
+        if request.transformConfig.splitOps:
+            sql_attrs["split_ops"] = json.dumps(request.transformConfig.splitOps)
+        if request.transformConfig.windowOps:
+            sql_attrs["window_ops"] = json.dumps(request.transformConfig.windowOps)
         # Filter translation: pandas query → SQL WHERE. Basic operators only;
         # anything involving `.str.contains` or method chains falls through
         # unchanged and may fail at run time.

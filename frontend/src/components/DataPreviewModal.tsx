@@ -5,6 +5,7 @@ import { X, AlertCircle, Table as TableIcon, Wand2, Save, Filter, Columns3, Tras
 import { assetsApi, projectsApi, type AssetDataPreview } from '@/services/api';
 import { notify } from './Notifications';
 import { CommunityTransformPicker } from './CommunityTransformPicker';
+import { ColumnProfileStrip } from './ColumnProfileStrip';
 
 interface DataPreviewModalProps {
   isOpen: boolean;
@@ -45,6 +46,9 @@ interface TransformConfig {
   pivotConfig: {index: string, columns: string, values: string, aggfunc: string} | null;
   unpivotConfig: {id_vars: string[], value_vars: string[], var_name: string, value_name: string} | null;
   limitRows: number | null;
+  replaceOps: Array<{column: string; find: string; replace: string}> | null;
+  splitOps: Array<{column: string; delimiter: string; into: string}> | null;
+  windowOps: Array<{kind: string; orderBy: string; partitionBy: string; orderAsc: boolean; into: string}> | null;
 }
 
 export function DataPreviewModal({
@@ -91,6 +95,19 @@ export function DataPreviewModal({
   const [pivotConfig, setPivotConfig] = useState<Record<string, any> | null>(null);
   const [unpivotConfig, setUnpivotConfig] = useState<Record<string, any> | null>(null);
   const [limitRows, setLimitRows] = useState<number | null>(null);
+  // Replace: {column, find, replace} — applied per row.
+  const [replaceOps, setReplaceOps] = useState<Array<{column: string; find: string; replace: string}>>([]);
+  // Split: {column, delimiter, into[]} — splits values on delimiter and
+  // assigns each part to one of the `into` column names, left-to-right.
+  const [splitOps, setSplitOps] = useState<Array<{column: string; delimiter: string; into: string}>>([]);
+  // Window: {kind, orderBy, partitionBy, into} — adds one column per op.
+  const [windowOps, setWindowOps] = useState<Array<{
+    kind: 'rank' | 'row_number' | 'dense_rank';
+    orderBy: string;
+    partitionBy: string;
+    orderAsc: boolean;
+    into: string;
+  }>>([]);
 
   // Accordion state for transform sections
   const [expandedSections, setExpandedSections] = useState<Set<string>>(new Set(['columns', 'filters']));
@@ -310,12 +327,16 @@ export function DataPreviewModal({
 
     let result = [...data.data];
 
-    // Apply filters
+    // Apply filters — skip any filter that isn't fully configured yet
+    // (empty value or column). Clicking "Add filter" gives you a blank row
+    // to configure; treating it as an active `equals ''` would nuke every
+    // row and leave the user staring at 0-row preview with nothing to
+    // filter against.
     filters.forEach(filter => {
+      const filterValue = (filter.value ?? '').trim();
+      if (!filter.column || !filterValue) return;
       result = result.filter(row => {
         const value = row[filter.column];
-        const filterValue = filter.value;
-
         switch (filter.operator) {
           case 'equals':
             return String(value).toLowerCase() === filterValue.toLowerCase();
@@ -456,6 +477,104 @@ export function DataPreviewModal({
       });
     }
 
+    // Apply column-level Replace ops
+    if (replaceOps.length > 0) {
+      result = result.map(row => {
+        const newRow = { ...row };
+        for (const op of replaceOps) {
+          if (!op.column || !op.find) continue;
+          const v = newRow[op.column];
+          if (v === null || v === undefined) continue;
+          const s = String(v);
+          // Replace all occurrences of the literal string. If find is a
+          // /regex/ literal we honor that too, but plain-text is the default.
+          const isRegex = op.find.startsWith('/') && op.find.lastIndexOf('/') > 0;
+          if (isRegex) {
+            const last = op.find.lastIndexOf('/');
+            try {
+              const re = new RegExp(op.find.slice(1, last), op.find.slice(last + 1) || 'g');
+              newRow[op.column] = s.replace(re, op.replace);
+            } catch {
+              // Bad regex — fall through to literal replace.
+              newRow[op.column] = s.split(op.find).join(op.replace);
+            }
+          } else {
+            newRow[op.column] = s.split(op.find).join(op.replace);
+          }
+        }
+        return newRow;
+      });
+    }
+
+    // Apply Split ops — split a column's string value by delimiter, write
+    // parts back into comma-separated destination columns. e.g. delimiter=","
+    // into="first_name,last_name" splits "Jane,Doe" into two new columns.
+    if (splitOps.length > 0) {
+      result = result.map(row => {
+        const newRow = { ...row };
+        for (const op of splitOps) {
+          if (!op.column || !op.delimiter || !op.into) continue;
+          const targets = op.into.split(',').map(s => s.trim()).filter(Boolean);
+          if (targets.length === 0) continue;
+          const v = newRow[op.column];
+          const s = v === null || v === undefined ? '' : String(v);
+          const parts = s.split(op.delimiter);
+          targets.forEach((t, i) => {
+            newRow[t] = parts[i] ?? '';
+          });
+        }
+        return newRow;
+      });
+    }
+
+    // Apply Window ops — rank / row_number / dense_rank. Client-side impl
+    // groups by partitionBy, sorts within each partition by orderBy, then
+    // assigns rank values. Backend does the same via SQL window functions.
+    if (windowOps.length > 0) {
+      for (const op of windowOps) {
+        if (!op.orderBy || !op.into) continue;
+        const partKeys = op.partitionBy
+          ? op.partitionBy.split(',').map(s => s.trim()).filter(Boolean)
+          : [];
+        // Group rows by partition key values.
+        const groups = new Map<string, number[]>();
+        result.forEach((row, i) => {
+          const key = partKeys.length > 0 ? partKeys.map(k => String(row[k])).join('|') : '__all__';
+          const arr = groups.get(key) ?? [];
+          arr.push(i);
+          groups.set(key, arr);
+        });
+        // For each group, sort indices by orderBy, then assign.
+        for (const [, indices] of groups) {
+          const sorted = [...indices].sort((a, b) => {
+            const av = result[a][op.orderBy];
+            const bv = result[b][op.orderBy];
+            const cmp = av > bv ? 1 : av < bv ? -1 : 0;
+            return op.orderAsc ? cmp : -cmp;
+          });
+          if (op.kind === 'row_number') {
+            sorted.forEach((idx, r) => {
+              result[idx] = { ...result[idx], [op.into]: r + 1 };
+            });
+          } else {
+            // rank + dense_rank
+            let rank = 0;
+            let denseRank = 0;
+            let prevVal: any = Symbol('none');
+            sorted.forEach((idx, r) => {
+              const v = result[idx][op.orderBy];
+              if (v !== prevVal) {
+                rank = r + 1;
+                denseRank++;
+                prevVal = v;
+              }
+              result[idx] = { ...result[idx], [op.into]: op.kind === 'dense_rank' ? denseRank : rank };
+            });
+          }
+        }
+      }
+    }
+
     // Apply string operations
     if (stringOperations.length > 0) {
       result = result.map(row => {
@@ -594,7 +713,7 @@ export function DataPreviewModal({
       row_count: result.length,
       column_count: finalColumns.length,
     };
-  }, [data, mode, filters, selectedColumns, dropDuplicates, dropNA, fillNAValue, sortColumns, sortAscending, groupByColumns, aggregations, columnRenames, columnsToDrop, stringOperations, calculatedColumns, columnOrder, limitRows]);
+  }, [data, mode, filters, selectedColumns, dropDuplicates, dropNA, fillNAValue, sortColumns, sortAscending, groupByColumns, aggregations, columnRenames, columnsToDrop, stringOperations, calculatedColumns, columnOrder, limitRows, replaceOps, splitOps, windowOps]);
 
   const toggleColumn = (column: string) => {
     const newSelected = new Set(selectedColumns);
@@ -781,7 +900,13 @@ export function DataPreviewModal({
         pivotConfig: pivotConfig as { index: string; columns: string; values: string; aggfunc: string } | null,
         unpivotConfig: unpivotConfig as { id_vars: string[]; value_vars: string[]; var_name: string; value_name: string } | null,
         limitRows: limitRows,
-      } as TransformConfig & { limitRows: number | null };
+        replaceOps: replaceOps.filter((o) => o.column && o.find).length > 0
+          ? replaceOps.filter((o) => o.column && o.find) : null,
+        splitOps: splitOps.filter((o) => o.column && o.delimiter && o.into).length > 0
+          ? splitOps.filter((o) => o.column && o.delimiter && o.into) : null,
+        windowOps: windowOps.filter((o) => o.orderBy && o.into).length > 0
+          ? windowOps.filter((o) => o.orderBy && o.into) : null,
+      } as TransformConfig & Record<string, any>;
 
       // Call API to create new transformer asset
       console.log('[DataPreviewModal] Creating transformer with sourceAssetKey:', assetKey);
@@ -1400,6 +1525,233 @@ export function DataPreviewModal({
                     )}
                   </div>
 
+                  {/* Accordion Section: Replace */}
+                  <div className="border border-gray-200 rounded-lg bg-white overflow-hidden">
+                    <button
+                      onClick={() => toggleSection('replace')}
+                      className="w-full px-4 py-3 flex items-center justify-between hover:bg-gray-50 transition-colors"
+                    >
+                      <div className="flex items-center space-x-2">
+                        <RotateCw className="w-4 h-4 text-blue-600" />
+                        <span className="text-sm font-semibold text-gray-900">Replace</span>
+                        {replaceOps.length > 0 && <span className="text-xs text-gray-500">{replaceOps.length}</span>}
+                      </div>
+                      {expandedSections.has('replace') ? (
+                        <ChevronDown className="w-4 h-4 text-gray-500" />
+                      ) : (
+                        <ChevronRight className="w-4 h-4 text-gray-500" />
+                      )}
+                    </button>
+                    {expandedSections.has('replace') && (
+                      <div className="px-4 pb-3 border-t border-gray-100">
+                        <div className="space-y-2 mt-3">
+                          {replaceOps.map((op, i) => (
+                            <div key={i} className="grid grid-cols-[1fr_1fr_1fr_auto] gap-1 items-center">
+                              <select
+                                value={op.column}
+                                onChange={(e) => setReplaceOps(ops => ops.map((o, j) => j === i ? { ...o, column: e.target.value } : o))}
+                                className="text-xs border border-gray-300 rounded px-1.5 py-1"
+                              >
+                                <option value="">Column…</option>
+                                {data?.columns?.map(c => <option key={c} value={c}>{c}</option>)}
+                              </select>
+                              <input
+                                type="text"
+                                value={op.find}
+                                onChange={(e) => setReplaceOps(ops => ops.map((o, j) => j === i ? { ...o, find: e.target.value } : o))}
+                                placeholder="find"
+                                className="text-xs border border-gray-300 rounded px-1.5 py-1"
+                              />
+                              <input
+                                type="text"
+                                value={op.replace}
+                                onChange={(e) => setReplaceOps(ops => ops.map((o, j) => j === i ? { ...o, replace: e.target.value } : o))}
+                                placeholder="replace with"
+                                className="text-xs border border-gray-300 rounded px-1.5 py-1"
+                              />
+                              <button
+                                onClick={() => setReplaceOps(ops => ops.filter((_, j) => j !== i))}
+                                className="text-gray-400 hover:text-red-600"
+                                title="Remove"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                            </div>
+                          ))}
+                          <button
+                            onClick={() => setReplaceOps(ops => [...ops, { column: data?.columns?.[0] || '', find: '', replace: '' }])}
+                            className="text-xs text-primary hover:underline flex items-center gap-1"
+                          >
+                            <Plus className="w-3 h-3" /> Add replace
+                          </button>
+                          <p className="text-[10px] text-gray-500">
+                            Literal text by default; wrap in <code className="font-mono bg-gray-100 px-1 rounded">/regex/flags</code> for regex.
+                          </p>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Accordion Section: Split */}
+                  <div className="border border-gray-200 rounded-lg bg-white overflow-hidden">
+                    <button
+                      onClick={() => toggleSection('split')}
+                      className="w-full px-4 py-3 flex items-center justify-between hover:bg-gray-50 transition-colors"
+                    >
+                      <div className="flex items-center space-x-2">
+                        <ArrowDownUp className="w-4 h-4 text-blue-600" />
+                        <span className="text-sm font-semibold text-gray-900">Split Column</span>
+                        {splitOps.length > 0 && <span className="text-xs text-gray-500">{splitOps.length}</span>}
+                      </div>
+                      {expandedSections.has('split') ? (
+                        <ChevronDown className="w-4 h-4 text-gray-500" />
+                      ) : (
+                        <ChevronRight className="w-4 h-4 text-gray-500" />
+                      )}
+                    </button>
+                    {expandedSections.has('split') && (
+                      <div className="px-4 pb-3 border-t border-gray-100">
+                        <div className="space-y-2 mt-3">
+                          {splitOps.map((op, i) => (
+                            <div key={i} className="space-y-1 bg-gray-50 border border-gray-200 rounded p-2">
+                              <div className="grid grid-cols-[1fr_1fr_auto] gap-1">
+                                <select
+                                  value={op.column}
+                                  onChange={(e) => setSplitOps(ops => ops.map((o, j) => j === i ? { ...o, column: e.target.value } : o))}
+                                  className="text-xs border border-gray-300 rounded px-1.5 py-1"
+                                >
+                                  <option value="">Column…</option>
+                                  {data?.columns?.map(c => <option key={c} value={c}>{c}</option>)}
+                                </select>
+                                <input
+                                  type="text"
+                                  value={op.delimiter}
+                                  onChange={(e) => setSplitOps(ops => ops.map((o, j) => j === i ? { ...o, delimiter: e.target.value } : o))}
+                                  placeholder="delimiter (e.g. , or |)"
+                                  className="text-xs border border-gray-300 rounded px-1.5 py-1"
+                                />
+                                <button
+                                  onClick={() => setSplitOps(ops => ops.filter((_, j) => j !== i))}
+                                  className="text-gray-400 hover:text-red-600"
+                                  title="Remove"
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                </button>
+                              </div>
+                              <input
+                                type="text"
+                                value={op.into}
+                                onChange={(e) => setSplitOps(ops => ops.map((o, j) => j === i ? { ...o, into: e.target.value } : o))}
+                                placeholder="output columns, comma-separated (e.g. first_name,last_name)"
+                                className="w-full text-xs border border-gray-300 rounded px-1.5 py-1"
+                              />
+                            </div>
+                          ))}
+                          <button
+                            onClick={() => setSplitOps(ops => [...ops, { column: data?.columns?.[0] || '', delimiter: ',', into: '' }])}
+                            className="text-xs text-primary hover:underline flex items-center gap-1"
+                          >
+                            <Plus className="w-3 h-3" /> Add split
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Accordion Section: Window / Ranking */}
+                  <div className="border border-gray-200 rounded-lg bg-white overflow-hidden">
+                    <button
+                      onClick={() => toggleSection('window')}
+                      className="w-full px-4 py-3 flex items-center justify-between hover:bg-gray-50 transition-colors"
+                    >
+                      <div className="flex items-center space-x-2">
+                        <SortAsc className="w-4 h-4 text-blue-600" />
+                        <span className="text-sm font-semibold text-gray-900">Rank & Row Number</span>
+                        {windowOps.length > 0 && <span className="text-xs text-gray-500">{windowOps.length}</span>}
+                      </div>
+                      {expandedSections.has('window') ? (
+                        <ChevronDown className="w-4 h-4 text-gray-500" />
+                      ) : (
+                        <ChevronRight className="w-4 h-4 text-gray-500" />
+                      )}
+                    </button>
+                    {expandedSections.has('window') && (
+                      <div className="px-4 pb-3 border-t border-gray-100">
+                        <div className="space-y-2 mt-3">
+                          {windowOps.map((op, i) => (
+                            <div key={i} className="space-y-1 bg-gray-50 border border-gray-200 rounded p-2">
+                              <div className="grid grid-cols-[1fr_1fr_auto] gap-1">
+                                <select
+                                  value={op.kind}
+                                  onChange={(e) => setWindowOps(ops => ops.map((o, j) => j === i ? { ...o, kind: e.target.value as any } : o))}
+                                  className="text-xs border border-gray-300 rounded px-1.5 py-1"
+                                >
+                                  <option value="rank">RANK()</option>
+                                  <option value="dense_rank">DENSE_RANK()</option>
+                                  <option value="row_number">ROW_NUMBER()</option>
+                                </select>
+                                <input
+                                  type="text"
+                                  value={op.into}
+                                  onChange={(e) => setWindowOps(ops => ops.map((o, j) => j === i ? { ...o, into: e.target.value } : o))}
+                                  placeholder="new column name"
+                                  className="text-xs border border-gray-300 rounded px-1.5 py-1"
+                                />
+                                <button
+                                  onClick={() => setWindowOps(ops => ops.filter((_, j) => j !== i))}
+                                  className="text-gray-400 hover:text-red-600"
+                                  title="Remove"
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                </button>
+                              </div>
+                              <div className="grid grid-cols-[auto_1fr_auto] gap-1 items-center">
+                                <span className="text-[10px] text-gray-500">ORDER BY</span>
+                                <select
+                                  value={op.orderBy}
+                                  onChange={(e) => setWindowOps(ops => ops.map((o, j) => j === i ? { ...o, orderBy: e.target.value } : o))}
+                                  className="text-xs border border-gray-300 rounded px-1.5 py-1"
+                                >
+                                  <option value="">Column…</option>
+                                  {data?.columns?.map(c => <option key={c} value={c}>{c}</option>)}
+                                </select>
+                                <button
+                                  onClick={() => setWindowOps(ops => ops.map((o, j) => j === i ? { ...o, orderAsc: !o.orderAsc } : o))}
+                                  className="text-[10px] px-1.5 py-1 border border-gray-300 rounded hover:bg-gray-100"
+                                  title="Toggle sort direction"
+                                >
+                                  {op.orderAsc ? 'ASC' : 'DESC'}
+                                </button>
+                              </div>
+                              <div className="grid grid-cols-[auto_1fr] gap-1 items-center">
+                                <span className="text-[10px] text-gray-500">PARTITION BY</span>
+                                <input
+                                  type="text"
+                                  value={op.partitionBy}
+                                  onChange={(e) => setWindowOps(ops => ops.map((o, j) => j === i ? { ...o, partitionBy: e.target.value } : o))}
+                                  placeholder="columns, comma-separated (optional)"
+                                  className="text-xs border border-gray-300 rounded px-1.5 py-1"
+                                />
+                              </div>
+                            </div>
+                          ))}
+                          <button
+                            onClick={() => setWindowOps(ops => [...ops, {
+                              kind: 'rank' as const,
+                              orderBy: data?.columns?.[0] || '',
+                              partitionBy: '',
+                              orderAsc: true,
+                              into: `rank_${ops.length + 1}`,
+                            }])}
+                            className="text-xs text-primary hover:underline flex items-center gap-1"
+                          >
+                            <Plus className="w-3 h-3" /> Add ranking
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
                   {/* Accordion Section: Advanced Reshaping */}
                   <div className="border border-gray-200 rounded-lg bg-white overflow-hidden">
                     <button
@@ -1708,13 +2060,20 @@ export function DataPreviewModal({
                               key={idx}
                               className="px-4 py-3 text-left text-xs font-medium text-gray-700 uppercase tracking-wider"
                             >
-                              <div className="flex items-center justify-between group">
-                                <div className="flex flex-col flex-1">
-                                  <span>{col}</span>
+                              <div className="flex items-start justify-between group">
+                                <div className="flex flex-col flex-1 min-w-0">
+                                  <span className="truncate">{col}</span>
                                   {displayData.dtypes && displayData.dtypes[col] && (
                                     <span className="text-[10px] text-gray-500 font-normal normal-case mt-1">
                                       {displayData.dtypes[col]}
                                     </span>
+                                  )}
+                                  {displayData.data && (
+                                    <ColumnProfileStrip
+                                      rows={displayData.data}
+                                      column={col}
+                                      dtype={displayData.dtypes?.[col]}
+                                    />
                                   )}
                                 </div>
                                 {mode === 'transform' && (

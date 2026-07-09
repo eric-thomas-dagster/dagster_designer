@@ -3,6 +3,7 @@ import { useQuery } from '@tanstack/react-query';
 import { X, Wand2, Maximize2, ChevronRight, Table as TableIcon, Play, Loader2, AlertCircle } from 'lucide-react';
 import { assetsApi, projectsApi, type AssetDataPreview } from '@/services/api';
 import { notify } from './Notifications';
+import { ColumnProfileStrip } from './ColumnProfileStrip';
 
 interface AssetIOPanelProps {
   projectId: string;
@@ -317,7 +318,7 @@ function PreviewTable({ projectId, assetKey }: { projectId: string; assetKey: st
             {data.columns.map((c) => (
               <th
                 key={c}
-                className="px-2 py-1 text-left font-medium text-gray-700 border-b border-gray-200 whitespace-nowrap"
+                className="px-2 py-1 text-left font-medium text-gray-700 border-b border-gray-200 whitespace-nowrap align-top"
               >
                 <div className="flex flex-col">
                   <span>{c}</span>
@@ -325,6 +326,14 @@ function PreviewTable({ projectId, assetKey }: { projectId: string; assetKey: st
                     <span className="text-[9px] text-gray-400 font-normal">
                       {data.dtypes[c]}
                     </span>
+                  )}
+                  {data.data && (
+                    <ColumnProfileStrip
+                      rows={data.data}
+                      column={c}
+                      dtype={data.dtypes?.[c]}
+                      compact
+                    />
                   )}
                 </div>
               </th>

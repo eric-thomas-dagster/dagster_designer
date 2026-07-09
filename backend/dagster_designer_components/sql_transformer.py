@@ -58,6 +58,15 @@ class SqlTransformerComponent(dg.Component, dg.Model, dg.Resolvable):
     drop_duplicates: bool = False
     limit_rows: Optional[int] = None
     calculated_columns: Optional[str] = None  # JSON dict: {"new_col": "SQL expr"}
+    # JSON list: [{"column", "find", "replace"}]  — REPLACE(col, find, replace).
+    replace_ops: Optional[str] = None
+    # JSON list: [{"column", "delimiter", "into"}] — dialect-specific split.
+    # We emit SPLIT_PART for the common adapters; some dialects need custom
+    # handling and will fall back to a per-index expression per new column.
+    split_ops: Optional[str] = None
+    # JSON list: [{"kind", "orderBy", "partitionBy", "orderAsc", "into"}]
+    # kind ∈ {rank, dense_rank, row_number}. Compiles to a window function.
+    window_ops: Optional[str] = None
 
     group_name: Optional[str] = None
     description: Optional[str] = None
@@ -121,6 +130,9 @@ class SqlTransformerComponent(dg.Component, dg.Model, dg.Resolvable):
             "drop_duplicates": self.drop_duplicates,
             "limit_rows": self.limit_rows,
             "calculated_columns": self.calculated_columns,
+            "replace_ops": self.replace_ops,
+            "split_ops": self.split_ops,
+            "window_ops": self.window_ops,
         }
 
 
@@ -298,6 +310,75 @@ def _build_select_sql(cfg: dict[str, Any], dialect_name: str) -> str:
     for new_name, expr in calc.items():
         select_items.append(literal_column(f'({expr})').label(new_name))
 
+    # Replace ops → REPLACE(col, find, replace) applied to the column in place
+    # via a labeled SELECT expression. Multiple replaces on the same column
+    # chain: REPLACE(REPLACE(col, a, b), c, d).
+    replace_ops = _json_list(cfg.get("replace_ops"))
+    if replace_ops:
+        # Group by column so we can chain replaces.
+        by_col: dict[str, list[dict]] = {}
+        for op in replace_ops:
+            col = op.get("column")
+            if not col or not op.get("find"):
+                continue
+            by_col.setdefault(col, []).append(op)
+        for col, ops in by_col.items():
+            expr = f'"{col}"'
+            for op in ops:
+                find = str(op.get("find", "")).replace("'", "''")
+                repl = str(op.get("replace", "")).replace("'", "''")
+                expr = f"REPLACE({expr}, '{find}', '{repl}')"
+            select_items.append(literal_column(expr).label(f"{col}"))
+
+    # Split ops → SPLIT_PART(col, delimiter, N) for each target column. Works
+    # on Postgres, DuckDB, Snowflake, Redshift. BigQuery uses SPLIT() but
+    # returns an array — a per-dialect branch can be added later.
+    split_ops = _json_list(cfg.get("split_ops"))
+    if split_ops:
+        for op in split_ops:
+            col = op.get("column")
+            delim = op.get("delimiter")
+            into = op.get("into") or ""
+            if not col or not delim or not into:
+                continue
+            targets = [t.strip() for t in into.split(",") if t.strip()]
+            escaped_delim = str(delim).replace("'", "''")
+            if dialect_name == 'bigquery':
+                for idx, t in enumerate(targets):
+                    select_items.append(
+                        literal_column(f"SPLIT(\"{col}\", '{escaped_delim}')[SAFE_OFFSET({idx})]").label(t)
+                    )
+            else:
+                for idx, t in enumerate(targets, start=1):
+                    select_items.append(
+                        literal_column(f"SPLIT_PART(\"{col}\", '{escaped_delim}', {idx})").label(t)
+                    )
+
+    # Window ops → RANK/DENSE_RANK/ROW_NUMBER OVER (PARTITION BY... ORDER BY...)
+    window_ops = _json_list(cfg.get("window_ops"))
+    if window_ops:
+        for op in window_ops:
+            kind = str(op.get("kind", "rank")).lower()
+            order_by = op.get("orderBy") or op.get("order_by")
+            into = op.get("into")
+            if not order_by or not into:
+                continue
+            partition_by = op.get("partitionBy") or op.get("partition_by") or ""
+            order_asc = bool(op.get("orderAsc", op.get("order_asc", True)))
+            func_name = {
+                "rank": "RANK",
+                "dense_rank": "DENSE_RANK",
+                "row_number": "ROW_NUMBER",
+            }.get(kind, "RANK")
+            over_parts = []
+            if partition_by:
+                parts = [f'"{p.strip()}"' for p in partition_by.split(",") if p.strip()]
+                if parts:
+                    over_parts.append("PARTITION BY " + ", ".join(parts))
+            over_parts.append(f'ORDER BY "{order_by}" {"ASC" if order_asc else "DESC"}')
+            over = " ".join(over_parts)
+            select_items.append(literal_column(f"{func_name}() OVER ({over})").label(into))
+
     stmt = select(*select_items).select_from(tbl)
 
     if cfg.get("filter_expression"):
@@ -350,3 +431,13 @@ def _json_dict(s: Optional[str]) -> dict:
         return parsed if isinstance(parsed, dict) else {}
     except Exception:
         return {}
+
+
+def _json_list(s: Optional[str]) -> list:
+    if not s:
+        return []
+    try:
+        parsed = json.loads(s)
+        return parsed if isinstance(parsed, list) else []
+    except Exception:
+        return []
