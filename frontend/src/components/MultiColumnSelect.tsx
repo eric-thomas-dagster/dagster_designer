@@ -217,6 +217,11 @@ export function MultiColumnSelect({
                   <button
                     key={col}
                     type="button"
+                    // preventDefault on mousedown so the button never grabs
+                    // focus — Radix Dialog's FocusScope traps focus inside
+                    // Dialog.Content and would otherwise steal it back
+                    // between mousedown and click, canceling the click.
+                    onMouseDown={(e) => e.preventDefault()}
                     onClick={() => toggle(col)}
                     className="w-full flex items-center gap-2 px-2 py-1.5 text-xs hover:bg-gray-50 text-left"
                   >
