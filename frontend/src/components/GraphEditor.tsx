@@ -649,14 +649,40 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick }: GraphEditorProps) 
     if (currentProject?.graph) {
       console.log('[GraphEditor] Graph has', currentProject.graph.nodes.length, 'nodes');
 
-      // Disable auto-arrange - let users manually arrange groups if needed
-      // const hadNodesBeforeReload = nodes.length > 0;
-      // const projectHasGroups = currentProject.graph.nodes.some((n: GraphNode) => n.data?.group_name);
-
-      // if ((hadNodesBeforeReload || projectHasGroups) && currentProject.graph.nodes.length > 0) {
-      //   shouldAutoArrange.current = true;
-      //   console.log('[GraphEditor] Will auto-arrange groups after load (hadNodesBefore:', hadNodesBeforeReload, 'hasGroups:', projectHasGroups, ')');
-      // }
+      // Auto-arrange only when the incoming layout is actually broken —
+      // i.e., group bounding boxes overlap. Users who've manually arranged
+      // nodes keep their arrangement; users opening a fresh project with
+      // the backend's naive layer-based layout get a clean layout.
+      const assetNodes = currentProject.graph.nodes.filter((n: GraphNode) => n.data?.node_kind === 'asset');
+      const groupBoxes: Record<string, { minX: number; minY: number; maxX: number; maxY: number }> = {};
+      const NODE_W = 220;
+      const NODE_H = 100;
+      for (const n of assetNodes) {
+        const g = (n.data?.group_name as string) || '_ungrouped';
+        const x = n.position?.x ?? 0;
+        const y = n.position?.y ?? 0;
+        const box = groupBoxes[g] ?? { minX: x, minY: y, maxX: x + NODE_W, maxY: y + NODE_H };
+        box.minX = Math.min(box.minX, x);
+        box.minY = Math.min(box.minY, y);
+        box.maxX = Math.max(box.maxX, x + NODE_W);
+        box.maxY = Math.max(box.maxY, y + NODE_H);
+        groupBoxes[g] = box;
+      }
+      const names = Object.keys(groupBoxes);
+      let hasOverlap = false;
+      for (let i = 0; i < names.length && !hasOverlap; i++) {
+        for (let j = i + 1; j < names.length && !hasOverlap; j++) {
+          const a = groupBoxes[names[i]];
+          const b = groupBoxes[names[j]];
+          if (a.minX < b.maxX && a.maxX > b.minX && a.minY < b.maxY && a.maxY > b.minY) {
+            hasOverlap = true;
+          }
+        }
+      }
+      if (hasOverlap && names.length > 1) {
+        console.log('[GraphEditor] Group boxes overlap — scheduling auto-arrange');
+        shouldAutoArrange.current = true;
+      }
 
       const flowNodes: Node[] = currentProject.graph.nodes.map((node: GraphNode) => {
         // Use IO metadata from node.data if available (from backend), otherwise extract from schema cache
