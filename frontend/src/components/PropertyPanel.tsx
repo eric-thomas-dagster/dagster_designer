@@ -149,16 +149,12 @@ export function PropertyPanel({ nodeId, onConfigureComponent, onOpenFile, onNewP
     staleTime: 30000, // Refetch after 30 seconds
   });
 
-  // Return early if node is not found (AFTER all hooks have been called)
-  if (!node) {
-    return (
-      <aside className="property-panel">
-        <div className="p-4 text-sm text-gray-500">
-          Node not found
-        </div>
-      </aside>
-    );
-  }
+  // NOTE: do NOT early-return here. There's a "!node" early return further
+  // down, but it's after ALL hooks. Returning here would skip the useState /
+  // useEffect / useMemo calls below, breaking React's hooks-order rule and
+  // producing the "Rendered fewer hooks than expected" crash (blank screen)
+  // whenever the selected node vanishes between renders (typical after a
+  // Delete Component Instance + project reload).
 
   // Handle both backend structure (node_kind at top level) and React Flow structure (node_kind in data)
   const nodeKind = (node as any)?.node_kind || node?.data?.node_kind;

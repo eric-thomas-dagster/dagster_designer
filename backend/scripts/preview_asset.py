@@ -578,9 +578,28 @@ def main():
                         "error": f"Asset returned {type(result).__name__}, expected DataFrame"
                     }))
             else:
+                # Asset function returned None. This is the normal case for
+                # in-warehouse transforms (SqlTransformerComponent's asset
+                # does CREATE TABLE AS SELECT with no return value) and for
+                # sink components that write to disk. Fall back to reading
+                # the materialized data — first from DuckDB (fast), then via
+                # `dbt show` if a dbt profile is nearby.
+                duck = _try_duckdb_preview(asset_key)
+                if duck is not None:
+                    print(json.dumps(duck))
+                    sys.exit(0)
+                dbt_r = _try_dbt_show_preview(asset_key)
+                if dbt_r is not None:
+                    print(json.dumps(dbt_r))
+                    sys.exit(0)
                 print(json.dumps({
                     "success": False,
-                    "error": "Asset returned None"
+                    "error": (
+                        "Asset returned None. This asset writes to a warehouse "
+                        "or sink instead of returning a DataFrame — click Run "
+                        "to here first, then re-open the preview so we can "
+                        "read the materialized result."
+                    ),
                 }))
         else:
             print(json.dumps({
