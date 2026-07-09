@@ -518,12 +518,19 @@ def main():
     if len(sys.argv) < 3:
         print(json.dumps({
             "success": False,
-            "error": "Usage: python -m scripts.preview_asset <project_module> <asset_key>"
+            "error": "Usage: python -m scripts.preview_asset <project_module> <asset_key> [sample_limit]"
         }))
         sys.exit(1)
 
     project_module = sys.argv[1]
     asset_key = sys.argv[2]
+    # Optional sample_limit — how many rows to return. Default 100 keeps
+    # click-around browsing snappy; Profile mode passes larger values.
+    try:
+        sample_limit = int(sys.argv[3]) if len(sys.argv) > 3 else 100
+    except ValueError:
+        sample_limit = 100
+    sample_limit = max(1, min(sample_limit, 50000))
 
     try:
         # Import the definitions module
@@ -567,7 +574,7 @@ def main():
         if len(keys_in_group) > 1:
             # 1) DuckDB fast path — <100ms if the model has been materialized
             #    into a `.duckdb` file that lives next to the project.
-            duckdb_result = _try_duckdb_preview(asset_key)
+            duckdb_result = _try_duckdb_preview(asset_key, sample_limit)
             if duckdb_result is not None:
                 print(json.dumps(duckdb_result))
                 sys.exit(0)
@@ -575,7 +582,7 @@ def main():
             # 2) `dbt show` general fallback — works for every adapter dbt
             #    supports (Postgres/Snowflake/BigQuery/Redshift/…). ~5s cold
             #    start but reuses dbt's full connection + credential stack.
-            dbt_result = _try_dbt_show_preview(asset_key)
+            dbt_result = _try_dbt_show_preview(asset_key, sample_limit)
             if dbt_result is not None:
                 print(json.dumps(dbt_result))
                 sys.exit(0)
@@ -708,15 +715,10 @@ def main():
                 if isinstance(result, pd.DataFrame):
                     columns = result.columns.tolist()
                     dtypes = {col: str(dtype) for col, dtype in result.dtypes.items()}
-                    # Coerce Timestamp / datetime / date / Decimal / bytes into
-                    # something json.dumps understands. `to_dict('records')`
-                    # preserves the original Python types (Timestamp,
-                    # np.datetime64, Decimal, etc.) which json.dumps chokes on;
-                    # `default=str` handles the long tail. For DataFrames
-                    # specifically we also pre-convert datetime-like columns
-                    # to isoformat strings so the front-end table displays
-                    # readable dates.
-                    display_df = result.copy()
+                    full_row_count = len(result)
+                    # Cap rows sent to the client at sample_limit — Profile mode
+                    # can request more; regular preview stays at 100 for speed.
+                    display_df = result.head(sample_limit).copy()
                     for col in display_df.columns:
                         # datetime64, DatetimeIndex-backed columns, and object
                         # columns containing pd.Timestamp all match here.
@@ -729,9 +731,10 @@ def main():
                         "data": data,
                         "columns": columns,
                         "dtypes": dtypes,
-                        "row_count": len(result),
+                        "row_count": full_row_count,
                         "column_count": len(columns),
-                        "shape": list(result.shape)
+                        "shape": list(result.shape),
+                        "sample_limit": sample_limit if len(data) < full_row_count else None,
                     }, default=str))
                 else:
                     print(json.dumps({
@@ -747,15 +750,15 @@ def main():
                 #      output_schema.asset_name from defs.yaml, no guessing)
                 #   2. DuckDB fast path (glob + naming heuristic)
                 #   3. `dbt show` if a dbt profile is nearby (last resort)
-                sql_r = _try_sql_transformer_output_preview(project_module, asset_key)
+                sql_r = _try_sql_transformer_output_preview(project_module, asset_key, sample_limit)
                 if sql_r is not None:
                     print(json.dumps(sql_r))
                     sys.exit(0)
-                duck = _try_duckdb_preview(asset_key)
+                duck = _try_duckdb_preview(asset_key, sample_limit)
                 if duck is not None:
                     print(json.dumps(duck))
                     sys.exit(0)
-                dbt_r = _try_dbt_show_preview(asset_key)
+                dbt_r = _try_dbt_show_preview(asset_key, sample_limit)
                 if dbt_r is not None:
                     print(json.dumps(dbt_r))
                     sys.exit(0)

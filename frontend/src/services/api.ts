@@ -1141,9 +1141,17 @@ export interface CreateTransformerRequest {
 }
 
 export const assetsApi = {
-  previewData: async (projectId: string, assetKey: string): Promise<AssetDataPreview> => {
+  previewData: async (
+    projectId: string,
+    assetKey: string,
+    opts?: { sampleLimit?: number; noCache?: boolean },
+  ): Promise<AssetDataPreview> => {
+    const params: Record<string, string> = {};
+    if (opts?.sampleLimit) params.sample_limit = String(opts.sampleLimit);
+    if (opts?.noCache) params.no_cache = 'true';
     const response = await api.get<AssetDataPreview>(
-      `/assets/${projectId}/${encodeURIComponent(assetKey)}/preview`
+      `/assets/${projectId}/${encodeURIComponent(assetKey)}/preview`,
+      { params },
     );
     return response.data;
   },

@@ -14,11 +14,12 @@ from ..services.project_service import project_service
 
 router = APIRouter(prefix="/assets", tags=["assets"])
 
-# Simple in-memory TTL cache for preview results. Key = (project_id, asset_key).
+# Simple in-memory TTL cache for preview results. Key includes sample_limit
+# so a 100-row preview and a 1000-row Profile request cache separately.
 # Preview execution costs 5–15s per call for dbt models (dbt show cold start)
 # so caching lets users click around the graph without re-paying that cost.
 # Materializes clear the whole project's cache (see clear_preview_cache below).
-_PREVIEW_CACHE: dict[tuple[str, str], tuple[float, dict]] = {}
+_PREVIEW_CACHE: dict[tuple[str, str, int], tuple[float, dict]] = {}
 _PREVIEW_TTL_SECONDS = 120
 
 # Longer-lived schema cache: once we've seen an asset's actual columns and
@@ -137,7 +138,12 @@ class AssetDataResponse(BaseModel):
 
 
 @router.get("/{project_id}/{asset_key:path}/preview")
-async def preview_asset_data(project_id: str, asset_key: str, no_cache: bool = False):
+async def preview_asset_data(
+    project_id: str,
+    asset_key: str,
+    no_cache: bool = False,
+    sample_limit: int = 100,
+):
     """
     Execute an asset function and return its dataframe data for preview.
 
@@ -147,13 +153,20 @@ async def preview_asset_data(project_id: str, asset_key: str, no_cache: bool = F
         project_id: Project ID
         asset_key: Asset key (can be multi-part like "models/customers")
         no_cache: If true, skip the TTL cache and force a fresh preview.
+        sample_limit: Max rows to return. Default 100 (fast). Profile mode
+            can bump this to 1000+ for better distribution accuracy.
 
     Returns:
         Asset data in JSON format suitable for table display
     """
-    # Check TTL cache first — dbt show is ~5s per call, so clicking around the
-    # graph would be miserable without caching.
-    cache_key = (project_id, asset_key)
+    # Clamp to a reasonable range so a user can't accidentally page-fault
+    # the backend by asking for a million rows over HTTP.
+    sample_limit = max(1, min(sample_limit, 50000))
+
+    # Cache is keyed on (project, asset, sample_limit) — bigger samples
+    # are separate cache entries. Otherwise a 100-row preview would mask
+    # the 1000-row Profile request.
+    cache_key = (project_id, asset_key, sample_limit)
     if not no_cache:
         cached = _PREVIEW_CACHE.get(cache_key)
         if cached and (time.time() - cached[0]) < _PREVIEW_TTL_SECONDS:
@@ -193,6 +206,7 @@ async def preview_asset_data(project_id: str, asset_key: str, no_cache: bool = F
                 "scripts.preview_asset",
                 project_module,
                 asset_key,
+                str(sample_limit),
             ],
             cwd=Path.cwd(),  # Run from backend directory
             env=env,
@@ -232,7 +246,10 @@ async def preview_asset_data(project_id: str, asset_key: str, no_cache: bool = F
             # sources (file readers, SQL queries, upstream chains, etc.).
             cols = output_data.get('columns')
             if cols:
-                _SCHEMA_CACHE[cache_key] = {
+                # Schema cache is keyed on (project, asset) — the schema
+                # doesn't depend on sample size, so a 100-row and 1000-row
+                # preview share the same schema entry.
+                _SCHEMA_CACHE[(project_id, asset_key)] = {
                     'columns': list(cols),
                     'dtypes': dict(output_data.get('dtypes') or {}),
                 }

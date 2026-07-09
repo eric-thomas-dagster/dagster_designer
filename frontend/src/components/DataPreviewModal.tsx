@@ -1,7 +1,8 @@
 import React, { useState, useMemo } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu';
-import { X, AlertCircle, Table as TableIcon, Wand2, Save, Filter, Columns3, Trash2, Eye, EyeOff, ChevronDown, ChevronRight, SortAsc, SortDesc, Sigma, Group, Calculator, ArrowDownUp, RotateCw, Play, Loader2, Plus, Package } from 'lucide-react';
+import { X, AlertCircle, Table as TableIcon, Wand2, Save, Filter, Columns3, Trash2, Eye, EyeOff, ChevronDown, ChevronRight, SortAsc, SortDesc, Sigma, Group, Calculator, ArrowDownUp, RotateCw, Play, Loader2, Plus, Package, BarChart3 } from 'lucide-react';
+import { ColumnProfilePanel } from './ColumnProfilePanel';
 import { assetsApi, projectsApi, type AssetDataPreview } from '@/services/api';
 import { notify } from './Notifications';
 import { CommunityTransformPicker } from './CommunityTransformPicker';
@@ -21,7 +22,7 @@ interface DataPreviewModalProps {
   existingComponentId?: string; // ID of component being edited (if editing)
   /** Optional initial mode. AssetIOPanel's "Transform" button opens the modal
       pre-flipped to transform mode instead of view. */
-  initialMode?: 'view' | 'transform';
+  initialMode?: 'view' | 'transform' | 'profile';
 }
 
 interface FilterCondition {
@@ -68,8 +69,12 @@ export function DataPreviewModal({
   const [data, setData] = useState<AssetDataPreview | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [mode, setMode] = useState<'view' | 'transform'>(initialMode);
+  const [mode, setMode] = useState<'view' | 'transform' | 'profile'>(initialMode);
   const [saving, setSaving] = useState(false);
+  // How many rows the preview endpoint should return. Defaults to 100 for
+  // fast responsiveness on click; Profile mode lets users request more so
+  // histograms and top-N counts approach the true distribution.
+  const [sampleLimit, setSampleLimit] = useState<number>(100);
 
   // Transform configuration
   const [selectedColumns, setSelectedColumns] = useState<Set<string>>(new Set());
@@ -362,12 +367,15 @@ export function DataPreviewModal({
   const [runningToHere, setRunningToHere] = useState(false);
   const [showCommunityPicker, setShowCommunityPicker] = useState(false);
 
-  const loadData = async () => {
+  const loadData = async (opts?: { sampleLimit?: number; noCache?: boolean }) => {
     setLoading(true);
     setError(null);
 
     try {
-      const result = await assetsApi.previewData(projectId, assetKey);
+      const result = await assetsApi.previewData(projectId, assetKey, {
+        sampleLimit: opts?.sampleLimit ?? sampleLimit,
+        noCache: opts?.noCache,
+      });
 
       if (!result.success) {
         setError(result.error || 'Failed to load asset data');
@@ -1607,6 +1615,18 @@ export function DataPreviewModal({
                     Transform
                   </button>
                 )}
+                <button
+                  onClick={() => setMode('profile')}
+                  className={`px-3 py-1.5 text-sm font-medium rounded transition-colors ${
+                    mode === 'profile'
+                      ? 'bg-white text-gray-900 shadow-sm'
+                      : 'text-gray-600 hover:text-gray-900'
+                  }`}
+                  title="Column-by-column profile with distributions and warnings"
+                >
+                  <BarChart3 className="w-4 h-4 inline mr-1.5" />
+                  Profile
+                </button>
               </div>
 
               <Dialog.Close asChild>
@@ -3588,7 +3608,44 @@ export function DataPreviewModal({
                 </div>
               )}
 
-              {displayData && displayData.success && displayData.data && displayData.columns && (
+              {mode === 'profile' && displayData && displayData.success && displayData.data && displayData.columns && (
+                <div className="space-y-3">
+                  {/* Sample-size control — bump this to profile more rows.
+                      Fires a fresh preview (no_cache) so the backend re-runs
+                      the asset with the new sample_limit. */}
+                  <div className="flex items-center gap-3 bg-white border border-gray-200 rounded-lg px-4 py-2.5">
+                    <label className="text-sm text-gray-700">Sample size:</label>
+                    <select
+                      value={sampleLimit}
+                      onChange={(e) => {
+                        const n = parseInt(e.target.value, 10);
+                        setSampleLimit(n);
+                        loadData({ sampleLimit: n, noCache: true });
+                      }}
+                      className="text-sm border border-gray-300 rounded px-2 py-1"
+                    >
+                      <option value={100}>100 rows (default)</option>
+                      <option value={500}>500 rows</option>
+                      <option value={1000}>1,000 rows</option>
+                      <option value={5000}>5,000 rows</option>
+                      <option value={10000}>10,000 rows</option>
+                    </select>
+                    <span className="text-xs text-gray-500">
+                      Bigger samples give more accurate distributions but take longer to load.
+                    </span>
+                  </div>
+                  <div className="border border-gray-200 rounded-lg bg-gray-50">
+                    <ColumnProfilePanel
+                      rows={displayData.data}
+                      columns={displayData.columns}
+                      dtypes={displayData.dtypes ?? undefined}
+                      totalRows={displayData.row_count ?? displayData.data.length}
+                    />
+                  </div>
+                </div>
+              )}
+
+              {mode !== 'profile' && displayData && displayData.success && displayData.data && displayData.columns && (
                 <div className="border border-gray-200 rounded-lg overflow-hidden">
                   <div className="overflow-x-auto">
                     <table className="min-w-full divide-y divide-gray-200">
@@ -3889,7 +3946,7 @@ export function DataPreviewModal({
           {data && data.success && mode === 'view' && (
             <div className="px-6 py-4 border-t border-gray-200 bg-gray-50">
               <button
-                onClick={loadData}
+                onClick={() => loadData({ noCache: true })}
                 disabled={loading}
                 className="px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
               >
