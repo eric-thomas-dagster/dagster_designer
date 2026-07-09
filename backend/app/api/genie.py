@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
@@ -14,6 +15,26 @@ from ..services.genie_service import (
 )
 
 router = APIRouter(prefix="/ai", tags=["ai"])
+
+
+class AiProvidersStatus(BaseModel):
+    openai_available: bool
+    anthropic_available: bool
+    any_available: bool
+
+
+@router.get("/providers", response_model=AiProvidersStatus)
+async def ai_providers_status() -> AiProvidersStatus:
+    """Report which LLM providers have their API keys configured. The
+    frontend uses this to hide models the user can't reach and to show
+    setup instructions when nothing's configured."""
+    openai = bool(os.getenv("OPENAI_API_KEY"))
+    anthropic = bool(os.getenv("ANTHROPIC_API_KEY"))
+    return AiProvidersStatus(
+        openai_available=openai,
+        anthropic_available=anthropic,
+        any_available=openai or anthropic,
+    )
 
 
 class GeniePlanRequest(BaseModel):

@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useMemo } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { Sparkles, ArrowUp, Loader2, ChevronDown, X, Check } from 'lucide-react';
 import { useProjectStore } from '@/hooks/useProject';
@@ -31,6 +31,12 @@ const MODEL_OPTIONS = [
   { value: 'claude-opus-4-5', label: 'Claude Opus 4.5 (highest quality)' },
 ];
 
+interface AiProvidersStatus {
+  openai_available: boolean;
+  anthropic_available: boolean;
+  any_available: boolean;
+}
+
 export function DagsterAIBar() {
   const { currentProject, loadProject } = useProjectStore();
   const queryClient = useQueryClient();
@@ -39,9 +45,37 @@ export function DagsterAIBar() {
   const [applying, setApplying] = useState(false);
   const [plan, setPlan] = useState<AIPlanResponse | null>(null);
   const [refinement, setRefinement] = useState('');
-  const [model, setModel] = useState(MODEL_OPTIONS[0].value);
   const [showModelMenu, setShowModelMenu] = useState(false);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
+
+  // Which LLM providers have API keys? Filter the model dropdown and show
+  // setup guidance rather than letting the user pick a model that'll 400.
+  const [providers, setProviders] = useState<AiProvidersStatus | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    fetch('/api/v1/ai/providers')
+      .then((r) => r.json())
+      .then((d) => { if (!cancelled) setProviders(d); })
+      .catch(() => { if (!cancelled) setProviders({ openai_available: false, anthropic_available: false, any_available: false }); });
+    return () => { cancelled = true; };
+  }, []);
+
+  const availableModels = useMemo(() => {
+    if (!providers) return MODEL_OPTIONS;
+    return MODEL_OPTIONS.filter((m) => {
+      const isClaude = m.value.startsWith('claude');
+      return isClaude ? providers.anthropic_available : providers.openai_available;
+    });
+  }, [providers]);
+
+  const [model, setModel] = useState(MODEL_OPTIONS[0].value);
+  // Once providers load, snap `model` to a supported one if the default isn't.
+  useEffect(() => {
+    if (!providers || availableModels.length === 0) return;
+    if (!availableModels.find((m) => m.value === model)) {
+      setModel(availableModels[0].value);
+    }
+  }, [providers, availableModels, model]);
 
   useEffect(() => {
     const el = inputRef.current;
@@ -305,63 +339,106 @@ export function DagsterAIBar() {
       )}
 
       <div className="bg-white border border-gray-200 rounded-2xl shadow-lg pointer-events-auto">
-        <div className="flex items-start gap-2 px-4 py-2.5">
-          <Sparkles className="w-5 h-5 text-primary flex-shrink-0 mt-1" />
-          <textarea
-            ref={inputRef}
-            value={task}
-            onChange={(e) => setTask(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter' && !e.shiftKey) {
-                e.preventDefault();
-                submit();
-              }
-            }}
-            placeholder="Ask Dagster AI to build a pipeline (e.g. 'Ingest sales.csv, join with customers, aggregate by month, write to CSV')"
-            rows={1}
-            disabled={thinking || applying}
-            className="flex-1 resize-none border-none outline-none text-sm placeholder-gray-400 bg-transparent max-h-[120px] py-1"
-          />
-          <div className="flex items-center gap-1 flex-shrink-0">
-            <div className="relative">
-              <button
-                onClick={() => setShowModelMenu((v) => !v)}
-                disabled={thinking || applying}
-                className="flex items-center gap-1 px-2 py-1 text-xs text-gray-500 hover:text-gray-900 rounded"
-                title="Choose model"
-              >
-                {model}
-                <ChevronDown className="w-3 h-3" />
-              </button>
-              {showModelMenu && (
-                <div className="absolute bottom-full right-0 mb-1 min-w-[220px] bg-white border border-gray-200 rounded-md shadow-lg py-1 z-50">
-                  {MODEL_OPTIONS.map((m) => (
-                    <button
-                      key={m.value}
-                      onClick={() => {
-                        setModel(m.value);
-                        setShowModelMenu(false);
-                      }}
-                      className={`w-full text-left px-3 py-1.5 text-xs hover:bg-gray-50 ${
-                        model === m.value ? 'text-primary font-medium' : 'text-gray-700'
-                      }`}
-                    >
-                      {m.label}
-                    </button>
-                  ))}
+        {providers && !providers.any_available ? (
+          // No API keys — surface actionable setup instructions instead of
+          // letting the user type and hit an opaque error.
+          <div className="flex items-start gap-3 px-4 py-3">
+            <Sparkles className="w-5 h-5 text-gray-400 flex-shrink-0 mt-0.5" />
+            <div className="flex-1 min-w-0 text-sm">
+              <div className="font-semibold text-gray-900 mb-1">
+                Dagster AI needs an API key
+              </div>
+              <div className="text-xs text-gray-600 space-y-1">
+                <div>Add one to <span className="font-mono text-gray-800">backend/.env</span>, then restart the backend:</div>
+                <pre className="mt-1 px-2 py-1.5 text-[11px] font-mono bg-gray-50 border border-gray-200 rounded overflow-x-auto">
+{`OPENAI_API_KEY=sk-...     # OR
+ANTHROPIC_API_KEY=sk-ant-...`}
+                </pre>
+                <div className="flex items-center gap-3 pt-1">
+                  <a
+                    href="https://platform.openai.com/api-keys"
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-primary hover:underline"
+                  >
+                    Get OpenAI key →
+                  </a>
+                  <a
+                    href="https://console.anthropic.com/settings/keys"
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-primary hover:underline"
+                  >
+                    Get Anthropic key →
+                  </a>
                 </div>
-              )}
+              </div>
             </div>
-            <button
-              onClick={() => submit()}
-              disabled={!task.trim() || thinking || applying}
-              className="p-1.5 rounded-full bg-primary text-primary-foreground hover:bg-accent disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-              aria-label="Submit"
-            >
-              {thinking ? <Loader2 className="w-4 h-4 animate-spin" /> : <ArrowUp className="w-4 h-4" />}
-            </button>
           </div>
-        </div>
+        ) : (
+          <div className="flex items-start gap-2 px-4 py-2.5">
+            <Sparkles className="w-5 h-5 text-primary flex-shrink-0 mt-1" />
+            <textarea
+              ref={inputRef}
+              value={task}
+              onChange={(e) => setTask(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                  e.preventDefault();
+                  submit();
+                }
+              }}
+              placeholder="Ask Dagster AI to build a pipeline (e.g. 'Ingest sales.csv, join with customers, aggregate by month, write to CSV')"
+              rows={1}
+              disabled={thinking || applying}
+              className="flex-1 resize-none border-none outline-none text-sm placeholder-gray-400 bg-transparent max-h-[120px] py-1"
+            />
+            <div className="flex items-center gap-1 flex-shrink-0">
+              <div className="relative">
+                <button
+                  onClick={() => setShowModelMenu((v) => !v)}
+                  disabled={thinking || applying}
+                  className="flex items-center gap-1 px-2 py-1 text-xs text-gray-500 hover:text-gray-900 rounded"
+                  title="Choose model"
+                >
+                  {model}
+                  <ChevronDown className="w-3 h-3" />
+                </button>
+                {showModelMenu && (
+                  <div className="absolute bottom-full right-0 mb-1 min-w-[220px] bg-white border border-gray-200 rounded-md shadow-lg py-1 z-50">
+                    {availableModels.map((m) => (
+                      <button
+                        key={m.value}
+                        onClick={() => {
+                          setModel(m.value);
+                          setShowModelMenu(false);
+                        }}
+                        className={`w-full text-left px-3 py-1.5 text-xs hover:bg-gray-50 ${
+                          model === m.value ? 'text-primary font-medium' : 'text-gray-700'
+                        }`}
+                      >
+                        {m.label}
+                      </button>
+                    ))}
+                    {providers && (!providers.openai_available || !providers.anthropic_available) && (
+                      <div className="border-t border-gray-100 mt-1 px-3 py-1.5 text-[10px] text-gray-400 italic">
+                        {providers.openai_available ? 'Anthropic key not set' : 'OpenAI key not set'} — add to backend/.env to unlock more models
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+              <button
+                onClick={() => submit()}
+                disabled={!task.trim() || thinking || applying}
+                className="p-1.5 rounded-full bg-primary text-primary-foreground hover:bg-accent disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                aria-label="Submit"
+              >
+                {thinking ? <Loader2 className="w-4 h-4 animate-spin" /> : <ArrowUp className="w-4 h-4" />}
+              </button>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

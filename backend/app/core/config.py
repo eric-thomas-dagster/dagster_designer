@@ -23,6 +23,10 @@ class Settings(BaseSettings):
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"
+        # Ignore env vars we don't explicitly declare (OPENAI_API_KEY,
+        # ANTHROPIC_API_KEY, etc.) so they flow through to os.getenv without
+        # tripping pydantic's "extra_forbidden" validation.
+        extra = "ignore"
 
 
 settings = Settings()
