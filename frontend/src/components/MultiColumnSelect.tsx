@@ -150,6 +150,13 @@ export function MultiColumnSelect({
         <div
           ref={dropdownRef}
           data-column-picker-dropdown="true"
+          // Stop pointer events from bubbling to document — Radix Dialog's
+          // internal outside-click listeners can otherwise treat clicks on
+          // portaled children as "outside" and swallow the click before our
+          // toggle handler fires (symptom: dropdown closes, no value picked).
+          onPointerDown={(e) => e.stopPropagation()}
+          onMouseDown={(e) => e.stopPropagation()}
+          onClick={(e) => e.stopPropagation()}
           style={{
             position: 'fixed',
             top: pos.top,

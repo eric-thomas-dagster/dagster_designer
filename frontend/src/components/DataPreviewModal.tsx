@@ -84,6 +84,11 @@ export function DataPreviewModal({
   const [sortAscending, setSortAscending] = useState(true);
   const [groupByColumns, setGroupByColumns] = useState<string[]>([]);
   const [aggregations, setAggregations] = useState<Record<string, string>>({});
+  // Draft state for the "add an aggregation" builder — previously read via
+  // document.getElementById, which reset on every re-render and silently
+  // dropped the user's picks. Controlled state fixes both.
+  const [newAggColumn, setNewAggColumn] = useState('');
+  const [newAggFunction, setNewAggFunction] = useState('');
   const [columnRenames, setColumnRenames] = useState<Record<string, string>>({});
   const [columnsToDrop, setColumnsToDrop] = useState<Set<string>>(new Set());
   const [openColumnMenu, setOpenColumnMenu] = useState<string | null>(null);
@@ -1934,9 +1939,9 @@ export function DataPreviewModal({
                               {/* Aggregation Builder */}
                               <div className="flex gap-2">
                                 <select
-                                  id="agg-column-select"
+                                  value={newAggColumn}
+                                  onChange={(e) => setNewAggColumn(e.target.value)}
                                   className="flex-1 text-xs border border-gray-300 rounded px-2 py-1.5"
-                                  defaultValue=""
                                 >
                                   <option value="" disabled>Select column...</option>
                                   {data?.columns?.filter(col => !groupByColumns.includes(col)).map((col) => (
@@ -1944,9 +1949,9 @@ export function DataPreviewModal({
                                   ))}
                                 </select>
                                 <select
-                                  id="agg-function-select"
+                                  value={newAggFunction}
+                                  onChange={(e) => setNewAggFunction(e.target.value)}
                                   className="w-24 text-xs border border-gray-300 rounded px-2 py-1.5"
-                                  defaultValue=""
                                 >
                                   <option value="" disabled>Function...</option>
                                   <option value="sum">sum</option>
@@ -1959,18 +1964,17 @@ export function DataPreviewModal({
                                 </select>
                                 <button
                                   onClick={() => {
-                                    const colSelect = document.getElementById('agg-column-select') as HTMLSelectElement;
-                                    const funcSelect = document.getElementById('agg-function-select') as HTMLSelectElement;
-                                    if (colSelect.value && funcSelect.value) {
+                                    if (newAggColumn && newAggFunction) {
                                       setAggregations({
                                         ...aggregations,
-                                        [colSelect.value]: funcSelect.value
+                                        [newAggColumn]: newAggFunction,
                                       });
-                                      colSelect.value = '';
-                                      funcSelect.value = '';
+                                      setNewAggColumn('');
+                                      setNewAggFunction('');
                                     }
                                   }}
-                                  className="px-2 py-1 text-xs font-medium text-white bg-blue-600 rounded hover:bg-blue-700 transition-colors"
+                                  disabled={!newAggColumn || !newAggFunction}
+                                  className="px-2 py-1 text-xs font-medium text-white bg-blue-600 rounded hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
                                 >
                                   Add
                                 </button>
