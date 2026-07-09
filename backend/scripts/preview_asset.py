@@ -200,14 +200,23 @@ def _try_duckdb_preview(asset_key: str, row_limit: int = 100):
                         }
                         for row in rows
                     ]
+                    # True row count so the frontend can tell "you got all
+                    # 100 because the table has 100" vs "sampled 100 of 10k".
+                    try:
+                        true_total = con.execute(
+                            f'SELECT COUNT(*) FROM "{schema}"."{table}"'
+                        ).fetchone()[0]
+                    except Exception:
+                        true_total = len(rows)
                     return {
                         "success": True,
                         "data": data,
                         "columns": columns,
                         "dtypes": dtypes,
-                        "row_count": len(rows),
+                        "row_count": true_total,
                         "column_count": len(columns),
-                        "shape": [len(rows), len(columns)],
+                        "shape": [true_total, len(columns)],
+                        "sample_limit": row_limit if len(rows) < true_total else None,
                         "source": f"duckdb:{db_path.name}:{schema}.{table}",
                     }
         finally:

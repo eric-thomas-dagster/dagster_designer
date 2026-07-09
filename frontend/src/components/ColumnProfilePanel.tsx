@@ -28,9 +28,18 @@ export function ColumnProfilePanel({ rows, columns, dtypes, totalRows }: ColumnP
         <div>
           <h3 className="text-sm font-semibold text-gray-900">Column profiles</h3>
           <p className="text-xs text-gray-500 mt-0.5">
-            {sampled.toLocaleString()} rows profiled
-            {partial && (
-              <> · <span className="text-amber-600">of {totalRows!.toLocaleString()} total (sampled)</span></>
+            {partial ? (
+              <>
+                Profiled {sampled.toLocaleString()} of{' '}
+                <span className="text-amber-600">
+                  {totalRows!.toLocaleString()} rows
+                </span>{' '}
+                <span className="text-amber-600">(sampled)</span>
+              </>
+            ) : totalRows !== undefined ? (
+              <>Profiled {sampled.toLocaleString()} rows (full table)</>
+            ) : (
+              <>Profiled {sampled.toLocaleString()} rows</>
             )}
             {' · '}
             {columns.length} columns
