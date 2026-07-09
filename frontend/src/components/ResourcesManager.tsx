@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { Database, HardDrive, Code, Key, CheckCircle, XCircle, Download, FileCode, RefreshCw } from 'lucide-react';
 import { templatesApi, IOManagerParams, ResourceParams, integrationsApi, IntegrationStatusResponse } from '../services/api';
+import { CommunityAvailableSection } from './CommunityAvailableSection';
 import { useProjectStore } from '../hooks/useProject';
 import { Editor } from '@monaco-editor/react';
 import { EnvVarsManager } from './EnvVarsManager';
@@ -301,6 +302,28 @@ export function ResourcesManager({ onOpenFile }: ResourcesManagerProps = {}) {
           >
             <RefreshCw className="w-3.5 h-3.5" />
           </button>
+        </div>
+      )}
+
+      {/* Community catalog for the currently-selected tab. Lives above the
+          split-panel form so users can install a community resource/IO manager
+          before falling back to the hand-configured form. */}
+      {activeTab === 'io_manager' && (
+        <div className="flex-shrink-0 bg-white">
+          <CommunityAvailableSection
+            categories={['io_manager', 'io_managers']}
+            title="Community IO managers"
+            onInstalled={() => refetchInstalled()}
+          />
+        </div>
+      )}
+      {activeTab === 'resource' && (
+        <div className="flex-shrink-0 bg-white">
+          <CommunityAvailableSection
+            categories={['resource', 'resources']}
+            title="Community resources"
+            onInstalled={() => refetchInstalled()}
+          />
         </div>
       )}
 

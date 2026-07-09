@@ -19,6 +19,7 @@ import {
 } from 'lucide-react';
 import { primitivesApi, pipelinesApi, type PrimitiveCategory, type PrimitiveItem } from '@/services/api';
 import { useProjectStore } from '@/hooks/useProject';
+import { CommunityAvailableSection } from './CommunityAvailableSection';
 
 interface PrimitivesManagerProps {
   onNewPrimitive?: (category: string) => void;
@@ -409,22 +410,31 @@ export function PrimitivesManager({
 
         <Tabs.Content value="schedule" className="flex-1 overflow-y-auto">
           {renderPrimitivesList(getMergedPrimitives('schedule'), 'schedule')}
+          {/* Schedules aren't in the community manifest — this tab shows only
+              locally-created + dg-discovered schedules. */}
         </Tabs.Content>
 
         <Tabs.Content value="job" className="flex-1 overflow-y-auto">
           {renderPrimitivesList(getMergedPrimitives('job'), 'job')}
+          <CommunityAvailableSection categories={['jobs', 'job']} title="Community jobs" />
         </Tabs.Content>
 
         <Tabs.Content value="sensor" className="flex-1 overflow-y-auto">
           {renderPrimitivesList(getMergedPrimitives('sensor'), 'sensor')}
+          <CommunityAvailableSection categories={['sensor', 'sensors']} title="Community sensors" />
         </Tabs.Content>
 
         <Tabs.Content value="asset_check" className="flex-1 overflow-y-auto">
           {renderPrimitivesList(getMergedPrimitives('asset_check'), 'asset_check')}
+          <CommunityAvailableSection
+            categories={['check', 'checks', 'asset_check', 'asset_checks']}
+            title="Community asset checks"
+          />
         </Tabs.Content>
 
         <Tabs.Content value="freshness_policy" className="flex-1 overflow-y-auto">
           {renderPrimitivesList(getMergedPrimitives('freshness_policy'), 'freshness_policy')}
+          {/* Freshness policies aren't in the community manifest either. */}
         </Tabs.Content>
       </Tabs.Root>
 

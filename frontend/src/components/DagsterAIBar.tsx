@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
 import { Sparkles, ArrowUp, Loader2, ChevronDown, X, Check } from 'lucide-react';
 import { useProjectStore } from '@/hooks/useProject';
 import { notify } from './Notifications';
@@ -29,6 +30,7 @@ const MODEL_OPTIONS = [
 
 export function DagsterAIBar() {
   const { currentProject, loadProject } = useProjectStore();
+  const queryClient = useQueryClient();
   const [task, setTask] = useState('');
   const [thinking, setThinking] = useState(false);
   const [applying, setApplying] = useState(false);
@@ -101,20 +103,33 @@ export function DagsterAIBar() {
     let failed = 0;
     try {
       for (const pick of plan.picks) {
-        const config: Record<string, any> = {
+        // pick.component_type is actually the manifest component_id (e.g.
+        // "unique_dedup"). Pass the AI's proposed attrs as `attributes` so the
+        // CLI-based endpoint merges them into the stub defs.yaml — otherwise
+        // the LLM's carefully-planned config gets discarded and the user has
+        // to re-enter it by hand.
+        const attributes: Record<string, any> = {
           ...pick.config,
           asset_name: pick.config.asset_name || pick.asset_name,
         };
         if (pick.upstream_asset_names.length > 0) {
-          config.upstream_asset_keys = pick.upstream_asset_names.join(', ');
+          attributes.upstream_asset_keys = pick.upstream_asset_names.join(', ');
         }
         try {
-          const res = await fetch(`/api/v1/templates/install/${pick.component_type}`, {
+          const res = await fetch(`/api/v1/templates/install-via-cli/${pick.component_type}`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ project_id: currentProject.id, config }),
+            body: JSON.stringify({
+              project_id: currentProject.id,
+              config: {},
+              attributes,
+              instance_name: pick.asset_name,
+            }),
           });
-          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          if (!res.ok) {
+            const body = await res.json().catch(() => ({} as any));
+            throw new Error(body.detail || `HTTP ${res.status}`);
+          }
           installed++;
         } catch (e) {
           failed++;
@@ -122,6 +137,13 @@ export function DagsterAIBar() {
         }
       }
 
+      // Refresh the palette + primitives lists so newly-installed community
+      // components flip from dashed "available" to purple "installed" and any
+      // new assets/schedules/etc. show up without a manual reload.
+      await queryClient.invalidateQueries({ queryKey: ['installed-components', currentProject.id] });
+      await queryClient.invalidateQueries({ queryKey: ['primitives', currentProject.id] });
+      await queryClient.invalidateQueries({ queryKey: ['definitions', currentProject.id] });
+      await queryClient.invalidateQueries({ queryKey: ['installed-resources', currentProject.id] });
       await loadProject(currentProject.id);
       if (failed === 0) {
         notify.success(`Dagster AI added ${installed} asset${installed === 1 ? '' : 's'} to the graph.`);

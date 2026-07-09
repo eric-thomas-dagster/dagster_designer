@@ -1,9 +1,10 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useComponentRegistry } from '@/hooks/useComponentRegistry';
-import { Database, ArrowRight, Download, RefreshCw, Box, Search, Plus, Code, FileText, Play, Clock, Radar, CheckCircle, FileCode, Package } from 'lucide-react';
+import { Database, ArrowRight, Download, RefreshCw, Box, Search, Plus, Code, FileText, Play, Clock, Radar, CheckCircle, FileCode, Package, Loader2, Cloud } from 'lucide-react';
 import { CreatePythonAssetDialog } from './CreatePythonAssetDialog';
 import { useProjectStore } from '@/hooks/useProject';
-import { useQuery } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { notify } from './Notifications';
 
 const iconMap: Record<string, React.ComponentType<any>> = {
   database: Database,
@@ -23,12 +24,22 @@ interface ComponentPaletteProps {
   onComponentClick: (componentType: string) => void;
 }
 
+interface ManifestComponent {
+  id: string;
+  name: string;
+  category: string;
+  description: string;
+  tags?: string[];
+}
+
 export function ComponentPalette({ onComponentClick }: ComponentPaletteProps) {
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedCategory, setSelectedCategory] = useState<string | undefined>();
   const [showCreateAssetDialog, setShowCreateAssetDialog] = useState(false);
+  const [installingId, setInstallingId] = useState<string | null>(null);
   const { data, isLoading } = useComponentRegistry(selectedCategory);
   const { currentProject, loadProject } = useProjectStore();
+  const queryClient = useQueryClient();
 
   // Fetch installed community components
   const { data: installedComponents } = useQuery({
@@ -42,49 +53,147 @@ export function ComponentPalette({ onComponentClick }: ComponentPaletteProps) {
     enabled: !!currentProject,
   });
 
-  // Filter out jobs, schedules, sensors - these shouldn't be on the lineage diagram
-  const assetComponents = data?.components.filter((comp) =>
-    !comp.type.toLowerCase().includes('job') &&
-    !comp.type.toLowerCase().includes('schedule') &&
-    !comp.type.toLowerCase().includes('sensor')
-  ) || [];
+  // Fetch the full community-templates manifest up-front — the palette
+  // browses ALL of it (grouped by category), not just search results.
+  // ~900 items but it's a single JSON blob and react-query caches it.
+  const searchActive = searchQuery.trim().length > 0;
+  const { data: manifest, isLoading: isLoadingManifest } = useQuery({
+    queryKey: ['community-templates-manifest'],
+    queryFn: async () => {
+      const res = await fetch('/api/v1/templates/manifest');
+      if (!res.ok) throw new Error('Failed to load community manifest');
+      return res.json() as Promise<{ components: ManifestComponent[] }>;
+    },
+    staleTime: 15 * 60 * 1000,
+  });
+
+  // Uses the official dagster-community-components-cli (via `uvx`). The CLI
+  // owns file layout + dependency install; the backend returns the canonical
+  // `component_type` it wrote into defs.yaml so we can drop the node.
+  const installMutation = useMutation({
+    mutationFn: async (componentId: string) => {
+      if (!currentProject) throw new Error('No project selected');
+      setInstallingId(componentId);
+      const res = await fetch(`/api/v1/templates/install-via-cli/${componentId}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ project_id: currentProject.id, config: {} }),
+      });
+      const body = await res.json().catch(() => ({} as any));
+      if (!res.ok) throw new Error(body.detail || 'Install failed');
+      return body as { component_type: string };
+    },
+    onSuccess: async (data) => {
+      notify.success('Component installed. Adding to graph…');
+      if (currentProject) {
+        await queryClient.invalidateQueries({ queryKey: ['installed-components', currentProject.id] });
+        await loadProject(currentProject.id);
+      }
+      onComponentClick(data.component_type);
+    },
+    onError: (e: Error) => notify.error(`Install failed: ${e.message}`),
+    onSettled: () => setInstallingId(null),
+  });
+
+  // The palette is for asset-producing components only. Anything that returns
+  // a non-asset primitive (resource, io manager, sensor, schedule, job, asset
+  // check, infra utility) is managed in the Resources or Automation tabs, so
+  // exclude those categories here. Category names come straight from each
+  // source's manifest — we filter by the category field rather than by
+  // substring on `type`, which is unreliable for community components.
+  const NON_ASSET_CATEGORIES = new Set([
+    'resource', 'resources',
+    'sensor', 'sensors',
+    'schedule', 'schedules',
+    'job', 'jobs',
+    'io_manager', 'io_managers',
+    'check', 'checks', 'asset_check', 'asset_checks',
+    'infrastructure',
+  ]);
+  const isAssetProducing = (category: string | undefined) =>
+    !NON_ASSET_CATEGORIES.has((category || '').toLowerCase());
+
+  const assetComponents = (data?.components || []).filter((comp) => isAssetProducing(comp.category));
+
+  const q = searchQuery.toLowerCase().trim();
+  const matchesQuery = (name: string, description?: string, category?: string) => {
+    if (!q) return true;
+    return (
+      name.toLowerCase().includes(q) ||
+      (description || '').toLowerCase().includes(q) ||
+      (category || '').toLowerCase().includes(q)
+    );
+  };
 
   const filteredComponents = assetComponents.filter((comp) =>
-    comp.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    comp.description?.toLowerCase().includes(searchQuery.toLowerCase())
+    matchesQuery(comp.name, comp.description, comp.category),
   );
-
-  // Separate single-asset components from asset factories
-  // Asset factories generate multiple assets (dbt, dlt, fivetran, sling, airbyte, etc.)
-  // Single-asset components generate one asset at a time
-  const assetFactoryKeywords = ['dbt', 'dlt', 'fivetran', 'sling', 'airbyte', 'factory'];
-
-  const singleAssetComponents = filteredComponents.filter((comp) => {
-    const nameOrType = `${comp.name} ${comp.type}`.toLowerCase();
-    return !assetFactoryKeywords.some(keyword => nameOrType.includes(keyword));
-  });
-
-  const assetFactoryComponents = filteredComponents.filter((comp) => {
-    const nameOrType = `${comp.name} ${comp.type}`.toLowerCase();
-    return assetFactoryKeywords.some(keyword => nameOrType.includes(keyword));
-  });
 
   // Filter Python Asset button based on search
-  const showPythonAsset = searchQuery === '' ||
-    'python asset'.includes(searchQuery.toLowerCase()) ||
-    'python'.includes(searchQuery.toLowerCase());
+  const showPythonAsset = q === '' || 'python asset'.includes(q) || 'python'.includes(q);
 
-  // Filter installed community components based on search
-  const filteredInstalledComponents = (installedComponents?.components || []).filter((comp) =>
-    searchQuery === '' ||
-    comp.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    comp.description?.toLowerCase().includes(searchQuery.toLowerCase())
+  // Filter installed community components — asset-producing only, and match search.
+  const filteredInstalledComponents = (installedComponents?.components || []).filter(
+    (comp) => isAssetProducing(comp.category) && matchesQuery(comp.name, comp.description, comp.category),
   );
 
-  // Dynamically determine available categories based on installed components
-  const availableCategories = Array.from(
-    new Set(assetComponents.map((comp) => comp.category))
-  ).sort();
+  // Every uninstalled manifest component that matches the current search
+  // (empty search matches all). We surface these in the palette alongside
+  // installed + registry entries, grouped into the same category buckets, so
+  // users can browse the full catalog by category without needing to search.
+  const installedIds = useMemo(
+    () => new Set((installedComponents?.components || []).map((c) => c.id)),
+    [installedComponents],
+  );
+  const filteredAvailableComponents = useMemo<ManifestComponent[]>(() => {
+    if (!manifest?.components) return [];
+    return manifest.components.filter(
+      (c) =>
+        !installedIds.has(c.id) &&
+        isAssetProducing(c.category) &&
+        matchesQuery(c.name, c.description, c.category),
+    );
+  }, [manifest, installedIds, q]);
+
+  // Unified category buckets across registry + installed community components.
+  // Category strings come straight from each source's own manifest — we do
+  // not invent our own taxonomy. When a category chip is selected, we filter
+  // to just that bucket; otherwise we render every bucket as its own section
+  // with a header + count, ordered by size descending.
+  type PaletteEntry =
+    | { kind: 'registry'; component: (typeof filteredComponents)[number] }
+    | { kind: 'installed'; component: (typeof filteredInstalledComponents)[number] }
+    | { kind: 'available'; component: ManifestComponent };
+
+  const groupedByCategory = useMemo(() => {
+    const buckets = new Map<string, PaletteEntry[]>();
+    const push = (cat: string, entry: PaletteEntry) => {
+      const key = cat || 'other';
+      const arr = buckets.get(key) ?? [];
+      arr.push(entry);
+      buckets.set(key, arr);
+    };
+    // Order: registry first (built-in), then installed community, then
+    // available-to-install. Within each source we keep manifest order so the
+    // ranking stays stable across renders.
+    for (const c of filteredComponents) push(c.category, { kind: 'registry', component: c });
+    for (const c of filteredInstalledComponents) push(c.category, { kind: 'installed', component: c });
+    for (const c of filteredAvailableComponents) push(c.category, { kind: 'available', component: c });
+    return buckets;
+  }, [filteredComponents, filteredInstalledComponents, filteredAvailableComponents]);
+
+  const categoriesSorted = useMemo(
+    () =>
+      Array.from(groupedByCategory.entries())
+        .sort(([, a], [, b]) => b.length - a.length || 0)
+        .map(([cat]) => cat),
+    [groupedByCategory],
+  );
+
+  const formatCategoryLabel = (cat: string) =>
+    cat === 'io_manager'
+      ? 'IO Managers'
+      : cat.split(/[_-]/).map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
 
   const handleAssetCreated = async () => {
     // Reload the project to pick up the new asset
@@ -109,29 +218,33 @@ export function ComponentPalette({ onComponentClick }: ComponentPaletteProps) {
           />
         </div>
 
-        {/* Category filter */}
+        {/* Category filter — chips reflect the categories present in the
+             current data (registry + installed), sorted by count desc. */}
         <div className="flex flex-wrap gap-1.5">
           <button
             onClick={() => setSelectedCategory(undefined)}
             className={`px-2.5 py-1 text-xs rounded-full ${
               !selectedCategory
-                ? 'bg-blue-600 text-white'
+                ? 'bg-primary text-primary-foreground'
                 : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
             }`}
           >
             All
           </button>
-          {availableCategories.map((category) => (
+          {categoriesSorted.map((category) => (
             <button
               key={category}
               onClick={() => setSelectedCategory(category)}
               className={`px-2.5 py-1 text-xs rounded-full ${
                 selectedCategory === category
-                  ? 'bg-blue-600 text-white'
+                  ? 'bg-primary text-primary-foreground'
                   : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
               }`}
             >
-              {category}
+              {formatCategoryLabel(category)}
+              <span className={`ml-1 ${selectedCategory === category ? 'text-white/70' : 'text-gray-400'}`}>
+                {groupedByCategory.get(category)?.length ?? 0}
+              </span>
             </button>
           ))}
         </div>
@@ -147,9 +260,8 @@ export function ComponentPalette({ onComponentClick }: ComponentPaletteProps) {
 
         {!isLoading && (
           <>
-            {/* Single Asset Components - Compact button style */}
-            {/* Create Python Asset */}
-            {showPythonAsset && (
+            {/* Python Asset — always at the top; not tied to any manifest category. */}
+            {showPythonAsset && !selectedCategory && (
               <button
                 onClick={() => setShowCreateAssetDialog(true)}
                 className="w-full flex items-center space-x-2 px-2.5 py-2 bg-gradient-to-br from-blue-50 to-indigo-50 border border-blue-200 rounded-md hover:border-blue-400 transition-all group"
@@ -160,126 +272,111 @@ export function ComponentPalette({ onComponentClick }: ComponentPaletteProps) {
               </button>
             )}
 
-            {/* Installed Community Components */}
-            {filteredInstalledComponents.map((comp) => (
-              <button
-                key={comp.id}
-                onClick={() => {
-                  console.log('[ComponentPalette] Clicking installed component:', comp.name, 'type:', comp.component_type);
-                  onComponentClick(comp.component_type);
-                }}
-                className="w-full flex items-center space-x-2 px-2.5 py-2 bg-gradient-to-br from-purple-50 to-pink-50 border border-purple-200 rounded-md hover:border-purple-400 transition-all group"
-              >
-                <Package className="w-4 h-4 text-purple-600" />
-                <span className="text-sm font-medium text-gray-900 truncate">{comp.name}</span>
-                <Plus className="w-3.5 h-3.5 text-purple-400 ml-auto group-hover:text-purple-600" />
-              </button>
-            ))}
-
-            {/* Single-Asset Components from catalog */}
-            {singleAssetComponents.map((component) => {
-              const Icon = iconMap[component.icon || 'cube'] || Box;
-              const isPrimitive = component.category === 'primitives';
-
-              return (
-                <button
-                  key={component.type}
-                  onClick={() => onComponentClick(component.type)}
-                  draggable
-                  onDragStart={(e) => {
-                    e.dataTransfer.setData(
-                      'application/reactflow',
-                      JSON.stringify(component)
-                    );
-                    e.dataTransfer.effectAllowed = 'move';
-                  }}
-                  className={`w-full flex items-center space-x-2 px-2.5 py-2 ${
-                    isPrimitive
-                      ? 'bg-gradient-to-br from-purple-50 to-blue-50 border border-purple-200 hover:border-purple-400'
-                      : 'bg-gradient-to-br from-green-50 to-teal-50 border border-green-200 hover:border-green-400'
-                  } rounded-md transition-all group cursor-move`}
-                >
-                  <Icon className={`w-4 h-4 ${
-                    isPrimitive ? 'text-purple-600' : 'text-green-600'
-                  }`} />
-                  <span className="text-sm font-medium text-gray-900 truncate">{component.name}</span>
-                  <Plus className={`w-3.5 h-3.5 ${
-                    isPrimitive ? 'text-purple-400' : 'text-green-400'
-                  } ml-auto group-hover:${isPrimitive ? 'text-purple-600' : 'text-green-600'}`} />
-                </button>
-              );
-            })}
-
-            {/* Divider between single assets and asset factories */}
-            {assetFactoryComponents.length > 0 && (
-              <>
-                <div className="border-t border-gray-200 my-2"></div>
-                <div className="text-xs font-semibold text-gray-500 uppercase tracking-wider px-1">
-                  Asset Factories
-                </div>
-              </>
+            {/* Community-manifest still loading? Show a subtle inline note so
+                users know more will appear soon; registry + installed keep
+                rendering immediately below. */}
+            {isLoadingManifest && !selectedCategory && !searchActive && (
+              <div className="text-xs text-gray-400 px-1 py-1 flex items-center gap-1.5">
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                Loading community catalog…
+              </div>
             )}
 
-            {/* Asset Factory Components - Detailed card style */}
-            {assetFactoryComponents.map((component) => {
-              const Icon = iconMap[component.icon || 'cube'] || Box;
-              const isPrimitive = component.category === 'primitives';
-
-              return (
-                <button
-                  key={component.type}
-                  onClick={() => onComponentClick(component.type)}
-                  draggable
-                  onDragStart={(e) => {
-                    e.dataTransfer.setData(
-                      'application/reactflow',
-                      JSON.stringify(component)
-                    );
-                    e.dataTransfer.effectAllowed = 'move';
-                  }}
-                  className={`w-full text-left p-2 ${
-                    isPrimitive
-                      ? 'bg-gradient-to-br from-purple-50 to-blue-50 border border-purple-200 hover:border-purple-400'
-                      : 'bg-white border border-gray-200 hover:border-blue-300'
-                  } rounded-md hover:shadow-sm transition-all group cursor-move`}
-                >
-                  <div className="flex items-start space-x-2">
-                    <div className="flex-shrink-0 mt-0.5">
-                      <Icon className={`w-4 h-4 ${
-                        isPrimitive
-                          ? 'text-purple-600 group-hover:text-purple-700'
-                          : 'text-gray-600 group-hover:text-blue-600'
-                      }`} />
+            {/* Category sections — one per bucket, headers sorted by count desc.
+                In the "All" view we cap each section at PER_SECTION_CAP entries
+                and offer a "Show all N" affordance that jumps to that category
+                filter. When a category is already selected, all entries show. */}
+            {categoriesSorted
+              .filter((cat) => !selectedCategory || cat === selectedCategory)
+              .map((cat) => {
+                const entries = groupedByCategory.get(cat) ?? [];
+                if (entries.length === 0) return null;
+                const isFocused = selectedCategory === cat || searchActive;
+                const PER_SECTION_CAP = 8;
+                const visible = isFocused ? entries : entries.slice(0, PER_SECTION_CAP);
+                const hiddenCount = entries.length - visible.length;
+                return (
+                  <div key={cat} className="space-y-1.5">
+                    <div className="text-xs font-semibold text-gray-500 uppercase tracking-wider px-1 pt-2 flex items-center justify-between">
+                      <span>{formatCategoryLabel(cat)}</span>
+                      <span className="text-gray-400 font-normal">{entries.length}</span>
                     </div>
-                    <div className="flex-1 min-w-0">
-                      <div className="text-sm font-medium text-gray-900 truncate">
-                        {component.name}
-                      </div>
-                      {component.description && (
-                        <div className="text-xs text-gray-500 mt-0.5 line-clamp-2">
-                          {component.description}
-                        </div>
-                      )}
-                      <div className={`text-xs mt-0.5 font-medium ${
-                        isPrimitive ? 'text-purple-600' : 'text-blue-600'
-                      }`}>
-                        {component.category}
-                      </div>
-                    </div>
-                    <div className="flex-shrink-0">
-                      <Plus className={`w-4 h-4 ${
-                        isPrimitive
-                          ? 'text-purple-400 group-hover:text-purple-600'
-                          : 'text-gray-400 group-hover:text-blue-600'
-                      }`} />
-                    </div>
+                    {visible.map((entry, i) => {
+                      if (entry.kind === 'installed') {
+                        const comp = entry.component;
+                        return (
+                          <button
+                            key={`inst-${comp.id}-${i}`}
+                            onClick={() => onComponentClick(comp.component_type)}
+                            title={comp.description || comp.name}
+                            className="w-full flex items-center space-x-2 px-2.5 py-2 bg-gradient-to-br from-purple-50 to-pink-50 border border-purple-200 rounded-md hover:border-purple-400 transition-all group text-left"
+                          >
+                            <Package className="w-4 h-4 text-purple-600 flex-shrink-0" />
+                            <span className="text-sm font-medium text-gray-900 truncate flex-1">{comp.name}</span>
+                            <Plus className="w-3.5 h-3.5 text-purple-400 ml-auto group-hover:text-purple-600 flex-shrink-0" />
+                          </button>
+                        );
+                      }
+                      if (entry.kind === 'available') {
+                        const comp = entry.component;
+                        const isInstalling = installingId === comp.id;
+                        return (
+                          <button
+                            key={`avail-${comp.id}-${i}`}
+                            onClick={() => !isInstalling && installMutation.mutate(comp.id)}
+                            disabled={isInstalling}
+                            title={comp.description || comp.name}
+                            className="w-full flex items-center space-x-2 px-2.5 py-2 border border-dashed border-gray-300 bg-white rounded-md hover:border-primary/50 hover:bg-primary/5 transition-all group text-left disabled:opacity-60"
+                          >
+                            <Cloud className="w-4 h-4 text-gray-400 group-hover:text-primary flex-shrink-0" />
+                            <span className="text-sm text-gray-900 truncate flex-1">{comp.name}</span>
+                            {isInstalling ? (
+                              <Loader2 className="w-3.5 h-3.5 text-primary animate-spin flex-shrink-0" />
+                            ) : (
+                              <Download className="w-3.5 h-3.5 text-gray-400 group-hover:text-primary flex-shrink-0" />
+                            )}
+                          </button>
+                        );
+                      }
+                      const component = entry.component;
+                      const Icon = iconMap[component.icon || 'cube'] || Box;
+                      const isPrimitive = component.category === 'primitives';
+                      return (
+                        <button
+                          key={`reg-${component.type}-${i}`}
+                          onClick={() => onComponentClick(component.type)}
+                          draggable
+                          onDragStart={(e) => {
+                            e.dataTransfer.setData('application/reactflow', JSON.stringify(component));
+                            e.dataTransfer.effectAllowed = 'move';
+                          }}
+                          title={component.description || component.name}
+                          className={`w-full flex items-center space-x-2 px-2.5 py-2 ${
+                            isPrimitive
+                              ? 'bg-gradient-to-br from-purple-50 to-blue-50 border border-purple-200 hover:border-purple-400'
+                              : 'bg-gradient-to-br from-green-50 to-teal-50 border border-green-200 hover:border-green-400'
+                          } rounded-md transition-all group cursor-move text-left`}
+                        >
+                          <Icon className={`w-4 h-4 flex-shrink-0 ${isPrimitive ? 'text-purple-600' : 'text-green-600'}`} />
+                          <span className="text-sm font-medium text-gray-900 truncate flex-1">{component.name}</span>
+                          <Plus className={`w-3.5 h-3.5 flex-shrink-0 ml-auto ${isPrimitive ? 'text-purple-400 group-hover:text-purple-600' : 'text-green-400 group-hover:text-green-600'}`} />
+                        </button>
+                      );
+                    })}
+                    {hiddenCount > 0 && (
+                      <button
+                        onClick={() => setSelectedCategory(cat)}
+                        className="w-full text-left text-xs text-primary hover:underline px-1 py-1"
+                      >
+                        Show all {entries.length} in {formatCategoryLabel(cat)} →
+                      </button>
+                    )}
                   </div>
-                </button>
-              );
-            })}
+                );
+              })}
 
             {/* No results message */}
-            {!showPythonAsset && filteredInstalledComponents.length === 0 && singleAssetComponents.length === 0 && assetFactoryComponents.length === 0 && (
+            {!showPythonAsset && categoriesSorted.length === 0 && !isLoadingManifest && (
               <div className="text-center text-sm text-gray-500 py-8">
                 No components found
               </div>

@@ -110,6 +110,14 @@ class InstallComponentRequest(BaseModel):
     """Request model for installing a component."""
     project_id: str
     config: dict = {}
+    # When provided, these get merged into the stub defs.yaml the CLI writes so
+    # the caller (e.g. Dagster AI) can install + configure in one shot instead
+    # of installing and then leaving the user to hand-edit placeholder values.
+    attributes: Optional[dict] = None
+    # Optional override for the defs.yaml directory name — useful when a single
+    # component_id is being installed multiple times (each instance needs its
+    # own defs/<name>/ directory).
+    instance_name: Optional[str] = None
 
 
 def validate_component_config(component_dir: Path, attributes: dict) -> tuple[dict, list[str]]:
@@ -861,3 +869,128 @@ async def install_component(
             status_code=500,
             detail=f"Error installing component: {str(e)}\n\nTraceback: {error_details}"
         )
+
+
+@router.post("/install-via-cli/{component_id}")
+async def install_component_via_cli(
+    component_id: str,
+    request: InstallComponentRequest,
+):
+    """Install a component using the official dagster-community-components-cli.
+
+    The CLI is the source of truth for install layout: it drops files into
+    <project>/src/<module>/components/<id>/ (with a component.py) and writes
+    a stub defs.yaml with the canonical `type:` string. We shell out via uvx
+    so the user doesn't need it globally installed, then parse the written
+    defs.yaml to return the exact type string for the palette to use.
+    """
+    project = project_service.get_project(request.project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    project_dir = project_service._get_project_dir(project)
+    if not project_dir.is_absolute():
+        project_dir = project_dir.resolve()
+    if not project_dir.exists():
+        raise HTTPException(status_code=404, detail=f"Project directory not found: {project_dir}")
+
+    cmd = [
+        "uvx",
+        "--from", "dagster-community-components-cli",
+        "dagster-component",
+        "add", component_id,
+        "--auto-install",
+        "--manager", "uv",
+        "--force",
+    ]
+    print(f"[CLI Install] Running: {' '.join(cmd)} (cwd={project_dir})")
+
+    try:
+        result = subprocess.run(
+            cmd,
+            cwd=str(project_dir),
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+    except subprocess.TimeoutExpired:
+        raise HTTPException(status_code=504, detail="CLI install timed out after 5 minutes")
+    except FileNotFoundError:
+        raise HTTPException(
+            status_code=500,
+            detail="uvx not found. Install `uv` (https://docs.astral.sh/uv/) to enable CLI-based component installs.",
+        )
+
+    stdout = result.stdout or ""
+    stderr = result.stderr or ""
+    print(f"[CLI Install] rc={result.returncode}\nstdout: {stdout}\nstderr: {stderr}")
+
+    if result.returncode != 0:
+        detail = (stderr or stdout or "unknown error").strip().splitlines()
+        raise HTTPException(status_code=500, detail=f"CLI install failed: {' | '.join(detail[-5:])}")
+
+    # The CLI writes a defs.yaml stub at <project>/src/<module>/defs/<id>/defs.yaml
+    # (or the flat-layout equivalent). Find it and pull out the canonical type.
+    candidates = [
+        *project_dir.glob(f"src/*/defs/{component_id}/defs.yaml"),
+        *project_dir.glob(f"*/defs/{component_id}/defs.yaml"),
+    ]
+    defs_yaml_path = next(iter(candidates), None)
+    if defs_yaml_path is None:
+        raise HTTPException(
+            status_code=500,
+            detail=f"CLI reported success but defs.yaml for {component_id} was not found under {project_dir}",
+        )
+
+    try:
+        parsed = yaml.safe_load(defs_yaml_path.read_text()) or {}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to parse {defs_yaml_path}: {e}")
+
+    component_type = parsed.get("type")
+    if not component_type or not isinstance(component_type, str):
+        raise HTTPException(
+            status_code=500,
+            detail=f"defs.yaml at {defs_yaml_path} has no `type:` field to return",
+        )
+
+    # If the caller supplied attributes (e.g. Dagster AI's proposed config),
+    # merge them into the stub defs.yaml the CLI wrote. Otherwise the CLI's
+    # placeholder attributes stand, and the user configures via the UI.
+    if request.attributes:
+        existing_attrs = parsed.get("attributes") or {}
+        if not isinstance(existing_attrs, dict):
+            existing_attrs = {}
+        parsed["attributes"] = {**existing_attrs, **request.attributes}
+        try:
+            defs_yaml_path.write_text(yaml.safe_dump(parsed, sort_keys=False))
+        except Exception as e:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Installed but failed to write attributes to {defs_yaml_path}: {e}",
+            )
+
+    # If the caller wants a different instance directory name (needed when the
+    # same component_id is being installed more than once), rename the defs
+    # directory now. defs.yaml itself is unchanged.
+    final_defs_yaml_path = defs_yaml_path
+    if request.instance_name and request.instance_name != component_id:
+        target_dir = defs_yaml_path.parent.parent / request.instance_name
+        if target_dir.exists():
+            # Collision — fall back to a numeric suffix so we don't overwrite.
+            i = 2
+            while (defs_yaml_path.parent.parent / f"{request.instance_name}_{i}").exists():
+                i += 1
+            target_dir = defs_yaml_path.parent.parent / f"{request.instance_name}_{i}"
+        try:
+            defs_yaml_path.parent.rename(target_dir)
+            final_defs_yaml_path = target_dir / "defs.yaml"
+        except Exception as e:
+            print(f"[CLI Install] Rename to {target_dir} failed, leaving default name: {e}")
+
+    return {
+        "success": True,
+        "component_id": component_id,
+        "component_type": component_type,
+        "defs_yaml": str(final_defs_yaml_path.relative_to(project_dir)),
+    }
