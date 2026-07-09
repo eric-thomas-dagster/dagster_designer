@@ -698,10 +698,23 @@ def main():
             if result is not None:
                 import pandas as pd
                 if isinstance(result, pd.DataFrame):
-                    # Convert DataFrame to dict
-                    data = result.to_dict('records')
                     columns = result.columns.tolist()
                     dtypes = {col: str(dtype) for col, dtype in result.dtypes.items()}
+                    # Coerce Timestamp / datetime / date / Decimal / bytes into
+                    # something json.dumps understands. `to_dict('records')`
+                    # preserves the original Python types (Timestamp,
+                    # np.datetime64, Decimal, etc.) which json.dumps chokes on;
+                    # `default=str` handles the long tail. For DataFrames
+                    # specifically we also pre-convert datetime-like columns
+                    # to isoformat strings so the front-end table displays
+                    # readable dates.
+                    display_df = result.copy()
+                    for col in display_df.columns:
+                        # datetime64, DatetimeIndex-backed columns, and object
+                        # columns containing pd.Timestamp all match here.
+                        if pd.api.types.is_datetime64_any_dtype(display_df[col]):
+                            display_df[col] = display_df[col].astype(str)
+                    data = display_df.to_dict('records')
 
                     print(json.dumps({
                         "success": True,
@@ -711,7 +724,7 @@ def main():
                         "row_count": len(result),
                         "column_count": len(columns),
                         "shape": list(result.shape)
-                    }))
+                    }, default=str))
                 else:
                     print(json.dumps({
                         "success": False,
