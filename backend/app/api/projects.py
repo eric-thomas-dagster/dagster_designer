@@ -975,6 +975,14 @@ async def materialize_assets(project_id: str, request: MaterializeRequest):
             except Exception as e:
                 print(f"[materialize] Warning: Failed to delete temp config file: {e}")
 
+        # Invalidate the preview cache so subsequent previews see fresh data
+        # rather than the previous materialize's rows.
+        try:
+            from .assets import clear_preview_cache
+            clear_preview_cache(project_id)
+        except Exception as e:
+            print(f"[materialize] Warning: Failed to clear preview cache: {e}")
+
         return MaterializeResponse(
             success=success,
             message=message,

@@ -4,6 +4,7 @@ import sys
 import json
 import subprocess
 import importlib.util
+import time
 from pathlib import Path
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
@@ -12,6 +13,21 @@ from typing import Any
 from ..services.project_service import project_service
 
 router = APIRouter(prefix="/assets", tags=["assets"])
+
+# Simple in-memory TTL cache for preview results. Key = (project_id, asset_key).
+# Preview execution costs 5–15s per call for dbt models (dbt show cold start)
+# so caching lets users click around the graph without re-paying that cost.
+# Materializes clear the whole project's cache (see clear_preview_cache below).
+_PREVIEW_CACHE: dict[tuple[str, str], tuple[float, dict]] = {}
+_PREVIEW_TTL_SECONDS = 120
+
+
+def clear_preview_cache(project_id: str) -> None:
+    """Invalidate every cached preview for a project. Called after materializes
+    so stale rows don't outlive the underlying data change."""
+    for key in list(_PREVIEW_CACHE.keys()):
+        if key[0] == project_id:
+            del _PREVIEW_CACHE[key]
 
 
 class AssetDataResponse(BaseModel):
@@ -29,7 +45,7 @@ class AssetDataResponse(BaseModel):
 
 
 @router.get("/{project_id}/{asset_key:path}/preview")
-async def preview_asset_data(project_id: str, asset_key: str):
+async def preview_asset_data(project_id: str, asset_key: str, no_cache: bool = False):
     """
     Execute an asset function and return its dataframe data for preview.
 
@@ -38,10 +54,19 @@ async def preview_asset_data(project_id: str, asset_key: str):
     Args:
         project_id: Project ID
         asset_key: Asset key (can be multi-part like "models/customers")
+        no_cache: If true, skip the TTL cache and force a fresh preview.
 
     Returns:
         Asset data in JSON format suitable for table display
     """
+    # Check TTL cache first — dbt show is ~5s per call, so clicking around the
+    # graph would be miserable without caching.
+    cache_key = (project_id, asset_key)
+    if not no_cache:
+        cached = _PREVIEW_CACHE.get(cache_key)
+        if cached and (time.time() - cached[0]) < _PREVIEW_TTL_SECONDS:
+            return AssetDataResponse(**cached[1])
+
     # Get project
     project = project_service.get_project(project_id)
     if not project:
@@ -105,6 +130,10 @@ async def preview_asset_data(project_id: str, asset_key: str):
         stdout_lines = result.stdout.strip().split('\n')
         last_line = stdout_lines[-1] if stdout_lines else ""
         output_data = json.loads(last_line)
+        # Only cache successful previews — errors are usually "not
+        # materialized yet" and should re-check on next click.
+        if output_data.get('success'):
+            _PREVIEW_CACHE[cache_key] = (time.time(), output_data)
         return AssetDataResponse(**output_data)
 
     except json.JSONDecodeError as e:
@@ -189,6 +218,19 @@ async def create_transformer_asset(project_id: str, request: CreateTransformerRe
     src_dir = project_dir / "src" / project.directory_name
     defs_dir = src_dir / "defs" / component_id
     defs_dir.mkdir(parents=True, exist_ok=True)
+
+    # Detect whether the upstream asset lives in a warehouse (dbt model / sink
+    # component output) vs. produces a Python DataFrame in-process. Warehouse
+    # upstreams get the SqlTransformerComponent (in-warehouse SQL, no data
+    # movement); DataFrame upstreams get DataFrameTransformerComponent.
+    #
+    # MVP heuristic: dbt asset keys always look like "models/<name>" or
+    # "seeds/<name>". Anything else is treated as a DataFrame. We can add
+    # richer detection (introspect the source component's output type) once
+    # this lands.
+    upstream_is_warehouse = '/' in request.sourceAssetKey and request.sourceAssetKey.split('/', 1)[0] in {
+        'models', 'seeds', 'snapshots', 'analyses'
+    }
 
     # Build transformation configuration for the transformer component
     # The DataFrameTransformerComponent expects specific attributes, not a transforms array
@@ -279,15 +321,62 @@ async def create_transformer_asset(project_id: str, request: CreateTransformerRe
     if request.transformConfig.unpivotConfig:
         attributes["unpivot_config"] = json.dumps(request.transformConfig.unpivotConfig)
 
-    # Create defs.yaml for the transformer component
-    transformer_component_type = f"{project.directory_name}.components.dataframe_transformer.DataFrameTransformerComponent"
+    # Pick the right transformer backend based on upstream type.
+    if upstream_is_warehouse:
+        # Translate the DF-style attributes we built above into SQL-style ones
+        # SqlTransformerComponent expects. Fields the SQL backend doesn't
+        # support (group_by, aggregations, pivot, unpivot, string_operations,
+        # string_replace, drop_na, fill_na) are dropped with a warning — the
+        # user can re-do those in a DataFrame branch if they need them.
+        sql_attrs: dict = {
+            "asset_name": attributes["asset_name"],
+            "upstream_asset_keys": attributes["upstream_asset_keys"],
+            # dbt models materialize under `main` in the default profile;
+            # the last segment of the asset key is the table name.
+            "upstream_table": f"main.{request.sourceAssetKey.rsplit('/', 1)[-1]}",
+            "output_schema": "main",
+        }
+        # Direct passes.
+        if request.transformConfig.columnsToKeep:
+            sql_attrs["columns_to_keep"] = ",".join(request.transformConfig.columnsToKeep)
+        if request.transformConfig.columnsToDrop:
+            sql_attrs["columns_to_drop"] = ",".join(request.transformConfig.columnsToDrop)
+        if request.transformConfig.columnRenames:
+            sql_attrs["rename_columns"] = json.dumps(request.transformConfig.columnRenames)
+        if request.transformConfig.dropDuplicates:
+            sql_attrs["drop_duplicates"] = True
+        if request.transformConfig.sortBy:
+            sql_attrs["sort_by"] = ",".join(request.transformConfig.sortBy)
+            sql_attrs["sort_ascending"] = request.transformConfig.sortAscending
+        if request.transformConfig.calculatedColumns:
+            sql_attrs["calculated_columns"] = json.dumps(request.transformConfig.calculatedColumns)
+        # Filter translation: pandas query → SQL WHERE. Basic operators only;
+        # anything involving `.str.contains` or method chains falls through
+        # unchanged and may fail at run time.
+        if request.transformConfig.filters:
+            sql_parts = []
+            for f in request.transformConfig.filters:
+                col, op, val = f.column, f.operator, f.value
+                if op == "equals":
+                    sql_parts.append(f'"{col}" = ' + (val if val.lower() in ('true', 'false') else f"'{val}'"))
+                elif op == "not_equals":
+                    sql_parts.append(f'"{col}" != ' + (val if val.lower() in ('true', 'false') else f"'{val}'"))
+                elif op == "greater_than":
+                    sql_parts.append(f'"{col}" > {val}')
+                elif op == "less_than":
+                    sql_parts.append(f'"{col}" < {val}')
+                elif op == "contains":
+                    sql_parts.append(f'"{col}" LIKE \'%{val}%\'')
+                elif op == "not_contains":
+                    sql_parts.append(f'"{col}" NOT LIKE \'%{val}%\'')
+            if sql_parts:
+                sql_attrs["filter_expression"] = " AND ".join(sql_parts)
+        attributes = sql_attrs
+        transformer_component_type = f"{project.directory_name}.dagster_designer_components.SqlTransformerComponent"
+        print(f"[Create Transformer] Using SqlTransformerComponent for warehouse upstream {request.sourceAssetKey}", flush=True)
+    else:
+        transformer_component_type = f"{project.directory_name}.components.dataframe_transformer.DataFrameTransformerComponent"
 
-    defs_yaml = {
-        "type": transformer_component_type,
-        "attributes": attributes
-    }
-
-    # Write YAML - component now accepts dicts/lists and converts them to JSON strings
     defs_yaml = {
         "type": transformer_component_type,
         "attributes": attributes
@@ -332,9 +421,9 @@ async def create_transformer_asset(project_id: str, request: CreateTransformerRe
         json.dump(custom_lineage_data, f, indent=2)
     print(f"[Create Transformer] Updated custom_lineage.json with {len(project.custom_lineage)} edges", flush=True)
 
-    # Add component to project's components list if not already there
-    transformer_component_type = f"{project.directory_name}.components.dataframe_transformer.DataFrameTransformerComponent"
-
+    # Add component to project's components list if not already there.
+    # transformer_component_type was set correctly above based on the branch;
+    # don't re-hardcode DataFrameTransformerComponent here.
     component_exists = any(
         c.component_type == transformer_component_type and c.id == component_id
         for c in project.components

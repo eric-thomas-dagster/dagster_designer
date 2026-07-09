@@ -1,6 +1,6 @@
 import { memo } from 'react';
 import { Handle, Position, NodeProps } from 'reactflow';
-import { Layers, Database, Users, CheckCircle, X, Wand2, Search, Package, AlertTriangle, Zap, Clock, Play, Radar } from 'lucide-react';
+import { Layers, Database, Users, CheckCircle, X, Wand2, Search, Package, AlertTriangle, Zap, Clock, Play, Radar, Loader2 } from 'lucide-react';
 
 // Icon mapping for component icons
 const componentIconMap: Record<string, any> = {
@@ -119,7 +119,7 @@ export const AssetNode = memo(({ data, selected, id }: NodeProps) => {
       )}
 
       {/* Header with asset icon and key */}
-      <div className={`px-2 py-1.5 rounded-t-md ${isIncomplete ? 'bg-amber-500' : 'bg-primary'}`}>
+      <div className={`group/header px-2 py-1.5 rounded-t-md ${isIncomplete ? 'bg-amber-500' : 'bg-primary'}`}>
         <div className="flex items-center space-x-1.5">
           <div className="flex-shrink-0">
             <Layers className="w-3.5 h-3.5 text-white" />
@@ -136,6 +136,27 @@ export const AssetNode = memo(({ data, selected, id }: NodeProps) => {
             >
               <AlertTriangle className="w-3.5 h-3.5 text-white" />
             </div>
+          )}
+          {/* Run to here — materializes this asset + all upstream, then opens
+              the data preview. Only shown in the graph view (not pipeline
+              builder), and only when the parent wires up the callback. */}
+          {!isPipelineBuilder && data.onRunToHere && (
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                data.onRunToHere(data.asset_key || data.label);
+              }}
+              disabled={data.isRunningToHere}
+              className="flex-shrink-0 opacity-0 group-hover/header:opacity-100 focus:opacity-100 data-[running=true]:opacity-100 w-5 h-5 rounded flex items-center justify-center bg-white/20 hover:bg-white/30 disabled:cursor-wait transition-opacity"
+              data-running={data.isRunningToHere ? 'true' : 'false'}
+              title="Run to here — materialize this asset + upstream, then preview the output"
+            >
+              {data.isRunningToHere ? (
+                <Loader2 className="w-3 h-3 text-white animate-spin" />
+              ) : (
+                <Play className="w-3 h-3 text-white fill-white" />
+              )}
+            </button>
           )}
         </div>
       </div>

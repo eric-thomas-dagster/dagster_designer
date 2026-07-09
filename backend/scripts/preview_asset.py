@@ -11,6 +11,219 @@ from pathlib import Path
 # Suppress warnings that would interfere with JSON output
 warnings.filterwarnings('ignore')
 
+# Marker used when we detect an asset that can't be previewed by calling its
+# compute function in-process (e.g. @dbt_assets — needs a real Dagster context
+# with resources and often shells out to subprocesses). Callers check for this
+# and surface a friendly error instead of trying + crashing.
+_MULTIKEY_SENTINEL = object()
+
+
+def _try_duckdb_preview(asset_key: str, row_limit: int = 100):
+    """For dbt-on-DuckDB projects (Jaffle Shop, etc.): after `dg launch` has
+    materialized the asset, the data lives in a `.duckdb` file the dbt profile
+    points at. Walk from cwd to find one and query the table matching the
+    asset key. Returns a dict shaped like the DataFrame branch of main(),
+    or None if nothing works.
+    """
+    import os
+    from pathlib import Path as _Path
+
+    # Candidate table names to try — asset_key can be multi-segment like
+    # "seeds/raw_customers", and dbt materializes tables by their model name
+    # (final segment). Try a few normalizations.
+    last_segment = asset_key.rsplit('/', 1)[-1]
+    candidates = [
+        last_segment,
+        asset_key.replace('/', '_'),
+        asset_key,
+    ]
+    # De-dupe while preserving order.
+    seen = set()
+    candidates = [c for c in candidates if not (c in seen or seen.add(c))]
+
+    # Find .duckdb files near cwd (dbt profiles.yml usually points at one via
+    # a relative path — safer to just search for the file directly).
+    cwd = _Path(os.getcwd())
+    duckdb_paths = []
+    for root in [cwd, *cwd.parents[:3]]:
+        for p in root.glob("**/*.duckdb"):
+            if any(part in {".venv", "node_modules", "__pycache__"} for part in p.parts):
+                continue
+            duckdb_paths.append(p)
+        if duckdb_paths:
+            break
+    if not duckdb_paths:
+        return None
+
+    try:
+        import duckdb  # type: ignore
+    except ImportError:
+        return None
+
+    for db_path in duckdb_paths:
+        try:
+            con = duckdb.connect(str(db_path), read_only=True)
+        except Exception:
+            continue
+        try:
+            # Discover the schema list once so we can hit the right one.
+            schemas = [
+                r[0] for r in con.execute(
+                    "SELECT DISTINCT schema_name FROM information_schema.schemata"
+                ).fetchall()
+            ] or ['main']
+            for schema in schemas:
+                if schema in ('information_schema', 'pg_catalog'):
+                    continue
+                for table in candidates:
+                    try:
+                        # `fetchdf()` requires numpy which isn't guaranteed in
+                        # every project's venv (Jaffle Shop's minimal env
+                        # doesn't have it). Use raw tuples + cursor metadata.
+                        cursor = con.execute(
+                            f'SELECT * FROM "{schema}"."{table}" LIMIT {row_limit}'
+                        )
+                    except Exception:
+                        continue
+                    rows = cursor.fetchall()
+                    description = cursor.description or []
+                    columns = [d[0] for d in description]
+                    # duckdb's cursor.description type codes aren't very
+                    # descriptive — get proper column types via DESCRIBE.
+                    try:
+                        type_rows = con.execute(
+                            f'DESCRIBE "{schema}"."{table}"'
+                        ).fetchall()
+                        dtypes = {r[0]: r[1] for r in type_rows if r[0] in columns}
+                    except Exception:
+                        dtypes = {c: '' for c in columns}
+                    data = [
+                        {
+                            columns[i]: (v if _json_safe(v) else str(v))
+                            for i, v in enumerate(row)
+                        }
+                        for row in rows
+                    ]
+                    return {
+                        "success": True,
+                        "data": data,
+                        "columns": columns,
+                        "dtypes": dtypes,
+                        "row_count": len(rows),
+                        "column_count": len(columns),
+                        "shape": [len(rows), len(columns)],
+                        "source": f"duckdb:{db_path.name}:{schema}.{table}",
+                    }
+        finally:
+            con.close()
+
+    return None
+
+
+def _json_safe(v):
+    """Return True if `v` will round-trip through json.dumps as-is. Anything
+    else (Decimal, datetime, bytes, UUID) we coerce via str() at the call site."""
+    if v is None or isinstance(v, (bool, int, float, str)):
+        return True
+    return False
+
+
+def _try_dbt_show_preview(asset_key: str, row_limit: int = 100):
+    """General fallback for dbt models across any adapter (Postgres, Snowflake,
+    BigQuery, etc.): shell out to `dbt show --select <model>` and parse the
+    JSON. Slower than a direct DuckDB read (~5s cold start) but reuses dbt's
+    entire connection/credential/dialect stack — including env var
+    interpolation like `{{ env_var('SNOWFLAKE_PASSWORD') }}`.
+
+    Returns a preview dict or None if dbt isn't available / no project found /
+    the model wasn't built yet.
+    """
+    import os
+    import subprocess as _sp
+    from pathlib import Path as _Path
+
+    # Find the dbt project (has dbt_project.yml). Look near cwd first, then
+    # walk down into project subdirs (Jaffle Shop has it in ./jaffle-shop-classic/).
+    cwd = _Path(os.getcwd())
+    candidates = [cwd, *cwd.parents[:2]]
+    dbt_project_dir = None
+    for root in candidates:
+        for p in root.glob("**/dbt_project.yml"):
+            if any(part in {".venv", "node_modules", "__pycache__", ".dbt"} for part in p.parts):
+                continue
+            dbt_project_dir = p.parent
+            break
+        if dbt_project_dir:
+            break
+    if dbt_project_dir is None:
+        return None
+
+    # Profiles: usually in the same directory as dbt_project.yml (per dbt-
+    # cookiecutter conventions), else the user's ~/.dbt/.
+    profiles_dir = dbt_project_dir if (dbt_project_dir / "profiles.yml").exists() else None
+
+    # Model name is the last segment of the asset key (dbt models are
+    # identified by their name, not their path).
+    model_name = asset_key.rsplit('/', 1)[-1]
+
+    # Locate the dbt binary — this script already runs in the project's
+    # own venv (set by assets.py) so `dbt` should be next to `python`.
+    dbt_bin = _Path(sys.executable).parent / "dbt"
+    if not dbt_bin.exists():
+        return None
+
+    cmd = [
+        str(dbt_bin), "--quiet", "show",
+        "--select", model_name,
+        "--limit", str(row_limit),
+        "--output", "json",
+        "--project-dir", str(dbt_project_dir),
+    ]
+    if profiles_dir:
+        cmd.extend(["--profiles-dir", str(profiles_dir)])
+
+    try:
+        result = _sp.run(cmd, capture_output=True, text=True, timeout=180)
+    except _sp.TimeoutExpired:
+        return {"success": False, "error": f"dbt show timed out after 180s for {model_name}"}
+    except Exception:
+        return None
+
+    stdout = result.stdout or ""
+    # `dbt --quiet show` emits pure JSON on stdout; grab from first `{`.
+    brace = stdout.find('{')
+    if brace < 0:
+        # Failure — surface dbt's own error (typically indicates the model
+        # isn't materialized yet or has an upstream that isn't built).
+        tail = (result.stderr or stdout or 'unknown error').strip().splitlines()[-5:]
+        return {
+            "success": False,
+            "error": f"dbt show couldn't preview '{model_name}': {' | '.join(tail)}",
+        }
+
+    try:
+        payload = json.loads(stdout[brace:])
+    except json.JSONDecodeError as e:
+        return {"success": False, "error": f"dbt show returned unparseable JSON: {e}"}
+
+    rows = payload.get("show") or []
+    columns = list(rows[0].keys()) if rows else []
+    # Coerce non-JSON-safe values (Decimal, datetime, bytes) to strings.
+    data = [
+        {c: (v if _json_safe(v) else str(v)) for c, v in row.items()}
+        for row in rows
+    ]
+    return {
+        "success": True,
+        "data": data,
+        "columns": columns,
+        "dtypes": {c: '' for c in columns},  # dbt show doesn't return types
+        "row_count": len(data),
+        "column_count": len(columns),
+        "shape": [len(data), len(columns)],
+        "source": f"dbt show:{model_name}",
+    }
+
 
 def create_mock_context():
     """Create a mock context for asset execution."""
@@ -37,14 +250,23 @@ def create_mock_context():
     return SimpleMockContext()
 
 
-def execute_asset_dependencies(defs, asset_key: str, executed_results: dict):
+def execute_asset_dependencies(defs, asset_key: str, executed_results: dict, visiting: set | None = None):
     """
     Recursively execute upstream dependencies of an asset AND the asset itself.
     Returns a dict of asset_key -> result.
+
+    `visiting` tracks the current recursion stack so we don't loop forever when
+    a multi-key AssetsDefinition (e.g. `@dbt_assets`) reports intra-group keys
+    in its `dependency_keys` — asking for A's deps returns the whole group's
+    dep set, which includes B (also in the group), whose deps include A, etc.
     """
-    # Skip if already executed
-    if asset_key in executed_results:
+    if visiting is None:
+        visiting = set()
+
+    # Skip if already executed OR currently being visited (cycle guard).
+    if asset_key in executed_results or asset_key in visiting:
         return executed_results
+    visiting.add(asset_key)
 
     # Get all assets
     all_assets = []
@@ -63,6 +285,18 @@ def execute_asset_dependencies(defs, asset_key: str, executed_results: dict):
             break
 
     if not target_asset_def:
+        visiting.discard(asset_key)
+        return executed_results
+
+    # Multi-key AssetsDefinition (@dbt_assets, factory-generated groups, etc.)
+    # can't be executed by calling `op.compute_fn` in-process with a mock
+    # context — they need real resources (DbtCliResource, etc.) and often
+    # shell out to subprocesses. Bail early with a marker so main() can
+    # produce a friendly error instead of trying and infinite-looping.
+    keys_in_group = list(getattr(target_asset_def, 'keys', []) or [])
+    if len(keys_in_group) > 1:
+        executed_results[asset_key] = _MULTIKEY_SENTINEL
+        visiting.discard(asset_key)
         return executed_results
 
     # First, execute all dependencies of this asset
@@ -73,7 +307,7 @@ def execute_asset_dependencies(defs, asset_key: str, executed_results: dict):
         for dep_key in dep_keys:
             dep_key_str = dep_key.to_user_string()
             # Recursively execute this dependency and its dependencies
-            execute_asset_dependencies(defs, dep_key_str, executed_results)
+            execute_asset_dependencies(defs, dep_key_str, executed_results, visiting)
 
     # Now execute the target asset itself
     if hasattr(target_asset_def, 'op'):
@@ -201,6 +435,42 @@ def main():
                 "error": f"Asset '{asset_key}' not found"
             }))
             sys.exit(1)
+
+        # If the target lives inside a multi-key AssetsDefinition (e.g. dbt
+        # assets, factory-generated groups), we can't reconstruct a compute
+        # for a single key by mocking a context. But if the user has already
+        # materialized it via "Run to here", the data is sitting in the
+        # underlying store — for dbt-on-DuckDB projects that's a `.duckdb`
+        # file we can read directly. Try that; fall back to a helpful error.
+        keys_in_group = list(getattr(asset_def, 'keys', []) or [])
+        if len(keys_in_group) > 1:
+            # 1) DuckDB fast path — <100ms if the model has been materialized
+            #    into a `.duckdb` file that lives next to the project.
+            duckdb_result = _try_duckdb_preview(asset_key)
+            if duckdb_result is not None:
+                print(json.dumps(duckdb_result))
+                sys.exit(0)
+
+            # 2) `dbt show` general fallback — works for every adapter dbt
+            #    supports (Postgres/Snowflake/BigQuery/Redshift/…). ~5s cold
+            #    start but reuses dbt's full connection + credential stack.
+            dbt_result = _try_dbt_show_preview(asset_key)
+            if dbt_result is not None:
+                print(json.dumps(dbt_result))
+                sys.exit(0)
+
+            group_kind = 'dbt project' if 'dbt' in type(asset_def).__module__.lower() else 'multi-asset group'
+            other_keys = [k.to_user_string() for k in keys_in_group if k.to_user_string() != asset_key][:5]
+            hint = f' Related keys in this group: {", ".join(other_keys)}.' if other_keys else ''
+            print(json.dumps({
+                "success": False,
+                "error": (
+                    f"Preview couldn't find materialized data for '{asset_key}'. "
+                    f"It's part of a {group_kind} — click Run to here first to "
+                    f"materialize it, then re-open the preview.{hint}"
+                ),
+            }))
+            sys.exit(0)
 
         # Check if asset has upstream_asset_keys configuration
         configured_upstream_keys = get_upstream_asset_keys_from_config(project_module, asset_key)

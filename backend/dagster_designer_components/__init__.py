@@ -9,6 +9,7 @@ from .sql_asset import SQLAssetComponent
 from .dbt_translator import ResourceTypePrefixTranslator
 from .dbt_project_with_translator import DbtProjectWithTranslatorComponent
 from .freshness_policy import FreshnessPolicyComponent
+from .sql_transformer import SqlTransformerComponent
 
 __all__ = [
     "ScheduleComponent",
@@ -20,4 +21,5 @@ __all__ = [
     "ResourceTypePrefixTranslator",
     "DbtProjectWithTranslatorComponent",
     "FreshnessPolicyComponent",
+    "SqlTransformerComponent",
 ]

@@ -308,8 +308,23 @@ export function ComponentPalette({ onComponentClick }: ComponentPaletteProps) {
                           <button
                             key={`inst-${comp.id}-${i}`}
                             onClick={() => onComponentClick(comp.component_type)}
+                            draggable
+                            onDragStart={(e) => {
+                              // Match registry drag payload shape so GraphEditor's
+                              // onDrop handler doesn't need special-casing.
+                              e.dataTransfer.setData(
+                                'application/reactflow',
+                                JSON.stringify({
+                                  type: comp.component_type,
+                                  name: comp.name,
+                                  category: comp.category,
+                                  description: comp.description,
+                                }),
+                              );
+                              e.dataTransfer.effectAllowed = 'move';
+                            }}
                             title={comp.description || comp.name}
-                            className="w-full flex items-center space-x-2 px-2.5 py-2 bg-gradient-to-br from-purple-50 to-pink-50 border border-purple-200 rounded-md hover:border-purple-400 transition-all group text-left"
+                            className="w-full flex items-center space-x-2 px-2.5 py-2 bg-gradient-to-br from-purple-50 to-pink-50 border border-purple-200 rounded-md hover:border-purple-400 transition-all group text-left cursor-move"
                           >
                             <Package className="w-4 h-4 text-purple-600 flex-shrink-0" />
                             <span className="text-sm font-medium text-gray-900 truncate flex-1">{comp.name}</span>

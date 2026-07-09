@@ -25,6 +25,7 @@ import 'reactflow/dist/style.css';
 import { ComponentNode } from './nodes/ComponentNode';
 import { AssetNode } from './nodes/AssetNode';
 import { Launchpad } from './Launchpad';
+import { DataPreviewModal } from './DataPreviewModal';
 import { notify } from './Notifications';
 import { useProjectStore } from '@/hooks/useProject';
 import { projectsApi, componentsApi } from '@/services/api';
@@ -385,6 +386,48 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick }: GraphEditorProps) 
   const [showLaunchpad, setShowLaunchpad] = useState(false);
   const [launchpadAssetKey, setLaunchpadAssetKey] = useState<string>('');
 
+  // "Run to here" — materializes an asset + all upstream (via `+asset` selection)
+  // and then auto-opens the DataPreviewModal on that asset. Simple Alteryx/Lakeflow
+  // style ergonomic loop.
+  const [previewAssetKey, setPreviewAssetKey] = useState<string | null>(null);
+
+  const handleRunToHere = useCallback(
+    async (assetKey: string) => {
+      if (!currentProject) return;
+      // Flip the running flag on just this node so its Play button spins.
+      setNodes((nds) =>
+        nds.map((n) =>
+          n.id === assetKey || n.data?.asset_key === assetKey
+            ? { ...n, data: { ...n.data, isRunningToHere: true } }
+            : n,
+        ),
+      );
+      try {
+        // `+asset_key` in dg's selection syntax = "this asset and everything upstream."
+        const result = await projectsApi.materialize(currentProject.id, [`+${assetKey}`]);
+        if (result.success) {
+          notify.success(`Materialized ${assetKey} + upstream. Opening preview…`);
+          setPreviewAssetKey(assetKey);
+        } else {
+          const tail = (result.stderr || result.stdout || '').split('\n').slice(-4).join(' | ');
+          notify.error(`Materialize failed: ${tail || 'unknown error'}`);
+        }
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        notify.error(`Materialize failed: ${msg}`);
+      } finally {
+        setNodes((nds) =>
+          nds.map((n) =>
+            n.id === assetKey || n.data?.asset_key === assetKey
+              ? { ...n, data: { ...n.data, isRunningToHere: false } }
+              : n,
+          ),
+        );
+      }
+    },
+    [currentProject],
+  );
+
   // Handlers for asset context menu
   const handleMaterializeAsset = useCallback(async (assetKey: string) => {
     if (!currentProject) return;
@@ -625,6 +668,7 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick }: GraphEditorProps) 
               onMaterialize: handleMaterializeAsset,
               onOpenLaunchpad: handleOpenLaunchpad,
               onPrimitiveClick,
+              onRunToHere: handleRunToHere,
             } : {}),
           },
         };
@@ -922,7 +966,7 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick }: GraphEditorProps) 
                 node_kind: node.node_kind,
                 source_component: node.source_component,
                 ...ioMetadata,
-                ...(node.node_kind === 'asset' ? { onPrimitiveClick } : {}),
+                ...(node.node_kind === 'asset' ? { onPrimitiveClick, onRunToHere: handleRunToHere } : {}),
               },
             };
           });
@@ -1698,6 +1742,18 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick }: GraphEditorProps) 
           onLaunch={handleLaunchpadSubmit}
           defaultConfig={{}}
           configSchema={{}}
+        />
+      )}
+
+      {/* Data preview — opened automatically by "Run to here" once the
+          materialize completes; also closable via the modal's own X. */}
+      {currentProject && previewAssetKey && (
+        <DataPreviewModal
+          isOpen={!!previewAssetKey}
+          onClose={() => setPreviewAssetKey(null)}
+          projectId={currentProject.id}
+          assetKey={previewAssetKey}
+          assetName={previewAssetKey}
         />
       )}
     </div>

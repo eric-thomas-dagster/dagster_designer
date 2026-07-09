@@ -1,8 +1,8 @@
 import React, { useState, useMemo } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu';
-import { X, AlertCircle, Table as TableIcon, Wand2, Save, Filter, Columns3, Trash2, Eye, EyeOff, ChevronDown, ChevronRight, SortAsc, SortDesc, Sigma, Group, Calculator, ArrowDownUp, RotateCw } from 'lucide-react';
-import { assetsApi, type AssetDataPreview } from '@/services/api';
+import { X, AlertCircle, Table as TableIcon, Wand2, Save, Filter, Columns3, Trash2, Eye, EyeOff, ChevronDown, ChevronRight, SortAsc, SortDesc, Sigma, Group, Calculator, ArrowDownUp, RotateCw, Play, Loader2 } from 'lucide-react';
+import { assetsApi, projectsApi, type AssetDataPreview } from '@/services/api';
 import { notify } from './Notifications';
 
 interface DataPreviewModalProps {
@@ -233,6 +233,8 @@ export function DataPreviewModal({
     }
   }, [existingComponentAttributes, data]);
 
+  const [runningToHere, setRunningToHere] = useState(false);
+
   const loadData = async () => {
     setLoading(true);
     setError(null);
@@ -251,6 +253,40 @@ export function DataPreviewModal({
       setLoading(false);
     }
   };
+
+  // Empty-state "Run to here" — same materialize + auto-preview loop as the
+  // node's play button, but triggered from inside the modal when the initial
+  // preview came back with "not materialized". Keeps the click count low.
+  const handleRunToHere = async () => {
+    setRunningToHere(true);
+    try {
+      const result = await projectsApi.materialize(projectId, [`+${assetKey}`]);
+      if (!result.success) {
+        const tail = (result.stderr || result.stdout || '').split('\n').slice(-4).join(' | ');
+        notify.error(`Materialize failed: ${tail || 'unknown error'}`);
+        return;
+      }
+      notify.success(`Materialized ${assetKey} + upstream. Loading data…`);
+      // Reload the preview — the cache was just invalidated by materialize.
+      await loadData();
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      notify.error(`Materialize failed: ${msg}`);
+    } finally {
+      setRunningToHere(false);
+    }
+  };
+
+  // Preview may return an error that hints at needing materialization first
+  // (typically a dbt / multi-key group where the underlying table doesn't
+  // exist yet). Detect that so we can render the Run-to-here empty state
+  // instead of just showing the raw error text.
+  const isNotMaterializedError = !!error && (
+    /run to here/i.test(error) ||
+    /not materialized/i.test(error) ||
+    /couldn.?t find materialized/i.test(error) ||
+    /does not exist/i.test(error)
+  );
 
   // Apply transformations to preview data
   const transformedData = useMemo(() => {
@@ -1540,12 +1576,54 @@ export function DataPreviewModal({
                 <div className="flex items-center justify-center h-full">
                   <div className="text-center">
                     <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto mb-4"></div>
-                    <p className="text-gray-600">Loading asset data...</p>
+                    <p className="text-gray-600">Loading asset data…</p>
+                    <p className="text-xs text-gray-400 mt-2">
+                      dbt models query the warehouse; this can take a few seconds.
+                    </p>
                   </div>
                 </div>
               )}
 
-              {error && (
+              {error && isNotMaterializedError && (
+                <div className="flex items-center justify-center h-full">
+                  <div className="bg-amber-50 border border-amber-200 rounded-lg p-6 max-w-xl text-center">
+                    <Play className="w-8 h-8 text-amber-600 mx-auto mb-3" />
+                    <h3 className="text-base font-medium text-gray-900 mb-1">
+                      No data yet for this asset
+                    </h3>
+                    <p className="text-sm text-gray-600 mb-4">
+                      This asset needs to be materialized before you can preview
+                      its output. Click below to run it (and every upstream
+                      asset it depends on).
+                    </p>
+                    <button
+                      onClick={handleRunToHere}
+                      disabled={runningToHere}
+                      className="inline-flex items-center gap-2 px-4 py-2 text-sm font-medium bg-primary text-primary-foreground rounded-md hover:bg-accent disabled:opacity-60"
+                    >
+                      {runningToHere ? (
+                        <>
+                          <Loader2 className="w-4 h-4 animate-spin" />
+                          Running…
+                        </>
+                      ) : (
+                        <>
+                          <Play className="w-4 h-4 fill-current" />
+                          Run to here
+                        </>
+                      )}
+                    </button>
+                    <details className="mt-4 text-left">
+                      <summary className="text-xs text-gray-500 cursor-pointer hover:text-gray-700">
+                        Details
+                      </summary>
+                      <p className="text-xs text-gray-500 mt-2 whitespace-pre-wrap">{error}</p>
+                    </details>
+                  </div>
+                </div>
+              )}
+
+              {error && !isNotMaterializedError && (
                 <div className="flex items-center justify-center h-full">
                   <div className="bg-red-50 border border-red-200 rounded-lg p-6 max-w-2xl">
                     <div className="flex items-start space-x-3">
