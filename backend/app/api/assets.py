@@ -54,6 +54,74 @@ def get_known_schemas(project_id: str) -> dict[str, dict]:
     }
 
 
+def _infer_upstream_resource_key(src_dir: Path, source_asset_key: str) -> str | None:
+    """Look up the upstream asset's defs.yaml and return its declared Dagster
+    resource_key, if any. Enables the SqlTransformer to inherit warehouse
+    credentials from the same resource its upstream uses (Snowflake, Postgres,
+    dbt-managed DuckDB, etc.) without the user having to configure it twice.
+
+    Match rules (first hit wins):
+      * an attribute literally named `resource_key`
+      * any attribute ending in `_resource_key` (snowflake_resource_key,
+        postgres_resource_key, warehouse_resource_key, …)
+      * for dbt models (source key like `models/foo`), we skip — dbt has its
+        own resource injection and the SqlTransformer's dbt-profile fallback
+        already handles those cases.
+    Returns None when no upstream defs.yaml is found or none of the shapes match.
+    """
+    if "/" in source_asset_key and source_asset_key.split("/", 1)[0] in {
+        "models", "seeds", "snapshots", "analyses"
+    }:
+        return None
+
+    import yaml as _yaml
+
+    defs_root = src_dir / "defs"
+    if not defs_root.exists():
+        return None
+
+    # Component-generated assets live at defs/<asset_name>/defs.yaml. The
+    # source_asset_key for these is the bare asset name.
+    candidates = [defs_root / source_asset_key / "defs.yaml"]
+    # Fallback: scan all defs.yamls under defs/ for one whose asset_name
+    # attribute matches. Cheap enough — projects have <100 components.
+    for defs_yaml_path in defs_root.glob("*/defs.yaml"):
+        if defs_yaml_path not in candidates:
+            candidates.append(defs_yaml_path)
+
+    for defs_yaml_path in candidates:
+        if not defs_yaml_path.exists():
+            continue
+        try:
+            parsed = _yaml.safe_load(defs_yaml_path.read_text()) or {}
+        except Exception:
+            continue
+        attrs = parsed.get("attributes") or {}
+        if not isinstance(attrs, dict):
+            continue
+        # Only accept a scan-hit if the asset_name actually matches. For the
+        # primary candidate (defs/<key>/defs.yaml) the folder already
+        # constrains the match, so skip that check to allow assets whose
+        # folder name differs from asset_name.
+        is_primary = defs_yaml_path == candidates[0]
+        if not is_primary and attrs.get("asset_name") != source_asset_key:
+            continue
+
+        if isinstance(attrs.get("resource_key"), str) and attrs["resource_key"]:
+            return attrs["resource_key"]
+        for k, v in attrs.items():
+            if isinstance(k, str) and k.endswith("_resource_key") and isinstance(v, str) and v:
+                return v
+
+        if is_primary:
+            # Primary candidate exists but has no resource_key — no need to
+            # keep scanning; secondary scan would only match by asset_name
+            # anyway.
+            break
+
+    return None
+
+
 class AssetDataResponse(BaseModel):
     """Response containing asset data preview."""
 
@@ -487,6 +555,17 @@ async def create_transformer_asset(project_id: str, request: CreateTransformerRe
                     sql_parts.append(f'"{col}" NOT LIKE \'%{val}%\'')
             if sql_parts:
                 sql_attrs["filter_expression"] = " AND ".join(sql_parts)
+
+        # Auto-detect a Dagster resource_key from the upstream's defs.yaml so
+        # the SqlTransformer inherits warehouse credentials the same way its
+        # upstream does. We look for any attribute matching *_resource_key
+        # (or bare `resource_key`) on the upstream component. First match wins
+        # — surfaced in the SQL transformer so users can override in the UI.
+        inferred_resource_key = _infer_upstream_resource_key(src_dir, request.sourceAssetKey)
+        if inferred_resource_key:
+            sql_attrs["resource_key"] = inferred_resource_key
+            print(f"[Create Transformer] Auto-detected resource_key='{inferred_resource_key}' from upstream {request.sourceAssetKey}", flush=True)
+
         attributes = sql_attrs
         transformer_component_type = f"{project.directory_name}.dagster_designer_components.SqlTransformerComponent"
         print(f"[Create Transformer] Using SqlTransformerComponent for warehouse upstream {request.sourceAssetKey}", flush=True)

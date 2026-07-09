@@ -41,10 +41,17 @@ class SqlTransformerComponent(dg.Component, dg.Model, dg.Resolvable):
     upstream_table: str  # SQL identifier for the source, e.g. "main.stg_customers"
     output_schema: str = "main"
 
-    # Connection — try in order.
+    # Connection — try in order:
+    #   1. Dagster resource_key (highest precedence — proper Dagster pattern,
+    #      inherits deployment-specific credentials from resources.py; works
+    #      with SnowflakeResource, DuckDBResource, custom SQLAlchemy engines,
+    #      or any object exposing get_sqlalchemy_engine() / get_connection()).
+    #   2. Explicit connection_url (e.g. postgresql+psycopg2://user:pw@host/db).
+    #   3. Environment variable holding the URL (secret-friendly).
+    #   4. dbt profiles.yml derivation — walks up the filesystem to find one.
+    resource_key: Optional[str] = None
     connection_url: Optional[str] = None
     connection_url_env_var: Optional[str] = None
-    # If both are unset we look for a dbt profiles.yml near the project.
 
     # Visual-builder ops (same names/semantics as DataFrameTransformerComponent
     # so the frontend save flow doesn't need to know which backend it's
@@ -107,20 +114,28 @@ class SqlTransformerComponent(dg.Component, dg.Model, dg.Resolvable):
         # the asset function.
         cfg = self._snapshot()
 
-        @dg.asset(
+        # Declare required_resource_keys ONLY when the user has explicitly
+        # set resource_key — otherwise Dagster errors "resource key X required
+        # but not provided" at build time. When unset we fall back to
+        # connection_url / env var / dbt profile.
+        asset_kwargs: dict[str, Any] = dict(
             name=self.asset_name,
             deps=upstream_keys,
             group_name=self.group_name,
             description=self.description,
             compute_kind="sql",
         )
+        if self.resource_key:
+            asset_kwargs["required_resource_keys"] = {self.resource_key}
+
+        @dg.asset(**asset_kwargs)
         # NB: parameter MUST be named `context` — Dagster treats any other
         # first-arg name as an upstream asset dep. Type annotation is left
         # blank because Dagster's decorator inspection rejects
         # `dg.AssetExecutionContext` (module-attribute form) — only the
         # bare class name or no annotation are accepted.
         def _sql_transform(context):
-            engine = _resolve_engine(cfg)
+            engine = _resolve_engine(cfg, context)
             select_sql = _build_select_sql(cfg, engine.dialect.name)
             create_sql = (
                 f'CREATE OR REPLACE TABLE "{cfg["output_schema"]}"."{cfg["asset_name"]}" AS\n'
@@ -149,6 +164,7 @@ class SqlTransformerComponent(dg.Component, dg.Model, dg.Resolvable):
             "upstream_asset_keys": self.upstream_asset_keys,
             "upstream_table": self.upstream_table,
             "output_schema": self.output_schema,
+            "resource_key": self.resource_key,
             "connection_url": self.connection_url,
             "connection_url_env_var": self.connection_url_env_var,
             "columns_to_keep": self.columns_to_keep,
@@ -177,10 +193,40 @@ class SqlTransformerComponent(dg.Component, dg.Model, dg.Resolvable):
         }
 
 
-def _resolve_engine(cfg: dict[str, Any]):
-    """Return a SQLAlchemy Engine. Tries in order: explicit URL, env var URL,
-    then dbt profiles.yml derivation. Raises with a clear message on failure."""
+def _resolve_engine(cfg: dict[str, Any], context=None):
+    """Return a SQLAlchemy Engine. Tries in order:
+      1. Dagster resource (context.resources.<resource_key>) — proper Dagster
+         pattern; duck-typed against SnowflakeResource, DuckDBResource, any
+         object with get_sqlalchemy_engine() / get_connection(), or the shape
+         of a connection config.
+      2. Explicit `connection_url` (SQLAlchemy URL).
+      3. `connection_url_env_var` — read at execute time.
+      4. dbt profiles.yml derivation.
+    Raises with a clear message on failure."""
     from sqlalchemy import create_engine
+
+    resource_key = cfg.get("resource_key")
+    if resource_key and context is not None:
+        try:
+            resource = getattr(context.resources, resource_key)
+        except AttributeError:
+            raise RuntimeError(
+                f"resource_key '{resource_key}' is set on the SqlTransformer, "
+                f"but no such resource is available on context.resources. "
+                f"Add it to the project's Definitions (resources.py) or clear "
+                f"resource_key to fall back to connection_url."
+            )
+        engine = _engine_from_resource(resource)
+        if engine is not None:
+            return engine
+        raise RuntimeError(
+            f"Could not build a SQLAlchemy Engine from resource '{resource_key}' "
+            f"(type={type(resource).__name__}). The resource must expose one of: "
+            f"get_sqlalchemy_engine(), get_connection() returning a connection, "
+            f"or a SqlAlchemy-URL-compatible attribute set "
+            f"(account/user/password for Snowflake; host/port/user/password/database "
+            f"for Postgres; database for DuckDB)."
+        )
 
     url = cfg.get("connection_url")
     if not url and cfg.get("connection_url_env_var"):
@@ -195,10 +241,67 @@ def _resolve_engine(cfg: dict[str, Any]):
     if not url:
         raise RuntimeError(
             "SqlTransformerComponent could not resolve a database connection. "
-            "Set connection_url, connection_url_env_var, or ensure a dbt "
-            "profiles.yml is present in the project."
+            "Set resource_key, connection_url, connection_url_env_var, or ensure a "
+            "dbt profiles.yml is present in the project."
         )
     return create_engine(url)
+
+
+def _engine_from_resource(resource: Any):
+    """Duck-type a Dagster resource into a SQLAlchemy Engine.
+
+    Order matters — try richest interfaces first so we don't reconstruct URLs
+    when the resource already knows how to hand out an engine.
+    """
+    from sqlalchemy import create_engine
+
+    # 1. Prefer any explicit engine accessor the resource exposes.
+    for meth in ("get_sqlalchemy_engine", "sqlalchemy_engine", "get_engine"):
+        fn = getattr(resource, meth, None)
+        if callable(fn):
+            try:
+                eng = fn()
+                if eng is not None:
+                    return eng
+            except Exception:
+                pass  # fall through and try other strategies
+
+    # 2. Snowflake-shaped resource → snowflake:// URL.
+    account = getattr(resource, "account", None)
+    if account:
+        user = getattr(resource, "user", "") or ""
+        password = getattr(resource, "password", "") or ""
+        database = getattr(resource, "database", "") or ""
+        schema = getattr(resource, "schema_", None) or getattr(resource, "schema", "") or ""
+        warehouse = getattr(resource, "warehouse", "") or ""
+        role = getattr(resource, "role", "") or ""
+        url = f"snowflake://{user}:{password}@{account}/{database}"
+        if schema:
+            url += f"/{schema}"
+        params = []
+        if warehouse:
+            params.append(f"warehouse={warehouse}")
+        if role:
+            params.append(f"role={role}")
+        if params:
+            url += "?" + "&".join(params)
+        return create_engine(url)
+
+    # 3. Postgres-shaped resource → postgresql+psycopg2:// URL.
+    host = getattr(resource, "host", None)
+    if host and getattr(resource, "database", None):
+        user = getattr(resource, "user", "") or getattr(resource, "username", "") or ""
+        password = getattr(resource, "password", "") or ""
+        port = getattr(resource, "port", 5432) or 5432
+        db = getattr(resource, "database", "") or getattr(resource, "dbname", "") or ""
+        return create_engine(f"postgresql+psycopg2://{user}:{password}@{host}:{port}/{db}")
+
+    # 4. DuckDB-shaped resource → duckdb:/// URL.
+    database = getattr(resource, "database", None)
+    if database and not host:
+        return create_engine(f"duckdb:///{database}")
+
+    return None
 
 
 def _derive_url_from_dbt_profile() -> Optional[str]:
