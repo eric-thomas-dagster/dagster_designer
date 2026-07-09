@@ -229,6 +229,13 @@ function App() {
   useEffect(() => {
     try { localStorage.setItem('nav.collapsed', navCollapsed ? '1' : '0'); } catch { /* ignore */ }
   }, [navCollapsed]);
+
+  // Clear the selection whenever the currently-selected node disappears from
+  // the graph (typically after a delete + project reload). Without this the
+  // PropertyPanel + downstream consumers keep pointing at a ghost node id
+  // and can crash when they try to look up attributes that no longer exist.
+  // Uses useProjectStore subscription rather than a hook here so we don't
+  // couple the whole App re-render to every graph edit.
   const [dagsterUILoading, setDagsterUILoading] = useState(false);
   const [showDagsterStartupModal, setShowDagsterStartupModal] = useState(false);
   const [fileToOpen, setFileToOpen] = useState<string | null>(null);
@@ -257,6 +264,14 @@ function App() {
     dismissDependencyInstallStatus
   } = useProjectStore();
   const queryClient = useQueryClient();
+
+  // Clear the selection whenever the currently-selected node vanishes from
+  // the graph (typical after Delete Component Instance + project reload).
+  useEffect(() => {
+    if (!selectedNodeId || !currentProject) return;
+    const exists = currentProject.graph.nodes.some((n) => n.id === selectedNodeId);
+    if (!exists) setSelectedNodeId(null);
+  }, [currentProject, selectedNodeId]);
 
   // Delay validation check by 2 seconds after project loads to avoid blocking UI
   useEffect(() => {

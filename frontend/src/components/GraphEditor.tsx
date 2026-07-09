@@ -399,6 +399,16 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick }: GraphEditorProps) 
   // open across non-asset clicks (rubber-band selections, etc.).
   const [ioPanelAssetKey, setIoPanelAssetKey] = useState<string | null>(null);
 
+  // Clear the docked panel if its selected asset vanishes from the graph
+  // (typically because the user deleted the component).
+  useEffect(() => {
+    if (!ioPanelAssetKey || !currentProject) return;
+    const stillExists = currentProject.graph.nodes.some(
+      (n) => n.id === ioPanelAssetKey || (n.data as any)?.asset_key === ioPanelAssetKey,
+    );
+    if (!stillExists) setIoPanelAssetKey(null);
+  }, [currentProject, ioPanelAssetKey]);
+
   const handleRunToHere = useCallback(
     async (assetKey: string) => {
       if (!currentProject) return;
