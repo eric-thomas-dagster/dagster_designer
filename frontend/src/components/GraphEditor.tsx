@@ -823,111 +823,184 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick }: GraphEditorProps) 
 
   // Function to arrange groups in a grid to avoid overlaps
   const arrangeGroups = useCallback(() => {
-    // Get nodes from React Flow's internal state (more up-to-date than component state)
+    // Proper two-level layout:
+    //   1) Intra-group: topologically layer each group's assets left-to-right
+    //      using only edges internal to the group. Within a layer, sort by
+    //      indegree then stable order so parallel branches line up.
+    //   2) Inter-group: topologically layer the GROUPS themselves using
+    //      cross-group edges (source group → target group). Place groups in
+    //      columns by layer, rows by order within layer.
     const currentNodes = getNodes();
+    const currentEdges = edges;
 
-    // Get asset nodes grouped by group_name
-    const groupedNodes = currentNodes.reduce((acc, node) => {
-      if (node.data?.node_kind === 'asset' && node.data?.group_name) {
-        const groupName = node.data.group_name;
-        if (!acc[groupName]) {
-          acc[groupName] = [];
+    const NODE_W = 220;
+    const NODE_H = 100;
+    const NODE_H_GAP = 80;      // horizontal gap between layers within a group
+    const NODE_V_GAP = 40;      // vertical gap between siblings within a layer
+    const GROUP_H_GAP = 200;    // horizontal gap between group columns
+    const GROUP_V_GAP = 200;    // vertical gap between group rows within a column
+    const GROUP_PADDING = 60;   // padding inside each group's bounding box
+
+    // 1) Bucket assets by group_name (ungrouped assets get a synthetic "_" group).
+    const buckets = new Map<string, Node[]>();
+    for (const n of currentNodes) {
+      if (n.data?.node_kind !== 'asset') continue;
+      const g = (n.data?.group_name as string) || '_';
+      if (!buckets.has(g)) buckets.set(g, []);
+      buckets.get(g)!.push(n);
+    }
+    if (buckets.size === 0) return;
+
+    // Index nodes → group so we can classify edges as intra/inter-group.
+    const nodeToGroup = new Map<string, string>();
+    for (const [g, ns] of buckets) for (const n of ns) nodeToGroup.set(n.id, g);
+
+    // 2) For each group, run a longest-path topological layering on the
+    //    subgraph induced by intra-group edges. Node's layer = 1 + max(layer
+    //    of intra-group predecessors), or 0 if none.
+    const nodePos = new Map<string, { x: number; y: number }>();
+    const groupBoxes = new Map<string, { w: number; h: number }>();
+
+    for (const [g, ns] of buckets) {
+      const idsInGroup = new Set(ns.map((n) => n.id));
+      const intraPreds = new Map<string, string[]>();
+      for (const e of currentEdges) {
+        if (idsInGroup.has(e.source) && idsInGroup.has(e.target)) {
+          const arr = intraPreds.get(e.target) ?? [];
+          arr.push(e.source);
+          intraPreds.set(e.target, arr);
         }
-        acc[groupName].push(node);
       }
-      return acc;
-    }, {} as Record<string, Node[]>);
+      // Longest-path layer assignment (memoized DFS with cycle guard).
+      const layer = new Map<string, number>();
+      const visiting = new Set<string>();
+      const compute = (id: string): number => {
+        if (layer.has(id)) return layer.get(id)!;
+        if (visiting.has(id)) return 0; // cycle — bail
+        visiting.add(id);
+        const preds = intraPreds.get(id) ?? [];
+        const l = preds.length === 0 ? 0 : Math.max(...preds.map(compute)) + 1;
+        visiting.delete(id);
+        layer.set(id, l);
+        return l;
+      };
+      ns.forEach((n) => compute(n.id));
 
-    const groupNames = Object.keys(groupedNodes);
-    console.log('[GraphEditor] arrangeGroups - found groups:', groupNames, 'from', currentNodes.length, 'nodes');
+      // Bucket nodes by layer for stable within-layer ordering.
+      const byLayer = new Map<number, Node[]>();
+      ns.forEach((n) => {
+        const l = layer.get(n.id) ?? 0;
+        if (!byLayer.has(l)) byLayer.set(l, []);
+        byLayer.get(l)!.push(n);
+      });
+      // Sort within-layer by predecessor count (single-parent nodes first)
+      // then id for determinism.
+      for (const arr of byLayer.values()) {
+        arr.sort((a, b) => {
+          const pa = intraPreds.get(a.id)?.length ?? 0;
+          const pb = intraPreds.get(b.id)?.length ?? 0;
+          return pa - pb || a.id.localeCompare(b.id);
+        });
+      }
 
-    if (groupNames.length <= 1) {
-      console.log('[GraphEditor] Only one or zero groups, skipping arrange');
-      return;
+      // Assign positions relative to the group's local origin.
+      const sortedLayers = Array.from(byLayer.keys()).sort((a, b) => a - b);
+      let groupW = 0;
+      let groupH = 0;
+      sortedLayers.forEach((l, li) => {
+        const rows = byLayer.get(l)!;
+        rows.forEach((n, ri) => {
+          nodePos.set(n.id, {
+            x: li * (NODE_W + NODE_H_GAP),
+            y: ri * (NODE_H + NODE_V_GAP),
+          });
+        });
+        groupW = Math.max(groupW, li * (NODE_W + NODE_H_GAP) + NODE_W);
+        groupH = Math.max(groupH, rows.length * (NODE_H + NODE_V_GAP) - NODE_V_GAP);
+      });
+      groupBoxes.set(g, {
+        w: groupW + GROUP_PADDING * 2,
+        h: Math.max(groupH, NODE_H) + GROUP_PADDING * 2,
+      });
     }
 
-    // Calculate bounding boxes for each group
-    const groupBounds = groupNames.map((groupName) => {
-      const groupNodes = groupedNodes[groupName];
-      const positions = groupNodes.map((n) => ({
-        x: n.position.x,
-        y: n.position.y,
-        width: 280,
-        height: 120,
-      }));
+    // 3) Inter-group topological layering: same longest-path idea, but on
+    //    cross-group edges. Groups with no cross-group predecessors go in
+    //    column 0. Columns are laid out left-to-right.
+    const groupPreds = new Map<string, Set<string>>();
+    for (const e of currentEdges) {
+      const sg = nodeToGroup.get(e.source);
+      const tg = nodeToGroup.get(e.target);
+      if (!sg || !tg || sg === tg) continue;
+      if (!groupPreds.has(tg)) groupPreds.set(tg, new Set());
+      groupPreds.get(tg)!.add(sg);
+    }
+    const groupLayer = new Map<string, number>();
+    const groupVisiting = new Set<string>();
+    const computeGroup = (g: string): number => {
+      if (groupLayer.has(g)) return groupLayer.get(g)!;
+      if (groupVisiting.has(g)) return 0;
+      groupVisiting.add(g);
+      const preds = groupPreds.get(g);
+      const l = !preds || preds.size === 0 ? 0 : Math.max(...Array.from(preds).map(computeGroup)) + 1;
+      groupVisiting.delete(g);
+      groupLayer.set(g, l);
+      return l;
+    };
+    Array.from(buckets.keys()).forEach(computeGroup);
 
-      const minX = Math.min(...positions.map((p) => p.x)) - 60;
-      const minY = Math.min(...positions.map((p) => p.y)) - 80;
-      const maxX = Math.max(...positions.map((p) => p.x + p.width)) + 60;
-      const maxY = Math.max(...positions.map((p) => p.y + p.height)) + 60;
+    // Bucket groups by column (layer) and lay out.
+    const groupsByCol = new Map<number, string[]>();
+    for (const g of buckets.keys()) {
+      const l = groupLayer.get(g) ?? 0;
+      if (!groupsByCol.has(l)) groupsByCol.set(l, []);
+      groupsByCol.get(l)!.push(g);
+    }
+    for (const arr of groupsByCol.values()) arr.sort();
 
-      return {
-        groupName,
-        x: minX,
-        y: minY,
-        width: maxX - minX,
-        height: maxY - minY,
-        nodes: groupNodes,
-      };
-    });
+    // Compute each column's total width (max group width in that column).
+    const cols = Array.from(groupsByCol.keys()).sort((a, b) => a - b);
+    const colWidths = new Map<number, number>();
+    for (const c of cols) {
+      const maxW = Math.max(...groupsByCol.get(c)!.map((g) => groupBoxes.get(g)!.w));
+      colWidths.set(c, maxW);
+    }
+    // Column X = cumulative sum of prior column widths + gaps.
+    const colX = new Map<number, number>();
+    let runX = 0;
+    for (const c of cols) {
+      colX.set(c, runX);
+      runX += (colWidths.get(c) ?? 0) + GROUP_H_GAP;
+    }
 
-    console.log('[GraphEditor] Arranging', groupBounds.length, 'groups in grid layout');
-
-    // Arrange groups in a grid layout
-    const HORIZONTAL_SPACING = 150;
-    const VERTICAL_SPACING = 150;
-    const COLS = 2; // 2 columns
-
-    let currentX = 0;
-    let currentY = 0;
-    let maxHeightInRow = 0;
-    let col = 0;
-
-    const newNodePositions = new Map<string, { x: number; y: number }>();
-
-    groupBounds.forEach((group) => {
-      // Calculate offset for this group
-      const offsetX = currentX - group.x;
-      const offsetY = currentY - group.y;
-
-      // Update positions for all nodes in this group
-      group.nodes.forEach((node) => {
-        newNodePositions.set(node.id, {
-          x: node.position.x + offsetX,
-          y: node.position.y + offsetY,
-        });
-      });
-
-      // Update for next group
-      maxHeightInRow = Math.max(maxHeightInRow, group.height);
-      col++;
-
-      if (col >= COLS) {
-        // Move to next row
-        currentX = 0;
-        currentY += maxHeightInRow + VERTICAL_SPACING;
-        maxHeightInRow = 0;
-        col = 0;
-      } else {
-        // Move to next column
-        currentX += group.width + HORIZONTAL_SPACING;
+    // Group anchor positions: column X + accumulated Y within column.
+    const groupAnchor = new Map<string, { x: number; y: number }>();
+    for (const c of cols) {
+      let y = 0;
+      for (const g of groupsByCol.get(c)!) {
+        groupAnchor.set(g, { x: colX.get(c) ?? 0, y });
+        y += (groupBoxes.get(g)!.h) + GROUP_V_GAP;
       }
-    });
+    }
 
-    // Apply new positions
+    // 4) Final positions = group anchor + intra-group offset (with padding).
+    const finalPos = new Map<string, { x: number; y: number }>();
+    for (const n of currentNodes) {
+      if (n.data?.node_kind !== 'asset') continue;
+      const g = (n.data?.group_name as string) || '_';
+      const anchor = groupAnchor.get(g);
+      const local = nodePos.get(n.id);
+      if (!anchor || !local) continue;
+      finalPos.set(n.id, {
+        x: anchor.x + GROUP_PADDING + local.x,
+        y: anchor.y + GROUP_PADDING + local.y,
+      });
+    }
+
     setNodes((nds) =>
-      nds.map((node) => {
-        const newPos = newNodePositions.get(node.id);
-        if (newPos) {
-          return {
-            ...node,
-            position: newPos,
-          };
-        }
-        return node;
-      })
+      nds.map((n) => (finalPos.has(n.id) ? { ...n, position: finalPos.get(n.id)! } : n)),
     );
-  }, [setNodes, getNodes]);
+  }, [setNodes, getNodes, edges]);
 
   // Auto-regenerate assets if project has components but no assets
   // Only triggers if dependencies are installed to avoid premature regeneration
