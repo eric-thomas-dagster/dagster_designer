@@ -56,6 +56,8 @@ backend/projects/
 backend/.env
 backend/.manifest_cache.json
 frontend/.env
+*.duckdb
+*.duckdb.wal
 *.db
 *.sqlite
 

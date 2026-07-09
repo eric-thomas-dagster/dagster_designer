@@ -1,9 +1,10 @@
 import React, { useState, useMemo } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu';
-import { X, AlertCircle, Table as TableIcon, Wand2, Save, Filter, Columns3, Trash2, Eye, EyeOff, ChevronDown, ChevronRight, SortAsc, SortDesc, Sigma, Group, Calculator, ArrowDownUp, RotateCw, Play, Loader2 } from 'lucide-react';
+import { X, AlertCircle, Table as TableIcon, Wand2, Save, Filter, Columns3, Trash2, Eye, EyeOff, ChevronDown, ChevronRight, SortAsc, SortDesc, Sigma, Group, Calculator, ArrowDownUp, RotateCw, Play, Loader2, Plus, Package } from 'lucide-react';
 import { assetsApi, projectsApi, type AssetDataPreview } from '@/services/api';
 import { notify } from './Notifications';
+import { CommunityTransformPicker } from './CommunityTransformPicker';
 
 interface DataPreviewModalProps {
   isOpen: boolean;
@@ -15,6 +16,9 @@ interface DataPreviewModalProps {
   hasTransformerComponent?: boolean;
   existingComponentAttributes?: Record<string, any>;
   existingComponentId?: string; // ID of component being edited (if editing)
+  /** Optional initial mode. AssetIOPanel's "Transform" button opens the modal
+      pre-flipped to transform mode instead of view. */
+  initialMode?: 'view' | 'transform';
 }
 
 interface FilterCondition {
@@ -40,6 +44,7 @@ interface TransformConfig {
   calculatedColumns: Record<string, string> | null;
   pivotConfig: {index: string, columns: string, values: string, aggfunc: string} | null;
   unpivotConfig: {id_vars: string[], value_vars: string[], var_name: string, value_name: string} | null;
+  limitRows: number | null;
 }
 
 export function DataPreviewModal({
@@ -52,11 +57,12 @@ export function DataPreviewModal({
   hasTransformerComponent = true, // Default to true for backward compatibility
   existingComponentAttributes,
   existingComponentId,
+  initialMode = 'view',
 }: DataPreviewModalProps) {
   const [data, setData] = useState<AssetDataPreview | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [mode, setMode] = useState<'view' | 'transform'>('view');
+  const [mode, setMode] = useState<'view' | 'transform'>(initialMode);
   const [saving, setSaving] = useState(false);
 
   // Transform configuration
@@ -84,6 +90,7 @@ export function DataPreviewModal({
   const [newCalcColExpr, setNewCalcColExpr] = useState('');
   const [pivotConfig, setPivotConfig] = useState<Record<string, any> | null>(null);
   const [unpivotConfig, setUnpivotConfig] = useState<Record<string, any> | null>(null);
+  const [limitRows, setLimitRows] = useState<number | null>(null);
 
   // Accordion state for transform sections
   const [expandedSections, setExpandedSections] = useState<Set<string>>(new Set(['columns', 'filters']));
@@ -198,6 +205,12 @@ export function DataPreviewModal({
         setSortColumns(sortCols);
       }
 
+      // Load limit_rows
+      if (existingComponentAttributes.limit_rows !== undefined && existingComponentAttributes.limit_rows !== null) {
+        const n = parseInt(String(existingComponentAttributes.limit_rows), 10);
+        if (!isNaN(n)) setLimitRows(n);
+      }
+
       // Load sort_ascending
       if (existingComponentAttributes.sort_ascending !== undefined) {
         setSortAscending(existingComponentAttributes.sort_ascending);
@@ -234,6 +247,7 @@ export function DataPreviewModal({
   }, [existingComponentAttributes, data]);
 
   const [runningToHere, setRunningToHere] = useState(false);
+  const [showCommunityPicker, setShowCommunityPicker] = useState(false);
 
   const loadData = async () => {
     setLoading(true);
@@ -567,6 +581,12 @@ export function DataPreviewModal({
       finalColumns = [...orderedColumns, ...remainingColumns];
     }
 
+    // Apply row limit — takes precedence over row_count reporting. Applied
+    // last so it slices the already-filtered/sorted result.
+    if (limitRows !== null && limitRows > 0 && result.length > limitRows) {
+      result = result.slice(0, limitRows);
+    }
+
     return {
       ...data,
       data: result,
@@ -574,7 +594,7 @@ export function DataPreviewModal({
       row_count: result.length,
       column_count: finalColumns.length,
     };
-  }, [data, mode, filters, selectedColumns, dropDuplicates, dropNA, fillNAValue, sortColumns, sortAscending, groupByColumns, aggregations, columnRenames, columnsToDrop, stringOperations, calculatedColumns, columnOrder]);
+  }, [data, mode, filters, selectedColumns, dropDuplicates, dropNA, fillNAValue, sortColumns, sortAscending, groupByColumns, aggregations, columnRenames, columnsToDrop, stringOperations, calculatedColumns, columnOrder, limitRows]);
 
   const toggleColumn = (column: string) => {
     const newSelected = new Set(selectedColumns);
@@ -760,7 +780,8 @@ export function DataPreviewModal({
         calculatedColumns: Object.keys(calculatedColumns).length > 0 ? calculatedColumns : null,
         pivotConfig: pivotConfig as { index: string; columns: string; values: string; aggfunc: string } | null,
         unpivotConfig: unpivotConfig as { id_vars: string[]; value_vars: string[]; var_name: string; value_name: string } | null,
-      };
+        limitRows: limitRows,
+      } as TransformConfig & { limitRows: number | null };
 
       // Call API to create new transformer asset
       console.log('[DataPreviewModal] Creating transformer with sourceAssetKey:', assetKey);
@@ -883,6 +904,26 @@ export function DataPreviewModal({
             {/* Transform Controls Sidebar */}
             {mode === 'transform' && (
               <div className="w-80 border-r border-gray-200 overflow-y-auto p-4 bg-gray-50 flex flex-col">
+                {/* Escape hatch to the community catalog: 124+ transformation
+                    components that go beyond the built-in visual ops. Installs
+                    via CLI, chains onto this asset. User configures the new
+                    node's specific attributes from the graph. */}
+                <button
+                  onClick={() => setShowCommunityPicker(true)}
+                  className="mb-3 w-full flex items-center gap-2 px-3 py-2 border border-dashed border-primary/30 bg-primary/5 hover:bg-primary/10 rounded-lg text-left group"
+                >
+                  <Package className="w-4 h-4 text-primary flex-shrink-0" />
+                  <div className="flex-1 min-w-0">
+                    <div className="text-xs font-semibold text-primary">
+                      Community transform
+                    </div>
+                    <div className="text-[11px] text-gray-500">
+                      Pick from 124+ community components
+                    </div>
+                  </div>
+                  <Plus className="w-4 h-4 text-primary/60 group-hover:text-primary flex-shrink-0" />
+                </button>
+
                 <div className="space-y-2 flex-1">
                   {/* Accordion Section: Column Selection */}
                   <div className="border border-gray-200 rounded-lg bg-white overflow-hidden">
@@ -1071,6 +1112,23 @@ export function DataPreviewModal({
                               placeholder="e.g., 0 or N/A"
                               className="w-full text-sm border border-gray-300 rounded px-2 py-1.5"
                             />
+                          </div>
+                          <div className="pt-2">
+                            <label className="text-xs text-gray-600 mb-1 block">Limit rows (top N):</label>
+                            <input
+                              type="number"
+                              min={1}
+                              value={limitRows ?? ''}
+                              onChange={(e) => {
+                                const raw = e.target.value.trim();
+                                setLimitRows(raw === '' ? null : Math.max(1, parseInt(raw, 10) || 1));
+                              }}
+                              placeholder="e.g., 100 (leave blank for all)"
+                              className="w-full text-sm border border-gray-300 rounded px-2 py-1.5"
+                            />
+                            <p className="text-[11px] text-gray-500 mt-1">
+                              Applies after sort/filter; SQL mode compiles to LIMIT N.
+                            </p>
                           </div>
                         </div>
                       </div>
@@ -1905,6 +1963,22 @@ export function DataPreviewModal({
           )}
         </Dialog.Content>
       </Dialog.Portal>
+
+      {/* Community transform picker — nested modal on top of this one. */}
+      <CommunityTransformPicker
+        open={showCommunityPicker}
+        onOpenChange={setShowCommunityPicker}
+        projectId={projectId}
+        upstreamAssetKey={assetKey}
+        onInstalled={({ instanceName }) => {
+          // Close the preview modal so the user can see the new node land
+          // on the graph and configure it. onTransformerCreated triggers a
+          // project reload upstream.
+          if (onTransformerCreated) onTransformerCreated(null);
+          onClose();
+          notify.info(`Configure "${instanceName}" from the graph to fill in its attributes.`);
+        }}
+      />
     </Dialog.Root>
   );
 }

@@ -176,6 +176,7 @@ class TransformConfig(BaseModel):
     calculatedColumns: dict[str, str] | None = None  # e.g., {"total": "price * quantity"}
     pivotConfig: dict[str, str] | None = None
     unpivotConfig: dict[str, Any] | None = None
+    limitRows: int | None = None  # LIMIT N — applied last after all other ops.
 
 
 class CreateTransformerRequest(BaseModel):
@@ -321,6 +322,10 @@ async def create_transformer_asset(project_id: str, request: CreateTransformerRe
     if request.transformConfig.unpivotConfig:
         attributes["unpivot_config"] = json.dumps(request.transformConfig.unpivotConfig)
 
+    # Add row limit
+    if request.transformConfig.limitRows is not None and request.transformConfig.limitRows > 0:
+        attributes["limit_rows"] = request.transformConfig.limitRows
+
     # Pick the right transformer backend based on upstream type.
     if upstream_is_warehouse:
         # Translate the DF-style attributes we built above into SQL-style ones
@@ -350,6 +355,8 @@ async def create_transformer_asset(project_id: str, request: CreateTransformerRe
             sql_attrs["sort_ascending"] = request.transformConfig.sortAscending
         if request.transformConfig.calculatedColumns:
             sql_attrs["calculated_columns"] = json.dumps(request.transformConfig.calculatedColumns)
+        if request.transformConfig.limitRows is not None and request.transformConfig.limitRows > 0:
+            sql_attrs["limit_rows"] = request.transformConfig.limitRows
         # Filter translation: pandas query → SQL WHERE. Basic operators only;
         # anything involving `.str.contains` or method chains falls through
         # unchanged and may fail at run time.

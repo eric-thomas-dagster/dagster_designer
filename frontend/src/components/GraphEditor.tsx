@@ -26,6 +26,7 @@ import { ComponentNode } from './nodes/ComponentNode';
 import { AssetNode } from './nodes/AssetNode';
 import { Launchpad } from './Launchpad';
 import { DataPreviewModal } from './DataPreviewModal';
+import { AssetIOPanel } from './AssetIOPanel';
 import { notify } from './Notifications';
 import { useProjectStore } from '@/hooks/useProject';
 import { projectsApi, componentsApi } from '@/services/api';
@@ -390,6 +391,13 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick }: GraphEditorProps) 
   // and then auto-opens the DataPreviewModal on that asset. Simple Alteryx/Lakeflow
   // style ergonomic loop.
   const [previewAssetKey, setPreviewAssetKey] = useState<string | null>(null);
+  const [previewInitialMode, setPreviewInitialMode] = useState<'view' | 'transform'>('view');
+
+  // AssetIOPanel — Lakeflow-style docked bottom pane showing input/output
+  // previews for the currently-selected asset. Tracks the asset key
+  // independently of the react-flow selection state so we can keep the panel
+  // open across non-asset clicks (rubber-band selections, etc.).
+  const [ioPanelAssetKey, setIoPanelAssetKey] = useState<string | null>(null);
 
   const handleRunToHere = useCallback(
     async (assetKey: string) => {
@@ -1536,6 +1544,11 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick }: GraphEditorProps) 
       } else if (node.data?.node_kind === 'asset') {
         // Single asset click without Cmd/Ctrl - select only this asset
         setSelectedAssets([node.id]);
+        // Populate the docked I/O panel with this asset's data. Use the
+        // asset's real key (from data), not the react-flow node id, because
+        // dbt asset keys have slashes we replace for graph safety.
+        const key = node.data?.asset_key || node.id;
+        setIoPanelAssetKey(key);
       } else {
         // Clear selection when clicking non-asset nodes
         setSelectedAssets([]);
@@ -1731,6 +1744,40 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick }: GraphEditorProps) 
       </ReactFlow>
       </div>
 
+      {/* Docked I/O preview panel — appears when the user selects an asset
+          node and shows compact input/output tables. Buttons in its header
+          hand off to the full DataPreviewModal. */}
+      {currentProject && ioPanelAssetKey && (() => {
+        // Upstream keys = source data of every edge ending at this node.
+        // We match on both node.id and node.data.asset_key because the two
+        // can differ for assets whose key has slashes (react-flow ids don't
+        // allow slashes so they get normalized).
+        const targetIds = new Set(
+          nodes
+            .filter((n) => n.id === ioPanelAssetKey || n.data?.asset_key === ioPanelAssetKey)
+            .map((n) => n.id),
+        );
+        const upstream = edges
+          .filter((e) => targetIds.has(e.target))
+          .map((e) => {
+            const sourceNode = nodes.find((n) => n.id === e.source);
+            return (sourceNode?.data?.asset_key as string) || e.source;
+          })
+          .filter((k, i, arr) => arr.indexOf(k) === i);
+        return (
+          <AssetIOPanel
+            projectId={currentProject.id}
+            selectedAssetKey={ioPanelAssetKey}
+            upstreamKeys={upstream}
+            onOpenPreview={(assetKey, mode) => {
+              setPreviewInitialMode(mode);
+              setPreviewAssetKey(assetKey);
+            }}
+            onClose={() => setIoPanelAssetKey(null)}
+          />
+        );
+      })()}
+
       {/* Launchpad for single asset materialization */}
       {currentProject && launchpadAssetKey && (
         <Launchpad
@@ -1746,14 +1793,19 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick }: GraphEditorProps) 
       )}
 
       {/* Data preview — opened automatically by "Run to here" once the
-          materialize completes; also closable via the modal's own X. */}
+          materialize completes; also opened by the I/O panel's Transform /
+          Preview more buttons (with initialMode set accordingly). */}
       {currentProject && previewAssetKey && (
         <DataPreviewModal
           isOpen={!!previewAssetKey}
-          onClose={() => setPreviewAssetKey(null)}
+          onClose={() => {
+            setPreviewAssetKey(null);
+            setPreviewInitialMode('view');
+          }}
           projectId={currentProject.id}
           assetKey={previewAssetKey}
           assetName={previewAssetKey}
+          initialMode={previewInitialMode}
         />
       )}
     </div>
