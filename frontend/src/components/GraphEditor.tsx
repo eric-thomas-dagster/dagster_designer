@@ -654,7 +654,11 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick }: GraphEditorProps) 
       // i.e., group bounding boxes overlap. Users who've manually arranged
       // nodes keep their arrangement; users opening a fresh project with
       // the backend's naive layer-based layout get a clean layout.
-      const assetNodes = currentProject.graph.nodes.filter((n: GraphNode) => n.data?.node_kind === 'asset');
+      // NB: backend GraphNode carries `node_kind` at the top level (not
+      // under `data`), unlike the React-Flow node shape used elsewhere in
+      // this file. Filtering on `n.data.node_kind` here returned no assets
+      // and the auto-arrange never fired.
+      const assetNodes = currentProject.graph.nodes.filter((n: GraphNode) => n.node_kind === 'asset');
       const groupBoxes: Record<string, { minX: number; minY: number; maxX: number; maxY: number }> = {};
       const NODE_W = 220;
       const NODE_H = 100;
