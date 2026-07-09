@@ -1655,7 +1655,7 @@ export function DataPreviewModal({
                         <Columns3 className="w-4 h-4 text-blue-600" />
                         <span className="text-sm font-semibold text-gray-900">Columns</span>
                         <span className="text-xs text-gray-500">
-                          {selectedColumns.size} of {data?.columns?.length || 0}
+                          {(displayData?.columns?.length ?? data?.columns?.length) || 0}
                         </span>
                       </div>
                       {expandedSections.has('columns') ? (
@@ -1666,21 +1666,46 @@ export function DataPreviewModal({
                     </button>
                     {expandedSections.has('columns') && (
                       <div className="px-4 pb-3 border-t border-gray-100">
-                        <div className="space-y-2 max-h-60 overflow-y-auto mt-3">
-                          {data?.columns?.map((col) => (
-                            <label key={col} className="flex items-center space-x-2 cursor-pointer hover:bg-gray-50 p-1.5 rounded">
-                              <input
-                                type="checkbox"
-                                checked={selectedColumns.has(col)}
-                                onChange={() => toggleColumn(col)}
-                                className="w-4 h-4 text-blue-600 border-gray-300 rounded focus:ring-blue-500"
-                              />
-                              <span className="text-sm text-gray-700 flex-1">{col}</span>
-                              {data.dtypes?.[col] && (
-                                <span className="text-xs text-gray-500">{data.dtypes[col]}</span>
-                              )}
-                            </label>
-                          ))}
+                        <div className="space-y-1 max-h-72 overflow-y-auto mt-3">
+                          {/* Show the CURRENT columns — post-transform in transform
+                              mode, so group-by output is reflected here — with the
+                              inline compact profile from ColumnProfileStrip. Users
+                              can toggle input columns via the checkbox when the
+                              column exists in the source data; derived/aggregation
+                              outputs are shown without a checkbox. */}
+                          {(displayData?.columns ?? data?.columns ?? []).map((col) => {
+                            const isInputCol = !!data?.columns?.includes(col);
+                            const dtype = displayData?.dtypes?.[col] ?? data?.dtypes?.[col];
+                            return (
+                              <div key={col} className="hover:bg-gray-50 rounded px-1.5 py-1">
+                                <div className="flex items-center gap-2">
+                                  {isInputCol ? (
+                                    <input
+                                      type="checkbox"
+                                      checked={selectedColumns.has(col)}
+                                      onChange={() => toggleColumn(col)}
+                                      className="w-4 h-4 text-blue-600 border-gray-300 rounded focus:ring-blue-500 flex-shrink-0"
+                                      title="Include this column in the output"
+                                    />
+                                  ) : (
+                                    <span className="w-4 h-4 flex-shrink-0" title="Derived / aggregation output" />
+                                  )}
+                                  <span className="text-sm text-gray-700 flex-1 truncate" title={col}>{col}</span>
+                                  {dtype && <span className="text-[10px] text-gray-500">{dtype}</span>}
+                                </div>
+                                {displayData?.data && (
+                                  <div className="pl-6">
+                                    <ColumnProfileStrip
+                                      rows={displayData.data}
+                                      column={col}
+                                      dtype={dtype}
+                                      compact
+                                    />
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })}
                         </div>
                       </div>
                     )}

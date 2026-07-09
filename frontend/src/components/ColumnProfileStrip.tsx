@@ -45,12 +45,40 @@ export function ColumnProfileStrip({ rows, column, dtype, compact = false }: Col
 
   if (compact) {
     return (
-      <div className="flex items-center gap-1.5 text-[9px] text-gray-500 mt-0.5" title={`${profile.total} rows`}>
+      <div className="flex items-center gap-1.5 text-[10px] text-gray-500 mt-0.5 flex-wrap" title={`${profile.total} rows`}>
         <span>{profile.distinct} distinct</span>
         {profile.nullFrac > 0 && (
           <>
             <span>·</span>
             <span className={profile.nullFrac > 0.5 ? 'text-amber-600' : ''}>{nullPct}% null</span>
+          </>
+        )}
+        {profile.kind === 'numeric' && profile.min !== undefined && profile.max !== undefined && (
+          <>
+            <span>·</span>
+            <span title={`mean ${profile.mean?.toFixed(2) ?? '?'}`}>
+              {formatNum(profile.min)}–{formatNum(profile.max)}
+            </span>
+            <span className="text-gray-400">μ{formatNum(profile.mean ?? 0)}</span>
+          </>
+        )}
+        {(profile.kind === 'string' || profile.kind === 'date') && profile.topValues && profile.topValues[0] && (
+          <>
+            <span>·</span>
+            <span
+              className="max-w-[140px] truncate text-gray-500"
+              title={`Most common: ${profile.topValues[0].value} (${profile.topValues[0].count} rows)`}
+            >
+              top: {profile.topValues[0].value.length > 16 ? profile.topValues[0].value.slice(0, 16) + '…' : profile.topValues[0].value}
+            </span>
+          </>
+        )}
+        {profile.kind === 'boolean' && profile.trueCount !== undefined && (
+          <>
+            <span>·</span>
+            <span className="text-gray-500">
+              {Math.round((profile.trueCount / profile.total) * 100)}% true
+            </span>
           </>
         )}
       </div>
