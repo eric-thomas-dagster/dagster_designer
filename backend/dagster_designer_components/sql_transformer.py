@@ -67,6 +67,10 @@ class SqlTransformerComponent(dg.Component, dg.Model, dg.Resolvable):
     # JSON list: [{"kind", "orderBy", "partitionBy", "orderAsc", "into"}]
     # kind ∈ {rank, dense_rank, row_number}. Compiles to a window function.
     window_ops: Optional[str] = None
+    # JSON list: [{"column", "operator", "value", "into", "partitionBy"}]
+    # Emits COUNT(CASE WHEN … END) OVER (PARTITION BY …) so the count is
+    # scoped per-partition (or global when no partition).
+    count_match_ops: Optional[str] = None
 
     group_name: Optional[str] = None
     description: Optional[str] = None
@@ -133,6 +137,7 @@ class SqlTransformerComponent(dg.Component, dg.Model, dg.Resolvable):
             "replace_ops": self.replace_ops,
             "split_ops": self.split_ops,
             "window_ops": self.window_ops,
+            "count_match_ops": self.count_match_ops,
         }
 
 
@@ -353,6 +358,36 @@ def _build_select_sql(cfg: dict[str, Any], dialect_name: str) -> str:
                     select_items.append(
                         literal_column(f"SPLIT_PART(\"{col}\", '{escaped_delim}', {idx})").label(t)
                     )
+
+    # Count-matching ops → COUNT(CASE WHEN cond THEN 1 END) OVER (PARTITION BY ...)
+    count_match_ops = _json_list(cfg.get("count_match_ops"))
+    if count_match_ops:
+        for op in count_match_ops:
+            col = op.get("column")
+            operator = str(op.get("operator", "equals"))
+            val = op.get("value")
+            into = op.get("into")
+            if not col or not into or val is None or str(val).strip() == "":
+                continue
+            partition_by = op.get("partitionBy") or op.get("partition_by") or ""
+            # Build the CASE condition. Values are quoted as strings; numeric
+            # comparisons work because most warehouses coerce.
+            v_str = str(val).replace("'", "''")
+            cond = {
+                "equals": f'"{col}" = \'{v_str}\'',
+                "not_equals": f'"{col}" <> \'{v_str}\'',
+                "greater_than": f'"{col}" > {v_str}',
+                "less_than": f'"{col}" < {v_str}',
+                "contains": f'"{col}" LIKE \'%{v_str}%\'',
+            }.get(operator, f'"{col}" = \'{v_str}\'')
+            expr = f"COUNT(CASE WHEN {cond} THEN 1 END) OVER"
+            over_parts = []
+            if partition_by:
+                parts = [f'"{p.strip()}"' for p in partition_by.split(",") if p.strip()]
+                if parts:
+                    over_parts.append("PARTITION BY " + ", ".join(parts))
+            over = " (" + " ".join(over_parts) + ")" if over_parts else " ()"
+            select_items.append(literal_column(expr + over).label(into))
 
     # Window ops → RANK/DENSE_RANK/ROW_NUMBER OVER (PARTITION BY... ORDER BY...)
     window_ops = _json_list(cfg.get("window_ops"))

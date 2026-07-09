@@ -6,6 +6,7 @@ import { assetsApi, projectsApi, type AssetDataPreview } from '@/services/api';
 import { notify } from './Notifications';
 import { CommunityTransformPicker } from './CommunityTransformPicker';
 import { ColumnProfileStrip } from './ColumnProfileStrip';
+import { MultiColumnSelect } from './MultiColumnSelect';
 
 interface DataPreviewModalProps {
   isOpen: boolean;
@@ -107,6 +108,17 @@ export function DataPreviewModal({
     partitionBy: string;
     orderAsc: boolean;
     into: string;
+  }>>([]);
+  // Count Matching: {column, operator, value, into, partitionBy} — emits a
+  // new column whose value is COUNT of rows matching the condition,
+  // optionally within a partition. e.g. count of orders where status =
+  // 'completed' per customer_id.
+  const [countMatchOps, setCountMatchOps] = useState<Array<{
+    column: string;
+    operator: 'equals' | 'not_equals' | 'greater_than' | 'less_than' | 'contains';
+    value: string;
+    into: string;
+    partitionBy: string;
   }>>([]);
 
   // Accordion state for transform sections
@@ -527,6 +539,45 @@ export function DataPreviewModal({
       });
     }
 
+    // Apply Count Matching ops. For each op, compute a per-row column whose
+    // value is the count of rows in the same partition where the condition
+    // is true. Preview compute uses the same match semantics as the filter
+    // panel so the results feel consistent.
+    if (countMatchOps.length > 0) {
+      for (const op of countMatchOps) {
+        if (!op.column || !op.into || !op.value.trim()) continue;
+        const partKeys = op.partitionBy
+          ? op.partitionBy.split(',').map(s => s.trim()).filter(Boolean)
+          : [];
+        // Group rows by partition; count matching within each group.
+        const groups = new Map<string, number[]>();
+        result.forEach((row, i) => {
+          const key = partKeys.length > 0 ? partKeys.map(k => String(row[k])).join('|') : '__all__';
+          const arr = groups.get(key) ?? [];
+          arr.push(i);
+          groups.set(key, arr);
+        });
+        for (const [, indices] of groups) {
+          let count = 0;
+          for (const idx of indices) {
+            const v = result[idx][op.column];
+            const s = String(v ?? '').toLowerCase();
+            const fv = op.value.toLowerCase();
+            switch (op.operator) {
+              case 'equals': if (s === fv) count++; break;
+              case 'not_equals': if (s !== fv) count++; break;
+              case 'contains': if (s.includes(fv)) count++; break;
+              case 'greater_than': if (Number(v) > Number(op.value)) count++; break;
+              case 'less_than': if (Number(v) < Number(op.value)) count++; break;
+            }
+          }
+          for (const idx of indices) {
+            result[idx] = { ...result[idx], [op.into]: count };
+          }
+        }
+      }
+    }
+
     // Apply Window ops — rank / row_number / dense_rank. Client-side impl
     // groups by partitionBy, sorts within each partition by orderBy, then
     // assigns rank values. Backend does the same via SQL window functions.
@@ -713,7 +764,7 @@ export function DataPreviewModal({
       row_count: result.length,
       column_count: finalColumns.length,
     };
-  }, [data, mode, filters, selectedColumns, dropDuplicates, dropNA, fillNAValue, sortColumns, sortAscending, groupByColumns, aggregations, columnRenames, columnsToDrop, stringOperations, calculatedColumns, columnOrder, limitRows, replaceOps, splitOps, windowOps]);
+  }, [data, mode, filters, selectedColumns, dropDuplicates, dropNA, fillNAValue, sortColumns, sortAscending, groupByColumns, aggregations, columnRenames, columnsToDrop, stringOperations, calculatedColumns, columnOrder, limitRows, replaceOps, splitOps, windowOps, countMatchOps]);
 
   const toggleColumn = (column: string) => {
     const newSelected = new Set(selectedColumns);
@@ -906,6 +957,8 @@ export function DataPreviewModal({
           ? splitOps.filter((o) => o.column && o.delimiter && o.into) : null,
         windowOps: windowOps.filter((o) => o.orderBy && o.into).length > 0
           ? windowOps.filter((o) => o.orderBy && o.into) : null,
+        countMatchOps: countMatchOps.filter((o) => o.column && o.into && o.value).length > 0
+          ? countMatchOps.filter((o) => o.column && o.into && o.value) : null,
       } as TransformConfig & Record<string, any>;
 
       // Call API to create new transformer asset
@@ -1546,36 +1599,39 @@ export function DataPreviewModal({
                       <div className="px-4 pb-3 border-t border-gray-100">
                         <div className="space-y-2 mt-3">
                           {replaceOps.map((op, i) => (
-                            <div key={i} className="grid grid-cols-[1fr_1fr_1fr_auto] gap-1 items-center">
-                              <select
-                                value={op.column}
-                                onChange={(e) => setReplaceOps(ops => ops.map((o, j) => j === i ? { ...o, column: e.target.value } : o))}
-                                className="text-xs border border-gray-300 rounded px-1.5 py-1"
-                              >
-                                <option value="">Column…</option>
-                                {data?.columns?.map(c => <option key={c} value={c}>{c}</option>)}
-                              </select>
+                            <div key={i} className="bg-gray-50 border border-gray-200 rounded p-2 space-y-1.5">
+                              <div className="flex items-center justify-between">
+                                <select
+                                  value={op.column}
+                                  onChange={(e) => setReplaceOps(ops => ops.map((o, j) => j === i ? { ...o, column: e.target.value } : o))}
+                                  className="text-xs border border-gray-300 rounded px-1.5 py-1 flex-1 mr-1"
+                                >
+                                  <option value="">Column…</option>
+                                  {data?.columns?.map(c => <option key={c} value={c}>{c}</option>)}
+                                </select>
+                                <button
+                                  onClick={() => setReplaceOps(ops => ops.filter((_, j) => j !== i))}
+                                  className="p-1 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded flex-shrink-0"
+                                  title="Remove replace"
+                                  aria-label="Remove replace"
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                </button>
+                              </div>
                               <input
                                 type="text"
                                 value={op.find}
                                 onChange={(e) => setReplaceOps(ops => ops.map((o, j) => j === i ? { ...o, find: e.target.value } : o))}
-                                placeholder="find"
-                                className="text-xs border border-gray-300 rounded px-1.5 py-1"
+                                placeholder="find (literal or /regex/g)"
+                                className="w-full text-xs border border-gray-300 rounded px-1.5 py-1"
                               />
                               <input
                                 type="text"
                                 value={op.replace}
                                 onChange={(e) => setReplaceOps(ops => ops.map((o, j) => j === i ? { ...o, replace: e.target.value } : o))}
                                 placeholder="replace with"
-                                className="text-xs border border-gray-300 rounded px-1.5 py-1"
+                                className="w-full text-xs border border-gray-300 rounded px-1.5 py-1"
                               />
-                              <button
-                                onClick={() => setReplaceOps(ops => ops.filter((_, j) => j !== i))}
-                                className="text-gray-400 hover:text-red-600"
-                                title="Remove"
-                              >
-                                <Trash2 className="w-3.5 h-3.5" />
-                              </button>
                             </div>
                           ))}
                           <button
@@ -1638,13 +1694,18 @@ export function DataPreviewModal({
                                   <Trash2 className="w-3.5 h-3.5" />
                                 </button>
                               </div>
-                              <input
-                                type="text"
-                                value={op.into}
-                                onChange={(e) => setSplitOps(ops => ops.map((o, j) => j === i ? { ...o, into: e.target.value } : o))}
-                                placeholder="output columns, comma-separated (e.g. first_name,last_name)"
-                                className="w-full text-xs border border-gray-300 rounded px-1.5 py-1"
-                              />
+                              <div>
+                                <label className="text-[10px] text-gray-500 block mb-1">Into columns (order matters)</label>
+                                <MultiColumnSelect
+                                  columns={data?.columns || []}
+                                  value={op.into ? op.into.split(',').map(s => s.trim()).filter(Boolean) : []}
+                                  onChange={(cols) =>
+                                    setSplitOps(ops => ops.map((o, j) => j === i ? { ...o, into: cols.join(',') } : o))
+                                  }
+                                  placeholder="pick existing or type new names…"
+                                  allowFreeText
+                                />
+                              </div>
                             </div>
                           ))}
                           <button
@@ -1723,14 +1784,15 @@ export function DataPreviewModal({
                                   {op.orderAsc ? 'ASC' : 'DESC'}
                                 </button>
                               </div>
-                              <div className="grid grid-cols-[auto_1fr] gap-1 items-center">
-                                <span className="text-[10px] text-gray-500">PARTITION BY</span>
-                                <input
-                                  type="text"
-                                  value={op.partitionBy}
-                                  onChange={(e) => setWindowOps(ops => ops.map((o, j) => j === i ? { ...o, partitionBy: e.target.value } : o))}
-                                  placeholder="columns, comma-separated (optional)"
-                                  className="text-xs border border-gray-300 rounded px-1.5 py-1"
+                              <div className="grid grid-cols-[auto_1fr] gap-1 items-start">
+                                <span className="text-[10px] text-gray-500 pt-1.5">PARTITION BY</span>
+                                <MultiColumnSelect
+                                  columns={data?.columns || []}
+                                  value={op.partitionBy ? op.partitionBy.split(',').map(s => s.trim()).filter(Boolean) : []}
+                                  onChange={(cols) =>
+                                    setWindowOps(ops => ops.map((o, j) => j === i ? { ...o, partitionBy: cols.join(',') } : o))
+                                  }
+                                  placeholder="(optional) partition columns…"
                                 />
                               </div>
                             </div>
@@ -1746,6 +1808,105 @@ export function DataPreviewModal({
                             className="text-xs text-primary hover:underline flex items-center gap-1"
                           >
                             <Plus className="w-3 h-3" /> Add ranking
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Accordion Section: Count Matching */}
+                  <div className="border border-gray-200 rounded-lg bg-white overflow-hidden">
+                    <button
+                      onClick={() => toggleSection('countMatch')}
+                      className="w-full px-4 py-3 flex items-center justify-between hover:bg-gray-50 transition-colors"
+                    >
+                      <div className="flex items-center space-x-2">
+                        <Sigma className="w-4 h-4 text-blue-600" />
+                        <span className="text-sm font-semibold text-gray-900">Count Matching</span>
+                        {countMatchOps.length > 0 && <span className="text-xs text-gray-500">{countMatchOps.length}</span>}
+                      </div>
+                      {expandedSections.has('countMatch') ? (
+                        <ChevronDown className="w-4 h-4 text-gray-500" />
+                      ) : (
+                        <ChevronRight className="w-4 h-4 text-gray-500" />
+                      )}
+                    </button>
+                    {expandedSections.has('countMatch') && (
+                      <div className="px-4 pb-3 border-t border-gray-100">
+                        <div className="space-y-2 mt-3">
+                          {countMatchOps.map((op, i) => (
+                            <div key={i} className="bg-gray-50 border border-gray-200 rounded p-2 space-y-1.5">
+                              <div className="flex items-center justify-between">
+                                <input
+                                  type="text"
+                                  value={op.into}
+                                  onChange={(e) => setCountMatchOps(ops => ops.map((o, j) => j === i ? { ...o, into: e.target.value } : o))}
+                                  placeholder="new column name"
+                                  className="text-xs border border-gray-300 rounded px-1.5 py-1 flex-1 mr-1"
+                                />
+                                <button
+                                  onClick={() => setCountMatchOps(ops => ops.filter((_, j) => j !== i))}
+                                  className="p-1 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded flex-shrink-0"
+                                  title="Remove"
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                </button>
+                              </div>
+                              <div className="text-[10px] text-gray-500">
+                                Count rows where
+                              </div>
+                              <div className="grid grid-cols-[1fr_auto_1fr] gap-1">
+                                <select
+                                  value={op.column}
+                                  onChange={(e) => setCountMatchOps(ops => ops.map((o, j) => j === i ? { ...o, column: e.target.value } : o))}
+                                  className="text-xs border border-gray-300 rounded px-1.5 py-1"
+                                >
+                                  <option value="">Column…</option>
+                                  {data?.columns?.map(c => <option key={c} value={c}>{c}</option>)}
+                                </select>
+                                <select
+                                  value={op.operator}
+                                  onChange={(e) => setCountMatchOps(ops => ops.map((o, j) => j === i ? { ...o, operator: e.target.value as any } : o))}
+                                  className="text-xs border border-gray-300 rounded px-1.5 py-1"
+                                >
+                                  <option value="equals">=</option>
+                                  <option value="not_equals">≠</option>
+                                  <option value="greater_than">&gt;</option>
+                                  <option value="less_than">&lt;</option>
+                                  <option value="contains">contains</option>
+                                </select>
+                                <input
+                                  type="text"
+                                  value={op.value}
+                                  onChange={(e) => setCountMatchOps(ops => ops.map((o, j) => j === i ? { ...o, value: e.target.value } : o))}
+                                  placeholder="value"
+                                  className="text-xs border border-gray-300 rounded px-1.5 py-1"
+                                />
+                              </div>
+                              <div>
+                                <label className="text-[10px] text-gray-500 block mb-0.5">PARTITION BY (optional)</label>
+                                <MultiColumnSelect
+                                  columns={data?.columns || []}
+                                  value={op.partitionBy ? op.partitionBy.split(',').map(s => s.trim()).filter(Boolean) : []}
+                                  onChange={(cols) =>
+                                    setCountMatchOps(ops => ops.map((o, j) => j === i ? { ...o, partitionBy: cols.join(',') } : o))
+                                  }
+                                  placeholder="count globally, or per group…"
+                                />
+                              </div>
+                            </div>
+                          ))}
+                          <button
+                            onClick={() => setCountMatchOps(ops => [...ops, {
+                              column: data?.columns?.[0] || '',
+                              operator: 'equals',
+                              value: '',
+                              into: `count_${ops.length + 1}`,
+                              partitionBy: '',
+                            }])}
+                            className="text-xs text-primary hover:underline flex items-center gap-1"
+                          >
+                            <Plus className="w-3 h-3" /> Add count-matching
                           </button>
                         </div>
                       </div>
