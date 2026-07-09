@@ -329,12 +329,21 @@ async def plan(
     if not task or not task.strip():
         raise GenieError("Empty task")
 
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        raise GenieError(
-            "OPENAI_API_KEY is not set on the backend. Set it in the shell env "
-            "where you run the backend."
-        )
+    is_anthropic = model.lower().startswith("claude")
+    if is_anthropic:
+        api_key = os.getenv("ANTHROPIC_API_KEY")
+        if not api_key:
+            raise GenieError(
+                "ANTHROPIC_API_KEY is not set on the backend. Set it in the shell env "
+                "where you run the backend, then restart."
+            )
+    else:
+        api_key = os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            raise GenieError(
+                "OPENAI_API_KEY is not set on the backend. Set it in the shell env "
+                "where you run the backend, then restart."
+            )
 
     manifest = await fetch_manifest()
     components: list[dict[str, Any]] = manifest.get("components") or []
@@ -348,29 +357,73 @@ async def plan(
     )
 
     async with httpx.AsyncClient(timeout=60.0) as client:
-        r = await client.post(
-            "https://api.openai.com/v1/chat/completions",
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-            json={
-                "model": model,
-                "messages": [
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": user_prompt},
-                ],
-                "response_format": {"type": "json_object"},
-                "temperature": 0.2,
-            },
-        )
-        if r.status_code != 200:
-            raise GenieError(f"OpenAI error {r.status_code}: {r.text[:400]}")
-        data = r.json()
+        if is_anthropic:
+            # Anthropic Messages API. Docs at
+            # https://docs.claude.com/en/api/messages. system_prompt goes in
+            # its own top-level field; messages carry the user turn only.
+            r = await client.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={
+                    "x-api-key": api_key,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json",
+                },
+                json={
+                    "model": model,
+                    "max_tokens": 4096,
+                    "system": SYSTEM_PROMPT + "\n\nRespond with ONLY the JSON object, no prose, no code fences.",
+                    "messages": [{"role": "user", "content": user_prompt}],
+                    "temperature": 0.2,
+                },
+            )
+            if r.status_code != 200:
+                raise GenieError(f"Anthropic error {r.status_code}: {r.text[:400]}")
+            data = r.json()
+            # Content is a list of blocks; the first text block holds the reply.
+            try:
+                blocks = data.get("content") or []
+                content = next((b.get("text", "") for b in blocks if b.get("type") == "text"), "")
+                # Claude sometimes wraps in ```json fences despite instructions;
+                # strip if present.
+                stripped = content.strip()
+                if stripped.startswith("```"):
+                    stripped = stripped.split("```", 2)[1]
+                    if stripped.startswith("json"):
+                        stripped = stripped[len("json"):]
+                    content = stripped.strip("` \n")
+                parsed = json.loads(content)
+                raw_picks = parsed.get("picks") or []
+                usage = data.get("usage") or {}
+                data["usage"] = {
+                    "prompt_tokens": usage.get("input_tokens", 0),
+                    "completion_tokens": usage.get("output_tokens", 0),
+                }
+            except (KeyError, IndexError, json.JSONDecodeError) as e:
+                raise GenieError(f"Could not parse Claude response: {e}") from e
+        else:
+            r = await client.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                json={
+                    "model": model,
+                    "messages": [
+                        {"role": "system", "content": SYSTEM_PROMPT},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    "response_format": {"type": "json_object"},
+                    "temperature": 0.2,
+                },
+            )
+            if r.status_code != 200:
+                raise GenieError(f"OpenAI error {r.status_code}: {r.text[:400]}")
+            data = r.json()
 
-    try:
-        content = data["choices"][0]["message"]["content"]
-        parsed = json.loads(content)
-        raw_picks = parsed.get("picks") or []
-    except (KeyError, IndexError, json.JSONDecodeError) as e:
-        raise GenieError(f"Could not parse LLM response: {e}") from e
+            try:
+                content = data["choices"][0]["message"]["content"]
+                parsed = json.loads(content)
+                raw_picks = parsed.get("picks") or []
+            except (KeyError, IndexError, json.JSONDecodeError) as e:
+                raise GenieError(f"Could not parse LLM response: {e}") from e
 
     valid_ids = {c["id"] for c in filtered}
     picks: list[GeniePick] = []
@@ -378,6 +431,17 @@ async def plan(
     notes: list[str] = []
 
     existing_names = {str(a["name"]) for a in (existing_assets or []) if a.get("name")}
+
+    def _dedupe(name: str, used: set[str]) -> str:
+        """Return a unique variant of `name` not in `used`. Appends `_v2`,
+        `_v3`, … until we find a fresh one."""
+        if name not in used:
+            return name
+        n = 2
+        while f"{name}_v{n}" in used:
+            n += 1
+        return f"{name}_v{n}"
+
     for i, p in enumerate(raw_picks):
         component_type = p.get("component_type") or ""
         if component_type == "noop":
@@ -389,20 +453,21 @@ async def plan(
             )
             continue
 
-        asset_name = (p.get("asset_name") or "").strip()
-        if not asset_name:
+        original_name = (p.get("asset_name") or "").strip()
+        if not original_name:
             notes.append(f"⚠︎ Pick #{i + 1} is missing an asset name — skipped.")
             continue
-        if asset_name in existing_names:
+        # Rename on collision rather than skip: existing_names + seen_names
+        # form the "used" set. If the LLM meant to reference an existing
+        # asset we'd prefer that upstream_asset_names be used; but if it's
+        # proposing a new asset with a colliding name, giving it a suffix
+        # keeps the plan actionable.
+        used = existing_names | seen_names
+        asset_name = _dedupe(original_name, used)
+        if asset_name != original_name:
             notes.append(
-                f"ℹ Asset '{asset_name}' already exists in the graph — skipping (no action needed)."
+                f"ℹ Renamed pick #{i + 1} '{original_name}' → '{asset_name}' (name was already in use)."
             )
-            continue
-        if asset_name in seen_names:
-            notes.append(
-                f"⚠︎ Pick #{i + 1}: duplicate name '{asset_name}' in the same plan — skipped."
-            )
-            continue
         seen_names.add(asset_name)
 
         upstream = p.get("upstream_asset_names") or []

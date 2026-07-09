@@ -26,6 +26,9 @@ const MODEL_OPTIONS = [
   { value: 'gpt-4o', label: 'GPT-4o (higher quality)' },
   { value: 'gpt-4.1-mini', label: 'GPT-4.1 mini' },
   { value: 'gpt-5-mini', label: 'GPT-5 mini' },
+  { value: 'claude-haiku-4-5', label: 'Claude Haiku 4.5 (fast)' },
+  { value: 'claude-sonnet-4-5', label: 'Claude Sonnet 4.5 (balanced)' },
+  { value: 'claude-opus-4-5', label: 'Claude Opus 4.5 (highest quality)' },
 ];
 
 export function DagsterAIBar() {
