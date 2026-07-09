@@ -1,5 +1,4 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
-import { createPortal } from 'react-dom';
 import { X, ChevronDown, Check } from 'lucide-react';
 
 interface MultiColumnSelectProps {
@@ -20,13 +19,12 @@ interface MultiColumnSelectProps {
 /**
  * Chip-based multi-column picker.
  *
- * Positioning: portaled to document.body with `position: fixed` so it
- * escapes both `overflow: hidden/auto` ancestors AND any CSS `transform`
- * ancestors that would rebase `position: fixed` (Radix Dialog.Content uses
- * transforms for centering, which broke plain-child fixed positioning).
- *
- * Focus: the dropdown carries `data-column-picker-dropdown` so parent
- * Dialogs can whitelist it via `onInteractOutside` / `onFocusOutside`.
+ * Positioning: rendered inline as an `absolute`-positioned child of a
+ * `relative` wrapper. We do NOT portal to document.body because Radix
+ * Dialog applies `inert` to every body sibling when a modal opens (via
+ * the `aria-hidden` library) — that killed clicks on our checkboxes.
+ * Staying inside the Dialog subtree keeps us clickable and inside every
+ * Radix focus/dismiss whitelist automatically.
  */
 export function MultiColumnSelect({
   columns,
@@ -40,42 +38,16 @@ export function MultiColumnSelect({
 }: MultiColumnSelectProps) {
   const [open, setOpen] = useState(false);
   const [freeText, setFreeText] = useState('');
-  const [pos, setPos] = useState<{ top: number; left: number; width: number } | null>(null);
   const triggerRef = useRef<HTMLDivElement | null>(null);
   const dropdownRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
 
-  const measure = useCallback(() => {
-    const el = triggerRef.current;
-    if (!el) return null;
-    const rect = el.getBoundingClientRect();
-    return { top: rect.bottom + 4, left: rect.left, width: rect.width };
-  }, []);
-
-  const openDropdown = useCallback(() => {
-    const p = measure();
-    if (p) setPos(p);
-    setOpen(true);
-  }, [measure]);
+  const openDropdown = useCallback(() => setOpen(true), []);
 
   const closeDropdown = useCallback(() => {
     setOpen(false);
     setFreeText('');
   }, []);
-
-  useEffect(() => {
-    if (!open) return;
-    const reposition = () => {
-      const p = measure();
-      if (p) setPos(p);
-    };
-    window.addEventListener('resize', reposition);
-    window.addEventListener('scroll', reposition, true);
-    return () => {
-      window.removeEventListener('resize', reposition);
-      window.removeEventListener('scroll', reposition, true);
-    };
-  }, [open, measure]);
 
   useEffect(() => {
     if (!open) return;
@@ -115,7 +87,7 @@ export function MultiColumnSelect({
     : columns.filter((c) => !excludedSet.has(c));
 
   return (
-    <>
+    <div className="relative">
       <div
         ref={triggerRef}
         onClick={() => (open ? closeDropdown() : openDropdown())}
@@ -146,25 +118,12 @@ export function MultiColumnSelect({
         <ChevronDown className="w-3 h-3 text-gray-400 ml-auto flex-shrink-0" />
       </div>
 
-      {open && pos && createPortal(
+      {open && (
         <div
           ref={dropdownRef}
           data-column-picker-dropdown="true"
-          // Stop pointer events from bubbling to document — Radix Dialog's
-          // internal outside-click listeners can otherwise treat clicks on
-          // portaled children as "outside" and swallow the click before our
-          // toggle handler fires (symptom: dropdown closes, no value picked).
-          onPointerDown={(e) => e.stopPropagation()}
-          onMouseDown={(e) => e.stopPropagation()}
-          onClick={(e) => e.stopPropagation()}
-          style={{
-            position: 'fixed',
-            top: pos.top,
-            left: pos.left,
-            width: Math.max(pos.width, 220),
-            zIndex: 10000,
-          }}
-          className="bg-white border border-gray-200 rounded-md shadow-xl flex flex-col overflow-hidden"
+          className="absolute left-0 right-0 mt-1 z-[10000] bg-white border border-gray-200 rounded-md shadow-xl flex flex-col overflow-hidden"
+          style={{ top: '100%', minWidth: 220 }}
         >
           {allowFreeText && (
             <div className="border-b border-gray-100 p-2 bg-gray-50">
@@ -238,9 +197,8 @@ export function MultiColumnSelect({
               })}
             </div>
           )}
-        </div>,
-        document.body,
+        </div>
       )}
-    </>
+    </div>
   );
 }
