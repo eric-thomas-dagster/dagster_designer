@@ -114,18 +114,23 @@ class SqlTransformerComponent(dg.Component, dg.Model, dg.Resolvable):
             description=self.description,
             compute_kind="sql",
         )
-        def _sql_transform(ctx: dg.AssetExecutionContext):
+        # NB: parameter MUST be named `context` — Dagster treats any other
+        # first-arg name as an upstream asset dep. Type annotation is left
+        # blank because Dagster's decorator inspection rejects
+        # `dg.AssetExecutionContext` (module-attribute form) — only the
+        # bare class name or no annotation are accepted.
+        def _sql_transform(context):
             engine = _resolve_engine(cfg)
             select_sql = _build_select_sql(cfg, engine.dialect.name)
             create_sql = (
                 f'CREATE OR REPLACE TABLE "{cfg["output_schema"]}"."{cfg["asset_name"]}" AS\n'
                 f'{select_sql}'
             )
-            ctx.log.info(
+            context.log.info(
                 f"[SqlTransformer] Materializing {cfg['output_schema']}.{cfg['asset_name']}"
             )
-            ctx.log.info(f"[SqlTransformer] Dialect: {engine.dialect.name}")
-            ctx.log.info(f"[SqlTransformer] SQL:\n{create_sql}")
+            context.log.info(f"[SqlTransformer] Dialect: {engine.dialect.name}")
+            context.log.info(f"[SqlTransformer] SQL:\n{create_sql}")
             with engine.begin() as conn:
                 from sqlalchemy import text  # local import — sqlalchemy is a soft dep
                 conn.execute(text(create_sql))
@@ -133,7 +138,7 @@ class SqlTransformerComponent(dg.Component, dg.Model, dg.Resolvable):
                 count = conn.execute(
                     text(f'SELECT COUNT(*) FROM "{cfg["output_schema"]}"."{cfg["asset_name"]}"')
                 ).scalar()
-                ctx.add_output_metadata({"row_count": int(count) if count is not None else 0})
+                context.add_output_metadata({"row_count": int(count) if count is not None else 0})
             return None
 
         return dg.Definitions(assets=[_sql_transform])
