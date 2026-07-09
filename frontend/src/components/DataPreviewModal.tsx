@@ -163,6 +163,37 @@ export function DataPreviewModal({
     fraction: number | null;
     random: boolean;
   } | null>(null);
+  // Bin/Bucket: {column, boundaries (csv of numbers), labels (csv, one more
+  // than boundaries), into}. e.g. boundaries="10,20,30" labels="low,mid,high"
+  // → three buckets: <=10 low, 10-20 mid, 20-30 high, >30 (unlabeled null).
+  const [binOps, setBinOps] = useState<Array<{
+    column: string;
+    boundaries: string;  // comma-separated ascending numbers
+    labels: string;       // comma-separated labels; must be boundaries.length + 1 or missing = auto
+    into: string;
+  }>>([]);
+  // Dedupe with subset: {subsetCols (csv), keep: 'first' | 'last'}. Applied
+  // as its own step; leaves the boolean dropDuplicates untouched for the
+  // "all columns" mode.
+  const [dedupeSubset, setDedupeSubset] = useState<{ subsetCols: string; keep: 'first' | 'last' } | null>(null);
+  // Cumulative sum: {column, partitionBy (csv, optional), orderBy (col),
+  // orderAsc, into}. Compiles to SUM() OVER (PARTITION BY... ORDER BY...).
+  const [cumsumOps, setCumsumOps] = useState<Array<{
+    column: string;
+    partitionBy: string;
+    orderBy: string;
+    orderAsc: boolean;
+    into: string;
+  }>>([]);
+  // Fill forward/backward: {column, direction, partitionBy, orderBy}.
+  // Fills null/empty values using the previous (ffill) or next (bfill) value
+  // in the same partition, ordered by orderBy.
+  const [fillDirectionOps, setFillDirectionOps] = useState<Array<{
+    column: string;
+    direction: 'ffill' | 'bfill';
+    partitionBy: string;
+    orderBy: string;
+  }>>([]);
 
   // Step-view: when set, applies only the first N ops (0-indexed) and shows
   // that partial snapshot in the preview table. RecipePanel highlights the
@@ -690,6 +721,112 @@ export function DataPreviewModal({
       });
     });
 
+    // 15a. Bin / Bucket
+    binOps.forEach(op => {
+      if (!op.column || !op.into || !op.boundaries) return;
+      if (!gate()) return;
+      const bounds = op.boundaries.split(',').map(s => Number(s.trim())).filter(n => !isNaN(n));
+      const labels = op.labels ? op.labels.split(',').map(s => s.trim()) : [];
+      if (bounds.length === 0) return;
+      result = result.map(row => {
+        const v = Number(row[op.column]);
+        if (isNaN(v)) return { ...row, [op.into]: null };
+        // Bucket = smallest boundary that v <= bound. Otherwise last "overflow" bin.
+        let idx = bounds.length; // overflow slot
+        for (let i = 0; i < bounds.length; i++) {
+          if (v <= bounds[i]) { idx = i; break; }
+        }
+        const label = labels[idx] ?? (
+          idx === 0 ? `≤${bounds[0]}` :
+          idx === bounds.length ? `>${bounds[bounds.length - 1]}` :
+          `${bounds[idx - 1]}-${bounds[idx]}`
+        );
+        return { ...row, [op.into]: label };
+      });
+    });
+
+    // 15b. Dedupe with subset
+    if (dedupeSubset && dedupeSubset.subsetCols && gate()) {
+      const cols = dedupeSubset.subsetCols.split(',').map(s => s.trim()).filter(Boolean);
+      if (cols.length > 0) {
+        const seen = new Set<string>();
+        const keepLast = dedupeSubset.keep === 'last';
+        const filtered: any[] = [];
+        const iter = keepLast ? [...result].reverse() : result;
+        for (const row of iter) {
+          const key = cols.map(c => String(row[c])).join('|');
+          if (!seen.has(key)) {
+            seen.add(key);
+            filtered.push(row);
+          }
+        }
+        result = keepLast ? filtered.reverse() : filtered;
+      }
+    }
+
+    // 15c. Cumulative sum
+    cumsumOps.forEach(op => {
+      if (!op.column || !op.into || !op.orderBy) return;
+      if (!gate()) return;
+      const partKeys = op.partitionBy
+        ? op.partitionBy.split(',').map(s => s.trim()).filter(Boolean)
+        : [];
+      const groups = new Map<string, number[]>();
+      result.forEach((row, i) => {
+        const key = partKeys.length > 0 ? partKeys.map(k => String(row[k])).join('|') : '__all__';
+        const arr = groups.get(key) ?? [];
+        arr.push(i);
+        groups.set(key, arr);
+      });
+      for (const [, indices] of groups) {
+        const sorted = [...indices].sort((a, b) => {
+          const av = result[a][op.orderBy];
+          const bv = result[b][op.orderBy];
+          const cmp = av > bv ? 1 : av < bv ? -1 : 0;
+          return op.orderAsc ? cmp : -cmp;
+        });
+        let running = 0;
+        sorted.forEach((idx) => {
+          const v = Number(result[idx][op.column]);
+          if (!isNaN(v)) running += v;
+          result[idx] = { ...result[idx], [op.into]: running };
+        });
+      }
+    });
+
+    // 15d. Fill forward / backward
+    fillDirectionOps.forEach(op => {
+      if (!op.column || !op.orderBy) return;
+      if (!gate()) return;
+      const partKeys = op.partitionBy
+        ? op.partitionBy.split(',').map(s => s.trim()).filter(Boolean)
+        : [];
+      const groups = new Map<string, number[]>();
+      result.forEach((row, i) => {
+        const key = partKeys.length > 0 ? partKeys.map(k => String(row[k])).join('|') : '__all__';
+        const arr = groups.get(key) ?? [];
+        arr.push(i);
+        groups.set(key, arr);
+      });
+      for (const [, indices] of groups) {
+        const sorted = [...indices].sort((a, b) => {
+          const av = result[a][op.orderBy];
+          const bv = result[b][op.orderBy];
+          return av > bv ? 1 : av < bv ? -1 : 0;
+        });
+        const iter = op.direction === 'bfill' ? [...sorted].reverse() : sorted;
+        let last: any = null;
+        for (const idx of iter) {
+          const v = result[idx][op.column];
+          if (v !== null && v !== undefined && v !== '') {
+            last = v;
+          } else if (last !== null) {
+            result[idx] = { ...result[idx], [op.column]: last };
+          }
+        }
+      }
+    });
+
     // 15. Count Matching ops
     countMatchOps.forEach(op => {
       if (!op.column || !op.into || !op.value.trim()) return;
@@ -911,7 +1048,7 @@ export function DataPreviewModal({
       row_count: result.length,
       column_count: finalColumns.length,
     };
-  }, [data, mode, previewAtStep, filters, selectedColumns, dropDuplicates, dropNA, fillNAValue, sortColumns, sortAscending, groupByColumns, aggregations, columnRenames, columnsToDrop, stringOperations, calculatedColumns, columnOrder, limitRows, replaceOps, splitOps, windowOps, countMatchOps, caseWhenOps, concatOps, dateExtractOps, substringOps, numericOps, sampleConfig]);
+  }, [data, mode, previewAtStep, filters, selectedColumns, dropDuplicates, dropNA, fillNAValue, sortColumns, sortAscending, groupByColumns, aggregations, columnRenames, columnsToDrop, stringOperations, calculatedColumns, columnOrder, limitRows, replaceOps, splitOps, windowOps, countMatchOps, caseWhenOps, concatOps, dateExtractOps, substringOps, numericOps, sampleConfig, binOps, dedupeSubset, cumsumOps, fillDirectionOps]);
 
   const toggleColumn = (column: string) => {
     const newSelected = new Set(selectedColumns);
@@ -1118,6 +1255,13 @@ export function DataPreviewModal({
           ? numericOps.filter((o) => o.column && o.into) : null,
         sampleConfig: sampleConfig && (sampleConfig.n || sampleConfig.fraction)
           ? sampleConfig : null,
+        binOps: binOps.filter((o) => o.column && o.into && o.boundaries).length > 0
+          ? binOps.filter((o) => o.column && o.into && o.boundaries) : null,
+        dedupeSubset: dedupeSubset && dedupeSubset.subsetCols ? dedupeSubset : null,
+        cumsumOps: cumsumOps.filter((o) => o.column && o.into && o.orderBy).length > 0
+          ? cumsumOps.filter((o) => o.column && o.into && o.orderBy) : null,
+        fillDirectionOps: fillDirectionOps.filter((o) => o.column && o.orderBy).length > 0
+          ? fillDirectionOps.filter((o) => o.column && o.orderBy) : null,
       } as TransformConfig & Record<string, any>;
 
       // Call API to create new transformer asset
@@ -1258,6 +1402,41 @@ export function DataPreviewModal({
       const detail = op.op === 'round' ? `${op.column} @ ${op.digits}dp` : op.column;
       steps.push({ id: `num-${i}`, icon: 'calc', label: `${label} → ${op.into}`, detail, onRemove: () => setNumericOps((arr) => arr.filter((_, j) => j !== i)) });
     });
+    // 15a. bin
+    binOps.forEach((op, i) => {
+      if (!op.column || !op.into || !op.boundaries) return;
+      steps.push({
+        id: `bin-${i}`, icon: 'calc', label: `Bin ${op.column} → ${op.into}`,
+        detail: `bounds: [${op.boundaries}]`,
+        onRemove: () => setBinOps((arr) => arr.filter((_, j) => j !== i)),
+      });
+    });
+    // 15b. dedupe subset
+    if (dedupeSubset && dedupeSubset.subsetCols) {
+      steps.push({
+        id: 'dedupe-subset', icon: 'wand', label: `Dedupe (keep ${dedupeSubset.keep})`,
+        detail: `by ${dedupeSubset.subsetCols}`,
+        onRemove: () => setDedupeSubset(null),
+      });
+    }
+    // 15c. cumsum
+    cumsumOps.forEach((op, i) => {
+      if (!op.column || !op.into || !op.orderBy) return;
+      steps.push({
+        id: `cumsum-${i}`, icon: 'sigma', label: `Cumsum ${op.column} → ${op.into}`,
+        detail: `order by ${op.orderBy}${op.partitionBy ? ` per (${op.partitionBy})` : ''}`,
+        onRemove: () => setCumsumOps((arr) => arr.filter((_, j) => j !== i)),
+      });
+    });
+    // 15d. fill forward/backward
+    fillDirectionOps.forEach((op, i) => {
+      if (!op.column || !op.orderBy) return;
+      steps.push({
+        id: `fill-${i}`, icon: 'wand', label: `${op.direction === 'ffill' ? 'Forward-fill' : 'Backward-fill'} ${op.column}`,
+        detail: `order by ${op.orderBy}${op.partitionBy ? ` per (${op.partitionBy})` : ''}`,
+        onRemove: () => setFillDirectionOps((arr) => arr.filter((_, j) => j !== i)),
+      });
+    });
     // 15. count matching
     countMatchOps.forEach((op, i) => {
       if (!op.into) return;
@@ -1304,7 +1483,7 @@ export function DataPreviewModal({
       steps.push({ id: 'limit', icon: 'play', label: 'Limit', detail: `${limitRows} rows`, onRemove: () => setLimitRows(null) });
     }
     return steps;
-  }, [filters, dropDuplicates, dropNA, fillNAValue, groupByColumns, aggregations, sortColumns, sortAscending, columnRenames, replaceOps, splitOps, caseWhenOps, concatOps, dateExtractOps, substringOps, numericOps, countMatchOps, windowOps, stringOperations, calculatedColumns, columnsToDrop, pivotConfig, unpivotConfig, sampleConfig, limitRows]);
+  }, [filters, dropDuplicates, dropNA, fillNAValue, groupByColumns, aggregations, sortColumns, sortAscending, columnRenames, replaceOps, splitOps, caseWhenOps, concatOps, dateExtractOps, substringOps, numericOps, countMatchOps, windowOps, stringOperations, calculatedColumns, columnsToDrop, pivotConfig, unpivotConfig, sampleConfig, limitRows, binOps, dedupeSubset, cumsumOps, fillDirectionOps]);
 
   return (
     <Dialog.Root open={isOpen} onOpenChange={handleClose}>
@@ -1989,16 +2168,20 @@ export function DataPreviewModal({
                                 </button>
                               </div>
                               <div>
-                                <label className="text-[10px] text-gray-500 block mb-1">Into columns (order matters)</label>
+                                <label className="text-[10px] text-gray-500 block mb-1">Into new columns (order matters)</label>
                                 <MultiColumnSelect
                                   columns={data?.columns || []}
                                   value={op.into ? op.into.split(',').map(s => s.trim()).filter(Boolean) : []}
                                   onChange={(cols) =>
                                     setSplitOps(ops => ops.map((o, j) => j === i ? { ...o, into: cols.join(',') } : o))
                                   }
-                                  placeholder="pick existing or type new names…"
+                                  placeholder="type new column names…"
                                   allowFreeText
+                                  excludeColumns={op.column ? [op.column] : []}
                                 />
+                                <p className="text-[10px] text-gray-500 mt-1">
+                                  Split creates new columns — type names above (e.g. first_name, last_name).
+                                </p>
                               </div>
                             </div>
                           ))}
@@ -2712,6 +2895,313 @@ export function DataPreviewModal({
                     )}
                   </div>
 
+                  {/* Accordion Section: Bin / Bucket */}
+                  <div className="border border-gray-200 rounded-lg bg-white overflow-hidden">
+                    <button
+                      onClick={() => toggleSection('bin')}
+                      className="w-full px-4 py-3 flex items-center justify-between hover:bg-gray-50 transition-colors"
+                    >
+                      <div className="flex items-center space-x-2">
+                        <Sigma className="w-4 h-4 text-blue-600" />
+                        <span className="text-sm font-semibold text-gray-900">Bin / Bucket</span>
+                        {binOps.length > 0 && <span className="text-xs text-gray-500">{binOps.length}</span>}
+                      </div>
+                      {expandedSections.has('bin') ? <ChevronDown className="w-4 h-4 text-gray-500" /> : <ChevronRight className="w-4 h-4 text-gray-500" />}
+                    </button>
+                    {expandedSections.has('bin') && (
+                      <div className="px-4 pb-3 border-t border-gray-100">
+                        <div className="space-y-2 mt-3">
+                          {binOps.map((op, i) => (
+                            <div key={i} className="bg-gray-50 border border-gray-200 rounded p-2 space-y-1.5">
+                              <div className="flex items-center justify-between">
+                                <input
+                                  type="text"
+                                  value={op.into}
+                                  onChange={(e) => setBinOps(ops => ops.map((o, j) => j === i ? { ...o, into: e.target.value } : o))}
+                                  placeholder="new column name"
+                                  className="text-xs border border-gray-300 rounded px-1.5 py-1 flex-1 mr-1"
+                                />
+                                <button
+                                  onClick={() => setBinOps(ops => ops.filter((_, j) => j !== i))}
+                                  className="p-1 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded flex-shrink-0"
+                                  title="Remove"
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                </button>
+                              </div>
+                              <select
+                                value={op.column}
+                                onChange={(e) => setBinOps(ops => ops.map((o, j) => j === i ? { ...o, column: e.target.value } : o))}
+                                className="w-full text-xs border border-gray-300 rounded px-1.5 py-1"
+                              >
+                                <option value="">Numeric column…</option>
+                                {data?.columns?.map(c => <option key={c} value={c}>{c}</option>)}
+                              </select>
+                              <div>
+                                <label className="text-[10px] text-gray-500 block mb-0.5">Bin boundaries (comma-separated, ascending)</label>
+                                <input
+                                  type="text"
+                                  value={op.boundaries}
+                                  onChange={(e) => setBinOps(ops => ops.map((o, j) => j === i ? { ...o, boundaries: e.target.value } : o))}
+                                  placeholder="e.g. 10,20,50,100"
+                                  className="w-full text-xs border border-gray-300 rounded px-1.5 py-1"
+                                />
+                              </div>
+                              <div>
+                                <label className="text-[10px] text-gray-500 block mb-0.5">Labels (optional; N+1 for N boundaries)</label>
+                                <input
+                                  type="text"
+                                  value={op.labels}
+                                  onChange={(e) => setBinOps(ops => ops.map((o, j) => j === i ? { ...o, labels: e.target.value } : o))}
+                                  placeholder="e.g. low,medium,high,vip"
+                                  className="w-full text-xs border border-gray-300 rounded px-1.5 py-1"
+                                />
+                              </div>
+                            </div>
+                          ))}
+                          <button
+                            onClick={() => setBinOps(ops => [...ops, { column: data?.columns?.[0] || '', boundaries: '', labels: '', into: `bin_${ops.length + 1}` }])}
+                            className="text-xs text-primary hover:underline flex items-center gap-1"
+                          >
+                            <Plus className="w-3 h-3" /> Add bin
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Accordion Section: Dedupe with subset */}
+                  <div className="border border-gray-200 rounded-lg bg-white overflow-hidden">
+                    <button
+                      onClick={() => toggleSection('dedupeSubset')}
+                      className="w-full px-4 py-3 flex items-center justify-between hover:bg-gray-50 transition-colors"
+                    >
+                      <div className="flex items-center space-x-2">
+                        <Wand2 className="w-4 h-4 text-blue-600" />
+                        <span className="text-sm font-semibold text-gray-900">Dedupe by subset</span>
+                        {dedupeSubset && <span className="text-xs text-gray-500">1</span>}
+                      </div>
+                      {expandedSections.has('dedupeSubset') ? <ChevronDown className="w-4 h-4 text-gray-500" /> : <ChevronRight className="w-4 h-4 text-gray-500" />}
+                    </button>
+                    {expandedSections.has('dedupeSubset') && (
+                      <div className="px-4 pb-3 border-t border-gray-100">
+                        <div className="space-y-2 mt-3">
+                          <div>
+                            <label className="text-[10px] text-gray-500 block mb-1">Match on columns</label>
+                            <MultiColumnSelect
+                              columns={data?.columns || []}
+                              value={dedupeSubset?.subsetCols ? dedupeSubset.subsetCols.split(',').map(s => s.trim()).filter(Boolean) : []}
+                              onChange={(cols) =>
+                                setDedupeSubset({
+                                  subsetCols: cols.join(','),
+                                  keep: dedupeSubset?.keep ?? 'first',
+                                })
+                              }
+                              placeholder="pick key columns…"
+                            />
+                          </div>
+                          <div>
+                            <label className="text-[10px] text-gray-500 block mb-1">Keep</label>
+                            <div className="flex gap-1">
+                              {(['first', 'last'] as const).map(k => (
+                                <button
+                                  key={k}
+                                  onClick={() => setDedupeSubset(prev => ({
+                                    subsetCols: prev?.subsetCols ?? '',
+                                    keep: k,
+                                  }))}
+                                  className={`flex-1 text-xs px-2 py-1 border rounded ${
+                                    (dedupeSubset?.keep ?? 'first') === k
+                                      ? 'border-primary bg-primary/5 text-primary'
+                                      : 'border-gray-300 text-gray-700 hover:bg-gray-50'
+                                  }`}
+                                >
+                                  {k}
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+                          {dedupeSubset && (
+                            <button
+                              onClick={() => setDedupeSubset(null)}
+                              className="text-xs text-red-600 hover:underline"
+                            >
+                              Clear dedupe
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Accordion Section: Cumulative sum */}
+                  <div className="border border-gray-200 rounded-lg bg-white overflow-hidden">
+                    <button
+                      onClick={() => toggleSection('cumsum')}
+                      className="w-full px-4 py-3 flex items-center justify-between hover:bg-gray-50 transition-colors"
+                    >
+                      <div className="flex items-center space-x-2">
+                        <Sigma className="w-4 h-4 text-blue-600" />
+                        <span className="text-sm font-semibold text-gray-900">Cumulative Sum</span>
+                        {cumsumOps.length > 0 && <span className="text-xs text-gray-500">{cumsumOps.length}</span>}
+                      </div>
+                      {expandedSections.has('cumsum') ? <ChevronDown className="w-4 h-4 text-gray-500" /> : <ChevronRight className="w-4 h-4 text-gray-500" />}
+                    </button>
+                    {expandedSections.has('cumsum') && (
+                      <div className="px-4 pb-3 border-t border-gray-100">
+                        <div className="space-y-2 mt-3">
+                          {cumsumOps.map((op, i) => (
+                            <div key={i} className="bg-gray-50 border border-gray-200 rounded p-2 space-y-1.5">
+                              <div className="flex items-center justify-between">
+                                <input
+                                  type="text"
+                                  value={op.into}
+                                  onChange={(e) => setCumsumOps(ops => ops.map((o, j) => j === i ? { ...o, into: e.target.value } : o))}
+                                  placeholder="new column name"
+                                  className="text-xs border border-gray-300 rounded px-1.5 py-1 flex-1 mr-1"
+                                />
+                                <button
+                                  onClick={() => setCumsumOps(ops => ops.filter((_, j) => j !== i))}
+                                  className="p-1 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded flex-shrink-0"
+                                  title="Remove"
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                </button>
+                              </div>
+                              <select
+                                value={op.column}
+                                onChange={(e) => setCumsumOps(ops => ops.map((o, j) => j === i ? { ...o, column: e.target.value } : o))}
+                                className="w-full text-xs border border-gray-300 rounded px-1.5 py-1"
+                              >
+                                <option value="">Numeric column…</option>
+                                {data?.columns?.map(c => <option key={c} value={c}>{c}</option>)}
+                              </select>
+                              <div className="grid grid-cols-[auto_1fr_auto] gap-1 items-center">
+                                <span className="text-[10px] text-gray-500">ORDER BY</span>
+                                <select
+                                  value={op.orderBy}
+                                  onChange={(e) => setCumsumOps(ops => ops.map((o, j) => j === i ? { ...o, orderBy: e.target.value } : o))}
+                                  className="text-xs border border-gray-300 rounded px-1.5 py-1"
+                                >
+                                  <option value="">Column…</option>
+                                  {data?.columns?.map(c => <option key={c} value={c}>{c}</option>)}
+                                </select>
+                                <button
+                                  onClick={() => setCumsumOps(ops => ops.map((o, j) => j === i ? { ...o, orderAsc: !o.orderAsc } : o))}
+                                  className="text-[10px] px-1.5 py-1 border border-gray-300 rounded hover:bg-gray-100"
+                                >
+                                  {op.orderAsc ? 'ASC' : 'DESC'}
+                                </button>
+                              </div>
+                              <div>
+                                <label className="text-[10px] text-gray-500 block mb-0.5">PARTITION BY (optional)</label>
+                                <MultiColumnSelect
+                                  columns={data?.columns || []}
+                                  value={op.partitionBy ? op.partitionBy.split(',').map(s => s.trim()).filter(Boolean) : []}
+                                  onChange={(cols) =>
+                                    setCumsumOps(ops => ops.map((o, j) => j === i ? { ...o, partitionBy: cols.join(',') } : o))
+                                  }
+                                  placeholder="reset per group…"
+                                />
+                              </div>
+                            </div>
+                          ))}
+                          <button
+                            onClick={() => setCumsumOps(ops => [...ops, { column: data?.columns?.[0] || '', partitionBy: '', orderBy: data?.columns?.[0] || '', orderAsc: true, into: `cumsum_${ops.length + 1}` }])}
+                            className="text-xs text-primary hover:underline flex items-center gap-1"
+                          >
+                            <Plus className="w-3 h-3" /> Add cumsum
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Accordion Section: Fill forward/backward */}
+                  <div className="border border-gray-200 rounded-lg bg-white overflow-hidden">
+                    <button
+                      onClick={() => toggleSection('fillDir')}
+                      className="w-full px-4 py-3 flex items-center justify-between hover:bg-gray-50 transition-colors"
+                    >
+                      <div className="flex items-center space-x-2">
+                        <ArrowDownUp className="w-4 h-4 text-blue-600" />
+                        <span className="text-sm font-semibold text-gray-900">Fill Forward / Backward</span>
+                        {fillDirectionOps.length > 0 && <span className="text-xs text-gray-500">{fillDirectionOps.length}</span>}
+                      </div>
+                      {expandedSections.has('fillDir') ? <ChevronDown className="w-4 h-4 text-gray-500" /> : <ChevronRight className="w-4 h-4 text-gray-500" />}
+                    </button>
+                    {expandedSections.has('fillDir') && (
+                      <div className="px-4 pb-3 border-t border-gray-100">
+                        <div className="space-y-2 mt-3">
+                          {fillDirectionOps.map((op, i) => (
+                            <div key={i} className="bg-gray-50 border border-gray-200 rounded p-2 space-y-1.5">
+                              <div className="flex items-center justify-between">
+                                <div className="flex gap-1">
+                                  {(['ffill', 'bfill'] as const).map(d => (
+                                    <button
+                                      key={d}
+                                      onClick={() => setFillDirectionOps(ops => ops.map((o, j) => j === i ? { ...o, direction: d } : o))}
+                                      className={`text-xs px-2 py-1 border rounded ${
+                                        op.direction === d
+                                          ? 'border-primary bg-primary/5 text-primary'
+                                          : 'border-gray-300 text-gray-700 hover:bg-gray-50'
+                                      }`}
+                                    >
+                                      {d === 'ffill' ? 'Forward' : 'Backward'}
+                                    </button>
+                                  ))}
+                                </div>
+                                <button
+                                  onClick={() => setFillDirectionOps(ops => ops.filter((_, j) => j !== i))}
+                                  className="p-1 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded flex-shrink-0"
+                                  title="Remove"
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                </button>
+                              </div>
+                              <select
+                                value={op.column}
+                                onChange={(e) => setFillDirectionOps(ops => ops.map((o, j) => j === i ? { ...o, column: e.target.value } : o))}
+                                className="w-full text-xs border border-gray-300 rounded px-1.5 py-1"
+                              >
+                                <option value="">Column to fill…</option>
+                                {data?.columns?.map(c => <option key={c} value={c}>{c}</option>)}
+                              </select>
+                              <div className="grid grid-cols-[auto_1fr] gap-1 items-center">
+                                <span className="text-[10px] text-gray-500">ORDER BY</span>
+                                <select
+                                  value={op.orderBy}
+                                  onChange={(e) => setFillDirectionOps(ops => ops.map((o, j) => j === i ? { ...o, orderBy: e.target.value } : o))}
+                                  className="text-xs border border-gray-300 rounded px-1.5 py-1"
+                                >
+                                  <option value="">Column…</option>
+                                  {data?.columns?.map(c => <option key={c} value={c}>{c}</option>)}
+                                </select>
+                              </div>
+                              <div>
+                                <label className="text-[10px] text-gray-500 block mb-0.5">PARTITION BY (optional)</label>
+                                <MultiColumnSelect
+                                  columns={data?.columns || []}
+                                  value={op.partitionBy ? op.partitionBy.split(',').map(s => s.trim()).filter(Boolean) : []}
+                                  onChange={(cols) =>
+                                    setFillDirectionOps(ops => ops.map((o, j) => j === i ? { ...o, partitionBy: cols.join(',') } : o))
+                                  }
+                                  placeholder="restart per group…"
+                                />
+                              </div>
+                            </div>
+                          ))}
+                          <button
+                            onClick={() => setFillDirectionOps(ops => [...ops, { column: data?.columns?.[0] || '', direction: 'ffill', partitionBy: '', orderBy: data?.columns?.[0] || '' }])}
+                            className="text-xs text-primary hover:underline flex items-center gap-1"
+                          >
+                            <Plus className="w-3 h-3" /> Add fill
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
                   {/* Accordion Section: Advanced Reshaping */}
                   <div className="border border-gray-200 rounded-lg bg-white overflow-hidden">
                     <button
@@ -3297,6 +3787,10 @@ export function DataPreviewModal({
                   setSubstringOps([]);
                   setNumericOps([]);
                   setSampleConfig(null);
+                  setBinOps([]);
+                  setDedupeSubset(null);
+                  setCumsumOps([]);
+                  setFillDirectionOps([]);
                 }}
               />
             )}

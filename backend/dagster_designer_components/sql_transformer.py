@@ -84,6 +84,14 @@ class SqlTransformerComponent(dg.Component, dg.Model, dg.Resolvable):
     numeric_ops: Optional[str] = None
     # JSON: {"n" | "fraction", "random"} — TABLESAMPLE on supported dialects.
     sample_config: Optional[str] = None
+    # JSON list: [{"column", "boundaries" (csv), "labels" (csv), "into"}]
+    bin_ops: Optional[str] = None
+    # JSON: {"subsetCols" (csv), "keep": first|last}
+    dedupe_subset: Optional[str] = None
+    # JSON list: [{"column", "partitionBy", "orderBy", "orderAsc", "into"}]
+    cumsum_ops: Optional[str] = None
+    # JSON list: [{"column", "direction": ffill|bfill, "partitionBy", "orderBy"}]
+    fill_direction_ops: Optional[str] = None
 
     group_name: Optional[str] = None
     description: Optional[str] = None
@@ -157,6 +165,10 @@ class SqlTransformerComponent(dg.Component, dg.Model, dg.Resolvable):
             "substring_ops": self.substring_ops,
             "numeric_ops": self.numeric_ops,
             "sample_config": self.sample_config,
+            "bin_ops": self.bin_ops,
+            "dedupe_subset": self.dedupe_subset,
+            "cumsum_ops": self.cumsum_ops,
+            "fill_direction_ops": self.fill_direction_ops,
         }
 
 
@@ -479,6 +491,52 @@ def _build_select_sql(cfg: dict[str, Any], dialect_name: str) -> str:
                 "hour": "HOUR",
             }.get(part, "YEAR")
             select_items.append(literal_column(f'EXTRACT({part_sql} FROM "{col}")').label(into))
+
+    # Bin / Bucket → CASE WHEN col <= b1 THEN L0 WHEN col <= b2 THEN L1 … END
+    bin_ops = _json_list(cfg.get("bin_ops"))
+    if bin_ops:
+        for op in bin_ops:
+            col = op.get("column")
+            into = op.get("into")
+            bounds_str = op.get("boundaries", "")
+            labels_str = op.get("labels", "")
+            if not col or not into or not bounds_str:
+                continue
+            try:
+                bounds = [float(x.strip()) for x in bounds_str.split(",") if x.strip()]
+            except ValueError:
+                continue
+            labels = [x.strip() for x in labels_str.split(",") if x.strip()]
+            branches = []
+            for i, b in enumerate(bounds):
+                lbl = (labels[i] if i < len(labels) else (
+                    f"<={b}" if i == 0 else f"{bounds[i-1]}-{b}"
+                )).replace("'", "''")
+                branches.append(f"WHEN \"{col}\" <= {b} THEN '{lbl}'")
+            # Overflow bucket
+            overflow_lbl = (labels[len(bounds)] if len(labels) > len(bounds) else f">{bounds[-1]}").replace("'", "''")
+            expr = f"CASE {' '.join(branches)} ELSE '{overflow_lbl}' END"
+            select_items.append(literal_column(expr).label(into))
+
+    # Cumulative sum → SUM(col) OVER (PARTITION BY ... ORDER BY ...)
+    cumsum_ops = _json_list(cfg.get("cumsum_ops"))
+    if cumsum_ops:
+        for op in cumsum_ops:
+            col = op.get("column")
+            into = op.get("into")
+            order_by = op.get("orderBy") or op.get("order_by")
+            partition_by = op.get("partitionBy") or op.get("partition_by") or ""
+            order_asc = bool(op.get("orderAsc", op.get("order_asc", True)))
+            if not col or not into or not order_by:
+                continue
+            over_parts = []
+            if partition_by:
+                parts = [f'"{p.strip()}"' for p in partition_by.split(",") if p.strip()]
+                if parts:
+                    over_parts.append("PARTITION BY " + ", ".join(parts))
+            over_parts.append(f'ORDER BY "{order_by}" {"ASC" if order_asc else "DESC"}')
+            expr = f'SUM("{col}") OVER ({" ".join(over_parts)})'
+            select_items.append(literal_column(expr).label(into))
 
     # Count-matching ops → COUNT(CASE WHEN cond THEN 1 END) OVER (PARTITION BY ...)
     count_match_ops = _json_list(cfg.get("count_match_ops"))

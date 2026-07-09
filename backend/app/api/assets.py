@@ -187,6 +187,10 @@ class TransformConfig(BaseModel):
     substringOps: list[dict[str, Any]] | None = None  # [{column, start, length, into}]
     numericOps: list[dict[str, Any]] | None = None  # [{column, op, digits, into}]
     sampleConfig: dict[str, Any] | None = None  # {n, fraction, random}
+    binOps: list[dict[str, Any]] | None = None  # [{column, boundaries, labels, into}]
+    dedupeSubset: dict[str, Any] | None = None  # {subsetCols, keep}
+    cumsumOps: list[dict[str, Any]] | None = None  # [{column, partitionBy, orderBy, orderAsc, into}]
+    fillDirectionOps: list[dict[str, Any]] | None = None  # [{column, direction, partitionBy, orderBy}]
 
 
 class CreateTransformerRequest(BaseModel):
@@ -360,6 +364,14 @@ async def create_transformer_asset(project_id: str, request: CreateTransformerRe
         attributes["numeric_ops"] = json.dumps(request.transformConfig.numericOps)
     if request.transformConfig.sampleConfig:
         attributes["sample_config"] = json.dumps(request.transformConfig.sampleConfig)
+    if request.transformConfig.binOps:
+        attributes["bin_ops"] = json.dumps(request.transformConfig.binOps)
+    if request.transformConfig.dedupeSubset:
+        attributes["dedupe_subset"] = json.dumps(request.transformConfig.dedupeSubset)
+    if request.transformConfig.cumsumOps:
+        attributes["cumsum_ops"] = json.dumps(request.transformConfig.cumsumOps)
+    if request.transformConfig.fillDirectionOps:
+        attributes["fill_direction_ops"] = json.dumps(request.transformConfig.fillDirectionOps)
 
     # Pick the right transformer backend based on upstream type.
     if upstream_is_warehouse:
@@ -412,6 +424,14 @@ async def create_transformer_asset(project_id: str, request: CreateTransformerRe
             sql_attrs["numeric_ops"] = json.dumps(request.transformConfig.numericOps)
         if request.transformConfig.sampleConfig:
             sql_attrs["sample_config"] = json.dumps(request.transformConfig.sampleConfig)
+        if request.transformConfig.binOps:
+            sql_attrs["bin_ops"] = json.dumps(request.transformConfig.binOps)
+        if request.transformConfig.dedupeSubset:
+            sql_attrs["dedupe_subset"] = json.dumps(request.transformConfig.dedupeSubset)
+        if request.transformConfig.cumsumOps:
+            sql_attrs["cumsum_ops"] = json.dumps(request.transformConfig.cumsumOps)
+        if request.transformConfig.fillDirectionOps:
+            sql_attrs["fill_direction_ops"] = json.dumps(request.transformConfig.fillDirectionOps)
         # Filter translation: pandas query → SQL WHERE. Basic operators only;
         # anything involving `.str.contains` or method chains falls through
         # unchanged and may fail at run time.
