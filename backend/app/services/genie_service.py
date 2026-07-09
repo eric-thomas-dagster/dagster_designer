@@ -313,6 +313,22 @@ SYSTEM_PROMPT = (
     "  chain to find them: transformer → source. If the root source is in "
     "  Case A, use its fixed schema; if Case B, use the user's words or "
     "  TODOs.\n"
+    "- Case C — upstream is ANOTHER PICK IN THIS SAME PLAN (not a materialized "
+    "  asset): the downstream pick can only reference columns the upstream "
+    "  pick actually produces. Compute the upstream's output set explicitly:\n"
+    "    * summarize / group-by aggregators output ONLY: group_by columns + "
+    "  aggregation output keys (e.g. `total_revenue` from "
+    "  `aggregations.total_revenue`). Nothing else survives.\n"
+    "    * projection transformers (filter, sort, dedupe, filter_columns): "
+    "  output = input columns minus drops/keeps plus renames.\n"
+    "    * calculated-column transformers: output = input columns + the new "
+    "  computed column names.\n"
+    "    * dataframe_to_csv / parquet_sink / other file sinks with a `columns` "
+    "  field: those columns MUST be a subset of the upstream pick's output "
+    "  set. Do NOT list `date`/`revenue`/`region` on a CSV sink whose upstream "
+    "  is a summarize that only produced `customer_id` and `total_purchase`.\n"
+    "  If the user's task implies a column the upstream doesn't produce, "
+    "  either add an upstream pick that produces it, or drop the reference.\n"
 )
 
 
