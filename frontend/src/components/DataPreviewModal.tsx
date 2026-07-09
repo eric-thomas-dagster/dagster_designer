@@ -1857,16 +1857,12 @@ export function DataPreviewModal({
                         <div className="space-y-3 mt-3">
                           <div>
                             <label className="text-xs text-gray-600 mb-1 block">Group by columns:</label>
-                            <select
-                              multiple
+                            <MultiColumnSelect
+                              columns={data?.columns || []}
                               value={groupByColumns}
-                              onChange={(e) => setGroupByColumns(Array.from(e.target.selectedOptions, option => option.value))}
-                              className="w-full text-sm border border-gray-300 rounded px-2 py-1.5 h-20"
-                            >
-                              {data?.columns?.map((col) => (
-                                <option key={col} value={col}>{col}</option>
-                              ))}
-                            </select>
+                              onChange={setGroupByColumns}
+                              placeholder="pick columns to group by…"
+                            />
                           </div>
                           <div>
                             <label className="text-xs text-gray-600 mb-1 block">Aggregations:</label>
@@ -2175,12 +2171,12 @@ export function DataPreviewModal({
                                   onChange={(cols) =>
                                     setSplitOps(ops => ops.map((o, j) => j === i ? { ...o, into: cols.join(',') } : o))
                                   }
-                                  placeholder="type new column names…"
+                                  placeholder="click to type new column names…"
                                   allowFreeText
-                                  excludeColumns={op.column ? [op.column] : []}
+                                  hideExistingColumns
                                 />
                                 <p className="text-[10px] text-gray-500 mt-1">
-                                  Split creates new columns — type names above (e.g. first_name, last_name).
+                                  Split creates new columns. Click above, type a name, press Enter to add.
                                 </p>
                               </div>
                             </div>
