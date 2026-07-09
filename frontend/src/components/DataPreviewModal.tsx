@@ -1529,7 +1529,7 @@ export function DataPreviewModal({
       steps.push({ id: 'limit', icon: 'play', label: 'Limit', detail: `${limitRows} rows`, onRemove: () => setLimitRows(null) });
     }
     return steps;
-  }, [filters, dropDuplicates, dropNA, fillNAValue, groupByColumns, aggregations, sortColumns, sortAscending, columnRenames, replaceOps, splitOps, caseWhenOps, concatOps, dateExtractOps, substringOps, numericOps, countMatchOps, windowOps, stringOperations, calculatedColumns, columnsToDrop, pivotConfig, unpivotConfig, sampleConfig, limitRows, binOps, dedupeSubset, cumsumOps, fillDirectionOps]);
+  }, [filters, dropDuplicates, dropNA, fillNAValue, groupByColumns, aggregations, sortColumns, sortAscending, columnRenames, replaceOps, splitOps, caseWhenOps, concatOps, dateExtractOps, substringOps, numericOps, countMatchOps, windowOps, stringOperations, calculatedColumns, columnsToDrop, pivotConfig, unpivotConfig, sampleConfig, limitRows, binOps, dedupeSubset, cumsumOps, fillDirectionOps, selectedColumns, data]);
 
   return (
     <Dialog.Root open={isOpen} onOpenChange={handleClose}>
