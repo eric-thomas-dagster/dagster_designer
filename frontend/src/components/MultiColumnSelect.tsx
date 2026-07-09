@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
+import { createPortal } from 'react-dom';
 import { X, ChevronDown, Check } from 'lucide-react';
 
 interface MultiColumnSelectProps {
@@ -17,11 +18,15 @@ interface MultiColumnSelectProps {
 }
 
 /**
- * Chip-based multi-column picker. Dropdown uses `position: fixed` (viewport-
- * relative) to escape overflow clipping, but stays in the trigger's DOM tree
- * so it participates in any surrounding focus trap (e.g. Radix Dialog).
- * A separate portal would break focus in modals because Dialog's focus-trap
- * treats document.body siblings as "outside".
+ * Chip-based multi-column picker.
+ *
+ * Positioning: portaled to document.body with `position: fixed` so it
+ * escapes both `overflow: hidden/auto` ancestors AND any CSS `transform`
+ * ancestors that would rebase `position: fixed` (Radix Dialog.Content uses
+ * transforms for centering, which broke plain-child fixed positioning).
+ *
+ * Focus: the dropdown carries `data-column-picker-dropdown` so parent
+ * Dialogs can whitelist it via `onInteractOutside` / `onFocusOutside`.
  */
 export function MultiColumnSelect({
   columns,
@@ -110,7 +115,7 @@ export function MultiColumnSelect({
     : columns.filter((c) => !excludedSet.has(c));
 
   return (
-    <div className="relative">
+    <>
       <div
         ref={triggerRef}
         onClick={() => (open ? closeDropdown() : openDropdown())}
@@ -141,9 +146,10 @@ export function MultiColumnSelect({
         <ChevronDown className="w-3 h-3 text-gray-400 ml-auto flex-shrink-0" />
       </div>
 
-      {open && pos && (
+      {open && pos && createPortal(
         <div
           ref={dropdownRef}
+          data-column-picker-dropdown="true"
           style={{
             position: 'fixed',
             top: pos.top,
@@ -220,8 +226,9 @@ export function MultiColumnSelect({
               })}
             </div>
           )}
-        </div>
+        </div>,
+        document.body,
       )}
-    </div>
+    </>
   );
 }

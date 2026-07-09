@@ -966,6 +966,28 @@ export function DataPreviewModal({
     let finalColumns = data.columns || [];
     const columnsArray = Array.from(selectedColumns);
 
+    // Every op that adds a NEW derived column contributes its `into` here.
+    // We union these onto finalColumns so Split/Concat/Rank/CaseWhen/etc.
+    // outputs appear in the preview header.
+    const derivedColumns: string[] = [];
+    const pushDerived = (name?: string) => {
+      if (name && !derivedColumns.includes(name)) derivedColumns.push(name);
+    };
+    caseWhenOps.forEach(op => pushDerived(op.into));
+    concatOps.forEach(op => pushDerived(op.into));
+    dateExtractOps.forEach(op => pushDerived(op.into));
+    substringOps.forEach(op => pushDerived(op.into));
+    numericOps.forEach(op => pushDerived(op.into));
+    countMatchOps.forEach(op => pushDerived(op.into));
+    windowOps.forEach(op => pushDerived(op.into));
+    binOps.forEach(op => pushDerived(op.into));
+    cumsumOps.forEach(op => pushDerived(op.into));
+    // Split's `into` is a csv of NEW column names.
+    splitOps.forEach(op => {
+      if (!op.into) return;
+      op.into.split(',').map(s => s.trim()).filter(Boolean).forEach(pushDerived);
+    });
+
     if (groupByColumns.length > 0 && Object.keys(aggregations).length > 0) {
       // If grouping, show group columns + aggregated columns
       finalColumns = [...groupByColumns, ...Object.keys(aggregations)];
@@ -989,6 +1011,16 @@ export function DataPreviewModal({
       if (Object.keys(calculatedColumns).length > 0) {
         finalColumns = [...finalColumns, ...Object.keys(calculatedColumns)];
       }
+
+      // Add derived columns from Split / Concat / CaseWhen / Rank / etc.
+      // dedupe against what's already in finalColumns (some ops output into
+      // an existing column name — Replace, for instance — which shouldn't
+      // appear twice).
+      derivedColumns.forEach(col => {
+        if (!finalColumns.includes(col) && !columnsToDrop.has(col)) {
+          finalColumns.push(col);
+        }
+      });
 
       // Apply column selection if any
       if (columnsArray.length > 0 && columnsArray.length < (data.columns?.length || 0)) {
@@ -1489,7 +1521,25 @@ export function DataPreviewModal({
     <Dialog.Root open={isOpen} onOpenChange={handleClose}>
       <Dialog.Portal>
         <Dialog.Overlay className="fixed inset-0 bg-black/50 z-50" />
-        <Dialog.Content className="fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 bg-white rounded-lg shadow-xl z-50 w-[95vw] h-[90vh] flex flex-col">
+        <Dialog.Content
+          className="fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 bg-white rounded-lg shadow-xl z-50 w-[95vw] h-[90vh] flex flex-col"
+          // Whitelist column-picker portals: they render outside Dialog.Content
+          // (in document.body) so we can escape overflow + transform ancestors,
+          // but Radix's focus-trap / auto-close would otherwise treat clicks
+          // and focus in the picker as "outside" the dialog.
+          onInteractOutside={(e) => {
+            const t = e.target as HTMLElement | null;
+            if (t?.closest?.('[data-column-picker-dropdown]')) e.preventDefault();
+          }}
+          onFocusOutside={(e) => {
+            const t = e.target as HTMLElement | null;
+            if (t?.closest?.('[data-column-picker-dropdown]')) e.preventDefault();
+          }}
+          onPointerDownOutside={(e) => {
+            const t = e.target as HTMLElement | null;
+            if (t?.closest?.('[data-column-picker-dropdown]')) e.preventDefault();
+          }}
+        >
           {/* Header */}
           <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200">
             <div className="flex items-center space-x-3">
