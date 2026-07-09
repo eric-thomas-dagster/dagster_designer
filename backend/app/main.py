@@ -1,5 +1,21 @@
 """Main FastAPI application."""
 
+# Load .env early so API keys (OPENAI_API_KEY, ANTHROPIC_API_KEY, etc.) picked
+# up via os.getenv further down get populated. Looks first at the backend
+# directory's own .env, then the repo root's .env. Missing files are OK —
+# environment already-set values take precedence.
+import os as _os
+from pathlib import Path as _Path
+try:
+    from dotenv import load_dotenv as _load_dotenv
+    _here = _Path(__file__).resolve()
+    for _p in (_here.parent.parent / ".env", _here.parent.parent.parent / ".env"):
+        if _p.exists():
+            _load_dotenv(_p, override=False)
+            print(f"[main] Loaded env from {_p}")
+except Exception as _e:  # pragma: no cover
+    print(f"[main] dotenv not available: {_e}")
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
