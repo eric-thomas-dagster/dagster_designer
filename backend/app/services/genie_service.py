@@ -377,18 +377,31 @@ async def plan(
     seen_names: set[str] = {str(a["name"]) for a in (existing_assets or []) if a.get("name")}
     notes: list[str] = []
 
+    existing_names = {str(a["name"]) for a in (existing_assets or []) if a.get("name")}
     for i, p in enumerate(raw_picks):
         component_type = p.get("component_type") or ""
         if component_type == "noop":
             notes.append(p.get("reason") or "planner could not build from catalog")
             continue
         if component_type not in valid_ids:
-            notes.append(f"pick {i}: unknown component_type '{component_type}', skipped")
+            notes.append(
+                f"⚠︎ Pick #{i + 1} references unknown component '{component_type}' — skipped."
+            )
             continue
 
         asset_name = (p.get("asset_name") or "").strip()
-        if not asset_name or asset_name in seen_names:
-            notes.append(f"pick {i}: duplicate or missing asset_name '{asset_name}', skipped")
+        if not asset_name:
+            notes.append(f"⚠︎ Pick #{i + 1} is missing an asset name — skipped.")
+            continue
+        if asset_name in existing_names:
+            notes.append(
+                f"ℹ Asset '{asset_name}' already exists in the graph — skipping (no action needed)."
+            )
+            continue
+        if asset_name in seen_names:
+            notes.append(
+                f"⚠︎ Pick #{i + 1}: duplicate name '{asset_name}' in the same plan — skipped."
+            )
             continue
         seen_names.add(asset_name)
 

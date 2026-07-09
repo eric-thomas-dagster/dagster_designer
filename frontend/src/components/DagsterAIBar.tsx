@@ -189,30 +189,57 @@ export function DagsterAIBar() {
           </div>
 
           <div className="max-h-64 overflow-y-auto">
-            {plan.picks.map((pick, i) => (
-              <div key={i} className="px-4 py-2.5 border-b border-gray-100 last:border-b-0 text-sm">
-                <div className="flex items-baseline gap-2">
-                  <span className="text-xs text-gray-400 font-mono w-5 flex-shrink-0">{i + 1}.</span>
-                  <span className="font-medium text-gray-900">{pick.asset_name}</span>
-                  <span className="text-[10px] uppercase tracking-wide text-gray-400 bg-gray-100 px-1.5 py-0.5 rounded">
-                    {pick.component_type}
-                  </span>
-                </div>
-                {pick.upstream_asset_names.length > 0 && (
-                  <div className="mt-1 pl-7 text-xs text-gray-500">
-                    from: {pick.upstream_asset_names.join(', ')}
+            {plan.picks.map((pick, i) => {
+              // Format config entries so column names and other AI-guessed
+              // values are visible before the user applies — helps catch
+              // hallucinations like `col: purchase_price` when the actual
+              // upstream column is `amount` or similar.
+              const configEntries = Object.entries(pick.config || {})
+                .filter(([k]) => k !== 'asset_name' && k !== 'upstream_asset_keys')
+                .filter(([, v]) => v !== null && v !== undefined && v !== '');
+              return (
+                <div key={i} className="px-4 py-2.5 border-b border-gray-100 last:border-b-0 text-sm">
+                  <div className="flex items-baseline gap-2">
+                    <span className="text-xs text-gray-400 font-mono w-5 flex-shrink-0">{i + 1}.</span>
+                    <span className="font-medium text-gray-900">{pick.asset_name}</span>
+                    <span className="text-[10px] uppercase tracking-wide text-gray-400 bg-gray-100 px-1.5 py-0.5 rounded">
+                      {pick.component_type}
+                    </span>
                   </div>
-                )}
-                {pick.reason && (
-                  <div className="mt-1 pl-7 text-xs text-gray-500 italic">{pick.reason}</div>
-                )}
-              </div>
-            ))}
+                  {pick.upstream_asset_names.length > 0 && (
+                    <div className="mt-1 pl-7 text-xs text-gray-500">
+                      from: <span className="font-mono">{pick.upstream_asset_names.join(', ')}</span>
+                    </div>
+                  )}
+                  {pick.reason && (
+                    <div className="mt-1 pl-7 text-xs text-gray-500 italic">{pick.reason}</div>
+                  )}
+                  {configEntries.length > 0 && (
+                    <div className="mt-1 pl-7 text-[11px] font-mono text-gray-600 bg-gray-50 rounded px-2 py-1 space-y-0.5">
+                      {configEntries.map(([k, v]) => (
+                        <div key={k} className="truncate" title={`${k}: ${JSON.stringify(v)}`}>
+                          <span className="text-gray-500">{k}</span>
+                          {': '}
+                          <span className="text-gray-800">
+                            {typeof v === 'string' ? v : JSON.stringify(v)}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
             {plan.notes.length > 0 && (
-              <div className="px-4 py-2 bg-amber-50 border-t border-amber-100 text-xs text-amber-800 space-y-0.5">
-                {plan.notes.map((n, i) => (
-                  <div key={i}>{n}</div>
-                ))}
+              <div className="px-4 py-2 bg-gray-50 border-t border-gray-100 text-xs space-y-0.5">
+                {plan.notes.map((n, i) => {
+                  const isInfo = n.startsWith('ℹ');
+                  return (
+                    <div key={i} className={isInfo ? 'text-gray-600' : 'text-amber-700'}>
+                      {n}
+                    </div>
+                  );
+                })}
               </div>
             )}
           </div>
