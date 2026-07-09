@@ -323,6 +323,12 @@ def _try_dbt_show_preview(asset_key: str, row_limit: int = 100):
 
 def create_mock_context():
     """Create a mock context for asset execution."""
+    class SimpleMockRun:
+        # Sink components (e.g. dataframe_to_csv) render output paths with
+        # `context.run.run_id` — we hand them a stable placeholder so preview
+        # doesn't crash and the on-disk file doesn't collide with real runs.
+        run_id = "preview"
+
     class SimpleMockContext:
         def __init__(self):
             self.log = self.SimpleLogger()
@@ -330,6 +336,8 @@ def create_mock_context():
             self.partition_key = None
             self._output_metadata = {}
             self.resources = {}
+            self.run = SimpleMockRun()
+            self.run_id = "preview"
 
         def add_output_metadata(self, metadata, output_name=None):
             if output_name:
