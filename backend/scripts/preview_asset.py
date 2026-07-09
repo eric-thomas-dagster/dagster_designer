@@ -429,20 +429,37 @@ def execute_asset_dependencies(defs, asset_key: str, executed_results: dict, vis
             has_var_keyword = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
 
             if has_var_keyword:
-                # Function accepts **kwargs - pass all executed results
                 for exec_key, exec_result in executed_results.items():
                     param_name = exec_key.replace('/', '_')
                     kwargs[param_name] = exec_result
             else:
-                # Function has specific parameters - match them individually
-                for param_name in sig.parameters:
-                    if param_name == 'context':
-                        continue
-                    # Look for this param in executed results
-                    for exec_key, exec_result in executed_results.items():
+                # Same three-pass matching as the main branch — name match,
+                # slash-normalized name match, then positional fallback so
+                # community components with generic param names (`upstream`,
+                # `df`, `input`) still receive their single upstream.
+                non_ctx_params = [
+                    p for p in sig.parameters
+                    if p != 'context' and sig.parameters[p].kind not in (
+                        inspect.Parameter.VAR_POSITIONAL,
+                        inspect.Parameter.VAR_KEYWORD,
+                    )
+                ]
+                unassigned_params = list(non_ctx_params)
+                unassigned_results = dict(executed_results)
+                for param_name in list(unassigned_params):
+                    for exec_key, exec_result in list(unassigned_results.items()):
                         if param_name == exec_key.replace('/', '_') or param_name == exec_key:
                             kwargs[param_name] = exec_result
+                            unassigned_params.remove(param_name)
+                            unassigned_results.pop(exec_key)
                             break
+                for param_name in list(unassigned_params):
+                    if not unassigned_results:
+                        break
+                    exec_key, exec_result = next(iter(unassigned_results.items()))
+                    kwargs[param_name] = exec_result
+                    unassigned_params.remove(param_name)
+                    unassigned_results.pop(exec_key)
 
             result = func(context, **kwargs)
             executed_results[asset_key] = result
@@ -613,15 +630,42 @@ def main():
                     param_name = exec_key.replace('/', '_')
                     kwargs[param_name] = exec_result
             else:
-                # Function has specific parameters - match them individually
-                for param_name in sig.parameters:
-                    if param_name == 'context':
-                        continue
-                    # Look for this param in executed results
-                    for exec_key, exec_result in executed_results.items():
+                # Function has specific parameters — try three matching passes:
+                # 1. Name matches asset key exactly
+                # 2. Name matches asset key with slashes → underscores
+                # 3. Fallback for community components: parameter names like
+                #    `upstream` / `input` / `df` are generic and don't match
+                #    the asset key. Positionally assign the remaining
+                #    executed_results to remaining non-context parameters in
+                #    the order Dagster's Ins would have — reasonable for the
+                #    one-upstream case; unreliable for many-upstream but
+                #    beats crashing with "missing 1 required positional".
+                non_ctx_params = [
+                    p for p in sig.parameters
+                    if p != 'context' and sig.parameters[p].kind not in (
+                        inspect.Parameter.VAR_POSITIONAL,
+                        inspect.Parameter.VAR_KEYWORD,
+                    )
+                ]
+                unassigned_params = list(non_ctx_params)
+                unassigned_results = dict(executed_results)
+
+                for param_name in list(unassigned_params):
+                    for exec_key, exec_result in list(unassigned_results.items()):
                         if param_name == exec_key.replace('/', '_') or param_name == exec_key:
                             kwargs[param_name] = exec_result
+                            unassigned_params.remove(param_name)
+                            unassigned_results.pop(exec_key)
                             break
+
+                # Positional fallback for whatever's left.
+                for param_name in list(unassigned_params):
+                    if not unassigned_results:
+                        break
+                    exec_key, exec_result = next(iter(unassigned_results.items()))
+                    kwargs[param_name] = exec_result
+                    unassigned_params.remove(param_name)
+                    unassigned_results.pop(exec_key)
 
             # Execute the asset
             try:
