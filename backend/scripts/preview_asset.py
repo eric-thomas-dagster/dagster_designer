@@ -18,6 +18,102 @@ warnings.filterwarnings('ignore')
 _MULTIKEY_SENTINEL = object()
 
 
+def _try_sql_transformer_output_preview(project_module: str, asset_key: str, row_limit: int = 100):
+    """If this asset was created by SqlTransformerComponent, we know exactly
+    which table it wrote — read `defs.yaml` and query it directly. This is
+    the correct preview path for our in-warehouse transforms: no dbt CLI,
+    no heuristic table-name guessing.
+
+    Returns a preview dict on success, None if the asset isn't a
+    SqlTransformer (so callers can fall back to other strategies).
+    """
+    import yaml
+    from pathlib import Path as _Path
+
+    # defs.yaml lives at <project_module>/defs/<asset_key_normalized>/defs.yaml
+    # Search a couple of common project layouts.
+    asset_dir = asset_key.replace('/', '_')
+    candidates = [
+        _Path(f"projects/{project_module}/src/{project_module}/defs/{asset_dir}/defs.yaml"),
+        _Path(f"projects/{project_module}/src/{project_module}/defs/{asset_key}/defs.yaml"),
+        _Path(f"{project_module}/defs/{asset_dir}/defs.yaml"),
+    ]
+    defs_yaml_path = next((p for p in candidates if p.exists()), None)
+    if defs_yaml_path is None:
+        return None
+
+    try:
+        cfg = yaml.safe_load(defs_yaml_path.read_text()) or {}
+    except Exception:
+        return None
+
+    component_type = str(cfg.get('type', ''))
+    if 'SqlTransformerComponent' not in component_type:
+        return None
+
+    attrs = cfg.get('attributes') or {}
+    output_schema = attrs.get('output_schema', 'main')
+    output_name = attrs.get('asset_name') or asset_key.rsplit('/', 1)[-1]
+
+    # Reuse the SqlTransformer's own connection resolver so we hit the exact
+    # same warehouse file/URL the component wrote to (no CWD divergence).
+    try:
+        import importlib
+        st_mod = importlib.import_module(f"{project_module}.dagster_designer_components.sql_transformer")
+        resolve = getattr(st_mod, '_resolve_engine')
+    except Exception:
+        return None
+
+    conn_cfg = {
+        'connection_url': attrs.get('connection_url'),
+        'connection_url_env_var': attrs.get('connection_url_env_var'),
+    }
+    try:
+        engine = resolve(conn_cfg)
+    except Exception as e:
+        return {"success": False, "error": f"SqlTransformer preview: couldn't resolve engine: {e}"}
+
+    try:
+        from sqlalchemy import text
+        with engine.connect() as conn:
+            cursor = conn.execute(
+                text(f'SELECT * FROM "{output_schema}"."{output_name}" LIMIT {row_limit}')
+            )
+            rows = cursor.fetchall()
+            columns = list(cursor.keys())
+            try:
+                desc = conn.execute(text(f'DESCRIBE "{output_schema}"."{output_name}"')).fetchall()
+                dtypes = {r[0]: r[1] for r in desc if r[0] in columns}
+            except Exception:
+                dtypes = {c: '' for c in columns}
+    except Exception as e:
+        return {
+            "success": False,
+            "error": (
+                f"SqlTransformer output table \"{output_schema}\".\"{output_name}\" "
+                f"couldn't be read: {e}. Click Run to here to materialize it first."
+            ),
+        }
+
+    data = [
+        {
+            columns[i]: (v if _json_safe(v) else str(v))
+            for i, v in enumerate(row)
+        }
+        for row in rows
+    ]
+    return {
+        "success": True,
+        "data": data,
+        "columns": columns,
+        "dtypes": dtypes,
+        "row_count": len(rows),
+        "column_count": len(columns),
+        "shape": [len(rows), len(columns)],
+        "source": f"SqlTransformer:{output_schema}.{output_name}",
+    }
+
+
 def _try_duckdb_preview(asset_key: str, row_limit: int = 100):
     """For dbt-on-DuckDB projects (Jaffle Shop, etc.): after `dg launch` has
     materialized the asset, the data lives in a `.duckdb` file the dbt profile
@@ -581,9 +677,15 @@ def main():
                 # Asset function returned None. This is the normal case for
                 # in-warehouse transforms (SqlTransformerComponent's asset
                 # does CREATE TABLE AS SELECT with no return value) and for
-                # sink components that write to disk. Fall back to reading
-                # the materialized data — first from DuckDB (fast), then via
-                # `dbt show` if a dbt profile is nearby.
+                # sink components that write to disk. Try, in order:
+                #   1. SqlTransformer-specific direct read (knows the exact
+                #      output_schema.asset_name from defs.yaml, no guessing)
+                #   2. DuckDB fast path (glob + naming heuristic)
+                #   3. `dbt show` if a dbt profile is nearby (last resort)
+                sql_r = _try_sql_transformer_output_preview(project_module, asset_key)
+                if sql_r is not None:
+                    print(json.dumps(sql_r))
+                    sys.exit(0)
                 duck = _try_duckdb_preview(asset_key)
                 if duck is not None:
                     print(json.dumps(duck))
