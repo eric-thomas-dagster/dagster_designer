@@ -32,6 +32,12 @@ interface ProjectStore {
   pollDependencyStatus: (projectId: string) => Promise<void>;
 }
 
+// Module-scoped debounce timer for auto-saving graph changes (positions,
+// edges) back to the backend. Positions are UI state that must persist —
+// without this, arranging + reloading loses the arrangement.
+let _graphSaveTimer: ReturnType<typeof setTimeout> | null = null;
+const GRAPH_SAVE_DELAY_MS = 1500;
+
 export const useProjectStore = create<ProjectStore>((set, get) => ({
   currentProject: null,
   projects: [],
@@ -140,21 +146,29 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   },
 
   updateGraph: async (nodes: GraphNode[], edges: GraphEdge[]) => {
-    console.log('[useProject] updateGraph called with', nodes.length, 'nodes');
     const { currentProject } = get();
-    if (!currentProject) {
-      console.log('[useProject] No current project, skipping update');
-      return;
-    }
+    if (!currentProject) return;
 
-    // Only update local state - save will be triggered manually via Save button
+    // Update local state immediately.
     const updatedProject = {
       ...currentProject,
       graph: { nodes, edges },
     };
-
-    console.log('[useProject] Updating project state');
     set({ currentProject: updatedProject });
+
+    // Debounced auto-save to backend so node positions, custom edges, etc.
+    // survive reloads. Coalesces rapid consecutive edits (e.g. drag events,
+    // arrangeGroups laying out dozens of nodes) into a single PUT.
+    if (_graphSaveTimer) clearTimeout(_graphSaveTimer);
+    _graphSaveTimer = setTimeout(async () => {
+      const latest = get().currentProject;
+      if (!latest || latest.id !== updatedProject.id) return;
+      try {
+        await projectsApi.update(latest.id, { graph: latest.graph });
+      } catch (e) {
+        console.warn('[useProject] Failed to auto-save graph:', e);
+      }
+    }, GRAPH_SAVE_DELAY_MS);
   },
 
   updateComponents: async (components: ComponentInstance[]) => {
