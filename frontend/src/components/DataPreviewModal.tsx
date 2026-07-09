@@ -1,8 +1,9 @@
 import React, { useState, useMemo } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu';
-import { X, AlertCircle, Table as TableIcon, Wand2, Save, Filter, Columns3, Trash2, Eye, EyeOff, ChevronDown, ChevronRight, SortAsc, SortDesc, Sigma, Group, Calculator, Type, ArrowDownUp, RotateCw } from 'lucide-react';
+import { X, AlertCircle, Table as TableIcon, Wand2, Save, Filter, Columns3, Trash2, Eye, EyeOff, ChevronDown, ChevronRight, SortAsc, SortDesc, Sigma, Group, Calculator, ArrowDownUp, RotateCw } from 'lucide-react';
 import { assetsApi, type AssetDataPreview } from '@/services/api';
+import { notify } from './Notifications';
 
 interface DataPreviewModalProps {
   isOpen: boolean;
@@ -700,7 +701,7 @@ export function DataPreviewModal({
 
   const handleSaveAsNewAsset = async () => {
     if (!newAssetName.trim()) {
-      alert('Please enter a name for the new asset');
+      notify.error('Please enter a name for the new asset');
       return;
     }
 
@@ -721,8 +722,8 @@ export function DataPreviewModal({
         stringOperations: stringOperations.length > 0 ? stringOperations : null,
         stringReplace: null, // TODO: Add UI
         calculatedColumns: Object.keys(calculatedColumns).length > 0 ? calculatedColumns : null,
-        pivotConfig: pivotConfig,
-        unpivotConfig: unpivotConfig
+        pivotConfig: pivotConfig as { index: string; columns: string; values: string; aggfunc: string } | null,
+        unpivotConfig: unpivotConfig as { id_vars: string[]; value_vars: string[]; var_name: string; value_name: string } | null,
       };
 
       // Call API to create new transformer asset
@@ -739,10 +740,10 @@ export function DataPreviewModal({
         onTransformerCreated(updatedProject);
       }
 
-      alert(`Successfully created new asset: ${newAssetName}`);
+      notify.success(`Successfully created new asset: ${newAssetName}`);
       handleClose();
     } catch (err: any) {
-      alert(`Failed to create asset: ${err.message}`);
+      notify.error(`Failed to create asset: ${err.message}`);
     } finally {
       setSaving(false);
     }
@@ -1416,10 +1417,10 @@ export function DataPreviewModal({
                                           type="checkbox"
                                           checked={unpivotConfig?.id_vars?.includes(col) || false}
                                           onChange={(e) => {
-                                            const currentIdVars = unpivotConfig?.id_vars || [];
+                                            const currentIdVars: string[] = unpivotConfig?.id_vars || [];
                                             const newIdVars = e.target.checked
                                               ? [...currentIdVars, col]
-                                              : currentIdVars.filter(c => c !== col);
+                                              : currentIdVars.filter((c: string) => c !== col);
                                             setUnpivotConfig({ ...unpivotConfig, id_vars: newIdVars });
                                           }}
                                           className="w-3 h-3 text-green-600 rounded"
@@ -1438,10 +1439,10 @@ export function DataPreviewModal({
                                           type="checkbox"
                                           checked={unpivotConfig?.value_vars?.includes(col) || false}
                                           onChange={(e) => {
-                                            const currentValueVars = unpivotConfig?.value_vars || [];
+                                            const currentValueVars: string[] = unpivotConfig?.value_vars || [];
                                             const newValueVars = e.target.checked
                                               ? [...currentValueVars, col]
-                                              : currentValueVars.filter(c => c !== col);
+                                              : currentValueVars.filter((c: string) => c !== col);
                                             setUnpivotConfig({ ...unpivotConfig, value_vars: newValueVars });
                                           }}
                                           className="w-3 h-3 text-green-600 rounded"

@@ -1,9 +1,10 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import * as Tabs from '@radix-ui/react-tabs';
 import * as Dialog from '@radix-ui/react-dialog';
 import Editor from '@monaco-editor/react';
 import { Launchpad } from './Launchpad';
+import { notify } from './Notifications';
 import {
   Clock,
   Play,
@@ -20,11 +21,18 @@ import { primitivesApi, pipelinesApi, type PrimitiveCategory, type PrimitiveItem
 import { useProjectStore } from '@/hooks/useProject';
 
 interface PrimitivesManagerProps {
-  onNavigateToTemplates?: () => void;
+  onNewPrimitive?: (category: string) => void;
   onOpenFile?: (filePath: string) => void;
+  openPrimitive?: { category: string; name: string } | null;
+  onOpenPrimitiveConsumed?: () => void;
 }
 
-export function PrimitivesManager({ onNavigateToTemplates, onOpenFile }: PrimitivesManagerProps = {}) {
+export function PrimitivesManager({
+  onNewPrimitive,
+  onOpenFile,
+  openPrimitive,
+  onOpenPrimitiveConsumed,
+}: PrimitivesManagerProps = {}) {
   const { currentProject } = useProjectStore();
   const [activeTab, setActiveTab] = useState<PrimitiveCategory>('schedule');
   const [selectedPrimitive, setSelectedPrimitive] = useState<PrimitiveItem | null>(null);
@@ -92,14 +100,18 @@ export function PrimitivesManager({ onNavigateToTemplates, onOpenFile }: Primiti
   const handleSearchAndOpen = async (primitiveType: string, name: string, filePath?: string) => {
     if (!currentProject) return;
 
-    // If the primitive is defined in a YAML file (e.g., defs.yaml), open it directly
-    // The file path from dg list defs is relative to the project directory
-    if (filePath && (filePath.includes('.yaml') || filePath.includes('.yml'))) {
-      if (onOpenFile) {
-        // Pass relative path to onOpenFile - the backend will resolve it
-        onOpenFile(filePath);
+    // For asset checks, always go through the backend search — it knows how to
+    // resolve dbt-derived checks to their real location in the dbt project's
+    // schema.yml (dg list defs' `source` for dbt checks points at the empty
+    // component defs.yaml, which is not useful).
+    if (primitiveType !== 'asset_check') {
+      // If the primitive is defined in a YAML file (e.g., defs.yaml), open it directly.
+      if (filePath && (filePath.includes('.yaml') || filePath.includes('.yml'))) {
+        if (onOpenFile) {
+          onOpenFile(filePath);
+        }
+        return;
       }
-      return;
     }
 
     // For Python-based primitives, search for the definition
@@ -117,11 +129,11 @@ export function PrimitivesManager({ onNavigateToTemplates, onOpenFile }: Primiti
           : result.file_path;
         onOpenFile(fullFilePath);
       } else {
-        alert(`Could not find source code for ${name}`);
+        notify.error(`Could not find source code for ${name}`);
       }
     } catch (error) {
       console.error('Failed to search for primitive:', error);
-      alert('Failed to search for source code');
+      notify.error('Failed to search for source code');
     }
   };
 
@@ -135,9 +147,9 @@ export function PrimitivesManager({ onNavigateToTemplates, onOpenFile }: Primiti
     try {
       const result = await pipelinesApi.launch(currentProject.id, selectedJobName, config, tags);
       if (result.success) {
-        alert(`Job ${selectedJobName} launched successfully!`);
+        notify.success(`Job ${selectedJobName} launched successfully!`);
       } else {
-        alert(`Failed to launch job ${selectedJobName}`);
+        notify.error(`Failed to launch job ${selectedJobName}`);
       }
     } catch (error) {
       console.error('Launch failed:', error);
@@ -191,6 +203,28 @@ export function PrimitivesManager({ onNavigateToTemplates, onOpenFile }: Primiti
     return [...managed, ...discovered];
   };
 
+  // When a badge is clicked in the asset graph, switch to the right category
+  // and open the details modal for that primitive.
+  useEffect(() => {
+    if (!openPrimitive || !currentProject) return;
+    const { category, name } = openPrimitive;
+    const validCategories: PrimitiveCategory[] = ['schedule', 'job', 'sensor', 'asset_check', 'freshness_policy'];
+    if (!validCategories.includes(category as PrimitiveCategory)) {
+      onOpenPrimitiveConsumed?.();
+      return;
+    }
+    setActiveTab(category as PrimitiveCategory);
+    const items = getMergedPrimitives(category as PrimitiveCategory);
+    const match = items.find((p) => p.name === name);
+    if (match) {
+      setSelectedPrimitive(match);
+      setDetailsOpen(true);
+    } else {
+      notify.info(`Couldn't find ${category} "${name}" — it may not be discovered yet. Try refreshing.`);
+    }
+    onOpenPrimitiveConsumed?.();
+  }, [openPrimitive?.category, openPrimitive?.name, currentProject?.id]);
+
   const renderPrimitivesList = (primitives: Array<PrimitiveItem & { isManaged: boolean }>, category: PrimitiveCategory) => {
     if (!primitives || primitives.length === 0) {
       return (
@@ -199,10 +233,10 @@ export function PrimitivesManager({ onNavigateToTemplates, onOpenFile }: Primiti
             <p className="text-sm font-medium mb-2">No {category}s found</p>
             <p className="text-xs text-gray-600 mb-4">Create a new {category} to get started</p>
             <button
-              onClick={() => onNavigateToTemplates?.()}
-              className="inline-flex items-center px-3 py-2 text-sm font-medium text-white bg-blue-600 rounded-md hover:bg-blue-700"
+              onClick={() => onNewPrimitive?.(category)}
+              className="inline-flex items-center px-3 py-2 text-sm font-medium text-white bg-primary rounded-md hover:bg-accent"
             >
-              Go to Templates Tab →
+              New {category}
             </button>
           </div>
         </div>
@@ -331,49 +365,46 @@ export function PrimitivesManager({ onNavigateToTemplates, onOpenFile }: Primiti
       >
         <div className="flex items-center justify-between border-b border-gray-200 bg-white">
           <Tabs.List className="flex">
-          <Tabs.Trigger
-            value="schedule"
-            className="flex items-center space-x-2 px-4 py-3 text-sm text-gray-600 hover:text-gray-900 border-b-2 border-transparent data-[state=active]:border-blue-600 data-[state=active]:text-blue-600"
-          >
-            <Clock className="w-4 h-4" />
-            <span>Schedules</span>
-          </Tabs.Trigger>
-          <Tabs.Trigger
-            value="job"
-            className="flex items-center space-x-2 px-4 py-3 text-sm text-gray-600 hover:text-gray-900 border-b-2 border-transparent data-[state=active]:border-blue-600 data-[state=active]:text-blue-600"
-          >
-            <Play className="w-4 h-4" />
-            <span>Jobs</span>
-          </Tabs.Trigger>
-          <Tabs.Trigger
-            value="sensor"
-            className="flex items-center space-x-2 px-4 py-3 text-sm text-gray-600 hover:text-gray-900 border-b-2 border-transparent data-[state=active]:border-blue-600 data-[state=active]:text-blue-600"
-          >
-            <Radar className="w-4 h-4" />
-            <span>Sensors</span>
-          </Tabs.Trigger>
-          <Tabs.Trigger
-            value="asset_check"
-            className="flex items-center space-x-2 px-4 py-3 text-sm text-gray-600 hover:text-gray-900 border-b-2 border-transparent data-[state=active]:border-blue-600 data-[state=active]:text-blue-600"
-          >
-            <CheckCircle className="w-4 h-4" />
-            <span>Asset Checks</span>
-          </Tabs.Trigger>
-          <Tabs.Trigger
-            value="freshness_policy"
-            className="flex items-center space-x-2 px-4 py-3 text-sm text-gray-600 hover:text-gray-900 border-b-2 border-transparent data-[state=active]:border-blue-600 data-[state=active]:text-blue-600"
-          >
-            <Timer className="w-4 h-4" />
-            <span>Freshness Policies</span>
-          </Tabs.Trigger>
+          {([
+            { value: 'schedule', label: 'Schedules', Icon: Clock },
+            { value: 'job', label: 'Jobs', Icon: Play },
+            { value: 'sensor', label: 'Sensors', Icon: Radar },
+            { value: 'asset_check', label: 'Asset Checks', Icon: CheckCircle },
+            { value: 'freshness_policy', label: 'Freshness Policies', Icon: Timer },
+          ] as const).map(({ value, label, Icon }) => {
+            const count = getMergedPrimitives(value as PrimitiveCategory).length;
+            return (
+              <Tabs.Trigger
+                key={value}
+                value={value}
+                className="flex items-center gap-2 px-4 py-3 text-sm text-gray-600 hover:text-gray-900 border-b-2 border-transparent data-[state=active]:border-primary data-[state=active]:text-primary"
+              >
+                <Icon className="w-4 h-4" />
+                <span>{label}</span>
+                {count > 0 && (
+                  <span className="text-xs text-gray-400 data-[state=active]:text-primary">{count}</span>
+                )}
+              </Tabs.Trigger>
+            );
+          })}
         </Tabs.List>
-          <button
-            onClick={() => refetch()}
-            className="flex items-center space-x-1 px-3 py-2 text-sm text-gray-600 hover:bg-gray-100 rounded"
-            title="Refresh"
-          >
-            <RefreshCw className="w-4 h-4" />
-          </button>
+          <div className="flex items-center gap-1 pr-3">
+            <button
+              onClick={() => onNewPrimitive?.(activeTab)}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-primary-foreground bg-primary rounded-md hover:bg-accent transition-colors"
+              title={`Create a new ${activeTab.replace(/_/g, ' ')}`}
+            >
+              <span className="text-base leading-none">+</span>
+              <span>New {activeTab.replace(/_/g, ' ')}</span>
+            </button>
+            <button
+              onClick={() => refetch()}
+              className="flex items-center space-x-1 px-2 py-1.5 text-sm text-gray-600 hover:bg-gray-100 rounded"
+              title="Refresh"
+            >
+              <RefreshCw className="w-4 h-4" />
+            </button>
+          </div>
       </div>
 
         <Tabs.Content value="schedule" className="flex-1 overflow-y-auto">

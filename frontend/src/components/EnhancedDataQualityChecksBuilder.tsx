@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { Plus, Trash2, ChevronDown, ChevronRight, AlertCircle } from 'lucide-react';
+import { notify } from './Notifications';
 
 interface CheckConfig {
   id: string;
@@ -45,7 +46,7 @@ export function EnhancedDataQualityChecksBuilder({ assets, onConfigChange }: Pro
       (a) => !assetChecks.some((ac) => ac.assetName === a)
     );
     if (availableAssets.length === 0) {
-      alert('All assets have checks configured');
+      notify.info('All assets have checks configured');
       return;
     }
 

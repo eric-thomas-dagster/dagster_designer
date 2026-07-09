@@ -1,6 +1,6 @@
 import { memo } from 'react';
 import { Handle, Position, NodeProps } from 'reactflow';
-import { Layers, Database, Tag, Users, CheckCircle, X, Wand2, Search, Package } from 'lucide-react';
+import { Layers, Database, Users, CheckCircle, X, Wand2, Search, Package, AlertTriangle, Zap, Clock, Play, Radar } from 'lucide-react';
 
 // Icon mapping for component icons
 const componentIconMap: Record<string, any> = {
@@ -17,6 +17,20 @@ export const AssetNode = memo(({ data, selected, id }: NodeProps) => {
   const hasDescription = data.description && data.description.length > 0;
   const hasChecks = data.checks && data.checks.length > 0;
   const isSelected = selected;
+
+  // Detect incomplete config — the AI (or a user) may have left TODO_* placeholders
+  // for fields it couldn't infer (file_path, connection_string, etc.). Flag these
+  // so the graph shows them clearly rather than silently failing at Dagster load.
+  const incompleteFields: string[] = [];
+  const attrs = data.component_attributes;
+  if (attrs && typeof attrs === 'object') {
+    for (const [k, v] of Object.entries(attrs)) {
+      if (typeof v === 'string' && v.startsWith('TODO_')) {
+        incompleteFields.push(k);
+      }
+    }
+  }
+  const isIncomplete = incompleteFields.length > 0;
 
   // Detect if we're in pipeline builder mode (vertical layout with delete button)
   const isPipelineBuilder = !!data.onDelete;
@@ -58,12 +72,20 @@ export const AssetNode = memo(({ data, selected, id }: NodeProps) => {
 
   return (
     <div
-      className={`relative shadow-md rounded-md bg-gradient-to-br from-purple-50 to-blue-50 min-w-[140px] max-w-[200px] ${
+      className={`relative shadow-sm rounded-md bg-white min-w-[160px] max-w-[220px] transition-shadow hover:shadow-md ${
         isSelected
-          ? 'border-2 border-green-500 ring-2 ring-green-200'
-          : 'border border-purple-400'
+          ? 'border-2 border-primary ring-2 ring-primary/20'
+          : isIncomplete
+          ? 'border-2 border-amber-500 ring-1 ring-amber-200'
+          : 'border border-gray-200'
       }`}
-      title={hasDescription ? data.description : ''}
+      title={
+        isIncomplete
+          ? `Needs config: ${incompleteFields.join(', ')}`
+          : hasDescription
+          ? data.description
+          : ''
+      }
     >
       {/* Delete button */}
       {data.onDelete && (
@@ -97,7 +119,7 @@ export const AssetNode = memo(({ data, selected, id }: NodeProps) => {
       )}
 
       {/* Header with asset icon and key */}
-      <div className="px-2 py-1.5 bg-gradient-to-r from-purple-500 to-blue-500 rounded-t-md">
+      <div className={`px-2 py-1.5 rounded-t-md ${isIncomplete ? 'bg-amber-500' : 'bg-primary'}`}>
         <div className="flex items-center space-x-1.5">
           <div className="flex-shrink-0">
             <Layers className="w-3.5 h-3.5 text-white" />
@@ -107,6 +129,14 @@ export const AssetNode = memo(({ data, selected, id }: NodeProps) => {
               {data.asset_key || data.label}
             </div>
           </div>
+          {isIncomplete && (
+            <div
+              className="flex-shrink-0"
+              title={`Needs config: ${incompleteFields.join(', ')}`}
+            >
+              <AlertTriangle className="w-3.5 h-3.5 text-white" />
+            </div>
+          )}
         </div>
       </div>
 
@@ -131,6 +161,15 @@ export const AssetNode = memo(({ data, selected, id }: NodeProps) => {
 
         {/* Metadata badges (facets) */}
         <div className="flex flex-wrap gap-1 pt-0.5">
+          {isIncomplete && (
+            <div
+              className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-medium bg-amber-100 text-amber-800 border border-amber-300"
+              title={`Missing required config: ${incompleteFields.join(', ')}`}
+            >
+              <AlertTriangle className="w-2.5 h-2.5" />
+              <span>Needs config</span>
+            </div>
+          )}
           {/* Group badge - only show if not "default" */}
           {hasGroup && data.group_name !== 'default' && (
             <div
@@ -170,14 +209,95 @@ export const AssetNode = memo(({ data, selected, id }: NodeProps) => {
             );
           })()}
 
-          {/* Asset checks badge */}
+          {/* Asset checks badge — clickable */}
           {hasChecks && (
-            <div
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                const firstCheck = data.checks[0];
+                const name = typeof firstCheck === 'string' ? firstCheck : firstCheck?.name;
+                if (name) data.onPrimitiveClick?.('asset_check', name);
+              }}
               className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-medium bg-orange-100 text-orange-700 border border-orange-300 cursor-pointer hover:bg-orange-200"
               title={`${data.checks.length} check${data.checks.length !== 1 ? 's' : ''}`}
             >
               <CheckCircle className="w-2.5 h-2.5" />
               <span>{data.checks.length}</span>
+            </button>
+          )}
+
+          {/* Jobs badge — clickable */}
+          {data.jobs && data.jobs.length > 0 && (
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                data.onPrimitiveClick?.('job', data.jobs![0]);
+              }}
+              className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-medium bg-indigo-100 text-indigo-700 border border-indigo-300 hover:bg-indigo-200 cursor-pointer"
+              title={data.jobs.length === 1 ? `Job: ${data.jobs[0]}` : `Jobs: ${data.jobs.join(', ')}`}
+            >
+              <Play className="w-2.5 h-2.5" />
+              <span>{data.jobs.length}</span>
+            </button>
+          )}
+
+          {/* Schedules badge — clickable */}
+          {data.schedules && data.schedules.length > 0 && (
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                data.onPrimitiveClick?.('schedule', data.schedules![0]);
+              }}
+              className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-medium bg-sky-100 text-sky-700 border border-sky-300 hover:bg-sky-200 cursor-pointer"
+              title={data.schedules.length === 1 ? `Schedule: ${data.schedules[0]}` : `Schedules: ${data.schedules.join(', ')}`}
+            >
+              <Clock className="w-2.5 h-2.5" />
+              <span>{data.schedules.length}</span>
+            </button>
+          )}
+
+          {/* Sensors badge — clickable */}
+          {data.sensors && data.sensors.length > 0 && (
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                data.onPrimitiveClick?.('sensor', data.sensors![0]);
+              }}
+              className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-medium bg-fuchsia-100 text-fuchsia-700 border border-fuchsia-300 hover:bg-fuchsia-200 cursor-pointer"
+              title={data.sensors.length === 1 ? `Sensor: ${data.sensors[0]}` : `Sensors: ${data.sensors.join(', ')}`}
+            >
+              <Radar className="w-2.5 h-2.5" />
+              <span>{data.sensors.length}</span>
+            </button>
+          )}
+
+          {/* Kinds — small tech tags (dbt, duckdb, python, etc.) */}
+          {(data.kinds || []).slice(0, 3).map((kind: string) => (
+            <div
+              key={kind}
+              className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-slate-100 text-slate-700 border border-slate-300"
+              title={`Kind: ${kind}`}
+            >
+              {kind}
+            </div>
+          ))}
+          {(data.kinds || []).length > 3 && (
+            <div
+              className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-slate-100 text-slate-600 border border-slate-300"
+              title={data.kinds.slice(3).join(', ')}
+            >
+              +{data.kinds.length - 3}
+            </div>
+          )}
+
+          {/* Automation condition badge */}
+          {data.automation_condition && (
+            <div
+              className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-medium bg-emerald-100 text-emerald-700 border border-emerald-300"
+              title={typeof data.automation_condition === 'string' ? data.automation_condition : JSON.stringify(data.automation_condition)}
+            >
+              <Zap className="w-2.5 h-2.5" />
+              <span>auto</span>
             </div>
           )}
 

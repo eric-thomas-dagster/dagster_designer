@@ -98,9 +98,12 @@ module_name = "{project_name}_defs"
         if post_processing:
             yaml_data["post_processing"] = post_processing
 
-        # Write YAML file
+        # Write YAML file. Some labels contain slashes (dbt asset keys like
+        # `seeds/raw_customers`) — treat as nested path and ensure parent dirs
+        # exist before writing.
         filename = f"{self._sanitize_name(label)}.yaml"
         output_file = output_dir / filename
+        output_file.parent.mkdir(parents=True, exist_ok=True)
 
         with open(output_file, "w") as f:
             yaml.dump(yaml_data, f, default_flow_style=False, sort_keys=False)

@@ -1,5 +1,4 @@
 import { useState, useEffect } from 'react';
-import { useProjectStore } from '@/hooks/useProject';
 import { dagsterApi, AssetInfo } from '@/services/api';
 import { RefreshCw, CheckCircle, XCircle, AlertCircle, Loader } from 'lucide-react';
 

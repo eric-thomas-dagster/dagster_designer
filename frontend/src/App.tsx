@@ -3,6 +3,7 @@ import * as Tabs from '@radix-ui/react-tabs';
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu';
 import { useQueryClient, useQuery } from '@tanstack/react-query';
 import { GraphEditor } from './components/GraphEditor';
+import { Library } from './components/Library';
 import { ComponentPalette } from './components/ComponentPalette';
 import { ProjectComponentsList } from './components/ProjectComponentsList';
 import { ComponentConfigModal } from './components/ComponentConfigModal';
@@ -11,15 +12,206 @@ import { ProjectManager } from './components/ProjectManager';
 import { CodeEditor } from './components/CodeEditor';
 import { TemplateBuilder } from './components/TemplateBuilder';
 import { PrimitivesManager } from './components/PrimitivesManager';
-import { IntegrationCatalog } from './components/IntegrationCatalog';
 import { ResourcesManager } from './components/ResourcesManager';
 import { PipelineBuilder } from './components/PipelineBuilder';
 import { DagsterStartupModal } from './components/DagsterStartupModal';
 import { DataPreviewModal } from './components/DataPreviewModal';
+import { DagsterAIBar } from './components/DagsterAIBar';
+import { DagsterCloudChip } from './components/DagsterCloudChip';
+import { NotificationHost, notify, confirmDialog } from './components/Notifications';
 import { useProjectStore } from './hooks/useProject';
-import { Network, FileCode, Wand2, Zap, Package, ExternalLink, Settings, Workflow, ChevronDown, Skull, AlertTriangle, X, Loader2, CheckCircle, XCircle } from 'lucide-react';
+import { Network, FileCode, Zap, Package, ExternalLink, Settings, Workflow, ChevronDown, Skull, AlertTriangle, X, Loader2, CheckCircle, XCircle, PanelLeftClose, PanelLeft, Clock, Play, Radar, Timer } from 'lucide-react';
 import { dagsterUIApi, projectsApi, filesApi, primitivesApi } from './services/api';
 import type { ComponentInstance } from './types';
+
+function BrandMark() {
+  const [failed, setFailed] = useState(false);
+  if (!failed) {
+    return (
+      <img
+        src="/dagster-logo.svg"
+        alt="Dagster"
+        className="w-7 h-7 flex-shrink-0"
+        onError={() => setFailed(true)}
+      />
+    );
+  }
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      xmlns="http://www.w3.org/2000/svg"
+      className="w-7 h-7 rounded bg-primary p-1 flex-shrink-0"
+      aria-label="Dagster"
+    >
+      <rect x="3" y="4" width="12" height="3" rx="1" fill="white" />
+      <rect x="6" y="10.5" width="12" height="3" rx="1" fill="white" opacity="0.85" />
+      <rect x="3" y="17" width="12" height="3" rx="1" fill="white" opacity="0.7" />
+    </svg>
+  );
+}
+
+interface StatusStripProps {
+  dependencyInstallStatus: string;
+  dependencyInstallError: string | null;
+  dependencyInstallOutput: string | null;
+  onViewDependencyDetails: () => void;
+  onDismissDependency: () => void;
+  assetGenerationStatus: string;
+  assetGenerationError: string | null;
+  onDismissAssetGen: () => void;
+  validationStatus: string;
+  validationError: string | null;
+  onDismissValidation: () => void;
+  validationFallback: boolean;
+  onViewValidationDetails: () => void;
+  onDismissValidationFallback: () => void;
+  isValidating: boolean;
+}
+
+function StatusStrip(props: StatusStripProps) {
+  const items: Array<{
+    key: string;
+    kind: 'progress' | 'success' | 'error' | 'warning';
+    label: string;
+    detail?: string | null;
+    actionLabel?: string;
+    onAction?: () => void;
+    onDismiss?: () => void;
+    dismissable: boolean;
+  }> = [];
+
+  if (props.dependencyInstallStatus === 'installing') {
+    items.push({
+      key: 'dep-install',
+      kind: 'progress',
+      label: 'Installing dependencies',
+      detail: 'Usually seconds; up to a couple minutes if the uv cache is cold',
+      actionLabel: props.dependencyInstallOutput ? 'Details' : undefined,
+      onAction: props.dependencyInstallOutput ? props.onViewDependencyDetails : undefined,
+      dismissable: false,
+    });
+  } else if (props.dependencyInstallStatus === 'success') {
+    items.push({
+      key: 'dep-install',
+      kind: 'success',
+      label: 'Dependencies installed',
+      actionLabel: props.dependencyInstallOutput ? 'Details' : undefined,
+      onAction: props.dependencyInstallOutput ? props.onViewDependencyDetails : undefined,
+      onDismiss: props.onDismissDependency,
+      dismissable: true,
+    });
+  } else if (props.dependencyInstallStatus === 'error') {
+    items.push({
+      key: 'dep-install',
+      kind: 'error',
+      label: 'Dependency install failed',
+      detail: props.dependencyInstallError,
+      actionLabel: props.dependencyInstallOutput ? 'Details' : undefined,
+      onAction: props.dependencyInstallOutput ? props.onViewDependencyDetails : undefined,
+      onDismiss: props.onDismissDependency,
+      dismissable: true,
+    });
+  }
+
+  if (props.assetGenerationStatus === 'generating') {
+    items.push({
+      key: 'asset-gen',
+      kind: 'progress',
+      label: 'Generating assets',
+      detail: '30–180s for large projects',
+      dismissable: false,
+    });
+  } else if (props.assetGenerationStatus === 'success') {
+    items.push({
+      key: 'asset-gen',
+      kind: 'success',
+      label: 'Assets generated',
+      onDismiss: props.onDismissAssetGen,
+      dismissable: true,
+    });
+  } else if (props.assetGenerationStatus === 'error') {
+    items.push({
+      key: 'asset-gen',
+      kind: 'error',
+      label: 'Asset generation failed',
+      detail: props.assetGenerationError,
+      onDismiss: props.onDismissAssetGen,
+      dismissable: true,
+    });
+  }
+
+  if (props.validationStatus === 'validating') {
+    items.push({ key: 'validate', kind: 'progress', label: 'Validating project', dismissable: false });
+  } else if (props.validationStatus === 'error') {
+    items.push({
+      key: 'validate',
+      kind: 'error',
+      label: 'Validation failed',
+      detail: props.validationError,
+      onDismiss: props.onDismissValidation,
+      dismissable: true,
+    });
+  }
+
+  if (props.validationFallback) {
+    items.push({
+      key: 'validation-fallback',
+      kind: 'warning',
+      label: 'Project validation failed',
+      actionLabel: props.isValidating ? 'Loading…' : 'View details',
+      onAction: props.isValidating ? undefined : props.onViewValidationDetails,
+      onDismiss: props.onDismissValidationFallback,
+      dismissable: true,
+    });
+  }
+
+  if (items.length === 0) return null;
+
+  const kindStyles: Record<'progress' | 'success' | 'error' | 'warning', { icon: typeof Loader2; iconClass: string; badgeClass: string }> = {
+    progress: { icon: Loader2, iconClass: 'text-primary animate-spin', badgeClass: 'bg-primary/5 border-primary/20 text-gray-800' },
+    success: { icon: CheckCircle, iconClass: 'text-emerald-600', badgeClass: 'bg-emerald-50 border-emerald-200 text-emerald-900' },
+    error: { icon: XCircle, iconClass: 'text-red-600', badgeClass: 'bg-red-50 border-red-200 text-red-900' },
+    warning: { icon: AlertTriangle, iconClass: 'text-amber-600', badgeClass: 'bg-amber-50 border-amber-200 text-amber-900' },
+  };
+
+  return (
+    <div className="flex-shrink-0 border-t border-gray-200 bg-white px-4 py-1.5 flex items-center gap-2 overflow-x-auto">
+      {items.map((item) => {
+        const s = kindStyles[item.kind];
+        const Icon = s.icon;
+        return (
+          <div
+            key={item.key}
+            className={`flex items-center gap-2 px-2.5 py-1 rounded-md border text-xs ${s.badgeClass}`}
+          >
+            <Icon className={`w-3.5 h-3.5 flex-shrink-0 ${s.iconClass}`} />
+            <span className="font-medium whitespace-nowrap">{item.label}</span>
+            {item.detail && (
+              <span className="text-gray-500 truncate max-w-xs">{item.detail}</span>
+            )}
+            {item.actionLabel && item.onAction && (
+              <button
+                onClick={item.onAction}
+                className="underline hover:no-underline font-medium"
+              >
+                {item.actionLabel}
+              </button>
+            )}
+            {item.dismissable && item.onDismiss && (
+              <button
+                onClick={item.onDismiss}
+                className="text-gray-400 hover:text-gray-600"
+                aria-label="Dismiss"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
 
 function App() {
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
@@ -28,6 +220,15 @@ function App() {
   const [componentsPanelHeight, setComponentsPanelHeight] = useState(60); // Percentage
   const [isDragging, setIsDragging] = useState(false);
   const [activeMainTab, setActiveMainTab] = useState('assets');
+  const [templateBuilderTab, setTemplateBuilderTab] = useState<string | null>(null);
+  const [templateBuilderAssetKey, setTemplateBuilderAssetKey] = useState<string | null>(null);
+  const [primitiveToOpen, setPrimitiveToOpen] = useState<{ category: string; name: string } | null>(null);
+  const [navCollapsed, setNavCollapsed] = useState<boolean>(() => {
+    try { return localStorage.getItem('nav.collapsed') === '1'; } catch { return false; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem('nav.collapsed', navCollapsed ? '1' : '0'); } catch { /* ignore */ }
+  }, [navCollapsed]);
   const [dagsterUILoading, setDagsterUILoading] = useState(false);
   const [showDagsterStartupModal, setShowDagsterStartupModal] = useState(false);
   const [fileToOpen, setFileToOpen] = useState<string | null>(null);
@@ -44,7 +245,6 @@ function App() {
   const [dataPreviewComponentId, setDataPreviewComponentId] = useState<string | undefined>(undefined);
   const {
     currentProject,
-    updateComponents,
     assetGenerationStatus,
     assetGenerationError,
     dismissAssetGenerationStatus,
@@ -111,6 +311,64 @@ function App() {
     setDismissedValidationError(false);
   }, [currentProject?.id]);
 
+  const [isDeletingBroken, setIsDeletingBroken] = useState(false);
+
+  // Delete a list of component IDs from the project. Used from the validation
+  // dialog as an escape hatch when defs won't load (the graph is empty in that
+  // state, so users can't click nodes to delete them). After delete, re-run
+  // validation so the user sees whether the project now loads.
+  const handleDeleteBrokenComponents = async (componentIds: string[]) => {
+    if (!currentProject || !componentIds.length) return;
+    const label = componentIds.length === 1
+      ? `Delete component "${componentIds[0]}"?`
+      : `Delete ${componentIds.length} broken components?`;
+    const confirmed = await confirmDialog(
+      `${label}\n\nThis removes the component instance and its defs.yaml. You can add it back later.`,
+      { title: 'Delete broken components', destructive: true }
+    );
+    if (!confirmed) return;
+
+    setIsDeletingBroken(true);
+    let deleted = 0;
+    let failed: string[] = [];
+    for (const cid of componentIds) {
+      try {
+        await projectsApi.deleteComponentInstance(currentProject.id, cid);
+        deleted++;
+      } catch (e) {
+        console.error(`[Validation] Failed to delete ${cid}:`, e);
+        failed.push(cid);
+      }
+    }
+
+    try {
+      await useProjectStore.getState().loadProject(currentProject.id);
+    } catch (e) {
+      console.warn('Reload after delete failed:', e);
+    }
+
+    if (failed.length === 0) {
+      notify.success(`Deleted ${deleted} component${deleted === 1 ? '' : 's'}. Re-validating…`);
+    } else {
+      notify.warning(`Deleted ${deleted}; ${failed.length} failed: ${failed.join(', ')}`);
+    }
+
+    // Immediately re-validate so the dialog reflects the new state.
+    try {
+      const result = await projectsApi.validate(currentProject.id);
+      setValidationResult(result);
+      if (result.valid) {
+        setShowValidationDialog(false);
+        setDismissedValidationError(false);
+        notify.success('Project validates cleanly now.');
+      }
+    } catch (e) {
+      console.warn('Re-validate failed:', e);
+    } finally {
+      setIsDeletingBroken(false);
+    }
+  };
+
   // Handler to run validation and show detailed results
   const handleViewValidationDetails = async () => {
     if (!currentProject) return;
@@ -122,7 +380,7 @@ function App() {
       setShowValidationDialog(true);
     } catch (error) {
       console.error('Failed to validate project:', error);
-      alert('Failed to validate project. Check console for details.');
+      notify.error('Failed to validate project. Check console for details.');
     } finally {
       setIsValidating(false);
     }
@@ -260,7 +518,7 @@ function App() {
       await loadProject(currentProject.id);
     } catch (error) {
       console.error('Failed to save component:', error);
-      alert('Failed to save component. Check console for details.');
+      notify.error('Failed to save component. Check console for details.');
       return;
     }
 
@@ -300,8 +558,9 @@ function App() {
   const handleDeleteComponent = async (component: ComponentInstance) => {
     if (!currentProject) return;
 
-    const confirmed = window.confirm(
-      `Are you sure you want to delete "${component.label}"? This will remove the component and its definition files.`
+    const confirmed = await confirmDialog(
+      `Are you sure you want to delete "${component.label}"? This will remove the component and its definition files.`,
+      { title: 'Delete component', destructive: true }
     );
     if (!confirmed) return;
 
@@ -326,7 +585,7 @@ function App() {
       await loadProject(currentProject.id);
     } catch (error) {
       console.error('Failed to delete component:', error);
-      alert('Failed to delete component. Check console for details.');
+      notify.error('Failed to delete component. Check console for details.');
     }
   };
 
@@ -358,8 +617,9 @@ function App() {
   const handleKillAllDagsterProcesses = async () => {
     if (!currentProject) return;
 
-    const confirmed = window.confirm(
-      'This will kill all running Dagster processes. Are you sure?'
+    const confirmed = await confirmDialog(
+      'This will kill all running Dagster processes. Are you sure?',
+      { title: 'Kill Dagster processes', destructive: true }
     );
     if (!confirmed) return;
 
@@ -369,342 +629,141 @@ function App() {
       });
 
       if (response.ok) {
-        alert('All Dagster processes have been terminated.');
+        notify.success('All Dagster processes have been terminated.');
       } else {
         const error = await response.json();
         throw new Error(error.detail || 'Failed to kill processes');
       }
     } catch (error) {
       console.error('Failed to kill Dagster processes:', error);
-      alert('Failed to kill Dagster processes. Check console for details.');
+      notify.error('Failed to kill Dagster processes. Check console for details.');
     }
   };
 
+  const navItems = [
+    { value: 'assets', label: 'Assets', icon: Network },
+    { value: 'pipelines', label: 'Pipelines', icon: Workflow },
+    { value: 'primitives', label: 'Automation', icon: Zap },
+    { value: 'library', label: 'Library', icon: Package },
+    { value: 'code', label: 'Code', icon: FileCode, onHover: handleCodeTabHover },
+    { value: 'resources', label: 'Resources', icon: Settings },
+  ];
+
   return (
-    <div className="h-screen flex flex-col bg-gray-50">
-      {/* Header */}
-      <header className="bg-white border-b border-gray-200 px-4 py-3 flex items-center justify-between">
-        <div className="flex items-center space-x-4">
-          <h1 className="text-xl font-bold text-gray-900">Dagster Designer</h1>
-          {currentProject && (
-            <span className="text-sm text-gray-600">
-              {currentProject.name}
-            </span>
+    <div className="h-screen flex bg-background text-foreground">
+      {/* Left vertical nav rail */}
+      <nav
+        className={`${navCollapsed ? 'w-14' : 'w-56'} transition-[width] duration-150 flex flex-col bg-[hsl(var(--dagster-black))] text-white/80 border-r border-[hsl(var(--dagster-black))]`}
+      >
+        <div className={`${navCollapsed ? 'px-3 justify-center' : 'px-5 justify-between'} py-4 flex items-center gap-2 border-b border-white/10`}>
+          {!navCollapsed && (
+            <div className="flex items-center gap-2 min-w-0">
+              <BrandMark />
+              <span className="text-sm font-semibold text-white tracking-tight truncate">Dagster Designer</span>
+            </div>
           )}
+          {navCollapsed && <BrandMark />}
         </div>
-        <div className="flex items-center space-x-3">
-          {currentProject && (
-            <DropdownMenu.Root>
-              <DropdownMenu.Trigger asChild>
-                <button
-                  disabled={dagsterUILoading}
-                  className="flex items-center space-x-2 px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+        {currentProject && (
+          <Tabs.Root value={activeMainTab} onValueChange={setActiveMainTab} orientation="vertical" className="flex-1 flex flex-col overflow-hidden">
+            <Tabs.List className="flex-1 flex flex-col gap-0.5 px-2 py-3 overflow-y-auto" aria-label="Main navigation">
+              {navItems.map(({ value, label, icon: Icon, onHover }) => (
+                <Tabs.Trigger
+                  key={value}
+                  value={value}
+                  onMouseEnter={onHover}
+                  title={navCollapsed ? label : undefined}
+                  className={`group flex items-center ${navCollapsed ? 'justify-center px-2' : 'gap-3 px-3'} py-2 rounded-md text-sm font-medium text-white/70 hover:text-white hover:bg-white/5 data-[state=active]:bg-white/10 data-[state=active]:text-white transition-colors focus:outline-none`}
                 >
-                  <ExternalLink className="w-4 h-4" />
-                  <span>{dagsterUILoading ? 'Starting...' : 'Open Dagster UI'}</span>
-                  <ChevronDown className="w-4 h-4 ml-1" />
-                </button>
-              </DropdownMenu.Trigger>
-              <DropdownMenu.Portal>
-                <DropdownMenu.Content
-                  className="min-w-[200px] bg-white rounded-md shadow-lg border border-gray-200 p-1"
-                  sideOffset={5}
-                  align="end"
-                >
-                  <DropdownMenu.Item
-                    className="flex items-center space-x-2 px-3 py-2 text-sm text-gray-700 hover:bg-gray-100 rounded cursor-pointer outline-none"
-                    onSelect={handleOpenDagsterUI}
+                  <Icon className="w-4 h-4 flex-shrink-0" />
+                  {!navCollapsed && <span>{label}</span>}
+                </Tabs.Trigger>
+              ))}
+            </Tabs.List>
+          </Tabs.Root>
+        )}
+        <div className={`mt-auto border-t border-white/10 flex ${navCollapsed ? 'flex-col items-center py-2 gap-1' : 'items-center justify-between px-3 py-2'}`}>
+          <button
+            onClick={() => setNavCollapsed((v) => !v)}
+            className="p-1.5 rounded text-white/50 hover:text-white hover:bg-white/5 transition-colors"
+            title={navCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+            aria-label={navCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+          >
+            {navCollapsed ? <PanelLeft className="w-4 h-4" /> : <PanelLeftClose className="w-4 h-4" />}
+          </button>
+          {!navCollapsed && <span className="text-[11px] text-white/40">v0.1</span>}
+        </div>
+      </nav>
+
+      {/* Right side: header + content + status strip */}
+      <div className="flex-1 flex flex-col overflow-hidden">
+        <header className="h-14 flex-shrink-0 bg-white border-b border-gray-200 px-5 flex items-center justify-between">
+          <div className="flex items-center gap-3 min-w-0">
+            {currentProject ? (
+              <>
+                <span className="text-sm font-semibold text-gray-900 truncate">{currentProject.name}</span>
+                <span className="text-xs text-gray-400">/</span>
+                <span className="text-sm text-gray-600">
+                  {navItems.find((n) => n.value === activeMainTab)?.label ?? activeMainTab}
+                </span>
+                <span className="text-xs text-gray-400 ml-2">·</span>
+                <DagsterCloudChip projectId={currentProject.id} />
+              </>
+            ) : (
+              <span className="text-sm text-gray-500">No project selected</span>
+            )}
+          </div>
+          <div className="flex items-center gap-2">
+            {currentProject && (
+              <DropdownMenu.Root>
+                <DropdownMenu.Trigger asChild>
+                  <button
+                    disabled={dagsterUILoading}
+                    className="flex items-center gap-2 px-3.5 py-1.5 bg-primary text-primary-foreground text-sm font-medium rounded-md hover:bg-accent disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
                   >
                     <ExternalLink className="w-4 h-4" />
-                    <span>Open Dagster UI</span>
-                  </DropdownMenu.Item>
-                  <DropdownMenu.Separator className="h-px bg-gray-200 my-1" />
-                  <DropdownMenu.Item
-                    className="flex items-center space-x-2 px-3 py-2 text-sm text-red-600 hover:bg-red-50 rounded cursor-pointer outline-none"
-                    onSelect={handleKillAllDagsterProcesses}
+                    <span>{dagsterUILoading ? 'Starting…' : 'Open Dagster UI'}</span>
+                    <ChevronDown className="w-3.5 h-3.5" />
+                  </button>
+                </DropdownMenu.Trigger>
+                <DropdownMenu.Portal>
+                  <DropdownMenu.Content
+                    className="min-w-[220px] bg-white rounded-md shadow-lg border border-gray-200 p-1"
+                    sideOffset={5}
+                    align="end"
                   >
-                    <Skull className="w-4 h-4" />
-                    <span>Kill All Dagster Processes</span>
-                  </DropdownMenu.Item>
-                </DropdownMenu.Content>
-              </DropdownMenu.Portal>
-            </DropdownMenu.Root>
-          )}
-          <ProjectManager />
-        </div>
-      </header>
-
-      {/* Dependency Installation Status Banner */}
-      {currentProject && dependencyInstallStatus !== 'idle' && (
-        <div className={`border-b px-4 py-2 ${
-          dependencyInstallStatus === 'installing' ? 'bg-blue-50 border-blue-200' :
-          dependencyInstallStatus === 'success' ? 'bg-green-50 border-green-200' :
-          'bg-red-50 border-red-200'
-        }`}>
-          <div className="max-w-7xl mx-auto flex items-center gap-3">
-            {dependencyInstallStatus === 'installing' && (
-              <Loader2 className="w-5 h-5 text-blue-600 flex-shrink-0 animate-spin" />
-            )}
-            {dependencyInstallStatus === 'success' && (
-              <CheckCircle className="w-5 h-5 text-green-600 flex-shrink-0" />
-            )}
-            {dependencyInstallStatus === 'error' && (
-              <XCircle className="w-5 h-5 text-red-600 flex-shrink-0" />
-            )}
-            <div className="flex-1 min-w-0">
-              <div className="flex items-center justify-between gap-4">
-                <div className="flex items-center gap-3 min-w-0">
-                  <span className={`text-sm font-semibold ${
-                    dependencyInstallStatus === 'installing' ? 'text-blue-800' :
-                    dependencyInstallStatus === 'success' ? 'text-green-800' :
-                    'text-red-800'
-                  }`}>
-                    {dependencyInstallStatus === 'installing' && 'Installing dependencies...'}
-                    {dependencyInstallStatus === 'success' && 'Dependencies installed!'}
-                    {dependencyInstallStatus === 'error' && 'Dependency installation failed'}
-                  </span>
-                  {dependencyInstallStatus === 'installing' && (
-                    <span className="text-xs text-blue-700">
-                      This may take 2-5 minutes for large projects
-                    </span>
-                  )}
-                  {dependencyInstallStatus === 'error' && dependencyInstallError && (
-                    <span className="text-xs text-red-700 truncate">
-                      {dependencyInstallError}
-                    </span>
-                  )}
-                  {dependencyInstallOutput && (
-                    <button
-                      onClick={() => setShowDependencyOutputDialog(true)}
-                      className={`text-sm underline font-medium ${
-                        dependencyInstallStatus === 'installing' ? 'text-blue-700 hover:text-blue-900' :
-                        dependencyInstallStatus === 'success' ? 'text-green-700 hover:text-green-900' :
-                        'text-red-700 hover:text-red-900'
-                      }`}
+                    <DropdownMenu.Item
+                      className="flex items-center gap-2 px-3 py-2 text-sm text-gray-700 hover:bg-gray-100 rounded cursor-pointer outline-none"
+                      onSelect={handleOpenDagsterUI}
                     >
-                      View Details
-                    </button>
-                  )}
-                </div>
-                {dependencyInstallStatus !== 'installing' && (
-                  <button
-                    onClick={dismissDependencyInstallStatus}
-                    className={`p-1 rounded flex-shrink-0 ${
-                      dependencyInstallStatus === 'success'
-                        ? 'text-green-600 hover:text-green-800'
-                        : 'text-red-600 hover:text-red-800'
-                    }`}
-                    title="Dismiss"
-                  >
-                    <X className="w-4 h-4" />
-                  </button>
-                )}
-              </div>
-            </div>
+                      <ExternalLink className="w-4 h-4" />
+                      <span>Open Dagster UI</span>
+                    </DropdownMenu.Item>
+                    <DropdownMenu.Separator className="h-px bg-gray-200 my-1" />
+                    <DropdownMenu.Item
+                      className="flex items-center gap-2 px-3 py-2 text-sm text-red-600 hover:bg-red-50 rounded cursor-pointer outline-none"
+                      onSelect={handleKillAllDagsterProcesses}
+                    >
+                      <Skull className="w-4 h-4" />
+                      <span>Kill All Dagster Processes</span>
+                    </DropdownMenu.Item>
+                  </DropdownMenu.Content>
+                </DropdownMenu.Portal>
+              </DropdownMenu.Root>
+            )}
+            <ProjectManager />
           </div>
-        </div>
-      )}
+        </header>
 
-      {/* Asset Generation Status Banner */}
-      {currentProject && assetGenerationStatus !== 'idle' && (
-        <div className={`border-b px-4 py-2 ${
-          assetGenerationStatus === 'generating' ? 'bg-blue-50 border-blue-200' :
-          assetGenerationStatus === 'success' ? 'bg-green-50 border-green-200' :
-          'bg-red-50 border-red-200'
-        }`}>
-          <div className="max-w-7xl mx-auto flex items-center gap-3">
-            {assetGenerationStatus === 'generating' && (
-              <Loader2 className="w-5 h-5 text-blue-600 flex-shrink-0 animate-spin" />
-            )}
-            {assetGenerationStatus === 'success' && (
-              <CheckCircle className="w-5 h-5 text-green-600 flex-shrink-0" />
-            )}
-            {assetGenerationStatus === 'error' && (
-              <XCircle className="w-5 h-5 text-red-600 flex-shrink-0" />
-            )}
-            <div className="flex-1 min-w-0">
-              <div className="flex items-center justify-between gap-4">
-                <div className="flex items-center gap-3 min-w-0">
-                  <span className={`text-sm font-semibold ${
-                    assetGenerationStatus === 'generating' ? 'text-blue-800' :
-                    assetGenerationStatus === 'success' ? 'text-green-800' :
-                    'text-red-800'
-                  }`}>
-                    {assetGenerationStatus === 'generating' && 'Generating assets...'}
-                    {assetGenerationStatus === 'success' && 'Assets generated successfully!'}
-                    {assetGenerationStatus === 'error' && 'Asset generation failed'}
-                  </span>
-                  {assetGenerationStatus === 'generating' && (
-                    <span className="text-xs text-blue-700">
-                      This may take 30-180 seconds for large projects
-                    </span>
-                  )}
-                  {assetGenerationStatus === 'error' && assetGenerationError && (
-                    <span className="text-xs text-red-700 truncate">
-                      {assetGenerationError}
-                    </span>
-                  )}
-                </div>
-                {assetGenerationStatus !== 'generating' && (
-                  <button
-                    onClick={dismissAssetGenerationStatus}
-                    className={`p-1 rounded flex-shrink-0 ${
-                      assetGenerationStatus === 'success'
-                        ? 'text-green-600 hover:text-green-800'
-                        : 'text-red-600 hover:text-red-800'
-                    }`}
-                    title="Dismiss"
-                  >
-                    <X className="w-4 h-4" />
-                  </button>
-                )}
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
 
-      {/* Validation Status Banner */}
-      {currentProject && validationStatus !== 'idle' && (
-        <div className={`border-b px-4 py-2 ${
-          validationStatus === 'validating' ? 'bg-blue-50 border-blue-200' :
-          validationStatus === 'success' ? 'bg-green-50 border-green-200' :
-          'bg-red-50 border-red-200'
-        }`}>
-          <div className="max-w-7xl mx-auto flex items-center gap-3">
-            {validationStatus === 'validating' && (
-              <Loader2 className="w-5 h-5 text-blue-600 flex-shrink-0 animate-spin" />
-            )}
-            {validationStatus === 'success' && (
-              <CheckCircle className="w-5 h-5 text-green-600 flex-shrink-0" />
-            )}
-            {validationStatus === 'error' && (
-              <XCircle className="w-5 h-5 text-red-600 flex-shrink-0" />
-            )}
-            <div className="flex-1 min-w-0">
-              <div className="flex items-center justify-between gap-4">
-                <div className="flex items-center gap-3 min-w-0">
-                  <span className={`text-sm font-semibold ${
-                    validationStatus === 'validating' ? 'text-blue-800' :
-                    validationStatus === 'success' ? 'text-green-800' :
-                    'text-red-800'
-                  }`}>
-                    {validationStatus === 'validating' && 'Validating project...'}
-                    {validationStatus === 'success' && 'Project validated successfully!'}
-                    {validationStatus === 'error' && 'Project validation failed'}
-                  </span>
-                  {validationStatus === 'error' && validationError && (
-                    <span className="text-xs text-red-700 truncate">
-                      {validationError}
-                    </span>
-                  )}
-                </div>
-                {validationStatus !== 'validating' && (
-                  <button
-                    onClick={dismissValidationStatus}
-                    className={`p-1 rounded flex-shrink-0 ${
-                      validationStatus === 'success'
-                        ? 'text-green-600 hover:text-green-800'
-                        : 'text-red-600 hover:text-red-800'
-                    }`}
-                    title="Dismiss"
-                  >
-                    <X className="w-4 h-4" />
-                  </button>
-                )}
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Global Validation Error Banner - Compact */}
-      {currentProject && backgroundValidationStatus?.using_fallback && !dismissedValidationError && (
-        <div className="bg-yellow-50 border-b border-yellow-200 px-4 py-2">
-          <div className="max-w-7xl mx-auto flex items-center gap-3">
-            <AlertTriangle className="w-5 h-5 text-yellow-600 flex-shrink-0" />
-            <div className="flex-1 min-w-0">
-              <div className="flex items-center justify-between gap-4">
-                <div className="flex items-center gap-3 min-w-0">
-                  <span className="text-sm font-semibold text-yellow-800">
-                    Project Validation Failed
-                  </span>
-                  <button
-                    onClick={handleViewValidationDetails}
-                    disabled={isValidating}
-                    className="text-sm text-yellow-700 hover:text-yellow-900 underline font-medium disabled:opacity-50"
-                  >
-                    {isValidating ? 'Loading...' : 'View Details'}
-                  </button>
-                </div>
-                <button
-                  onClick={() => setDismissedValidationError(true)}
-                  className="p-1 text-yellow-600 hover:text-yellow-800 rounded flex-shrink-0"
-                  title="Dismiss"
-                >
-                  <X className="w-4 h-4" />
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Main content with tabs */}
+      {/* Main content */}
       {currentProject ? (
         <Tabs.Root value={activeMainTab} onValueChange={setActiveMainTab} className="flex-1 flex flex-col overflow-hidden">
-          {/* Tab List */}
-          <Tabs.List className="flex items-center space-x-1 px-4 border-b border-gray-200 bg-white">
-            <Tabs.Trigger
-              value="assets"
-              className="flex items-center space-x-2 px-4 py-3 text-sm font-medium text-gray-600 hover:text-gray-900 border-b-2 border-transparent data-[state=active]:border-blue-600 data-[state=active]:text-blue-600"
-            >
-              <Network className="w-4 h-4" />
-              <span>Assets</span>
-            </Tabs.Trigger>
-            <Tabs.Trigger
-              value="pipelines"
-              className="flex items-center space-x-2 px-4 py-3 text-sm font-medium text-gray-600 hover:text-gray-900 border-b-2 border-transparent data-[state=active]:border-blue-600 data-[state=active]:text-blue-600"
-            >
-              <Workflow className="w-4 h-4" />
-              <span>Pipelines</span>
-            </Tabs.Trigger>
-            <Tabs.Trigger
-              value="code"
-              onMouseEnter={handleCodeTabHover}
-              className="flex items-center space-x-2 px-4 py-3 text-sm font-medium text-gray-600 hover:text-gray-900 border-b-2 border-transparent data-[state=active]:border-blue-600 data-[state=active]:text-blue-600"
-            >
-              <FileCode className="w-4 h-4" />
-              <span>Code</span>
-            </Tabs.Trigger>
-            <Tabs.Trigger
-              value="templates"
-              className="flex items-center space-x-2 px-4 py-3 text-sm font-medium text-gray-600 hover:text-gray-900 border-b-2 border-transparent data-[state=active]:border-blue-600 data-[state=active]:text-blue-600"
-            >
-              <Wand2 className="w-4 h-4" />
-              <span>Templates</span>
-            </Tabs.Trigger>
-            <Tabs.Trigger
-              value="primitives"
-              className="flex items-center space-x-2 px-4 py-3 text-sm font-medium text-gray-600 hover:text-gray-900 border-b-2 border-transparent data-[state=active]:border-blue-600 data-[state=active]:text-blue-600"
-            >
-              <Zap className="w-4 h-4" />
-              <span>Automation</span>
-            </Tabs.Trigger>
-            <Tabs.Trigger
-              value="integrations"
-              className="flex items-center space-x-2 px-4 py-3 text-sm font-medium text-gray-600 hover:text-gray-900 border-b-2 border-transparent data-[state=active]:border-blue-600 data-[state=active]:text-blue-600"
-            >
-              <Package className="w-4 h-4" />
-              <span>Integrations</span>
-            </Tabs.Trigger>
-            <Tabs.Trigger
-              value="resources"
-              className="flex items-center space-x-2 px-4 py-3 text-sm font-medium text-gray-600 hover:text-gray-900 border-b-2 border-transparent data-[state=active]:border-blue-600 data-[state=active]:text-blue-600"
-            >
-              <Settings className="w-4 h-4" />
-              <span>Resources</span>
-            </Tabs.Trigger>
+          {/* Hidden Tabs.List to satisfy Radix a11y (real nav is the sidebar) */}
+          <Tabs.List className="sr-only" aria-hidden="true">
+            {navItems.map(({ value, label }) => (
+              <Tabs.Trigger key={value} value={value}>{label}</Tabs.Trigger>
+            ))}
           </Tabs.List>
 
           {/* Assets Tab Content */}
@@ -757,7 +816,37 @@ function App() {
 
             {/* Graph Editor */}
             <main className="flex-1 relative">
-              <GraphEditor onNodeSelect={setSelectedNodeId} />
+              <GraphEditor
+                onNodeSelect={setSelectedNodeId}
+                onPrimitiveClick={async (category, name) => {
+                  // For asset checks — many are dbt-derived and don't live in
+                  // our managed primitives list. Route via the backend search
+                  // endpoint which knows how to resolve them to schema.yml,
+                  // then open the source file in the Code tab.
+                  if (category === 'asset_check' && currentProject) {
+                    try {
+                      const res = await primitivesApi.searchPrimitiveDefinition(
+                        currentProject.id,
+                        'asset_check',
+                        name,
+                      );
+                      if (res.found && res.file_path) {
+                        const path = res.line_number
+                          ? `${res.file_path}:${res.line_number}`
+                          : res.file_path;
+                        handleOpenFile(path);
+                        return;
+                      }
+                    } catch (e) {
+                      console.warn('[Asset check] search failed:', e);
+                    }
+                    // Fallback: still try Automation tab in case it's a managed check.
+                  }
+                  setActiveMainTab('primitives');
+                  setPrimitiveToOpen({ category, name });
+                }}
+              />
+              <DagsterAIBar />
             </main>
 
             {/* Property Panel */}
@@ -767,6 +856,10 @@ function App() {
                   nodeId={selectedNodeId}
                   onConfigureComponent={setEditingComponent}
                   onOpenFile={handleOpenFile}
+                  onNewPrimitiveForAsset={(category, assetKey) => {
+                    setTemplateBuilderAssetKey(assetKey);
+                    setTemplateBuilderTab(category);
+                  }}
                 />
               </aside>
             )}
@@ -790,34 +883,29 @@ function App() {
             </div>
           </Tabs.Content>
 
-          {/* Templates Tab Content */}
-          <Tabs.Content value="templates" className="flex-1 overflow-hidden">
-            <div className="h-full">
-              <TemplateBuilder />
-            </div>
-          </Tabs.Content>
-
-          {/* Primitives Tab Content */}
+          {/* Automation (Primitives) Tab Content */}
           <Tabs.Content value="primitives" className="flex-1 overflow-hidden">
             <div className="h-full">
               <PrimitivesManager
-                onNavigateToTemplates={() => setActiveMainTab('templates')}
+                onNewPrimitive={(category) => setTemplateBuilderTab(category)}
                 onOpenFile={handleOpenFile}
+                openPrimitive={primitiveToOpen}
+                onOpenPrimitiveConsumed={() => setPrimitiveToOpen(null)}
               />
             </div>
           </Tabs.Content>
 
-          {/* Integrations Tab Content */}
-          <Tabs.Content value="integrations" className="flex-1 overflow-hidden">
+          {/* Library Tab Content (Components + Integrations) */}
+          <Tabs.Content value="library" className="flex-1 overflow-hidden">
             <div className="h-full">
-              <IntegrationCatalog projectId={currentProject.id} />
+              <Library />
             </div>
           </Tabs.Content>
 
           {/* Resources Tab Content */}
           <Tabs.Content value="resources" className="flex-1 overflow-hidden">
             <div className="h-full">
-              <ResourcesManager />
+              <ResourcesManager onOpenFile={handleOpenFile} />
             </div>
           </Tabs.Content>
         </Tabs.Root>
@@ -830,6 +918,27 @@ function App() {
           </div>
         </div>
       )}
+
+        {/* Compact status strip (single line, only when active) */}
+        <StatusStrip
+          dependencyInstallStatus={dependencyInstallStatus}
+          dependencyInstallError={dependencyInstallError}
+          dependencyInstallOutput={dependencyInstallOutput}
+          onViewDependencyDetails={() => setShowDependencyOutputDialog(true)}
+          onDismissDependency={dismissDependencyInstallStatus}
+          assetGenerationStatus={assetGenerationStatus}
+          assetGenerationError={assetGenerationError}
+          onDismissAssetGen={dismissAssetGenerationStatus}
+          validationStatus={validationStatus}
+          validationError={validationError}
+          onDismissValidation={dismissValidationStatus}
+          validationFallback={!!backgroundValidationStatus?.using_fallback && !dismissedValidationError}
+          onViewValidationDetails={handleViewValidationDetails}
+          onDismissValidationFallback={() => setDismissedValidationError(true)}
+          isValidating={isValidating}
+        />
+      </div>
+      {/* /right-side column */}
 
       {/* Component Config Modal */}
       {(editingComponent || addingComponentType) && currentProject && (
@@ -863,9 +972,9 @@ function App() {
           <div className="bg-white rounded-lg shadow-xl w-full max-w-3xl max-h-[80vh] flex flex-col">
             <div className="flex items-center justify-between p-6 border-b">
               <h2 className="text-lg font-semibold">
-                {dependencyInstallStatus === 'installing' && '⏳ Dependency Installation Progress'}
-                {dependencyInstallStatus === 'success' && '✅ Dependency Installation Complete'}
-                {dependencyInstallStatus === 'error' && '❌ Dependency Installation Failed'}
+                {dependencyInstallStatus === 'installing' && 'Dependency installation in progress'}
+                {dependencyInstallStatus === 'success' && 'Dependency installation complete'}
+                {dependencyInstallStatus === 'error' && 'Dependency installation failed'}
               </h2>
               <button onClick={() => setShowDependencyOutputDialog(false)}>
                 <X className="w-5 h-5 text-gray-400 hover:text-gray-600" />
@@ -900,7 +1009,7 @@ function App() {
           <div className="bg-white rounded-lg shadow-xl w-full max-w-3xl max-h-[80vh] flex flex-col">
             <div className="flex items-center justify-between p-6 border-b">
               <h2 className="text-lg font-semibold">
-                {validationResult.valid ? '✅ Validation Successful' : '❌ Validation Failed'}
+                {validationResult.valid ? 'Validation successful' : 'Validation failed'}
               </h2>
               <button onClick={() => setShowValidationDialog(false)}>
                 <X className="w-5 h-5 text-gray-400 hover:text-gray-600" />
@@ -932,6 +1041,99 @@ function App() {
                 <div>
                   <p className="text-red-700 mb-4 font-medium">{validationResult.error}</p>
 
+                  {(!validationResult.failing_components || validationResult.failing_components.length === 0) &&
+                    currentProject && currentProject.components && currentProject.components.length > 0 && (
+                    <div className="mb-4 p-4 bg-gray-50 border border-gray-200 rounded-md">
+                      <div className="flex items-center justify-between mb-2">
+                        <h3 className="text-sm font-semibold text-gray-900">
+                          Couldn't parse specific components from the error. Delete broken components manually:
+                        </h3>
+                        <button
+                          onClick={handleViewValidationDetails}
+                          disabled={isValidating}
+                          className="text-xs text-primary hover:underline font-medium disabled:opacity-50"
+                        >
+                          {isValidating ? 'Retrying…' : 'Retry validation'}
+                        </button>
+                      </div>
+                      <ul className="space-y-1 max-h-48 overflow-y-auto">
+                        {currentProject.components.map((c) => (
+                          <li key={c.id} className="flex items-center justify-between text-sm">
+                            <span className="min-w-0 truncate">
+                              <code className="bg-white px-2 py-0.5 rounded border border-gray-200 text-gray-800">{c.id}</code>
+                              <span className="ml-2 text-xs text-gray-500 truncate">{c.component_type}</span>
+                            </span>
+                            <button
+                              onClick={() => handleDeleteBrokenComponents([c.id])}
+                              disabled={isDeletingBroken}
+                              className="text-xs text-red-600 hover:underline font-medium disabled:opacity-50 ml-3 flex-shrink-0"
+                            >
+                              Delete
+                            </button>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+
+                  {validationResult.failing_components?.length > 0 && (
+                    <div className="mb-4 p-4 bg-amber-50 border border-amber-200 rounded-md">
+                      <div className="flex items-center justify-between mb-2">
+                        <h3 className="text-sm font-semibold text-amber-900">
+                          {validationResult.failing_components.length} component{validationResult.failing_components.length === 1 ? '' : 's'} appear{validationResult.failing_components.length === 1 ? 's' : ''} in the error:
+                        </h3>
+                        <div className="flex items-center gap-2">
+                          <button
+                            onClick={handleViewValidationDetails}
+                            disabled={isValidating}
+                            className="text-xs text-primary hover:underline font-medium disabled:opacity-50"
+                          >
+                            {isValidating ? 'Retrying…' : 'Retry validation'}
+                          </button>
+                          <span className="text-amber-300">·</span>
+                          <button
+                            onClick={() => handleDeleteBrokenComponents(validationResult.failing_components)}
+                            disabled={isDeletingBroken}
+                            className="text-xs text-red-600 hover:underline font-medium disabled:opacity-50"
+                          >
+                            {isDeletingBroken ? 'Deleting…' : 'Delete all these'}
+                          </button>
+                        </div>
+                      </div>
+                      <ul className="space-y-1">
+                        {validationResult.failing_components.map((cid: string) => (
+                          <li key={cid} className="flex items-center justify-between text-sm">
+                            <code className="bg-white px-2 py-0.5 rounded border border-amber-200 text-amber-900 truncate max-w-xs">
+                              {cid}
+                            </code>
+                            <div className="flex items-center gap-3">
+                              <button
+                                onClick={() => {
+                                  setShowValidationDialog(false);
+                                  const path = `src/${currentProject?.directory_name || ''}/defs/${cid}/defs.yaml`;
+                                  handleOpenFile(path);
+                                }}
+                                className="text-xs text-primary hover:underline font-medium"
+                              >
+                                Open defs.yaml
+                              </button>
+                              <button
+                                onClick={() => handleDeleteBrokenComponents([cid])}
+                                disabled={isDeletingBroken}
+                                className="text-xs text-red-600 hover:underline font-medium disabled:opacity-50"
+                              >
+                                Delete
+                              </button>
+                            </div>
+                          </li>
+                        ))}
+                      </ul>
+                      <p className="text-xs text-amber-800 mt-3">
+                        Tip: missing required fields (e.g. <code>file_path</code>, <code>connection_string</code>) are the most common cause. Check for <code>TODO_</code> placeholders left by Dagster AI.
+                      </p>
+                    </div>
+                  )}
+
                   {validationResult.details?.validation_error && (
                     <div className="mt-4">
                       <h3 className="text-sm font-semibold text-gray-700 mb-2">Error Details:</h3>
@@ -951,7 +1153,7 @@ function App() {
                   )}
 
                   <div className="mt-6 p-4 bg-yellow-50 border border-yellow-200 rounded-md">
-                    <h4 className="text-sm font-semibold text-yellow-800 mb-2">💡 Common Issues:</h4>
+                    <h4 className="text-sm font-semibold text-yellow-800 mb-2">Common issues:</h4>
                     <ul className="text-sm text-yellow-700 space-y-1 list-disc list-inside">
                       <li>Check for syntax errors in Python files</li>
                       <li>Verify all imports are correct</li>
@@ -987,6 +1189,57 @@ function App() {
           existingComponentId={dataPreviewComponentId}
         />
       )}
+
+      {/* Template Builder Modal — opened from Automation "New" buttons */}
+      {templateBuilderTab && currentProject && (
+        <div className="fixed inset-0 bg-black/40 z-40 flex items-center justify-center p-6">
+          <div
+            className="bg-white rounded-lg shadow-2xl w-full max-w-6xl h-[85vh] flex flex-col overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex-shrink-0 flex items-center justify-between px-5 py-3 border-b border-gray-200">
+              <h2 className="text-base font-semibold text-gray-900 flex items-center gap-2">
+                {(() => {
+                  const iconMap: Record<string, React.ComponentType<{ className?: string }>> = {
+                    schedule: Clock,
+                    job: Play,
+                    sensor: Radar,
+                    asset_check: CheckCircle,
+                    freshness_policy: Timer,
+                  };
+                  const Icon = iconMap[templateBuilderTab];
+                  return Icon ? <Icon className="w-4 h-4 text-primary" /> : null;
+                })()}
+                <span>New {templateBuilderTab.replace(/_/g, ' ')}</span>
+                {templateBuilderAssetKey && (
+                  <span className="text-xs text-gray-500 font-normal">
+                    for <code className="bg-gray-100 px-1.5 py-0.5 rounded">{templateBuilderAssetKey}</code>
+                  </span>
+                )}
+              </h2>
+              <button
+                onClick={() => {
+                  setTemplateBuilderTab(null);
+                  setTemplateBuilderAssetKey(null);
+                }}
+                className="p-1 text-gray-400 hover:text-gray-600 rounded"
+                aria-label="Close"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <div className="flex-1 min-h-0 overflow-hidden">
+              <TemplateBuilder
+                initialTab={templateBuilderTab}
+                initialAssetKey={templateBuilderAssetKey}
+                hideSubNav
+              />
+            </div>
+          </div>
+        </div>
+      )}
+
+      <NotificationHost />
     </div>
   );
 }

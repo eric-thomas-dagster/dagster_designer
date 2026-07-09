@@ -54,6 +54,7 @@ build/
 backend/data/
 backend/projects/
 backend/.env
+backend/.manifest_cache.json
 frontend/.env
 *.db
 *.sqlite

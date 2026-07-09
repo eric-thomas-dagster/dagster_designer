@@ -5,7 +5,8 @@ import { TranslationEditor } from './TranslationEditor';
 import { EnhancedDataQualityChecksBuilder } from './EnhancedDataQualityChecksBuilder';
 import { useProjectStore } from '@/hooks/useProject';
 import { dbtAdaptersApi, type AdapterInfo } from '@/services/api';
-import type { ComponentInstance, ComponentSchema } from '@/types';
+import { notify } from './Notifications';
+import type { ComponentInstance } from '@/types';
 
 interface ComponentConfigModalProps {
   component: ComponentInstance | null;
@@ -179,17 +180,17 @@ export function ComponentConfigModal({
       const result = await dbtAdaptersApi.install(currentProject.id, adapterType);
 
       if (result.success) {
-        alert(`Successfully installed dbt-${adapterType}!`);
+        notify.success(`Successfully installed dbt-${adapterType}!`);
         // Refresh adapter status
         const status = await dbtAdaptersApi.getStatus(currentProject.id);
         setAdapterInfo(status.adapters);
       } else {
-        alert(`Failed to install dbt-${adapterType}:\n${result.message}\n\nCheck console for details.`);
+        notify.error(`Failed to install dbt-${adapterType}:\n${result.message}\n\nCheck console for details.`);
         console.error('Installation failed:', result.stderr);
       }
     } catch (error) {
       console.error('Failed to install adapter:', error);
-      alert('Failed to install adapter. Check console for details.');
+      notify.error('Failed to install adapter. Check console for details.');
     } finally {
       setInstallingAdapter(null);
     }
@@ -197,7 +198,7 @@ export function ComponentConfigModal({
 
   const validateRequiredFields = (): { valid: boolean; missing: string[] } => {
     const missing: string[] = [];
-    const required = componentSchema.schema.required || [];
+    const required = componentSchema.schema?.required || [];
 
     // For community components, instance name (label) is required UNLESS it's a single-asset component
     // (single-asset components auto-generate the instance name from asset_name)
@@ -285,7 +286,7 @@ export function ComponentConfigModal({
     const validation = validateRequiredFields();
 
     if (!validation.valid) {
-      alert(
+      notify.error(
         `Please fill in all required fields before saving:\n\n` +
         validation.missing.map(f => `• ${f}`).join('\n')
       );
@@ -353,11 +354,11 @@ export function ComponentConfigModal({
           // Don't fail the whole operation if regeneration fails
         }
 
-        alert(`Component configured successfully!\n\nYAML file: ${result.yaml_file}\n\nThe asset has been added to your project.`);
+        notify.success(`Component configured successfully!\n\nYAML file: ${result.yaml_file}\n\nThe asset has been added to your project.`);
         onClose();
       } catch (error: any) {
         console.error('Error configuring community component:', error);
-        alert(`Failed to configure component:\n\n${error.message}`);
+        notify.error(`Failed to configure component:\n\n${error.message}`);
       }
     } else {
       // For built-in components, use the standard save flow
@@ -840,7 +841,7 @@ export function ComponentConfigModal({
     );
   };
 
-  const properties = componentSchema.schema.properties || {};
+  const properties = componentSchema.schema?.properties || {};
 
   return (
     <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
@@ -1078,7 +1079,7 @@ export function ComponentConfigModal({
               <div key={fieldName}>
                 <label className="block text-sm font-medium text-gray-700 mb-1">
                   {fieldName}
-                  {componentSchema.schema.required?.includes(fieldName) && (
+                  {componentSchema.schema?.required?.includes(fieldName) && (
                     <span className="text-red-500 ml-1">*</span>
                   )}
                 </label>

@@ -3,6 +3,7 @@ import { useProjectStore } from '@/hooks/useProject';
 import { codegenApi, projectsApi, filesApi, pipelinesApi } from '@/services/api';
 import { DbtCloudImportModal } from './DbtCloudImportModal';
 import { Launchpad } from './Launchpad';
+import { notify, confirmDialog } from './Notifications';
 import {
   FolderOpen,
   Plus,
@@ -47,7 +48,7 @@ export function ProjectManager() {
   const [isCreating, setIsCreating] = useState(false);
   const [isImporting, setIsImporting] = useState(false);
   const [isMaterializingAll, setIsMaterializingAll] = useState(false);
-  const [materializeAllResult, setMaterializeAllResult] = useState<{ success: boolean; message: string } | null>(null);
+  const [, setMaterializeAllResult] = useState<{ success: boolean; message: string } | null>(null);
   const [showProjectMenu, setShowProjectMenu] = useState(false);
   const [showActionsMenu, setShowActionsMenu] = useState(false);
   const [isRegeneratingLineage, setIsRegeneratingLineage] = useState(false);
@@ -89,7 +90,7 @@ export function ProjectManager() {
       setShowNewDialog(false);
     } catch (error) {
       console.error('Failed to create project:', error);
-      alert('Failed to create project. Check the console for details.');
+      notify.error('Failed to create project. Check the console for details.');
     } finally {
       setIsCreating(false);
     }
@@ -103,10 +104,10 @@ export function ProjectManager() {
       await importProject(importPath);
       setImportPath('');
       setShowImportDialog(false);
-      alert('Project imported successfully!');
+      notify.success('Project imported successfully!');
     } catch (error) {
       console.error('Failed to import project:', error);
-      alert('Failed to import project. Check the console for details.');
+      notify.error('Failed to import project. Check the console for details.');
     } finally {
       setIsImporting(false);
     }
@@ -140,7 +141,7 @@ export function ProjectManager() {
       document.body.removeChild(a);
     } catch (error) {
       console.error('Export failed:', error);
-      alert('Failed to export project');
+      notify.error('Failed to export project');
     }
   };
 
@@ -153,7 +154,7 @@ export function ProjectManager() {
       setShowCodePreview(true);
     } catch (error) {
       console.error('Preview failed:', error);
-      alert('Failed to generate preview');
+      notify.error('Failed to generate preview');
     }
   };
 
@@ -174,10 +175,10 @@ export function ProjectManager() {
 
       if (result.success) {
         console.log('Materialization output:', result.stdout);
-        alert('All assets materialized successfully!');
+        notify.success('All assets materialized successfully!');
       } else {
         console.error('Materialization failed:', result.stderr);
-        alert('Materialization failed. Check console for details.');
+        notify.error('Materialization failed. Check console for details.');
       }
     } catch (error) {
       console.error('Materialize all failed:', error);
@@ -185,7 +186,7 @@ export function ProjectManager() {
         success: false,
         message: 'Failed to materialize assets. Check console for details.',
       });
-      alert('Failed to materialize assets. Check console for details.');
+      notify.error('Failed to materialize assets. Check console for details.');
     } finally {
       setIsMaterializingAll(false);
     }
@@ -208,20 +209,20 @@ export function ProjectManager() {
 
         if (result.success) {
           console.log('Materialization output:', result.stdout);
-          alert('Assets materialized successfully!');
+          notify.success('Assets materialized successfully!');
         } else {
           console.error('Materialization failed:', result.stderr);
-          alert('Materialization failed. Check console for details.');
+          notify.error('Materialization failed. Check console for details.');
         }
       } else if (launchpadMode === 'job') {
         const result = await pipelinesApi.launch(currentProject.id, selectedJobName, config, tags);
 
         if (result.success) {
           console.log('Job launch output:', result.stdout);
-          alert('Job launched successfully!');
+          notify.success('Job launched successfully!');
         } else {
           console.error('Job launch failed:', result.stderr);
-          alert('Job launch failed. Check console for details.');
+          notify.error('Job launch failed. Check console for details.');
         }
       }
     } catch (error) {
@@ -303,10 +304,10 @@ export function ProjectManager() {
       // Reload project to get updated components
       await loadProject(currentProject.id);
 
-      alert(`Components discovered successfully! Found ${updatedProject.components.length} component(s).`);
+      notify.success(`Components discovered successfully! Found ${updatedProject.components.length} component(s).`);
     } catch (error) {
       console.error('Failed to discover components:', error);
-      alert('Failed to discover components. Check console for details.');
+      notify.error('Failed to discover components. Check console for details.');
     } finally {
       setIsDiscoveringComponents(false);
     }
@@ -359,18 +360,18 @@ export function ProjectManager() {
       const result = await filesApi.execute(currentProject.id, 'dg scaffold build-artifacts', 60);
 
       if (result.success) {
-        alert('Successfully generated Dockerfile!\n\nCheck the project root directory for the generated Dockerfile.');
+        notify.success('Successfully generated Dockerfile!\n\nCheck the project root directory for the generated Dockerfile.');
       } else {
         throw new Error(result.stderr || 'Failed to scaffold build artifacts');
       }
     } catch (error) {
       console.error('Failed to scaffold build artifacts:', error);
-      alert('Failed to generate Dockerfile. Check console for details.');
+      notify.error('Failed to generate Dockerfile. Check console for details.');
     }
   };
 
   const handleScaffoldGithubActions = () => {
-    alert(
+    notify.info(
       'GitHub Actions Scaffolding\n\n' +
       'The "dg scaffold github-actions" command requires interactive input:\n' +
       '  • Dagster Plus organization name\n' +
@@ -501,7 +502,7 @@ export function ProjectManager() {
                     className="w-full flex items-center space-x-2 px-4 py-2 text-sm text-gray-700 hover:bg-gray-50"
                   >
                     <FileCode className="w-4 h-4" />
-                    <span>Open Launchpad (Assets)</span>
+                    <span>Open Launchpad</span>
                   </button>
                   <div className="relative">
                     <button
@@ -853,8 +854,9 @@ export function ProjectManager() {
                   <button
                     onClick={async (e) => {
                       e.stopPropagation();
-                      const confirmed = window.confirm(
-                        `Are you sure you want to delete "${project.name}"? This will remove the project and all its files.`
+                      const confirmed = await confirmDialog(
+                        `Are you sure you want to delete "${project.name}"? This will remove the project and all its files.`,
+                        { title: 'Delete project', destructive: true }
                       );
                       if (!confirmed) return;
 
@@ -867,7 +869,7 @@ export function ProjectManager() {
                         }
                       } catch (error) {
                         console.error('Failed to delete project:', error);
-                        alert('Failed to delete project. Check console for details.');
+                        notify.error('Failed to delete project. Check console for details.');
                       }
                     }}
                     className="p-2 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded transition-colors opacity-0 group-hover:opacity-100"
@@ -915,7 +917,7 @@ export function ProjectManager() {
           <div className="bg-white rounded-lg shadow-xl w-full max-w-3xl max-h-[80vh] flex flex-col">
             <div className="flex items-center justify-between p-6 border-b">
               <h2 className="text-lg font-semibold">
-                {validationResult.valid ? '✅ Validation Successful' : '❌ Validation Failed'}
+                {validationResult.valid ? 'Validation Successful' : 'Validation Failed'}
               </h2>
               <button onClick={() => setShowValidationDialog(false)}>
                 <X className="w-5 h-5 text-gray-400 hover:text-gray-600" />

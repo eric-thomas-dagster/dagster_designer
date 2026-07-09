@@ -716,6 +716,62 @@ def {request.asset_name}():
         )
 
 
+@router.get("/resources/{project_id}")
+async def list_resources_and_io_managers(project_id: str):
+    """List installed resources and IO managers by parsing resources.py.
+
+    Both live in a single resources.py file created by save_template_to_project.
+    We parse it for top-level function definitions and module-level assignments
+    so the frontend can show a list of what's installed.
+    """
+    from pathlib import Path
+    import re
+    from app.services.project_service import project_service
+
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    project_dir = project_service._get_project_dir(project)
+    directory_name = project.directory_name or ""
+
+    # resources.py could live in either flat or src layout.
+    candidates = [
+        project_dir / directory_name / f"{directory_name}_defs" / "resources.py",
+        project_dir / "src" / directory_name / "resources.py",
+        project_dir / directory_name / "resources.py",
+    ]
+    resources_file: Path | None = next((p for p in candidates if p.exists()), None)
+
+    io_managers: list[dict[str, Any]] = []
+    resources: list[dict[str, Any]] = []
+
+    if resources_file:
+        content = resources_file.read_text()
+        for m in re.finditer(r'^def\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*\(', content, re.MULTILINE):
+            name = m.group(1)
+            line_number = content[:m.start()].count("\n") + 1
+            # Very rough classification: name contains 'io_manager' → io_manager, else resource.
+            entry = {
+                "name": name,
+                "file": str(resources_file.relative_to(project_dir)),
+                "line_number": line_number,
+            }
+            if "io_manager" in name.lower():
+                io_managers.append(entry)
+            else:
+                resources.append(entry)
+
+    return {
+        "project_id": project_id,
+        "resources_file": (
+            str(resources_file.relative_to(project_dir)) if resources_file else None
+        ),
+        "io_managers": io_managers,
+        "resources": resources,
+    }
+
+
 @router.post("/save")
 async def save_template(request: SaveTemplateRequest):
     """

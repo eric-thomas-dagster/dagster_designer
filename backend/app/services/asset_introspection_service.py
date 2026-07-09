@@ -403,6 +403,18 @@ class AssetIntrospectionService:
         assets = assets_data.get("assets", [])
         asset_checks = assets_data.get("asset_checks", [])
 
+        # Normalize dg list defs field names — dg CLI renamed fields.
+        # Older code expects: key, deps, group.
+        # New dg emits: asset_key, dependency_keys, group_name.
+        # Backfill the legacy names so downstream code doesn't need to change.
+        for asset in assets:
+            if "key" not in asset and "asset_key" in asset:
+                asset["key"] = asset["asset_key"]
+            if "deps" not in asset and "dependency_keys" in asset:
+                asset["deps"] = asset["dependency_keys"]
+            if "group" not in asset and "group_name" in asset:
+                asset["group"] = asset["group_name"]
+
         # Create a mapping of asset key to checks
         checks_by_asset = {}
         for check in asset_checks:
@@ -416,6 +428,72 @@ class AssetIntrospectionService:
                     "description": check.get("description"),
                     "source": check.get("source"),
                 })
+
+        # Cross-reference jobs → assets and schedules/sensors → job → assets.
+        # Result: per-asset lists of primitive names so the UI can badge them.
+        jobs_data = assets_data.get("jobs", []) or []
+        schedules_data = assets_data.get("schedules", []) or []
+        sensors_data = assets_data.get("sensors", []) or []
+
+        jobs_by_asset: dict[str, list[str]] = {}
+        for j in jobs_data:
+            j_name = j.get("name")
+            if not j_name:
+                continue
+            for asset_key in (j.get("asset_selection") or []):
+                jobs_by_asset.setdefault(asset_key, []).append(j_name)
+
+        # A schedule targets an asset if its job targets that asset,
+        # or if the schedule has its own asset_selection.
+        job_to_schedules: dict[str, list[str]] = {}
+        schedule_direct_assets: dict[str, list[str]] = {}
+        for s in schedules_data:
+            s_name = s.get("name")
+            if not s_name:
+                continue
+            j_name = s.get("job_name")
+            if j_name:
+                job_to_schedules.setdefault(j_name, []).append(s_name)
+            for asset_key in (s.get("asset_selection") or []):
+                schedule_direct_assets.setdefault(asset_key, []).append(s_name)
+
+        # Same idea for sensors.
+        job_to_sensors: dict[str, list[str]] = {}
+        sensor_direct_assets: dict[str, list[str]] = {}
+        for s in sensors_data:
+            s_name = s.get("name")
+            if not s_name:
+                continue
+            j_name = s.get("job_name") or s.get("monitored_job_name")
+            if j_name:
+                job_to_sensors.setdefault(j_name, []).append(s_name)
+            for asset_key in (s.get("asset_selection") or []):
+                sensor_direct_assets.setdefault(asset_key, []).append(s_name)
+
+        def _schedules_for(asset_key: str) -> list[str]:
+            names = list(schedule_direct_assets.get(asset_key, []))
+            for j_name in jobs_by_asset.get(asset_key, []):
+                names.extend(job_to_schedules.get(j_name, []))
+            # Dedupe while preserving order.
+            seen = set()
+            out = []
+            for n in names:
+                if n not in seen:
+                    seen.add(n)
+                    out.append(n)
+            return out
+
+        def _sensors_for(asset_key: str) -> list[str]:
+            names = list(sensor_direct_assets.get(asset_key, []))
+            for j_name in jobs_by_asset.get(asset_key, []):
+                names.extend(job_to_sensors.get(j_name, []))
+            seen = set()
+            out = []
+            for n in names:
+                if n not in seen:
+                    seen.add(n)
+                    out.append(n)
+            return out
 
         # Create a mapping of component ID to component for source attribution
         component_map = {comp.id: comp for comp in project.components}
@@ -778,6 +856,9 @@ class AssetIntrospectionService:
                         "automation_condition": asset.get("automation_condition"),
                         "deps": asset.get("deps", []),  # Include dependencies
                         "checks": asset_checks_list,  # Include asset checks
+                        "jobs": jobs_by_asset.get(asset_key, []),  # Jobs that include this asset
+                        "schedules": _schedules_for(asset_key),  # Schedules targeting this asset (direct or via job)
+                        "sensors": _sensors_for(asset_key),  # Sensors targeting this asset
                         "component_icon": component_icon,  # Add component icon for visual identification
                         "component_attributes": component_attributes,  # Include component configuration
                         "component_type": component_type,  # Include component type for frontend

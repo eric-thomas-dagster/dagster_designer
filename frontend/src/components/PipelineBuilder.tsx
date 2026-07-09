@@ -1,5 +1,5 @@
 import { useState, useMemo, useEffect } from 'react';
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import ReactFlow, {
   Node,
   Edge,
@@ -14,6 +14,7 @@ import 'reactflow/dist/style.css';
 import { AssetNode } from './nodes/AssetNode';
 import { CronBuilder } from './CronBuilder';
 import { Launchpad } from './Launchpad';
+import { notify } from './Notifications';
 import { useProjectStore } from '@/hooks/useProject';
 import { pipelinesApi, primitivesApi, templatesApi, projectsApi } from '@/services/api';
 import {
@@ -89,9 +90,9 @@ export function PipelineBuilder() {
     try {
       const result = await pipelinesApi.launch(currentProject.id, selectedJobName, config, tags);
       if (result.success) {
-        alert(`Job ${selectedJobName} launched successfully!`);
+        notify.success(`Job ${selectedJobName} launched successfully!`);
       } else {
-        alert(`Failed to launch job ${selectedJobName}`);
+        notify.error(`Failed to launch job ${selectedJobName}`);
       }
     } catch (error) {
       console.error('Launch failed:', error);
@@ -276,7 +277,6 @@ export function PipelineBuilder() {
     // Layout parameters
     const verticalSpacing = 150;
     const horizontalSpacing = 250;
-    const nodeWidth = 200;
 
     // Position nodes
     const positionedNodes = nodes.map(node => {
@@ -418,16 +418,6 @@ export function PipelineBuilder() {
     setNodes(layoutedNodes);
   }, [currentProject, selectedAssets, allAssets, setEdges, setNodes]);
 
-  const handleNodeClick = (event: React.MouseEvent, node: Node) => {
-    const newSelection = new Set(selectedAssets);
-    if (newSelection.has(node.id)) {
-      newSelection.delete(node.id);
-    } else {
-      newSelection.add(node.id);
-    }
-    setSelectedAssets(newSelection);
-  };
-
   const handleNewPipeline = () => {
     setIsCreating(true);
     setSelectedPipeline(null);
@@ -514,7 +504,7 @@ export function PipelineBuilder() {
         sensor_config: firstSensor?.sensorConfig || sensorConfig,
       });
 
-      alert(`Pipeline created successfully!\n\nFiles created:\n${response.files_created.join('\n')}`);
+      notify.success(`Pipeline created successfully!\n\nFiles created:\n${response.files_created.join('\n')}`);
 
       // Clear backend cache to force fresh fetch
       try {
@@ -540,7 +530,7 @@ export function PipelineBuilder() {
       setSelectedPipeline(pipeline);
     } catch (error) {
       console.error('Failed to create pipeline:', error);
-      alert('Failed to create pipeline. Check console for details.');
+      notify.error('Failed to create pipeline. Check console for details.');
     } finally {
       setIsSaving(false);
     }
@@ -557,6 +547,8 @@ export function PipelineBuilder() {
       const triggers: Trigger[] = [];
       if (details.trigger_type === 'schedule' && details.cron_schedule) {
         triggers.push({
+          id: `trigger-${pipelineItem.id || pipelineItem.name}`,
+          name: `${details.name} schedule`,
           type: 'schedule',
           cronSchedule: details.cron_schedule,
         });
@@ -581,12 +573,12 @@ export function PipelineBuilder() {
       setSelectedAssetId(null);
     } catch (error) {
       console.error('Failed to load pipeline details:', error);
-      alert('Failed to load pipeline details. Check console for details.');
+      notify.error('Failed to load pipeline details. Check console for details.');
     }
   };
 
-  const handleDeletePipeline = (pipelineId: string) => {
-    alert('To delete a pipeline, remove its files from the project using the Code tab or your IDE.');
+  const handleDeletePipeline = (_pipelineId: string) => {
+    notify.info('To delete a pipeline, remove its files from the project using the Code tab or your IDE.');
   };
 
   const handleToggleAsset = (assetId: string) => {
@@ -643,7 +635,7 @@ export function PipelineBuilder() {
           deps: newAssetDeps.length > 0 ? newAssetDeps : undefined,
         });
 
-        alert(`Asset created successfully!\n\nFile: ${response.file_path}`);
+        notify.success(`Asset created successfully!\n\nFile: ${response.file_path}`);
       } else {
         // Create component-based asset
         const componentTypeMap: Record<string, string> = {
@@ -674,7 +666,7 @@ export function PipelineBuilder() {
           config.query = dbQuery;
         } else if (newAssetType === 'dataframe_transformer') {
           if (!inputAsset) {
-            alert('Please select an input asset');
+            notify.error('Please select an input asset');
             setIsCreatingAsset(false);
             return;
           }
@@ -687,12 +679,20 @@ export function PipelineBuilder() {
         }
 
         // Call install endpoint which will handle both installing the component and creating the instance
-        const response = await api.post(`/templates-registry/install/${componentId}`, {
-          project_id: currentProject.id,
-          config: config,
+        const installResponse = await fetch(`/api/v1/templates-registry/install/${componentId}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            project_id: currentProject.id,
+            config: config,
+          }),
         });
+        if (!installResponse.ok) {
+          const errorText = await installResponse.text();
+          throw new Error(`Failed to install component: ${errorText}`);
+        }
 
-        alert(`Component asset created successfully!`);
+        notify.success(`Component asset created successfully!`);
       }
 
       // Reload the project to get the new asset
@@ -719,7 +719,7 @@ export function PipelineBuilder() {
       setShowCreateAsset(false);
     } catch (error) {
       console.error('Failed to create asset:', error);
-      alert('Failed to create asset. Check console for details.');
+      notify.error('Failed to create asset. Check console for details.');
     } finally {
       setIsCreatingAsset(false);
     }
@@ -741,7 +741,7 @@ export function PipelineBuilder() {
       URL.revokeObjectURL(url);
     } catch (error) {
       console.error('Failed to export YAML:', error);
-      alert('Failed to export YAML. Check console for details.');
+      notify.error('Failed to export YAML. Check console for details.');
     }
   };
 
@@ -759,14 +759,14 @@ export function PipelineBuilder() {
       try {
         const content = await file.text();
         await projectsApi.importYAML(currentProject.id, content);
-        alert('YAML imported successfully! Reloading project...');
+        notify.success('YAML imported successfully! Reloading project...');
 
         // Reload the project to reflect the imported components
         const { loadProject } = useProjectStore.getState();
         await loadProject(currentProject.id);
       } catch (error) {
         console.error('Failed to import YAML:', error);
-        alert('Failed to import YAML. Check console for details.');
+        notify.error('Failed to import YAML. Check console for details.');
       }
     };
 
@@ -785,50 +785,9 @@ export function PipelineBuilder() {
   }
 
   return (
-    <div className="h-full flex flex-col bg-gray-50">
-      {/* Header */}
-      <div className="bg-white border-b border-gray-200 px-6 py-4">
-        <div className="flex items-center justify-between">
-          <div>
-            <h2 className="text-2xl font-bold text-gray-900 flex items-center space-x-2">
-              <Workflow className="w-6 h-6" />
-              <span>Pipeline Builder</span>
-            </h2>
-            <p className="text-sm text-gray-600 mt-1">
-              Create jobs with triggers and asset selections
-            </p>
-          </div>
-          <div className="flex items-center space-x-2">
-            <button
-              onClick={handleExportYAML}
-              className="flex items-center space-x-2 px-4 py-2 bg-white border border-gray-300 text-gray-700 rounded-md hover:bg-gray-50"
-              title="Export pipeline as YAML"
-            >
-              <Download className="w-4 h-4" />
-              <span>Export YAML</span>
-            </button>
-            <button
-              onClick={handleImportYAML}
-              className="flex items-center space-x-2 px-4 py-2 bg-white border border-gray-300 text-gray-700 rounded-md hover:bg-gray-50"
-              title="Import pipeline from YAML"
-            >
-              <Upload className="w-4 h-4" />
-              <span>Import YAML</span>
-            </button>
-            <button
-              onClick={handleNewPipeline}
-              className="flex items-center space-x-2 px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700"
-            >
-              <Plus className="w-4 h-4" />
-              <span>New Pipeline</span>
-            </button>
-          </div>
-        </div>
-      </div>
-
-      <div className="flex-1 flex overflow-hidden">
-        {/* Left Sidebar - Pipeline List */}
-        <aside className="w-64 bg-white border-r border-gray-200 flex flex-col">
+    <div className="h-full flex bg-gray-50">
+      {/* Left Sidebar - Pipeline List (top-level, matches Assets tab layout) */}
+      <aside className="w-64 bg-white border-r border-gray-200 flex flex-col flex-shrink-0">
           <div className="px-4 py-3 bg-gray-50 border-b border-gray-200">
             <h3 className="text-xs font-semibold text-gray-700 uppercase tracking-wider">
               Your Pipelines
@@ -891,6 +850,36 @@ export function PipelineBuilder() {
           </div>
         </aside>
 
+      {/* Right column: header row + main content */}
+      <div className="flex-1 flex flex-col min-w-0">
+        {/* Header row — sits only above the main area, not the sidebar */}
+        <div className="bg-white border-b border-gray-200 px-4 py-2 flex items-center justify-end gap-1.5 flex-shrink-0">
+          <button
+            onClick={handleExportYAML}
+            className="flex items-center gap-1.5 px-2.5 py-1.5 text-sm text-gray-700 hover:bg-gray-100 rounded"
+            title="Export pipeline as YAML"
+          >
+            <Download className="w-4 h-4" />
+            <span>Export YAML</span>
+          </button>
+          <button
+            onClick={handleImportYAML}
+            className="flex items-center gap-1.5 px-2.5 py-1.5 text-sm text-gray-700 hover:bg-gray-100 rounded"
+            title="Import pipeline from YAML"
+          >
+            <Upload className="w-4 h-4" />
+            <span>Import YAML</span>
+          </button>
+          <button
+            onClick={handleNewPipeline}
+            className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-primary-foreground bg-primary rounded-md hover:bg-accent"
+          >
+            <Plus className="w-4 h-4" />
+            <span>New Pipeline</span>
+          </button>
+        </div>
+
+        <div className="flex-1 flex overflow-hidden">
         {/* Center - Pipeline Builder */}
         <main className="flex-1 flex flex-col overflow-hidden bg-white">
           {(isCreating || selectedPipeline) ? (
@@ -1487,7 +1476,7 @@ export function PipelineBuilder() {
                           ) : communitySensorSchema ? (
                             <div className="space-y-3 pt-2 border-t border-gray-200">
                               <p className="text-sm font-medium text-gray-700">Configuration</p>
-                              {Object.entries(communitySensorSchema.attributes).map(([key, attr]: [string, any]) => (
+                              {Object.entries(communitySensorSchema.attributes || {}).map(([key, attr]: [string, any]) => (
                                 <div key={key}>
                                   <label className="block text-sm font-medium text-gray-700 mb-1">
                                     {attr.label} {attr.required && <span className="text-red-500">*</span>}
@@ -1712,6 +1701,7 @@ export function PipelineBuilder() {
             </div>
           </aside>
         )}
+        </div>
       </div>
 
       {/* Add Existing Asset Modal */}

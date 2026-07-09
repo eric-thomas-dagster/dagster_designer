@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Plus, X, Info } from 'lucide-react';
+import { X, Info } from 'lucide-react';
 
 interface TranslationEditorProps {
   value: Record<string, any>;

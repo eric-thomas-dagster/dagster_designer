@@ -8,7 +8,7 @@ import json
 import subprocess
 import os
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from ..services.project_service import project_service
 
@@ -81,11 +81,11 @@ class ComponentTemplate(BaseModel):
     name: str
     category: str
     description: str
-    version: str
-    author: str
+    version: str = "0.0.0"  # Manifest drifted — many entries no longer publish a version
+    author: str = "community"
     path: str
-    tags: List[str]
-    dependencies: dict
+    tags: List[str] = []
+    dependencies: Any = {}  # Manifest drifted: sometimes dict, sometimes list
     readme_url: str
     component_url: str
     schema_url: Optional[str] = None  # Optional - not all components have schema.json
@@ -94,6 +94,8 @@ class ComponentTemplate(BaseModel):
     manifest_url: Optional[str] = None
     icon: Optional[str] = "Package"  # Lucide icon name for visual identification
     supports_partitions: Optional[bool] = False  # Whether the component supports partitioned assets
+    validation: Optional[dict] = None  # New: validation rules from manifest
+    agent_hints: Optional[dict] = None  # New: hints for LLM agents
 
 
 class TemplateManifest(BaseModel):
@@ -540,11 +542,19 @@ async def get_manifest() -> TemplateManifest:
             response.raise_for_status()
             data = response.json()
 
+            # Components that shouldn't be surfaced in the UI.
+            # dependency_graph is an internal fallback we use to persist manual
+            # graph edges — users should use each component's own upstream fields
+            # (upstream_asset_keys, left_asset_key, etc.) instead.
+            HIDDEN_IDS = {"dependency_graph"}
+
             # Validate components individually to gracefully handle invalid entries
             valid_components = []
             invalid_components = []
 
             for component_data in data.get('components', []):
+                if component_data.get('id') in HIDDEN_IDS:
+                    continue
                 try:
                     # Validate individual component
                     component = ComponentTemplate(**component_data)

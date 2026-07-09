@@ -1,8 +1,7 @@
-import { useState, useEffect, useCallback } from 'react';
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { useState, useEffect, useRef, useMemo } from 'react';
+import { useQuery, useMutation } from '@tanstack/react-query';
 import Editor from '@monaco-editor/react';
 import {
-  File,
   Folder,
   FolderOpen,
   Save,
@@ -20,8 +19,8 @@ import {
   Search,
 } from 'lucide-react';
 import { filesApi, type FileTreeNode } from '@/services/api';
-import { useProjectStore } from '@/hooks/useProject';
 import { Terminal } from './Terminal';
+import { notify, confirmDialog } from './Notifications';
 
 interface CodeEditorProps {
   projectId: string;
@@ -53,8 +52,35 @@ export function CodeEditor({ projectId, fileToOpen, onFileOpened }: CodeEditorPr
   const [renameValue, setRenameValue] = useState('');
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; path: string; type: 'file' | 'directory' } | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
+  const [recentFiles, setRecentFiles] = useState<string[]>([]);
+  const [quickOpenOpen, setQuickOpenOpen] = useState(false);
+  const [quickOpenQuery, setQuickOpenQuery] = useState('');
+  const [quickOpenIndex, setQuickOpenIndex] = useState(0);
+  const quickOpenInputRef = useRef<HTMLInputElement | null>(null);
 
-  const queryClient = useQueryClient();
+  const recentFilesKey = `code.recent.${projectId}`;
+
+  // Load recent files from localStorage on mount / project change.
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(recentFilesKey);
+      setRecentFiles(raw ? JSON.parse(raw) : []);
+    } catch {
+      setRecentFiles([]);
+    }
+  }, [recentFilesKey]);
+
+  const pushRecentFile = (filePath: string) => {
+    setRecentFiles((prev) => {
+      const next = [filePath, ...prev.filter((p) => p !== filePath)].slice(0, 10);
+      try {
+        localStorage.setItem(recentFilesKey, JSON.stringify(next));
+      } catch {
+        // ignore
+      }
+      return next;
+    });
+  };
 
   // Customize the ScoutOS widget: hide expand button and inject close button
   useEffect(() => {
@@ -137,11 +163,62 @@ export function CodeEditor({ projectId, fileToOpen, onFileOpened }: CodeEditorPr
     };
   }, [aiPanelOpen]);
 
+  // Cmd/Ctrl+P → open quick file picker
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const mod = e.metaKey || e.ctrlKey;
+      if (mod && e.key.toLowerCase() === 'p') {
+        // Don't hijack browser Print in editable inputs unless we're in Code tab focus.
+        e.preventDefault();
+        setQuickOpenOpen(true);
+        setQuickOpenQuery('');
+        setQuickOpenIndex(0);
+        setTimeout(() => quickOpenInputRef.current?.focus(), 0);
+      } else if (e.key === 'Escape' && quickOpenOpen) {
+        setQuickOpenOpen(false);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [quickOpenOpen]);
+
   // Fetch file tree
   const { data: fileTree, refetch: refetchFileTree } = useQuery({
     queryKey: ['files', projectId],
     queryFn: () => filesApi.list(projectId),
   });
+
+  // Flatten the file tree into a list of file paths (for Cmd+P + recent-files list).
+  const flatFiles = useMemo(() => {
+    const out: string[] = [];
+    const walk = (nodes: FileTreeNode[] | undefined) => {
+      if (!nodes || !Array.isArray(nodes)) return;
+      for (const n of nodes) {
+        if (n.type === 'file') out.push(n.path);
+        if (n.children) walk(n.children);
+      }
+    };
+    // Backend returns { tree: { children: [...] } }. Handle both a bare array
+    // and the wrapped-tree shape.
+    const root: any = fileTree;
+    const roots =
+      Array.isArray(root) ? root :
+      Array.isArray(root?.tree) ? root.tree :
+      root?.tree?.children ? root.tree.children :
+      Array.isArray(root?.items) ? root.items :
+      Array.isArray(root?.files) ? root.files :
+      [];
+    walk(roots);
+    return out;
+  }, [fileTree]);
+
+  const quickOpenResults = useMemo(() => {
+    const q = quickOpenQuery.toLowerCase().trim();
+    if (!q) return recentFiles.filter((p) => flatFiles.includes(p)).slice(0, 20);
+    return flatFiles
+      .filter((p) => p.toLowerCase().includes(q))
+      .slice(0, 50);
+  }, [quickOpenQuery, flatFiles, recentFiles]);
 
   // Read file mutation
   const readFileMutation = useMutation({
@@ -149,7 +226,7 @@ export function CodeEditor({ projectId, fileToOpen, onFileOpened }: CodeEditorPr
       filesApi.read(projectId, filePath),
     onSuccess: (data, variables) => {
       if (data.is_binary) {
-        alert('Cannot open binary file');
+        notify.error('Cannot open binary file');
         return;
       }
 
@@ -157,6 +234,7 @@ export function CodeEditor({ projectId, fileToOpen, onFileOpened }: CodeEditorPr
       const existingFile = openFiles.find((f) => f.path === variables.filePath);
       if (existingFile) {
         setActiveFilePath(variables.filePath);
+        pushRecentFile(variables.filePath);
         return;
       }
 
@@ -170,6 +248,7 @@ export function CodeEditor({ projectId, fileToOpen, onFileOpened }: CodeEditorPr
         },
       ]);
       setActiveFilePath(variables.filePath);
+      pushRecentFile(variables.filePath);
     },
   });
 
@@ -271,7 +350,7 @@ export function CodeEditor({ projectId, fileToOpen, onFileOpened }: CodeEditorPr
   const renameMutation = useMutation({
     mutationFn: ({ projectId, oldPath, newPath }: { projectId: string; oldPath: string; newPath: string }) =>
       filesApi.rename(projectId, oldPath, newPath),
-    onSuccess: (data, variables) => {
+    onSuccess: (_data, variables) => {
       // Update open files if the renamed file was open
       setOpenFiles((prev) =>
         prev.map((f) => {
@@ -300,7 +379,7 @@ export function CodeEditor({ projectId, fileToOpen, onFileOpened }: CodeEditorPr
       setRenameValue('');
     },
     onError: (error: any) => {
-      alert(`Failed to rename: ${error.response?.data?.detail || error.message}`);
+      notify.error(`Failed to rename: ${error.response?.data?.detail || error.message}`);
       setRenamingPath(null);
       setRenameValue('');
     },
@@ -342,7 +421,15 @@ export function CodeEditor({ projectId, fileToOpen, onFileOpened }: CodeEditorPr
     });
   };
 
-  const handleCloseFile = (filePath: string) => {
+  const handleCloseFile = async (filePath: string) => {
+    const file = openFiles.find((f) => f.path === filePath);
+    if (file?.isDirty) {
+      const proceed = await confirmDialog(
+        `"${filePath.split('/').pop()}" has unsaved changes. Discard them?`,
+        { title: 'Discard unsaved changes?', destructive: true }
+      );
+      if (!proceed) return;
+    }
     setOpenFiles((prev) => prev.filter((f) => f.path !== filePath));
     if (activeFilePath === filePath) {
       const remainingFiles = openFiles.filter((f) => f.path !== filePath);
@@ -369,9 +456,9 @@ export function CodeEditor({ projectId, fileToOpen, onFileOpened }: CodeEditorPr
     });
   };
 
-  const handleDeleteFile = (filePath: string) => {
+  const handleDeleteFile = async (filePath: string) => {
     const fileName = filePath.split('/').pop();
-    if (!window.confirm(`Are you sure you want to delete "${fileName}"?`)) {
+    if (!(await confirmDialog(`Are you sure you want to delete "${fileName}"?`, { title: 'Delete file', destructive: true }))) {
       return;
     }
 
@@ -381,9 +468,9 @@ export function CodeEditor({ projectId, fileToOpen, onFileOpened }: CodeEditorPr
     });
   };
 
-  const handleDeleteDirectory = (dirPath: string) => {
+  const handleDeleteDirectory = async (dirPath: string) => {
     const dirName = dirPath.split('/').pop();
-    if (!window.confirm(`Are you sure you want to delete the folder "${dirName}" and ALL its contents? This cannot be undone.`)) {
+    if (!(await confirmDialog(`Are you sure you want to delete the folder "${dirName}" and ALL its contents? This cannot be undone.`, { title: 'Delete folder', destructive: true }))) {
       return;
     }
 
@@ -438,7 +525,7 @@ export function CodeEditor({ projectId, fileToOpen, onFileOpened }: CodeEditorPr
 
     const selectedText = editorInstance.getModel()?.getValueInRange(selection);
     if (!selectedText || selectedText.trim() === '') {
-      alert('Please select some code first');
+      notify.info('Please select some code first');
       return;
     }
 
@@ -462,7 +549,7 @@ export function CodeEditor({ projectId, fileToOpen, onFileOpened }: CodeEditorPr
         } else {
           console.error('Dagster AI panel not found');
           navigator.clipboard.writeText(prompt);
-          alert('✨ Code copied to clipboard! Paste it into the Dagster AI chat.');
+          notify.info('Code copied to clipboard! Paste it into the Dagster AI chat.');
         }
         return;
       }
@@ -477,7 +564,7 @@ export function CodeEditor({ projectId, fileToOpen, onFileOpened }: CodeEditorPr
           } catch (err) {
             console.error('Failed to submit prompt:', err);
             navigator.clipboard.writeText(prompt);
-            alert('✨ Code copied to clipboard! Paste it into the Dagster AI chat.');
+            notify.info('Code copied to clipboard! Paste it into the Dagster AI chat.');
           }
         } else if (submitAttempt < 10) {
           // handleSubmit not available yet, retry after 200ms
@@ -485,7 +572,7 @@ export function CodeEditor({ projectId, fileToOpen, onFileOpened }: CodeEditorPr
         } else {
           // Fallback to clipboard after 2 seconds
           navigator.clipboard.writeText(prompt);
-          alert('✨ Code copied to clipboard! Paste it into the Dagster AI chat.');
+          notify.info('Code copied to clipboard! Paste it into the Dagster AI chat.');
         }
       };
 
@@ -771,26 +858,26 @@ export function CodeEditor({ projectId, fileToOpen, onFileOpened }: CodeEditorPr
         className="border-r border-gray-200 flex flex-col shrink-0 relative"
         style={{ width: `${sidebarWidth}px`, minWidth: '200px', maxWidth: '600px' }}
       >
-        <div className="p-2 border-b border-gray-200 flex items-center justify-between">
-          <span className="text-sm font-semibold text-gray-700">Files</span>
+        <div className="px-4 py-3 bg-gray-50 border-b border-gray-200 flex items-center justify-between">
+          <h3 className="text-xs font-semibold text-gray-700 uppercase tracking-wider">Files</h3>
           <div className="flex items-center space-x-1">
             <button
               onClick={() => setShowNewFileModal(true)}
-              className="p-1 hover:bg-gray-100 rounded"
+              className="p-1 hover:bg-gray-200 rounded"
               title="New File"
             >
               <FilePlus className="w-4 h-4 text-gray-600" />
             </button>
             <button
               onClick={() => setShowNewFolderModal(true)}
-              className="p-1 hover:bg-gray-100 rounded"
+              className="p-1 hover:bg-gray-200 rounded"
               title="New Folder"
             >
               <FolderPlus className="w-4 h-4 text-gray-600" />
             </button>
             <button
               onClick={() => refetchFileTree()}
-              className="p-1 hover:bg-gray-100 rounded"
+              className="p-1 hover:bg-gray-200 rounded"
               title="Refresh"
             >
               <RefreshCw className="w-4 h-4 text-gray-600" />
@@ -970,9 +1057,66 @@ export function CodeEditor({ projectId, fileToOpen, onFileOpened }: CodeEditorPr
             />
           ) : (
             <div className="flex items-center justify-center h-full text-gray-500">
-              <div className="text-center">
-                <FileCode className="w-12 h-12 mx-auto mb-2 text-gray-400" />
-                <p className="text-sm">Select a file to edit</p>
+              <div className="w-full max-w-md">
+                <div className="text-center mb-6">
+                  <FileCode className="w-12 h-12 mx-auto mb-2 text-gray-400" />
+                  <p className="text-sm">Select a file, or press <kbd className="mx-1 px-1.5 py-0.5 text-xs bg-white border border-gray-300 rounded">⌘P</kbd> to search files</p>
+                </div>
+
+                {/* Quick actions */}
+                <div className="flex items-center gap-2 mb-4">
+                  <button
+                    onClick={() => setShowNewFileModal(true)}
+                    className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 text-sm text-primary bg-white border border-primary/30 rounded-md hover:bg-primary/5"
+                  >
+                    <FilePlus className="w-4 h-4" />
+                    New file
+                  </button>
+                  <button
+                    onClick={() => setShowNewFolderModal(true)}
+                    className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 text-sm text-gray-700 bg-white border border-gray-300 rounded-md hover:bg-gray-50"
+                  >
+                    <FolderPlus className="w-4 h-4" />
+                    New folder
+                  </button>
+                  <button
+                    onClick={() => {
+                      setQuickOpenOpen(true);
+                      setQuickOpenQuery('');
+                      setQuickOpenIndex(0);
+                      setTimeout(() => quickOpenInputRef.current?.focus(), 0);
+                    }}
+                    className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 text-sm text-gray-700 bg-white border border-gray-300 rounded-md hover:bg-gray-50"
+                    title="Search files (⌘P)"
+                  >
+                    <Search className="w-4 h-4" />
+                    Search…
+                  </button>
+                </div>
+
+                {recentFiles.length > 0 && (() => {
+                  const validRecents = recentFiles.filter((p) => flatFiles.includes(p)).slice(0, 8);
+                  if (!validRecents.length) return null;
+                  return (
+                    <div className="bg-white border border-gray-200 rounded-lg p-4 shadow-sm">
+                      <div className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Recent files</div>
+                      <ul className="space-y-1">
+                        {validRecents.map((path) => (
+                          <li key={path}>
+                            <button
+                              onClick={() => handleFileClick(path)}
+                              className="w-full text-left px-2 py-1.5 rounded hover:bg-gray-50 text-sm truncate flex items-center gap-2"
+                              title={path}
+                            >
+                              <FileCode className="w-3.5 h-3.5 text-gray-400 flex-shrink-0" />
+                              <span className="truncate">{path}</span>
+                            </button>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  );
+                })()}
               </div>
             </div>
           )}
@@ -1162,6 +1306,88 @@ export function CodeEditor({ projectId, fileToOpen, onFileOpened }: CodeEditorPr
             <Trash2 className="w-4 h-4" />
             <span>Delete</span>
           </button>
+        </div>
+      )}
+
+      {/* Quick Open modal (⌘P) */}
+      {quickOpenOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-start justify-center pt-24 bg-black/40"
+          onClick={() => setQuickOpenOpen(false)}
+        >
+          <div
+            className="w-full max-w-xl bg-white rounded-lg shadow-2xl border border-gray-200 overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center gap-2 px-4 py-3 border-b border-gray-200">
+              <Search className="w-4 h-4 text-gray-400 flex-shrink-0" />
+              <input
+                ref={quickOpenInputRef}
+                type="text"
+                value={quickOpenQuery}
+                onChange={(e) => {
+                  setQuickOpenQuery(e.target.value);
+                  setQuickOpenIndex(0);
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === 'ArrowDown') {
+                    e.preventDefault();
+                    setQuickOpenIndex((i) => Math.min(i + 1, quickOpenResults.length - 1));
+                  } else if (e.key === 'ArrowUp') {
+                    e.preventDefault();
+                    setQuickOpenIndex((i) => Math.max(i - 1, 0));
+                  } else if (e.key === 'Enter') {
+                    e.preventDefault();
+                    const target = quickOpenResults[quickOpenIndex];
+                    if (target) {
+                      handleFileClick(target);
+                      setQuickOpenOpen(false);
+                    }
+                  } else if (e.key === 'Escape') {
+                    setQuickOpenOpen(false);
+                  }
+                }}
+                placeholder={quickOpenQuery === '' && quickOpenResults.length === 0 ? 'Type to search files…' : 'Search files by name or path…'}
+                className="flex-1 text-sm bg-transparent outline-none placeholder-gray-400"
+              />
+              <kbd className="text-[10px] px-1.5 py-0.5 bg-gray-100 text-gray-500 rounded">Esc</kbd>
+            </div>
+            <div className="max-h-80 overflow-y-auto">
+              {quickOpenQuery === '' && quickOpenResults.length > 0 && (
+                <div className="px-4 py-1.5 text-xs font-semibold text-gray-400 uppercase tracking-wide bg-gray-50 border-b border-gray-100">
+                  Recent
+                </div>
+              )}
+              {quickOpenResults.length === 0 ? (
+                <div className="px-4 py-6 text-center text-sm text-gray-500">
+                  {quickOpenQuery ? 'No files match' : 'No recent files. Type to search.'}
+                </div>
+              ) : (
+                quickOpenResults.map((path, i) => {
+                  const name = path.split('/').pop();
+                  const dir = path.slice(0, -(name?.length ?? 0) - 1) || '/';
+                  const active = i === quickOpenIndex;
+                  return (
+                    <button
+                      key={path}
+                      onMouseEnter={() => setQuickOpenIndex(i)}
+                      onClick={() => {
+                        handleFileClick(path);
+                        setQuickOpenOpen(false);
+                      }}
+                      className={`w-full text-left px-4 py-2 text-sm flex items-center gap-2 ${
+                        active ? 'bg-primary/10 text-gray-900' : 'text-gray-700 hover:bg-gray-50'
+                      }`}
+                    >
+                      <FileCode className={`w-4 h-4 flex-shrink-0 ${active ? 'text-primary' : 'text-gray-400'}`} />
+                      <span className="font-medium truncate">{name}</span>
+                      <span className="text-xs text-gray-400 truncate">{dir}</span>
+                    </button>
+                  );
+                })
+              )}
+            </div>
+          </div>
         </div>
       )}
     </div>

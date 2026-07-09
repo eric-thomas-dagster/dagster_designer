@@ -7,10 +7,19 @@ interface ProjectComponentsListProps {
   onDeleteComponent: (component: ComponentInstance) => void;
 }
 
+// Internal components users shouldn't manage directly.
+// DependencyGraphComponent is auto-created when the user draws manual edges;
+// they should edit those edges on the graph canvas, not through this list.
+const HIDDEN_COMPONENT_TYPES = /DependencyGraphComponent$|dependency_graph$/i;
+
 export function ProjectComponentsList({ onEditComponent, onDeleteComponent }: ProjectComponentsListProps) {
   const { currentProject } = useProjectStore();
 
-  if (!currentProject || currentProject.components.length === 0) {
+  const visibleComponents = currentProject
+    ? currentProject.components.filter((c) => !HIDDEN_COMPONENT_TYPES.test(c.component_type || ''))
+    : [];
+
+  if (!currentProject || visibleComponents.length === 0) {
     return (
       <div className="p-4 text-center text-sm text-gray-500">
         No components added yet
@@ -29,7 +38,7 @@ export function ProjectComponentsList({ onEditComponent, onDeleteComponent }: Pr
 
   return (
     <div className="space-y-2">
-      {currentProject.components.map((component) => (
+      {visibleComponents.map((component) => (
         <div
           key={component.id}
           className="group relative p-3 bg-white border border-gray-200 rounded-lg hover:border-blue-300 hover:shadow-sm transition-all"

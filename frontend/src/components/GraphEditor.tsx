@@ -14,7 +14,6 @@ import ReactFlow, {
   MiniMap,
   NodeTypes,
   EdgeTypes,
-  Panel,
   useViewport,
   EdgeProps,
   getBezierPath,
@@ -26,9 +25,10 @@ import 'reactflow/dist/style.css';
 import { ComponentNode } from './nodes/ComponentNode';
 import { AssetNode } from './nodes/AssetNode';
 import { Launchpad } from './Launchpad';
+import { notify } from './Notifications';
 import { useProjectStore } from '@/hooks/useProject';
 import { projectsApi, componentsApi } from '@/services/api';
-import { Play, Trash2 } from 'lucide-react';
+import { Play } from 'lucide-react';
 import type { GraphNode, GraphEdge, ComponentSchema } from '@/types';
 
 const nodeTypes: NodeTypes = {
@@ -39,7 +39,7 @@ const nodeTypes: NodeTypes = {
 // Custom edge component that shows delete button when clicked for custom edges
 function CustomEdge({ id, source, target, sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition, data, markerEnd, selected }: EdgeProps) {
   const { currentProject, setCurrentProject } = useProjectStore();
-  const { setEdges, setNodes, getNodes } = useReactFlow();
+  const { setEdges, getNodes } = useReactFlow();
 
   console.log('[CustomEdge] Component called for edge:', id, 'source:', source, 'target:', target, 'data.is_custom:', data?.is_custom, 'selected:', selected);
 
@@ -92,7 +92,6 @@ function CustomEdge({ id, source, target, sourceX, sourceY, targetX, targetY, so
       console.log('[CustomEdge] Regenerated project has', updatedProject.graph.edges.length, 'edges,', updatedProject.custom_lineage.length, 'custom lineage entries');
 
       // Update edges from backend with smart routing
-      const customLineage = updatedProject.custom_lineage || [];
       const currentNodes = getNodes();
       const flowEdges: Edge[] = updatedProject.graph.edges.map((edge: GraphEdge) => {
         const isCustom = edge.is_custom === true;
@@ -121,7 +120,7 @@ function CustomEdge({ id, source, target, sourceX, sourceY, targetX, targetY, so
       console.log('[CustomEdge] Graph regenerated successfully');
     } catch (error) {
       console.error('[CustomEdge] Failed to delete custom lineage:', error);
-      alert('Failed to delete custom lineage. See console for details.');
+      notify.error('Failed to delete custom lineage. See console for details.');
 
       // On error, trigger regeneration to restore the correct state
       try {
@@ -367,15 +366,16 @@ function calculateEdgeHandles(sourceNode: Node | undefined, targetNode: Node | u
 
 interface GraphEditorProps {
   onNodeSelect: (nodeId: string | null) => void;
+  onPrimitiveClick?: (category: 'job' | 'schedule' | 'sensor' | 'asset_check', name: string) => void;
 }
 
-function GraphEditorInner({ onNodeSelect }: GraphEditorProps) {
+function GraphEditorInner({ onNodeSelect, onPrimitiveClick }: GraphEditorProps) {
   const { currentProject, updateGraph, setCurrentProject } = useProjectStore();
   const [nodes, setNodes, onNodesChange] = useNodesState([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState([]);
   const [selectedAssets, setSelectedAssets] = useState<string[]>([]);
   const [isMaterializing, setIsMaterializing] = useState(false);
-  const [schemasLoaded, setSchemasLoaded] = useState(false);
+  const [, setSchemasLoaded] = useState(false);
   const isInitialLoad = useRef(true);
   const hasTriggeredRegeneration = useRef(false);
   const lastSavedNodesHash = useRef<string>('');
@@ -391,13 +391,13 @@ function GraphEditorInner({ onNodeSelect }: GraphEditorProps) {
     try {
       const result = await projectsApi.materialize(currentProject.id, [assetKey]);
       if (result.success) {
-        alert(`Asset ${assetKey} materialized successfully!`);
+        notify.success(`Asset ${assetKey} materialized successfully!`);
       } else {
-        alert(`Failed to materialize asset ${assetKey}`);
+        notify.error(`Failed to materialize asset ${assetKey}`);
       }
     } catch (error) {
       console.error('Materialize failed:', error);
-      alert(`Failed to materialize asset ${assetKey}`);
+      notify.error(`Failed to materialize asset ${assetKey}`);
     }
   }, [currentProject]);
 
@@ -412,9 +412,9 @@ function GraphEditorInner({ onNodeSelect }: GraphEditorProps) {
       const result = await projectsApi.materialize(currentProject.id, [launchpadAssetKey], config, tags, partition);
       if (result.success) {
         const partitionMsg = partition ? ` (partition: ${partition})` : '';
-        alert(`Asset ${launchpadAssetKey}${partitionMsg} materialized successfully!`);
+        notify.success(`Asset ${launchpadAssetKey}${partitionMsg} materialized successfully!`);
       } else {
-        alert(`Failed to materialize asset ${launchpadAssetKey}`);
+        notify.error(`Failed to materialize asset ${launchpadAssetKey}`);
       }
     } catch (error) {
       console.error('Materialize failed:', error);
@@ -624,6 +624,7 @@ function GraphEditorInner({ onNodeSelect }: GraphEditorProps) {
             ...(node.node_kind === 'asset' ? {
               onMaterialize: handleMaterializeAsset,
               onOpenLaunchpad: handleOpenLaunchpad,
+              onPrimitiveClick,
             } : {}),
           },
         };
@@ -822,7 +823,7 @@ function GraphEditorInner({ onNodeSelect }: GraphEditorProps) {
 
     const newNodePositions = new Map<string, { x: number; y: number }>();
 
-    groupBounds.forEach((group, index) => {
+    groupBounds.forEach((group) => {
       // Calculate offset for this group
       const offsetX = currentX - group.x;
       const offsetY = currentY - group.y;
@@ -921,6 +922,7 @@ function GraphEditorInner({ onNodeSelect }: GraphEditorProps) {
                 node_kind: node.node_kind,
                 source_component: node.source_component,
                 ...ioMetadata,
+                ...(node.node_kind === 'asset' ? { onPrimitiveClick } : {}),
               },
             };
           });
@@ -1138,8 +1140,8 @@ function GraphEditorInner({ onNodeSelect }: GraphEditorProps) {
         );
 
         // Show user-friendly error message
-        alert(
-          `⚠️ Connection Type Mismatch\n\n` +
+        notify.error(
+          `Connection Type Mismatch\n\n` +
             `Cannot connect these assets:\n\n` +
             `• Source "${sourceNode.data?.label || sourceNode.id}" produces: ${sourceOutputType}\n` +
             `• Target "${targetNode.data?.label || targetNode.id}" requires: ${targetInputType}\n\n` +
@@ -1151,25 +1153,25 @@ function GraphEditorInner({ onNodeSelect }: GraphEditorProps) {
       }
 
       // Types match - now validate column compatibility
-      const columnValidation = validateColumnCompatibility(sourceNode, targetNode);
+      const columnValidation = validateColumnCompatibility(sourceNode as unknown as GraphNode, targetNode as unknown as GraphNode);
 
       if (!columnValidation.valid) {
         console.warn('[GraphEditor] Column validation failed:', columnValidation.errors);
 
         // Build detailed error message
-        let errorMessage = `⚠️ Column Schema Mismatch\n\n`;
+        let errorMessage = `Column Schema Mismatch\n\n`;
         errorMessage += `Cannot connect these components:\n\n`;
         errorMessage += `• Source: "${sourceNode.data?.label || sourceNode.id}"\n`;
         errorMessage += `• Target: "${targetNode.data?.label || targetNode.id}"\n\n`;
         errorMessage += `Missing Required Columns:\n`;
         columnValidation.errors.forEach(err => {
-          errorMessage += `  ❌ ${err}\n`;
+          errorMessage += `  - ${err}\n`;
         });
 
         if (columnValidation.warnings.length > 0) {
           errorMessage += `\nWarnings:\n`;
           columnValidation.warnings.forEach(warn => {
-            errorMessage += `  ⚠️ ${warn}\n`;
+            errorMessage += `  - ${warn}\n`;
           });
         }
 
@@ -1178,7 +1180,7 @@ function GraphEditorInner({ onNodeSelect }: GraphEditorProps) {
         errorMessage += `- Or add a transformation component to map/create missing columns\n`;
         errorMessage += `- Or connect a different source that provides the required data`;
 
-        alert(errorMessage);
+        notify.error(errorMessage);
         return false;
       }
 
@@ -1186,13 +1188,13 @@ function GraphEditorInner({ onNodeSelect }: GraphEditorProps) {
       if (columnValidation.warnings.length > 0) {
         console.warn('[GraphEditor] Column validation warnings:', columnValidation.warnings);
 
-        let warningMessage = `⚠️ Column Compatibility Warnings\n\n`;
+        let warningMessage = `Column Compatibility Warnings\n\n`;
         warningMessage += `Connecting:\n`;
         warningMessage += `• Source: "${sourceNode.data?.label || sourceNode.id}"\n`;
         warningMessage += `• Target: "${targetNode.data?.label || targetNode.id}"\n\n`;
         warningMessage += `Warnings:\n`;
         columnValidation.warnings.forEach(warn => {
-          warningMessage += `  ⚠️ ${warn}\n`;
+          warningMessage += `  - ${warn}\n`;
         });
         warningMessage += `\nThe connection will be allowed, but you may encounter runtime issues.`;
 
@@ -1249,8 +1251,8 @@ function GraphEditorInner({ onNodeSelect }: GraphEditorProps) {
         if (targetInputRequired && targetInputType) {
           // Check if source produces output
           if (!sourceOutputType) {
-            alert(
-              `⚠️ Cannot Connect These Assets\n\n` +
+            notify.error(
+              `Cannot Connect These Assets\n\n` +
               `Source: "${sourceNode.data?.label || sourceNode.id}"\n` +
               `• This asset does not produce output\n\n` +
               `Target: "${targetNode.data?.label || targetNode.id}"\n` +
@@ -1262,8 +1264,8 @@ function GraphEditorInner({ onNodeSelect }: GraphEditorProps) {
 
           // Check type compatibility
           if (sourceOutputType !== targetInputType) {
-            alert(
-              `⚠️ Type Mismatch - Connection Not Allowed\n\n` +
+            notify.error(
+              `Type Mismatch - Connection Not Allowed\n\n` +
               `Source: "${sourceNode.data?.label || sourceNode.id}"\n` +
               `• Produces: ${sourceOutputType}\n\n` +
               `Target: "${targetNode.data?.label || targetNode.id}"\n` +
@@ -1399,7 +1401,7 @@ function GraphEditorInner({ onNodeSelect }: GraphEditorProps) {
           console.log('[GraphEditor] Custom lineage applied successfully');
         } catch (error) {
           console.error('[GraphEditor] Failed to add custom lineage:', error);
-          alert('Failed to add custom lineage. See console for details.');
+          notify.error('Failed to add custom lineage. See console for details.');
         }
         return;
       }
@@ -1456,11 +1458,11 @@ function GraphEditorInner({ onNodeSelect }: GraphEditorProps) {
       console.log('[GraphEditor] Materialization result:', result);
 
       if (result.success) {
-        alert(`✅ Successfully materialized ${assetKeys.length} asset(s)!\n\nOutput:\n${result.stdout.slice(0, 500)}`);
+        notify.success(`Successfully materialized ${assetKeys.length} asset(s)!\n\nOutput:\n${result.stdout.slice(0, 500)}`);
         console.log('Materialization output:', result.stdout);
       } else {
         const errorMsg = result.stderr || result.message || 'Unknown error';
-        alert(`❌ Materialization failed:\n\n${errorMsg.slice(0, 500)}`);
+        notify.error(`Materialization failed:\n\n${errorMsg.slice(0, 500)}`);
         console.error('Materialization failed - stderr:', result.stderr);
         console.error('Materialization failed - stdout:', result.stdout);
         console.error('Materialization failed - message:', result.message);
@@ -1468,7 +1470,7 @@ function GraphEditorInner({ onNodeSelect }: GraphEditorProps) {
     } catch (error: any) {
       console.error('Materialize selected failed:', error);
       const errorMsg = error?.response?.data?.detail || error?.message || String(error);
-      alert(`❌ Failed to materialize assets:\n\n${errorMsg}`);
+      notify.error(`Failed to materialize assets:\n\n${errorMsg}`);
     } finally {
       setIsMaterializing(false);
     }
@@ -1610,7 +1612,41 @@ function GraphEditorInner({ onNodeSelect }: GraphEditorProps) {
   });
 
   return (
-    <div className="w-full h-full">
+    <div className="w-full h-full flex flex-col">
+      {/* Slim header row — actions on the right, matches Automation/Pipelines */}
+      <div className="flex-shrink-0 bg-white border-b border-gray-200 px-4 py-2 flex items-center justify-between gap-2">
+        <div className="text-xs text-gray-400">
+          Tip: shift+drag to box-select, or ⌘+click to add assets
+        </div>
+        <div className="flex items-center gap-2">
+        {selectedAssets.length > 0 && (
+          <>
+            <span className="text-xs text-gray-500 mr-1">
+              {selectedAssets.length} selected
+            </span>
+            <button
+              onClick={handleMaterializeSelected}
+              disabled={isMaterializing}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium bg-primary text-primary-foreground rounded-md hover:bg-accent disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              <Play className="w-4 h-4" />
+              <span>{isMaterializing ? 'Materializing…' : 'Materialize selected'}</span>
+            </button>
+          </>
+        )}
+        <button
+          onClick={arrangeGroups}
+          className="flex items-center gap-1.5 px-2.5 py-1.5 text-sm text-gray-700 hover:bg-gray-100 rounded"
+          title="Arrange groups in a grid to prevent overlaps (preserves positions within groups)"
+        >
+          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zM14 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z" />
+          </svg>
+          <span>Arrange Groups</span>
+        </button>
+        </div>
+      </div>
+      <div className="flex-1 min-h-0 relative">
       <ReactFlow
         nodes={displayNodes}
         edges={edges}
@@ -1619,6 +1655,14 @@ function GraphEditorInner({ onNodeSelect }: GraphEditorProps) {
         onConnect={onConnect}
         onNodeClick={onNodeClick}
         onPaneClick={onPaneClick}
+        onSelectionChange={({ nodes: sel }) => {
+          const assetIds = sel
+            .filter((n) => n.data?.node_kind === 'asset')
+            .map((n) => n.id);
+          if (assetIds.length > 0) {
+            setSelectedAssets(assetIds);
+          }
+        }}
         onDrop={onDrop}
         onDragOver={onDragOver}
         nodeTypes={nodeTypes}
@@ -1636,42 +1680,12 @@ function GraphEditorInner({ onNodeSelect }: GraphEditorProps) {
         minZoom={0.2}
         maxZoom={2}
       >
-        {selectedAssets.length > 0 && (
-          <Panel position="top-right" className="bg-white rounded-lg shadow-lg p-3 border border-gray-200">
-            <div className="flex flex-col items-center space-y-2">
-              <div className="text-sm font-medium text-gray-700">
-                {selectedAssets.length} asset{selectedAssets.length > 1 ? 's' : ''} selected
-              </div>
-              <button
-                onClick={handleMaterializeSelected}
-                disabled={isMaterializing}
-                className="flex items-center space-x-2 px-4 py-2 text-sm bg-green-600 text-white rounded-md hover:bg-green-700 disabled:bg-gray-400 disabled:cursor-not-allowed"
-              >
-                <Play className="w-4 h-4" />
-                <span>{isMaterializing ? 'Materializing...' : 'Materialize Selected'}</span>
-              </button>
-            </div>
-          </Panel>
-        )}
-        <Panel position="top-left" className="bg-white rounded-lg shadow-lg p-2 border border-gray-200">
-          <div className="flex flex-col space-y-2">
-            <button
-              onClick={arrangeGroups}
-              className="flex items-center space-x-2 px-3 py-2 text-sm bg-blue-600 text-white rounded-md hover:bg-blue-700"
-              title="Arrange groups in a grid to prevent overlaps (preserves positions within groups)"
-            >
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zM14 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z" />
-              </svg>
-              <span>Arrange Groups</span>
-            </button>
-          </div>
-        </Panel>
         <GroupOverlay nodes={nodes} setNodes={setNodes} />
         <Background variant={BackgroundVariant.Dots} gap={16} size={1} />
         <Controls />
         <MiniMap />
       </ReactFlow>
+      </div>
 
       {/* Launchpad for single asset materialization */}
       {currentProject && launchpadAssetKey && (
@@ -1789,11 +1803,10 @@ function GroupOverlay({ nodes, setNodes }: { nodes: Node[]; setNodes: React.Disp
                   y={bound.y}
                   width={bound.width}
                   height={bound.height}
-                  fill={isGroupSelected ? "rgba(59, 130, 246, 0.15)" : "rgba(59, 130, 246, 0.05)"}
-                  stroke={isGroupSelected ? "rgba(59, 130, 246, 0.6)" : "rgba(59, 130, 246, 0.3)"}
-                  strokeWidth={2 / zoom}
-                  strokeDasharray={`${5 / zoom},${5 / zoom}`}
-                  rx="8"
+                  fill={isGroupSelected ? 'hsl(246, 68%, 96%)' : 'hsl(246, 68%, 98%)'}
+                  stroke={isGroupSelected ? 'hsl(246, 68%, 56%)' : 'hsl(246, 60%, 80%)'}
+                  strokeWidth={1.5 / zoom}
+                  rx="6"
                   style={{ pointerEvents: 'none' }}
                 />
               </g>
@@ -1821,16 +1834,19 @@ function GroupOverlay({ nodes, setNodes }: { nodes: Node[]; setNodes: React.Disp
               top: `${screenY}px`,
               width: `${screenWidth}px`,
               height: `${handleHeight}px`,
-              background: isGroupSelected ? "rgba(59, 130, 246, 0.8)" : "rgba(59, 130, 246, 0.6)",
-              border: "1px solid rgba(59, 130, 246, 0.9)",
-              borderRadius: '8px',
+              background: isGroupSelected ? 'hsl(246, 68%, 56%)' : 'hsl(246, 68%, 56%, 0.85)',
+              border: '1px solid hsl(246, 60%, 41%)',
+              borderRadius: '6px 6px 0 0',
               cursor: 'pointer',
               display: 'flex',
               alignItems: 'center',
-              justifyContent: 'center',
+              justifyContent: 'flex-start',
+              paddingLeft: '10px',
               color: 'white',
-              fontSize: '12px',
+              fontSize: '11px',
               fontWeight: '600',
+              letterSpacing: '0.02em',
+              textTransform: 'uppercase',
               userSelect: 'none',
               zIndex: 10,
               pointerEvents: 'auto',
@@ -1842,7 +1858,6 @@ function GroupOverlay({ nodes, setNodes }: { nodes: Node[]; setNodes: React.Disp
               handleGroupHeaderClick(bound.groupName, e);
             }}
           >
-            <span style={{ marginRight: '4px' }}>📦</span>
             {bound.groupName}
           </div>
         );

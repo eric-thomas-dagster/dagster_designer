@@ -22,21 +22,24 @@ CACHE_TTL_SECONDS = 10  # Cache results for 10 seconds
 
 def _parse_automations_from_yaml(project_path: Path) -> Dict[str, List[Dict[str, Any]]]:
     """
-    Parse jobs, schedules, and sensors directly from YAML files in defs/ directory.
+    Parse jobs, schedules, sensors, and asset checks directly from YAML files
+    in the defs/ directory.
 
-    This provides a fallback when dg list defs fails (e.g., project doesn't validate).
-    Returns what the user *created*, even if it has errors.
+    This provides a fallback when dg list defs is stale or unavailable — the
+    user's newly-created primitives show up immediately after save (which
+    writes defs/<name>/defs.yaml).
 
     Args:
         project_path: Path to the project directory
 
     Returns:
-        Dictionary with 'jobs', 'schedules', 'sensors' lists
+        Dictionary with 'jobs', 'schedules', 'sensors', 'asset_checks' lists
     """
     import sys
     jobs = []
     schedules = []
     sensors = []
+    asset_checks = []
 
     # Find the defs directory
     defs_dir = None
@@ -47,7 +50,7 @@ def _parse_automations_from_yaml(project_path: Path) -> Dict[str, List[Dict[str,
 
     if not defs_dir or not defs_dir.exists():
         print(f"[YAML Fallback] No defs directory found in {project_path}", file=sys.stderr, flush=True)
-        return {"jobs": [], "schedules": [], "sensors": []}
+        return {"jobs": [], "schedules": [], "sensors": [], "asset_checks": []}
 
     print(f"[YAML Fallback] Parsing automations from {defs_dir}", file=sys.stderr, flush=True)
 
@@ -111,12 +114,26 @@ def _parse_automations_from_yaml(project_path: Path) -> Dict[str, List[Dict[str,
                 sensors.append(sensor_data)
                 print(f"[YAML Fallback] Found sensor: {sensor_data['name']}", file=sys.stderr, flush=True)
 
+            elif 'AssetCheckComponent' in component_type:
+                check_data = {
+                    "name": attributes.get('check_name', item.name),
+                    "asset_key": attributes.get('asset_name') or attributes.get('asset_key'),
+                    "check_type": attributes.get('check_type'),
+                    "description": attributes.get('description'),
+                    "source": str(yaml_file),
+                    "_from_yaml": True,
+                }
+                asset_checks.append(check_data)
+                print(f"[YAML Fallback] Found asset_check: {check_data['name']}", file=sys.stderr, flush=True)
+
         except Exception as e:
             print(f"[YAML Fallback] Error parsing {yaml_file}: {e}", file=sys.stderr, flush=True)
             continue
 
-    print(f"[YAML Fallback] Parsed {len(jobs)} jobs, {len(schedules)} schedules, {len(sensors)} sensors", file=sys.stderr, flush=True)
-    return {"jobs": jobs, "schedules": schedules, "sensors": sensors}
+    print(f"[YAML Fallback] Parsed {len(jobs)} jobs, {len(schedules)} schedules, "
+          f"{len(sensors)} sensors, {len(asset_checks)} asset_checks",
+          file=sys.stderr, flush=True)
+    return {"jobs": jobs, "schedules": schedules, "sensors": sensors, "asset_checks": asset_checks}
 
 
 @router.get("/list/{project_id}/{category}")
@@ -258,12 +275,28 @@ async def list_all_primitives(project_id: str):
                 print(f"[Primitives/all] Using shared asset cache for project {project_id} (age: {age:.1f}s)", file=sys.stderr, flush=True)
 
                 primitives = {
-                    "schedules": cached_defs.get("schedules", []),
-                    "jobs": cached_defs.get("jobs", []),
-                    "sensors": cached_defs.get("sensors", []),
-                    "asset_checks": cached_defs.get("asset_checks", []),
-                    "freshness_policies": cached_defs.get("freshness_policies", []),
+                    "schedules": list(cached_defs.get("schedules", [])),
+                    "jobs": list(cached_defs.get("jobs", [])),
+                    "sensors": list(cached_defs.get("sensors", [])),
+                    "asset_checks": list(cached_defs.get("asset_checks", [])),
+                    "freshness_policies": list(cached_defs.get("freshness_policies", [])),
                 }
+
+                # Merge freshly-parsed YAML so post-save primitives always show
+                # up, even during the 60s asset-cache window.
+                try:
+                    project = project_service.get_project(project_id)
+                    if project:
+                        project_dir = project_service._get_project_dir(project)
+                        yaml_parsed = _parse_automations_from_yaml(project_dir)
+                        for category in ("schedules", "jobs", "sensors", "asset_checks"):
+                            existing_names = {p.get("name") for p in primitives[category] if p.get("name")}
+                            for p in yaml_parsed.get(category, []):
+                                if p.get("name") and p["name"] not in existing_names:
+                                    primitives[category].append(p)
+                except Exception as e:
+                    print(f"[Primitives/all] Fresh YAML merge failed: {e}", file=sys.stderr, flush=True)
+
                 return {
                     "project_id": project_id,
                     "primitives": primitives,
@@ -275,7 +308,7 @@ async def list_all_primitives(project_id: str):
 
         project = project_service.get_project(project_id)
 
-        # Start with discovered primitives (from dg list defs)
+        # Start with discovered primitives (from dg list defs — may be stale).
         primitives = {
             "schedules": project.discovered_primitives.get("schedules", []) if project and project.discovered_primitives else [],
             "sensors": project.discovered_primitives.get("sensors", []) if project and project.discovered_primitives else [],
@@ -283,6 +316,18 @@ async def list_all_primitives(project_id: str):
             "asset_checks": [],
             "freshness_policies": primitives_service.list_primitives(project_id, "freshness_policy"),
         }
+
+        # Merge in freshly-parsed YAML so newly-saved schedules/jobs/sensors/checks
+        # show up immediately (before dg list defs re-runs and refreshes the
+        # discovered_primitives snapshot).
+        if project:
+            project_dir = project_service._get_project_dir(project)
+            yaml_parsed = _parse_automations_from_yaml(project_dir)
+            for category in ("schedules", "jobs", "sensors", "asset_checks"):
+                existing_names = {p.get("name") for p in primitives.get(category, []) if p.get("name")}
+                for p in yaml_parsed.get(category, []):
+                    if p.get("name") and p["name"] not in existing_names:
+                        primitives.setdefault(category, []).append(p)
 
         # Add asset checks from stored graph
         if project and project.graph and project.graph.nodes:
@@ -355,6 +400,77 @@ async def get_primitive_details(project_id: str, category: PrimitiveCategory, na
         raise HTTPException(
             status_code=500, detail=f"Failed to get primitive details: {str(e)}"
         )
+
+
+@router.post("/attach-asset/{project_id}/{category}/{name}")
+async def attach_asset_to_primitive(project_id: str, category: PrimitiveCategory, name: str, request: dict):
+    """Append an asset to an existing schedule or job's asset_selection.
+
+    Body: { "asset_key": str }
+
+    Only meaningful for categories that target multiple assets:
+    - schedule (via its scheduleType='assets' branch, or directly)
+    - job (asset_selection)
+    """
+    asset_key = (request or {}).get("asset_key")
+    if not asset_key:
+        raise HTTPException(status_code=400, detail="asset_key is required")
+
+    if category not in ("schedule", "job"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"attach-asset only supported for schedule and job; got '{category}'",
+        )
+
+    from app.services.project_service import project_service
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    project_dir = project_service._get_project_dir(project)
+
+    # Find the primitive's defs.yaml by scanning defs/ folders.
+    found_path: Path | None = None
+    found_data: dict | None = None
+    for defs_yaml in project_dir.rglob("defs.yaml"):
+        try:
+            with open(defs_yaml, 'r') as f:
+                data = yaml.safe_load(f) or {}
+        except Exception:
+            continue
+        if not isinstance(data, dict):
+            continue
+        attrs = data.get("attributes", {}) or {}
+        comp_type = str(data.get("type") or "")
+        matches = False
+        if category == "schedule" and "Schedule" in comp_type:
+            if attrs.get("schedule_name") == name or defs_yaml.parent.name == name:
+                matches = True
+        elif category == "job" and "Job" in comp_type:
+            if attrs.get("job_name") == name or defs_yaml.parent.name == name:
+                matches = True
+        if matches:
+            found_path = defs_yaml
+            found_data = data
+            break
+
+    if not found_path or not found_data:
+        raise HTTPException(status_code=404, detail=f"{category} '{name}' not found")
+
+    attrs = found_data.get("attributes") or {}
+    existing = attrs.get("asset_selection") or []
+    if isinstance(existing, str):
+        existing = [s.strip() for s in existing.split(",") if s.strip()]
+    if asset_key in existing:
+        return {"message": f"Asset already in {category}", "updated": False}
+    existing.append(asset_key)
+    attrs["asset_selection"] = existing
+    found_data["attributes"] = attrs
+
+    with open(found_path, 'w') as f:
+        yaml.dump(found_data, f, default_flow_style=False, sort_keys=False)
+
+    return {"message": f"Added to {category} '{name}'", "updated": True, "asset_selection": existing}
 
 
 @router.delete("/delete/{project_id}/{category}/{name}")
@@ -742,13 +858,28 @@ async def search_primitive_definition(project_id: str, primitive_type: str, name
 @router.delete("/definitions/cache/{project_id}")
 async def clear_definitions_cache(project_id: str):
     """
-    Clear the definitions cache for a specific project.
-    Use this to force a fresh fetch on the next request.
+    Clear all backend caches for a specific project so the next fetch is fresh.
+
+    Historically only cleared _definitions_cache (10s TTL). The 60s asset_cache
+    (populated by asset introspection) was leaking stale data after saves — a
+    newly-created schedule wouldn't appear on the Automation page or in the
+    per-asset "Add to existing" dropdown until the cache expired. This now
+    wipes both so post-save refetches immediately reflect on-disk state.
     """
+    cleared: list[str] = []
     if project_id in _definitions_cache:
         del _definitions_cache[project_id]
-        return {"message": f"Cache cleared for project {project_id}"}
-    return {"message": f"No cache found for project {project_id}"}
+        cleared.append("definitions")
+    try:
+        from ..services.asset_introspection_service import _assets_cache
+        if project_id in _assets_cache:
+            del _assets_cache[project_id]
+            cleared.append("assets")
+    except Exception:
+        pass
+    if not cleared:
+        return {"message": f"No cache found for project {project_id}"}
+    return {"message": f"Cleared caches ({', '.join(cleared)}) for {project_id}"}
 
 
 @router.get("/definitions/{project_id}")

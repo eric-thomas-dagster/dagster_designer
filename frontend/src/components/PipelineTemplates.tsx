@@ -3,6 +3,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Search, Workflow, X, ChevronRight, TrendingUp, DollarSign, Target, Package } from 'lucide-react';
 import { useProjectStore } from '@/hooks/useProject';
 import { PipelineConfigForm } from './PipelineConfigForm';
+import { notify } from './Notifications';
 
 interface PipelineComponent {
   component_id: string;
@@ -106,7 +107,7 @@ export function PipelineTemplates() {
       return response.json();
     },
     onSuccess: (data) => {
-      alert(`Pipeline installed successfully!\n\nPipeline: ${data.pipeline_name}\nComponents: ${data.total_instances}\n\nInstances created:\n${data.instances_created.map((i: any) => `- ${i.instance_name} (${i.component_type})`).join('\n')}`);
+      notify.success(`Pipeline installed successfully!\n\nPipeline: ${data.pipeline_name}\nComponents: ${data.total_instances}\n\nInstances created:\n${data.instances_created.map((i: any) => `- ${i.instance_name} (${i.component_type})`).join('\n')}`);
       setSelectedPipeline(null);
       setPipelineConfig({});
       // Invalidate installed components cache to refresh dropdowns
@@ -117,7 +118,7 @@ export function PipelineTemplates() {
     },
     onError: (error: Error) => {
       console.error('Installation error:', error);
-      alert(`Failed to install pipeline:\n\n${error.message}`);
+      notify.error(`Failed to install pipeline:\n\n${error.message}`);
     },
   });
 

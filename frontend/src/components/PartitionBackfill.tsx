@@ -1,8 +1,7 @@
 import { useState, useEffect } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
-import * as Tabs from '@radix-ui/react-tabs';
 import Editor from '@monaco-editor/react';
-import { X, Play, Tag, AlertCircle, CheckCircle2, Calendar } from 'lucide-react';
+import { X, Play, AlertCircle, Calendar } from 'lucide-react';
 import yaml from 'js-yaml';
 import { partitionsApi, type PartitionDef, type BackfillRequest } from '@/services/api';
 

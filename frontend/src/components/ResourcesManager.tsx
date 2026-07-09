@@ -1,9 +1,24 @@
 import { useState, useEffect } from 'react';
-import { Settings, Database, HardDrive, Code, Key, CheckCircle, XCircle, Download } from 'lucide-react';
+import { useQuery } from '@tanstack/react-query';
+import { Database, HardDrive, Code, Key, CheckCircle, XCircle, Download, FileCode, RefreshCw } from 'lucide-react';
 import { templatesApi, IOManagerParams, ResourceParams, integrationsApi, IntegrationStatusResponse } from '../services/api';
 import { useProjectStore } from '../hooks/useProject';
 import { Editor } from '@monaco-editor/react';
 import { EnvVarsManager } from './EnvVarsManager';
+import { notify } from './Notifications';
+
+interface ResourceListItem {
+  name: string;
+  file: string;
+  line_number: number;
+}
+
+interface ResourcesListResponse {
+  project_id: string;
+  resources_file: string | null;
+  io_managers: ResourceListItem[];
+  resources: ResourceListItem[];
+}
 
 type ResourceType = 'io_manager' | 'resource' | 'env_vars';
 
@@ -41,9 +56,26 @@ const RESOURCE_PACKAGES: Record<string, string[]> = {
   'sling': ['dagster-embedded-elt'],
 };
 
-export function ResourcesManager() {
+interface ResourcesManagerProps {
+  onOpenFile?: (filePath: string) => void;
+}
+
+export function ResourcesManager({ onOpenFile }: ResourcesManagerProps = {}) {
   const { currentProject } = useProjectStore();
   const [activeTab, setActiveTab] = useState<ResourceType>('io_manager');
+
+  // Fetch installed resources + IO managers so the user can see what's already
+  // in the project and jump to their source in the Code tab.
+  const { data: installed, refetch: refetchInstalled } = useQuery({
+    queryKey: ['installed-resources', currentProject?.id],
+    queryFn: async (): Promise<ResourcesListResponse | null> => {
+      if (!currentProject) return null;
+      const res = await fetch(`/api/v1/templates/resources/${currentProject.id}`);
+      if (!res.ok) return null;
+      return res.json();
+    },
+    enabled: !!currentProject,
+  });
   const [code, setCode] = useState('');
   const [saving, setSaving] = useState(false);
   const [saveMessage, setSaveMessage] = useState('');
@@ -96,7 +128,7 @@ export function ResourcesManager() {
       setCode(response.code);
     } catch (error) {
       console.error('Failed to generate code:', error);
-      alert('Failed to generate code. Check console for details.');
+      notify.error('Failed to generate code. Check console for details.');
     }
   };
 
@@ -107,6 +139,8 @@ export function ResourcesManager() {
 
     setSaving(true);
     setSaveMessage('');
+
+    if (activeTab === 'env_vars') return;
 
     try {
       const name = activeTab === 'io_manager' ? ioManager.io_manager_name : resource.resource_name;
@@ -121,7 +155,7 @@ export function ResourcesManager() {
       setTimeout(() => setSaveMessage(''), 3000);
     } catch (error) {
       console.error('Failed to save:', error);
-      alert('Failed to save. Check console for details.');
+      notify.error('Failed to save. Check console for details.');
     } finally {
       setSaving(false);
     }
@@ -184,16 +218,16 @@ export function ResourcesManager() {
       const result = await integrationsApi.install(currentProject.id, packageName);
 
       if (result.success) {
-        alert(`Successfully installed ${packageName}!`);
+        notify.success(`Successfully installed ${packageName}!`);
         // Refresh package status
         await checkPackageStatus();
       } else {
-        alert(`Failed to install ${packageName}:\n${result.message}\n\nCheck console for details.`);
+        notify.error(`Failed to install ${packageName}:\n${result.message}\n\nCheck console for details.`);
         console.error('Installation failed:', result.stderr);
       }
     } catch (error) {
       console.error('Failed to install package:', error);
-      alert('Failed to install package. Check console for details.');
+      notify.error('Failed to install package. Check console for details.');
     } finally {
       setInstallingPackage(null);
     }
@@ -208,55 +242,67 @@ export function ResourcesManager() {
 
   return (
     <div className="h-full flex flex-col bg-gray-50">
-      {/* Header */}
-      <div className="bg-white border-b border-gray-200 px-6 py-4">
-        <h2 className="text-2xl font-bold text-gray-900 flex items-center space-x-2">
-          <Settings className="w-6 h-6" />
-          <span>Resources & Configuration</span>
-        </h2>
-        <p className="text-sm text-gray-600 mt-1">
-          Manage resources, IO managers, and environment variables for your project
-        </p>
+      {/* Top-level tabs — no big page title; the app header breadcrumb covers that */}
+      <div className="flex items-center border-b border-gray-200 bg-white">
+        {([
+          { value: 'io_manager', label: 'IO Managers', Icon: HardDrive },
+          { value: 'resource', label: 'Resources', Icon: Database },
+          { value: 'env_vars', label: 'Environment Variables', Icon: Key },
+        ] as const).map(({ value, label, Icon }) => (
+          <button
+            key={value}
+            onClick={() => setActiveTab(value)}
+            className={`flex items-center gap-2 px-4 py-3 text-sm border-b-2 transition-colors ${
+              activeTab === value
+                ? 'border-primary text-primary'
+                : 'border-transparent text-gray-600 hover:text-gray-900'
+            }`}
+          >
+            <Icon className="w-4 h-4" />
+            <span>{label}</span>
+          </button>
+        ))}
       </div>
 
-      {/* Tab Selector - Always Visible */}
-      <div className="bg-white border-b border-gray-200">
-        <div className="flex space-x-2 px-6">
+      {/* Existing items — mirrors Automation's list style */}
+      {activeTab !== 'env_vars' && installed && (
+        <div className="flex-shrink-0 bg-white border-b border-gray-200 px-4 py-2 flex items-center gap-3 flex-wrap">
+          <span className="text-xs font-semibold text-gray-500 uppercase tracking-wider">
+            Installed
+          </span>
+          {(() => {
+            const items = activeTab === 'io_manager' ? installed.io_managers : installed.resources;
+            if (items.length === 0) {
+              return (
+                <span className="text-xs text-gray-400">
+                  None yet — fill the form below and click Save to add one
+                </span>
+              );
+            }
+            return items.map((item) => (
+              <button
+                key={item.name}
+                onClick={() => {
+                  if (!onOpenFile || !installed.resources_file) return;
+                  onOpenFile(`${installed.resources_file}:${item.line_number}`);
+                }}
+                className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs bg-white border border-gray-200 rounded-md hover:border-primary/40 hover:bg-primary/5"
+                title={`Open ${item.file}:${item.line_number}`}
+              >
+                <FileCode className="w-3 h-3 text-gray-400" />
+                <span className="font-mono">{item.name}</span>
+              </button>
+            ));
+          })()}
           <button
-            onClick={() => setActiveTab('io_manager')}
-            className={`flex items-center space-x-2 px-4 py-3 border-b-2 transition-colors ${
-              activeTab === 'io_manager'
-                ? 'border-blue-600 text-blue-600'
-                : 'border-transparent text-gray-600 hover:text-gray-900'
-            }`}
+            onClick={() => refetchInstalled()}
+            className="ml-auto p-1 text-gray-400 hover:text-gray-600 rounded"
+            title="Refresh list"
           >
-            <HardDrive className="w-4 h-4" />
-            <span className="font-medium">IO Managers</span>
-          </button>
-          <button
-            onClick={() => setActiveTab('resource')}
-            className={`flex items-center space-x-2 px-4 py-3 border-b-2 transition-colors ${
-              activeTab === 'resource'
-                ? 'border-blue-600 text-blue-600'
-                : 'border-transparent text-gray-600 hover:text-gray-900'
-            }`}
-          >
-            <Database className="w-4 h-4" />
-            <span className="font-medium">Resources</span>
-          </button>
-          <button
-            onClick={() => setActiveTab('env_vars')}
-            className={`flex items-center space-x-2 px-4 py-3 border-b-2 transition-colors ${
-              activeTab === 'env_vars'
-                ? 'border-blue-600 text-blue-600'
-                : 'border-transparent text-gray-600 hover:text-gray-900'
-            }`}
-          >
-            <Key className="w-4 h-4" />
-            <span className="font-medium">Environment Variables</span>
+            <RefreshCw className="w-3.5 h-3.5" />
           </button>
         </div>
-      </div>
+      )}
 
       {/* Main Content */}
       {activeTab === 'env_vars' ? (

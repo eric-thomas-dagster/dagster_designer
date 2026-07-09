@@ -11,7 +11,7 @@ export function DagsterStartupModal({ projectId, onClose, onSuccess }: DagsterSt
   const [status, setStatus] = useState<'starting' | 'success' | 'error'>('starting');
   const [command, setCommand] = useState('');
   const [output, setOutput] = useState<string[]>([]);
-  const [error, setError] = useState<string>('');
+  const [, setError] = useState<string>('');
   const outputEndRef = useRef<HTMLDivElement>(null);
   const hasStartedRef = useRef(false);
   const currentProjectIdRef = useRef<string | null>(null);

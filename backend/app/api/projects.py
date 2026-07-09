@@ -145,6 +145,151 @@ async def get_project(project_id: str):
     return project
 
 
+class DagsterCloudLocation(BaseModel):
+    """A single location entry in dagster_cloud.yaml."""
+    location_name: str
+    module_name: str | None = None
+    package_name: str | None = None
+    executable_path: str | None = None
+    build_directory: str | None = None
+    build_registry: str | None = None
+
+
+class DagsterCloudConfig(BaseModel):
+    """Parsed contents of dagster_cloud.yaml."""
+    exists: bool
+    path: str | None = None
+    locations: list[DagsterCloudLocation] = []
+    raw_yaml: str | None = None
+
+
+@router.get("/{project_id}/dagster-cloud", response_model=DagsterCloudConfig)
+async def get_dagster_cloud_config(project_id: str) -> DagsterCloudConfig:
+    """Read the project's dagster_cloud.yaml (if present).
+
+    Returns `exists=false` when there's no file yet — the frontend uses this to
+    show a "Scaffold dagster_cloud.yaml" affordance.
+    """
+    import yaml as _yaml
+
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    project_dir = project_service._get_project_dir(project)
+    path = project_dir / "dagster_cloud.yaml"
+    if not path.exists():
+        return DagsterCloudConfig(exists=False, path=str(path))
+
+    try:
+        raw = path.read_text()
+        data = _yaml.safe_load(raw) or {}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to parse dagster_cloud.yaml: {e}")
+
+    locations: list[DagsterCloudLocation] = []
+    for loc in (data.get("locations") or []):
+        code_source = loc.get("code_source") or {}
+        build = loc.get("build") or {}
+        locations.append(DagsterCloudLocation(
+            location_name=loc.get("location_name", ""),
+            module_name=code_source.get("module_name"),
+            package_name=code_source.get("package_name"),
+            executable_path=code_source.get("executable_path"),
+            build_directory=build.get("directory"),
+            build_registry=build.get("registry"),
+        ))
+    return DagsterCloudConfig(exists=True, path=str(path), locations=locations, raw_yaml=raw)
+
+
+class DagsterCloudUpdate(BaseModel):
+    """Body for PUT — either full locations list or raw YAML override."""
+    locations: list[DagsterCloudLocation] | None = None
+    raw_yaml: str | None = None
+
+
+@router.put("/{project_id}/dagster-cloud", response_model=DagsterCloudConfig)
+async def put_dagster_cloud_config(project_id: str, update: DagsterCloudUpdate):
+    """Write dagster_cloud.yaml. Either supply structured `locations` or `raw_yaml`."""
+    import yaml as _yaml
+
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    project_dir = project_service._get_project_dir(project)
+    path = project_dir / "dagster_cloud.yaml"
+
+    if update.raw_yaml is not None:
+        # Validate parses.
+        try:
+            _yaml.safe_load(update.raw_yaml)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Invalid YAML: {e}")
+        path.write_text(update.raw_yaml)
+    elif update.locations is not None:
+        if not update.locations:
+            raise HTTPException(status_code=400, detail="At least one location is required")
+        for loc in update.locations:
+            if not loc.location_name.strip():
+                raise HTTPException(status_code=400, detail="location_name is required")
+        doc: dict = {"locations": []}
+        for loc in update.locations:
+            entry: dict = {"location_name": loc.location_name.strip()}
+            code_source: dict = {}
+            if loc.module_name:
+                code_source["module_name"] = loc.module_name
+            if loc.package_name:
+                code_source["package_name"] = loc.package_name
+            if loc.executable_path:
+                code_source["executable_path"] = loc.executable_path
+            if code_source:
+                entry["code_source"] = code_source
+            build: dict = {}
+            if loc.build_directory:
+                build["directory"] = loc.build_directory
+            if loc.build_registry:
+                build["registry"] = loc.build_registry
+            if build:
+                entry["build"] = build
+            doc["locations"].append(entry)
+        path.write_text(_yaml.dump(doc, default_flow_style=False, sort_keys=False))
+    else:
+        raise HTTPException(status_code=400, detail="Provide either locations or raw_yaml")
+
+    return await get_dagster_cloud_config(project_id)
+
+
+@router.post("/{project_id}/dagster-cloud/scaffold", response_model=DagsterCloudConfig)
+async def scaffold_dagster_cloud_config(project_id: str) -> DagsterCloudConfig:
+    """Create a sensible default dagster_cloud.yaml if missing.
+
+    Uses the project's Python module name as both the location_name and
+    module_name (via `<module>.definitions`), which matches the layout that
+    `dg` scaffolds at project creation. Callers can then edit as needed.
+    """
+    import yaml as _yaml
+
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    project_dir = project_service._get_project_dir(project)
+    path = project_dir / "dagster_cloud.yaml"
+    if path.exists():
+        return await get_dagster_cloud_config(project_id)
+
+    module = project.directory_name or project.name.lower().replace(" ", "_").replace("-", "_")
+    doc = {
+        "locations": [
+            {
+                "location_name": module,
+                "code_source": {"module_name": f"{module}.definitions"},
+                "build": {"directory": "."},
+            }
+        ]
+    }
+    path.write_text(_yaml.dump(doc, default_flow_style=False, sort_keys=False))
+    return await get_dagster_cloud_config(project_id)
+
+
 @router.put("/{project_id}", response_model=Project)
 async def update_project(project_id: str, project_update: ProjectUpdate):
     """Update a project."""
@@ -635,9 +780,35 @@ async def validate_project(project_id: str):
                     validation_error = '\n'.join(error_lines[start:end])
                     break
 
+            # Try to extract which specific asset(s)/component instance(s) are broken.
+            # Dagster/dg error output typically references the failing component's
+            # `defs.yaml` (one per asset instance). e.g.
+            #   File ".../defs/dbt-1c633f9a/defs.yaml", line 1
+            #   Error loading component in defs/orders_csv:
+            # We collect unique component_ids so the frontend can show them.
+            import re as _re
+            failing_components: list[str] = []
+            _seen: set[str] = set()
+            _patterns = [
+                _re.compile(r"defs[/\\]([^/\\]+)[/\\]defs\.ya?ml"),
+                _re.compile(r"defs[/\\]([^/\\]+):"),
+                _re.compile(r"component_id[:\s]+['\"]?([\w\-]+)['\"]?"),
+            ]
+            for line in error_lines:
+                for pat in _patterns:
+                    for m in pat.finditer(line):
+                        cid = m.group(1)
+                        # Skip obvious false-positives from framework paths.
+                        if cid in {"__init__", "yaml"}:
+                            continue
+                        if cid not in _seen:
+                            _seen.add(cid)
+                            failing_components.append(cid)
+
             return {
                 "valid": False,
                 "error": "Project validation failed. Component definitions have errors.",
+                "failing_components": failing_components,
                 "details": {
                     "stderr": result.stderr,  # Full error output
                     "validation_error": validation_error

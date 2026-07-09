@@ -1,7 +1,9 @@
-import { useState } from 'react';
+import { useState, useMemo, useRef, useEffect } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { Search, Download, ExternalLink, Tag, X, ChevronRight, Package } from 'lucide-react';
+import { Search, Download, ExternalLink, X, ChevronRight, Package } from 'lucide-react';
+import { List, type RowComponentProps } from 'react-window';
 import { useProjectStore } from '@/hooks/useProject';
+import { notify } from './Notifications';
 
 interface ComponentTemplate {
   id: string;
@@ -37,6 +39,86 @@ interface ComponentDetails {
   readme: string;
   schema: any;
   example: string;
+}
+
+interface RowExtraProps {
+  components: ComponentTemplate[];
+  onSelect: (c: ComponentTemplate) => void;
+}
+
+function TemplateRow({ index, style, components, onSelect }: RowComponentProps<RowExtraProps>) {
+  const c = components[index];
+  if (!c) return null;
+  return (
+    <div style={style} className="px-3">
+      <button
+        onClick={() => onSelect(c)}
+        className="w-full h-full flex items-center gap-3 px-3 my-1 rounded-md border border-gray-200 bg-white hover:border-primary/40 hover:shadow-sm transition-colors text-left group"
+      >
+        <div className="w-8 h-8 rounded bg-primary/10 text-primary flex items-center justify-center flex-shrink-0">
+          <Package className="w-4 h-4" />
+        </div>
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2 min-w-0">
+            <span className="text-sm font-semibold text-gray-900 truncate">{c.name}</span>
+            <span className="text-[10px] uppercase tracking-wide bg-gray-100 text-gray-600 px-1.5 py-0.5 rounded flex-shrink-0">
+              {c.category}
+            </span>
+          </div>
+          <div className="text-xs text-gray-500 truncate mt-0.5">{c.description}</div>
+          {c.tags && c.tags.length > 0 && (
+            <div className="flex items-center gap-1 mt-1 overflow-hidden">
+              {c.tags.slice(0, 4).map((tag) => (
+                <span key={tag} className="text-[10px] text-gray-400 bg-gray-50 px-1.5 py-0.5 rounded flex-shrink-0">
+                  {tag}
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
+        <ChevronRight className="w-4 h-4 text-gray-300 group-hover:text-gray-600 flex-shrink-0" />
+      </button>
+    </div>
+  );
+}
+
+interface VirtualComponentListProps {
+  components: ComponentTemplate[];
+  rowHeight: number;
+  onSelect: (c: ComponentTemplate) => void;
+}
+
+function VirtualComponentList({ components, rowHeight, onSelect }: VirtualComponentListProps) {
+  // Measure the parent container so we can hand react-window an explicit pixel
+  // height. Relying on `h-full` inside nested flex-1/min-h-0 chains has been
+  // flaky (list rendered a scrollbar but wouldn't actually scroll).
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const [height, setHeight] = useState(0);
+
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const measure = () => setHeight(el.clientHeight);
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  return (
+    <div ref={containerRef} className="w-full h-full">
+      {height > 0 && (
+        <List
+          style={{ height, width: '100%' }}
+          rowComponent={TemplateRow}
+          rowCount={components.length}
+          rowHeight={rowHeight}
+          rowProps={{ components, onSelect }}
+          overscanCount={6}
+        />
+      )}
+    </div>
+  );
 }
 
 export function CommunityTemplates() {
@@ -95,7 +177,7 @@ export function CommunityTemplates() {
       return response.json();
     },
     onSuccess: (data) => {
-      alert(`Component installed successfully!\n\nComponent: ${data.component_type}\nInstance: ${data.instance_name}\n\nFiles:\n${data.files_created.join('\n')}`);
+      notify.success(`Component installed successfully!\n\nComponent: ${data.component_type}\nInstance: ${data.instance_name}\n\nFiles:\n${data.files_created.join('\n')}`);
       setSelectedComponent(null);
       // Invalidate installed components cache to refresh dropdowns
       if (currentProject) {
@@ -105,23 +187,50 @@ export function CommunityTemplates() {
     },
     onError: (error: Error) => {
       console.error('Installation error:', error);
-      alert(`Failed to install component:\n\n${error.message}`);
+      notify.error(`Failed to install component:\n\n${error.message}`);
     },
   });
 
-  // Dynamically extract unique categories from manifest
-  const categories = ['all', ...(manifest?.components
-    ? Array.from(new Set(manifest.components.map(c => c.category))).sort()
-    : [])];
+  // Match a component against the current search query (independent of category).
+  const searchMatches = useMemo(() => {
+    const q = searchQuery.toLowerCase().trim();
+    if (!manifest?.components) return () => false;
+    if (!q) return () => true;
+    return (c: ComponentTemplate) =>
+      c.name.toLowerCase().includes(q) ||
+      c.description.toLowerCase().includes(q) ||
+      c.tags.some((t) => t.toLowerCase().includes(q));
+  }, [manifest, searchQuery]);
 
-  const filteredComponents = manifest?.components.filter((c) => {
-    const matchesSearch =
-      c.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      c.description.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      c.tags.some((t) => t.toLowerCase().includes(searchQuery.toLowerCase()));
-    const matchesCategory = selectedCategory === 'all' || c.category === selectedCategory;
-    return matchesSearch && matchesCategory;
-  }) || [];
+  // Category list + per-category counts that reflect the current search.
+  // Sorted by count desc so the most useful categories are always leftmost
+  // when the row is horizontally scrollable.
+  const { categories, categoryCounts } = useMemo(() => {
+    if (!manifest?.components) return { categories: ['all'], categoryCounts: {} as Record<string, number> };
+    const counts: Record<string, number> = {};
+    let allMatching = 0;
+    manifest.components.forEach((c) => {
+      if (searchMatches(c)) {
+        counts[c.category] = (counts[c.category] || 0) + 1;
+        allMatching++;
+      }
+    });
+    const sorted = Object.keys(counts).sort((a, b) => (counts[b] - counts[a]) || a.localeCompare(b));
+    return {
+      categories: ['all', ...sorted],
+      categoryCounts: { ...counts, all: allMatching },
+    };
+  }, [manifest, searchMatches]);
+
+  const filteredComponents = useMemo(() => {
+    if (!manifest?.components) return [];
+    return manifest.components.filter((c) => {
+      const matchesCategory = selectedCategory === 'all' || c.category === selectedCategory;
+      return matchesCategory && searchMatches(c);
+    });
+  }, [manifest, searchMatches, selectedCategory]);
+
+  const totalCount = manifest?.components.length ?? 0;
 
   if (error) {
     return (
@@ -142,106 +251,78 @@ export function CommunityTemplates() {
     );
   }
 
+  const formatCategoryLabel = (cat: string) =>
+    cat === 'all'
+      ? 'All'
+      : cat === 'asset_checks'
+      ? 'Asset Checks'
+      : cat.split(/[_-]/).map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+
+  const ROW_HEIGHT = 88;
+
   return (
-    <div className="flex-1 flex flex-col min-h-0">
-      {/* Header */}
-      <div className="p-4 border-b bg-white flex-shrink-0">
-        <h2 className="text-xl font-semibold mb-2">Community Component Templates</h2>
-        <p className="text-sm text-gray-600">
-          Browse and install reusable Dagster components from the community
-        </p>
-      </div>
-
-      {/* Search and Filter */}
-      <div className="p-4 border-b bg-white space-y-3 flex-shrink-0">
-        <div className="relative">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
-          <input
-            type="text"
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            placeholder="Search components..."
-            className="w-full pl-10 pr-4 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-          />
+    <div className="h-full flex flex-col min-h-0 bg-gray-50">
+      {/* Search and Filter — count sits inline; page title lives in the app header */}
+      <div className="px-4 py-3 border-b bg-white space-y-2.5 flex-shrink-0">
+        <div className="flex items-center gap-2">
+          <div className="relative flex-1">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+            <input
+              type="text"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              placeholder="Search templates by name, description, or tag…"
+              className="w-full pl-10 pr-4 py-2 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-primary/30 focus:border-primary"
+            />
+          </div>
+          <div className="flex-shrink-0 text-xs text-gray-500 tabular-nums">
+            {isLoading
+              ? 'Loading…'
+              : `${filteredComponents.length.toLocaleString()} of ${totalCount.toLocaleString()}`}
+          </div>
         </div>
 
-        <div className="flex gap-2 flex-wrap">
-          {categories.map((cat) => (
-            <button
-              key={cat}
-              onClick={() => setSelectedCategory(cat)}
-              className={`px-3 py-1 rounded-full text-sm font-medium transition-colors ${
-                selectedCategory === cat
-                  ? 'bg-blue-600 text-white'
-                  : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
-              }`}
-            >
-              {cat === 'asset_checks'
-                ? 'Asset Checks'
-                : cat.split('_').map(word => word.charAt(0).toUpperCase() + word.slice(1)).join(' ')}
-            </button>
-          ))}
+        <div className="flex gap-1.5 overflow-x-auto pb-1 -mx-1 px-1" style={{ scrollbarWidth: 'thin' }}>
+          {categories.map((cat) => {
+            const active = selectedCategory === cat;
+            const count = categoryCounts[cat] ?? 0;
+            // Hide empty categories under the current search (except 'all').
+            if (cat !== 'all' && count === 0) return null;
+            return (
+              <button
+                key={cat}
+                onClick={() => setSelectedCategory(cat)}
+                className={`flex-shrink-0 px-2.5 py-1 rounded-md text-xs font-medium transition-colors border whitespace-nowrap ${
+                  active
+                    ? 'bg-primary text-primary-foreground border-primary'
+                    : 'bg-white text-gray-700 border-gray-200 hover:bg-gray-50'
+                }`}
+              >
+                {formatCategoryLabel(cat)}
+                <span className={`ml-1.5 ${active ? 'text-white/70' : 'text-gray-400'}`}>{count}</span>
+              </button>
+            );
+          })}
         </div>
       </div>
 
-      {/* Component Grid */}
-      <div className="flex-1 min-h-0 overflow-y-auto p-4 bg-gray-50">
+      {/* Virtualized list */}
+      <div className="flex-1 min-h-0">
         {isLoading ? (
           <div className="text-center py-8 text-gray-500">
-            <div className="animate-pulse">Loading components...</div>
+            <div className="animate-pulse text-sm">Loading components…</div>
           </div>
         ) : filteredComponents.length === 0 ? (
-          <div className="text-center py-8 text-gray-500">
-            <Package className="w-12 h-12 mx-auto mb-3 text-gray-300" />
-            <p>No components found matching your search</p>
+          <div className="text-center py-12 text-gray-500">
+            <Package className="w-10 h-10 mx-auto mb-3 text-gray-300" />
+            <p className="text-sm">No components match your search.</p>
           </div>
         ) : (
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 gap-4">
-            {filteredComponents.map((component) => (
-              <div
-                key={component.id}
-                className="border border-gray-200 rounded-lg p-4 bg-white hover:shadow-lg transition-shadow cursor-pointer flex flex-col"
-                onClick={() => setSelectedComponent(component)}
-              >
-                <div className="flex items-start justify-between mb-2">
-                  <h3 className="font-semibold text-lg">{component.name}</h3>
-                  <span className="text-xs bg-blue-100 text-blue-800 px-2 py-1 rounded">
-                    {component.category}
-                  </span>
-                </div>
-
-                <p className="text-sm text-gray-600 mb-3 line-clamp-2">{component.description}</p>
-
-                <div className="flex flex-wrap gap-1 mb-3">
-                  {component.tags.slice(0, 3).map((tag) => (
-                    <span
-                      key={tag}
-                      className="text-xs bg-gray-100 text-gray-600 px-2 py-0.5 rounded flex items-center gap-1"
-                    >
-                      <Tag className="w-3 h-3" />
-                      {tag}
-                    </span>
-                  ))}
-                </div>
-
-                <div className="flex items-center justify-between text-xs text-gray-500 mb-3">
-                  <span>v{component.version}</span>
-                  <span>by {component.author}</span>
-                </div>
-
-                <button
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setSelectedComponent(component);
-                  }}
-                  className="w-full flex items-center justify-center gap-2 px-3 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 transition-colors mt-auto"
-                >
-                  <ChevronRight className="w-4 h-4" />
-                  View Details
-                </button>
-              </div>
-            ))}
-          </div>
+          <VirtualComponentList
+            components={filteredComponents}
+            rowHeight={ROW_HEIGHT}
+            onSelect={setSelectedComponent}
+          />
         )}
       </div>
 

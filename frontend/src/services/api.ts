@@ -1,6 +1,5 @@
 import axios from 'axios';
 import type {
-  ComponentSchema,
   Project,
   ProjectCreate,
 } from '@/types';
@@ -464,6 +463,9 @@ export interface SensorParams {
   validate_signature?: boolean;
   signature_header?: string;
   secret_key?: string;
+  // Community sensor params (allows passthrough of community component fields)
+  component_type?: string;
+  [key: string]: any;
 }
 
 export interface AssetCheckParams {
@@ -655,6 +657,10 @@ export interface ComponentSchema {
   outputs?: any[];
   dependencies?: any;
   tags?: string[];
+  schema?: Record<string, any>;
+  icon?: string;
+  module?: string;
+  'x-dagster-io'?: Record<string, any>;
 }
 
 export interface ComponentAttribute {
@@ -694,6 +700,7 @@ export interface AllPrimitivesResponse {
     jobs: PrimitiveItem[];
     sensors: PrimitiveItem[];
     asset_checks: PrimitiveItem[];
+    freshness_policies?: PrimitiveItem[];
   };
 }
 
@@ -840,6 +847,7 @@ export interface AllDefinitionsResponse {
   schedules: DefinitionSchedule[];
   sensors: DefinitionSensor[];
   asset_checks: DefinitionAssetCheck[];
+  freshness_policies?: any[];
   using_fallback?: boolean;
   validation_error?: string;
 }
@@ -945,6 +953,7 @@ export interface PipelineCreateRequest {
   asset_selection: string[];
   trigger_type: 'manual' | 'schedule' | 'sensor';
   cron_schedule?: string;
+  sensor_config?: any;
 }
 
 export interface PipelineResponse {

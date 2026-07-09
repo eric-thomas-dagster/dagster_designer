@@ -1,5 +1,6 @@
 import { useState, useMemo } from 'react';
 import { Search, ExternalLink, Database, Cloud, Cpu, Bell, Package, Download, Check, X, ChevronRight, Code } from 'lucide-react';
+import { notify } from './Notifications';
 
 interface Integration {
   name: string;
@@ -661,13 +662,13 @@ export function IntegrationCatalog({ projectId }: IntegrationCatalogProps) {
 
       if (data.success) {
         setInstalled(prev => new Set(prev).add(packageName));
-        alert(`Successfully installed ${packageName}!`);
+        notify.success(`Successfully installed ${packageName}!`);
       } else {
-        alert(`Failed to install ${packageName}: ${data.message}`);
+        notify.error(`Failed to install ${packageName}: ${data.message}`);
       }
     } catch (error) {
       console.error('Error installing integration:', error);
-      alert(`Error installing ${packageName}. Please try again.`);
+      notify.error(`Error installing ${packageName}. Please try again.`);
     } finally {
       setInstalling(prev => {
         const next = new Set(prev);
@@ -679,7 +680,7 @@ export function IntegrationCatalog({ projectId }: IntegrationCatalogProps) {
 
   const handleCopyInstall = (packageName: string) => {
     navigator.clipboard.writeText(`uv pip install ${packageName}`);
-    alert(`Copied: uv pip install ${packageName}`);
+    notify.success(`Copied: uv pip install ${packageName}`);
   };
 
   return (
@@ -873,7 +874,7 @@ export function IntegrationCatalog({ projectId }: IntegrationCatalogProps) {
                       <button
                         onClick={() => {
                           navigator.clipboard.writeText(`pip install ${selectedIntegration.package}`);
-                          alert('Copied to clipboard!');
+                          notify.success('Copied to clipboard!');
                         }}
                         className="text-xs text-blue-600 hover:text-blue-700"
                       >
@@ -888,7 +889,7 @@ export function IntegrationCatalog({ projectId }: IntegrationCatalogProps) {
                       <button
                         onClick={() => {
                           navigator.clipboard.writeText(`uv pip install ${selectedIntegration.package}`);
-                          alert('Copied to clipboard!');
+                          notify.success('Copied to clipboard!');
                         }}
                         className="text-xs text-blue-600 hover:text-blue-700"
                       >

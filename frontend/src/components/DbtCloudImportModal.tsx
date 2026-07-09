@@ -168,7 +168,7 @@ export function DbtCloudImportModal({ isOpen, onClose, onSuccess }: DbtCloudImpo
 
         {/* Progress indicator */}
         <div className="flex items-center justify-center gap-2 p-4 bg-gray-50 border-b">
-          <div className={`flex items-center gap-1 ${step === 'credentials' ? 'text-blue-600 font-medium' : step !== 'credentials' ? 'text-green-600' : 'text-gray-400'}`}>
+          <div className={`flex items-center gap-1 ${step === 'credentials' ? 'text-blue-600 font-medium' : 'text-green-600'}`}>
             {step !== 'credentials' ? <CheckCircle className="w-4 h-4" /> : <div className="w-4 h-4 rounded-full border-2 border-current" />}
             <span className="text-sm">Credentials</span>
           </div>

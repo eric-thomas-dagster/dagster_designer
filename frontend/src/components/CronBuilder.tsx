@@ -80,7 +80,7 @@ export function CronBuilder({ value, onChange }: CronBuilderProps) {
     const parts = cron.split(' ');
     if (parts.length !== 5) return 'Invalid cron expression';
 
-    const [min, hr, dom, mon, dow] = parts;
+    const [min, hr, dom, , dow] = parts;
 
     let desc = 'Runs ';
 

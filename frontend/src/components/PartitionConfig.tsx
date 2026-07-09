@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Calendar, Plus, X, Info } from 'lucide-react';
+import { Calendar, Info } from 'lucide-react';
 
 export interface PartitionConfig {
   enabled: boolean;

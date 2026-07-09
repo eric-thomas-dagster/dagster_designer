@@ -1,14 +1,14 @@
 import { useState, useEffect, useMemo } from 'react';
 import { useQuery } from '@tanstack/react-query';
+import * as DropdownMenu from '@radix-ui/react-dropdown-menu';
 import { useProjectStore } from '@/hooks/useProject';
 import { useComponent } from '@/hooks/useComponentRegistry';
-import { X, Save, Settings, Play, Trash2, Plus, Wand2, Database, Search, Package, ChevronDown, FileCode, Calendar, Table } from 'lucide-react';
-import { AssetPreview } from './AssetPreview';
-import { TranslationEditor } from './TranslationEditor';
+import { X, Save, Settings, Play, Trash2, Plus, Wand2, Database, Search, Package, ChevronDown, FileCode, Calendar, Table, Clock, Radar, CheckCircle, Timer } from 'lucide-react';
 import { Launchpad } from './Launchpad';
 import { PartitionBackfill } from './PartitionBackfill';
-import { PartitionConfig, type PartitionConfig as PartitionConfigType } from './PartitionConfig';
+import { PartitionConfig } from './PartitionConfig';
 import { DataPreviewModal } from './DataPreviewModal';
+import { notify, confirmDialog } from './Notifications';
 import { projectsApi, primitivesApi, partitionsApi, templatesApi, type BackfillRequest } from '@/services/api';
 import type { ComponentInstance } from '@/types';
 
@@ -49,9 +49,33 @@ interface PropertyPanelProps {
   nodeId: string;
   onConfigureComponent?: (component: ComponentInstance) => void;
   onOpenFile?: (filePath: string) => void;
+  onNewPrimitiveForAsset?: (category: 'schedule' | 'job' | 'sensor' | 'asset_check' | 'freshness_policy', assetKey: string) => void;
 }
 
-export function PropertyPanel({ nodeId, onConfigureComponent, onOpenFile }: PropertyPanelProps) {
+// Collapsible wrapper for the freshness policy section — collapsed by default
+// unless the asset already has one configured. Keeps the panel short when no
+// policy is set (users add via the "+ Add" dropdown or by expanding this).
+function FreshnessPolicySection({ isConfigured, children }: { isConfigured: boolean; children: React.ReactNode }) {
+  const [open, setOpen] = useState(isConfigured);
+  return (
+    <div className="border-t border-gray-200 pt-4 mt-4">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="w-full flex items-center justify-between text-left"
+      >
+        <span className="text-sm font-medium text-gray-700 flex items-center gap-2">
+          Freshness Policy
+          {!isConfigured && <span className="text-xs text-gray-400 font-normal">None</span>}
+        </span>
+        <ChevronDown className={`w-4 h-4 text-gray-400 transition-transform ${open ? 'rotate-180' : ''}`} />
+      </button>
+      {open && <div className="mt-3">{children}</div>}
+    </div>
+  );
+}
+
+export function PropertyPanel({ nodeId, onConfigureComponent, onOpenFile, onNewPrimitiveForAsset }: PropertyPanelProps) {
   const { currentProject, updateGraph, loadProject } = useProjectStore();
   const node = currentProject?.graph.nodes.find((n) => n.id === nodeId);
 
@@ -69,6 +93,50 @@ export function PropertyPanel({ nodeId, onConfigureComponent, onOpenFile }: Prop
     staleTime: Infinity, // Never refetch automatically
     gcTime: Infinity, // Keep in cache forever (formerly cacheTime)
   });
+
+  // Fetch existing schedules + jobs for the "Add to existing" dropdown section.
+  const { data: existingPrimitives, refetch: refetchExistingPrimitives } = useQuery({
+    queryKey: ['primitives-list-for-panel', currentProject?.id],
+    queryFn: () =>
+      currentProject
+        ? primitivesApi.listAll(currentProject.id)
+        : Promise.reject('No project'),
+    enabled: !!currentProject,
+  });
+
+  const attachAssetToExisting = async (
+    category: 'schedule' | 'job',
+    primitiveName: string,
+    assetKey: string,
+  ) => {
+    if (!currentProject) return;
+    try {
+      const res = await fetch(
+        `/api/v1/primitives/attach-asset/${currentProject.id}/${category}/${encodeURIComponent(primitiveName)}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ asset_key: assetKey }),
+        },
+      );
+      const data = await res.json();
+      if (!res.ok) {
+        notify.error(data.detail || `Failed to add to ${category}`);
+        return;
+      }
+      if (data.updated) {
+        notify.success(`Added "${assetKey}" to ${category} "${primitiveName}".`);
+      } else {
+        notify.info(data.message || `Already in ${category}.`);
+      }
+      refetchExistingPrimitives();
+      // Reload project so the graph badges refresh.
+      loadProject(currentProject.id);
+    } catch (e) {
+      console.error(`[PropertyPanel] attach-asset failed:`, e);
+      notify.error(`Failed to add to ${category}. See console for details.`);
+    }
+  };
 
   // Fetch installed templates for this project
   const { data: installedTemplates } = useQuery({
@@ -132,7 +200,7 @@ export function PropertyPanel({ nodeId, onConfigureComponent, onOpenFile }: Prop
 
   // Handle both regular components and community components
   const [sourceComponent, setSourceComponent] = useState<ComponentInstance | null>(null);
-  const [loadingCommunityComponent, setLoadingCommunityComponent] = useState(false);
+  const [, setLoadingCommunityComponent] = useState(false);
 
   // Load source component (regular or community)
   useEffect(() => {
@@ -162,7 +230,7 @@ export function PropertyPanel({ nodeId, onConfigureComponent, onOpenFile }: Prop
       const componentName = componentIdx >= 0 && componentIdx + 1 < parts.length
         ? parts[componentIdx + 1]
         : parts[parts.length - 1] || 'Component';
-      const displayName = componentName.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
+      const displayName = componentName.replace(/_/g, ' ').replace(/\b\w/g, (l: string) => l.toUpperCase());
 
       // Create a component instance from the asset's component data
       const assetComponentId = (node as any)?.data?.component_id || node?.id;
@@ -185,8 +253,9 @@ export function PropertyPanel({ nodeId, onConfigureComponent, onOpenFile }: Prop
           setSourceComponent({
             id: sourceComponentId,
             component_type: data.component_type,
-            label: data.display_name || componentName.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase()),
+            label: data.display_name || componentName.replace(/_/g, ' ').replace(/\b\w/g, (l: string) => l.toUpperCase()),
             attributes: data.attributes || {},
+            is_asset_factory: false,
           });
         })
         .catch(err => {
@@ -204,12 +273,9 @@ export function PropertyPanel({ nodeId, onConfigureComponent, onOpenFile }: Prop
 
   const { data: componentSchema } = useComponent(node?.data.component_type || '');
 
-  const [formData, setFormData] = useState<Record<string, any>>({});
-  const [label, setLabel] = useState('');
-  const [translation, setTranslation] = useState<Record<string, any>>({});
-  const [gitRepo, setGitRepo] = useState('');
-  const [gitBranch, setGitBranch] = useState('main');
-  const [isCloning, setIsCloning] = useState(false);
+  const [, setFormData] = useState<Record<string, any>>({});
+  const [, setLabel] = useState('');
+  const [, setTranslation] = useState<Record<string, any>>({});
   const [isMaterializing, setIsMaterializing] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [materializeResult, setMaterializeResult] = useState<{ success: boolean; message: string } | null>(null);
@@ -222,7 +288,7 @@ export function PropertyPanel({ nodeId, onConfigureComponent, onOpenFile }: Prop
 
   // Compute asset key for API calls
   const assetKey = node?.data?.asset_key || node?.id || '';
-  const [checkingPartitions, setCheckingPartitions] = useState(false);
+  const [, setCheckingPartitions] = useState(false);
   const [assetConfigSchema, setAssetConfigSchema] = useState<any>(null);
   const [assetDefaultConfig, setAssetDefaultConfig] = useState<any>(null);
   const [editableMetadata, setEditableMetadata] = useState({
@@ -369,7 +435,7 @@ export function PropertyPanel({ nodeId, onConfigureComponent, onOpenFile }: Prop
 
             // Update the original component to exclude this asset
             const originalExclude = sourceComponent.attributes.exclude || '';
-            const excludeList = originalExclude ? originalExclude.split(',').map(s => s.trim()) : [];
+            const excludeList: string[] = originalExclude ? originalExclude.split(',').map((s: string) => s.trim()) : [];
 
             if (!excludeList.includes(dbtModelName)) {
               excludeList.push(dbtModelName);
@@ -598,19 +664,93 @@ export function PropertyPanel({ nodeId, onConfigureComponent, onOpenFile }: Prop
     return (
       <div className="h-full flex flex-col">
         <div className="p-4 border-b border-gray-200">
-          <div className="flex items-center justify-between mb-2">
-            <div className="flex items-center space-x-2">
-              {componentIconName && <ComponentIcon className="w-5 h-5 text-purple-600" />}
-              <h2 className="text-lg font-semibold text-gray-900">
-                {sourceComponent ? `${sourceComponent.label} Asset` : 'Asset Details'}
-              </h2>
-            </div>
-            <div className="flex items-center space-x-2">
+          {/* Title row */}
+          <div className="flex items-center gap-2 mb-3 min-w-0">
+            {componentIconName && <ComponentIcon className="w-5 h-5 text-primary flex-shrink-0" />}
+            <h2 className="text-lg font-semibold text-gray-900 truncate">
+              {sourceComponent ? `${sourceComponent.label} Asset` : 'Asset Details'}
+            </h2>
+          </div>
+          {/* Actions row */}
+          <div className="flex items-center justify-end gap-2 mb-2">
+            <div className="flex items-center gap-2">
+              {/* Prominent Add dropdown for attaching automation to this asset */}
+              {onNewPrimitiveForAsset && (
+                <DropdownMenu.Root>
+                  <DropdownMenu.Trigger asChild>
+                    <button className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-primary-foreground bg-primary rounded-md hover:bg-accent">
+                      <Plus className="w-4 h-4" />
+                      <span>Add</span>
+                      <ChevronDown className="w-3.5 h-3.5" />
+                    </button>
+                  </DropdownMenu.Trigger>
+                  <DropdownMenu.Portal>
+                    <DropdownMenu.Content
+                      className="min-w-[200px] bg-white rounded-md shadow-lg border border-gray-200 p-1 z-50"
+                      sideOffset={4}
+                      align="end"
+                    >
+                      <DropdownMenu.Label className="px-2.5 py-1 text-[10px] uppercase tracking-wider text-gray-400 font-semibold">
+                        New
+                      </DropdownMenu.Label>
+                      {([
+                        { category: 'schedule' as const, label: 'Schedule', Icon: Clock },
+                        { category: 'job' as const, label: 'Job', Icon: Play },
+                        { category: 'sensor' as const, label: 'Sensor', Icon: Radar },
+                        { category: 'asset_check' as const, label: 'Asset Check', Icon: CheckCircle },
+                        { category: 'freshness_policy' as const, label: 'Freshness Policy', Icon: Timer },
+                      ]).map(({ category, label, Icon }) => (
+                        <DropdownMenu.Item
+                          key={category}
+                          onSelect={() => onNewPrimitiveForAsset(category, node.data.asset_key || node.id)}
+                          className="flex items-center gap-2 px-2.5 py-1.5 text-sm text-gray-700 rounded hover:bg-gray-100 cursor-pointer outline-none"
+                        >
+                          <Icon className="w-3.5 h-3.5 text-gray-500" />
+                          <span>{label}</span>
+                        </DropdownMenu.Item>
+                      ))}
+                      {existingPrimitives && (
+                        (existingPrimitives.primitives.schedules?.length ?? 0) +
+                          (existingPrimitives.primitives.jobs?.length ?? 0) > 0
+                      ) && (
+                        <>
+                          <DropdownMenu.Separator className="h-px bg-gray-200 my-1" />
+                          <DropdownMenu.Label className="px-2.5 py-1 text-[10px] uppercase tracking-wider text-gray-400 font-semibold">
+                            Add to existing
+                          </DropdownMenu.Label>
+                          {(existingPrimitives.primitives.schedules || []).map((s) => (
+                            <DropdownMenu.Item
+                              key={`schedule-${s.name}`}
+                              onSelect={() => attachAssetToExisting('schedule', s.name, node.data.asset_key || node.id)}
+                              className="flex items-center gap-2 px-2.5 py-1.5 text-sm text-gray-700 rounded hover:bg-gray-100 cursor-pointer outline-none"
+                            >
+                              <Clock className="w-3.5 h-3.5 text-sky-500" />
+                              <span className="truncate">{s.name}</span>
+                              <span className="ml-auto text-[10px] text-gray-400">schedule</span>
+                            </DropdownMenu.Item>
+                          ))}
+                          {(existingPrimitives.primitives.jobs || []).map((j) => (
+                            <DropdownMenu.Item
+                              key={`job-${j.name}`}
+                              onSelect={() => attachAssetToExisting('job', j.name, node.data.asset_key || node.id)}
+                              className="flex items-center gap-2 px-2.5 py-1.5 text-sm text-gray-700 rounded hover:bg-gray-100 cursor-pointer outline-none"
+                            >
+                              <Play className="w-3.5 h-3.5 text-indigo-500" />
+                              <span className="truncate">{j.name}</span>
+                              <span className="ml-auto text-[10px] text-gray-400">job</span>
+                            </DropdownMenu.Item>
+                          ))}
+                        </>
+                      )}
+                    </DropdownMenu.Content>
+                  </DropdownMenu.Portal>
+                </DropdownMenu.Root>
+              )}
               <div className="relative">
                 <button
                   onClick={() => setShowMaterializeMenu(!showMaterializeMenu)}
                   disabled={isMaterializing}
-                  className="flex items-center space-x-1 px-3 py-1.5 text-sm bg-green-600 text-white rounded-md hover:bg-green-700 disabled:bg-gray-400 disabled:cursor-not-allowed"
+                  className="flex items-center space-x-1 px-3 py-1.5 text-sm bg-emerald-600 text-white rounded-md hover:bg-emerald-700 disabled:bg-gray-400 disabled:cursor-not-allowed"
                 >
                   <Play className="w-4 h-4" />
                   <span>{isMaterializing ? 'Materializing...' : 'Materialize'}</span>
@@ -718,6 +858,7 @@ export function PropertyPanel({ nodeId, onConfigureComponent, onOpenFile }: Prop
             </div>
           </div>
 
+
           {/* dbt Model Source - Link to SQL file */}
           {node.data.source && node.data.kinds?.includes('dbt') && isDbtComponentType(sourceComponent?.component_type) && (
             <div>
@@ -726,7 +867,7 @@ export function PropertyPanel({ nodeId, onConfigureComponent, onOpenFile }: Prop
               </label>
               <button
                 onClick={() => {
-                  if (!onOpenFile) return;
+                  if (!onOpenFile || !sourceComponent) return;
                   // The source for dbt models is like "dbt_project/models/marts/customer_metrics.sql"
                   // The project_path is like "/path/to/project/dbt_project"
                   // We need to go up one level and append the source
@@ -763,10 +904,9 @@ export function PropertyPanel({ nodeId, onConfigureComponent, onOpenFile }: Prop
               </label>
               <button
                 onClick={() => {
-                  if (!onOpenFile) return;
+                  if (!onOpenFile || !node.data.source) return;
                   // Navigate to code editor and open the file
-                  const sourceFile = node.data.source;
-                  onOpenFile(sourceFile);
+                  onOpenFile(node.data.source);
                 }}
                 className="w-full px-3 py-2 text-sm bg-blue-50 border border-blue-200 rounded-md text-blue-700 font-mono hover:bg-blue-100 transition-colors text-left flex items-center justify-between group"
               >
@@ -927,7 +1067,7 @@ export function PropertyPanel({ nodeId, onConfigureComponent, onOpenFile }: Prop
               {/* Partition Configuration for Components */}
               {componentSupportsPartitions && (
                 <PartitionConfig
-                  config={node.data.partition_config || null}
+                  config={(node.data.partition_config as any) || null}
                   onChange={(partitionConfig) => {
                     if (!currentProject) return;
 
@@ -945,7 +1085,7 @@ export function PropertyPanel({ nodeId, onConfigureComponent, onOpenFile }: Prop
                     );
 
                     // Save to backend
-                    updateGraph(updatedNodes, currentProject.graph.edges);
+                    updateGraph(updatedNodes as any, currentProject.graph.edges);
                   }}
                   supportedPartitionTypes={supportedPartitionTypes}
                 />
@@ -985,7 +1125,7 @@ export function PropertyPanel({ nodeId, onConfigureComponent, onOpenFile }: Prop
               {/* Partition Configuration for Component-Generated Assets */}
               {componentSupportsPartitions && (
                 <PartitionConfig
-                  config={node.data.partition_config || null}
+                  config={(node.data.partition_config as any) || null}
                   onChange={(partitionConfig) => {
                     if (!currentProject) return;
 
@@ -1002,18 +1142,20 @@ export function PropertyPanel({ nodeId, onConfigureComponent, onOpenFile }: Prop
                         : n
                     );
 
-                    updateGraph(updatedNodes, currentProject.graph.edges);
+                    updateGraph(updatedNodes as any, currentProject.graph.edges);
                   }}
                   supportedPartitionTypes={supportedPartitionTypes}
                 />
               )}
 
-              {/* Freshness Policy Configuration */}
-              <div className="border-t border-gray-200 pt-4 mt-4">
-                <label className="block text-sm font-medium text-gray-700 mb-3">
-                  Freshness Policy
-                </label>
-
+              {/* Freshness Policy Configuration — collapsed by default when 'none' */}
+              <FreshnessPolicySection
+                isConfigured={
+                  node.data.freshness_policy?.mode === 'template' ||
+                  node.data.freshness_policy?.mode === 'inline' ||
+                  (!node.data.freshness_policy?.mode && !!node.data.freshness_policy?.enabled)
+                }
+              >
                 {/* Mode Selection - Three Radio Buttons */}
                 <div className="space-y-3">
                   {/* Mode: None */}
@@ -1433,7 +1575,7 @@ export function PropertyPanel({ nodeId, onConfigureComponent, onOpenFile }: Prop
                     )}
                   </div>
                 </div>
-              </div>
+              </FreshnessPolicySection>
 
               {/* Delete Component Instance Button - only for non-factory components */}
               {!sourceComponent.is_asset_factory && (
@@ -1444,8 +1586,10 @@ export function PropertyPanel({ nodeId, onConfigureComponent, onOpenFile }: Prop
 
                       // Use the component_id from node.data, which contains the actual folder name
                       const componentId = node.data.component_id;
-                      const confirmed = window.confirm(
-                        `Are you sure you want to delete "${node.data.asset_key || node.data.label}"?\n\nThis will permanently remove the component instance and all its configuration.`
+                      if (!componentId) return;
+                      const confirmed = await confirmDialog(
+                        `Are you sure you want to delete "${node.data.asset_key || node.data.label}"?\n\nThis will permanently remove the component instance and all its configuration.`,
+                        { title: 'Delete component instance', destructive: true }
                       );
 
                       if (!confirmed) return;
@@ -1463,18 +1607,18 @@ export function PropertyPanel({ nodeId, onConfigureComponent, onOpenFile }: Prop
                         projectsApi.deleteComponentInstance(
                           currentProject.id,
                           componentId
-                        ).then(async (updatedProject) => {
+                        ).then(async () => {
                           // Reload the project to get the final state from the backend
                           await loadProject(currentProject.id);
                         }).catch((error) => {
                           console.error('Failed to delete component instance:', error);
                           // Reload to restore the correct state
                           loadProject(currentProject.id);
-                          alert('Failed to delete component instance. The view has been restored.');
+                          notify.error('Failed to delete component instance. The view has been restored.');
                         });
                       } catch (error) {
                         console.error('Failed to update UI:', error);
-                        alert('Failed to update UI. Please try again.');
+                        notify.error('Failed to update UI. Please try again.');
                       }
                     }}
                     className="w-full p-3 bg-red-50 border-2 border-red-300 hover:border-red-500 hover:bg-red-100 rounded-lg transition-all group"
@@ -1498,7 +1642,7 @@ export function PropertyPanel({ nodeId, onConfigureComponent, onOpenFile }: Prop
           <div className="border-t border-gray-200 pt-4 mt-4">
             <div className="flex items-center justify-between mb-2">
               <label className="block text-sm font-medium text-gray-700">
-                Asset Checks {node.data.checks?.length > 0 && <span className="text-orange-600">({node.data.checks.length})</span>}
+                Asset Checks {(node.data.checks?.length ?? 0) > 0 && <span className="text-orange-600">({node.data.checks!.length})</span>}
               </label>
               <button
                 onClick={() => {
@@ -1664,10 +1808,10 @@ export function PropertyPanel({ nodeId, onConfigureComponent, onOpenFile }: Prop
     const componentType = node.data.componentType || node.data.component_type || '';
     const componentName = componentType.split('.').pop() || 'Component';
 
-    const handleDeleteNode = () => {
+    const handleDeleteNode = async () => {
       if (!currentProject) return;
 
-      const confirmed = window.confirm(`Are you sure you want to delete "${node.data.label}"?`);
+      const confirmed = await confirmDialog(`Are you sure you want to delete "${node.data.label}"?`, { title: 'Delete node', destructive: true });
       if (!confirmed) return;
 
       // Remove the node from the graph

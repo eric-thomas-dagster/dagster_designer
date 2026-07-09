@@ -54,7 +54,9 @@ class ScheduleComponent(dg.Component, dg.Model, dg.Resolvable):
                 # Get all asset specs from context
                 all_specs = []
                 if hasattr(context, 'defs') and context.defs:
-                    if hasattr(context.defs, 'get_all_asset_specs'):
+                    if hasattr(context.defs, 'resolve_all_asset_specs'):
+                        all_specs = list(context.defs.resolve_all_asset_specs())
+                    elif hasattr(context.defs, 'get_all_asset_specs'):
                         all_specs = list(context.defs.get_all_asset_specs())
                     elif hasattr(context.defs, 'assets'):
                         # Fallback: get specs from asset list

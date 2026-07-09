@@ -1642,7 +1642,6 @@ if custom_lineage_edges:
                 venv_dir = project_dir / ".venv"
                 if not venv_dir.exists():
                     log(f"📦 Creating virtual environment at {venv_dir}...")
-                    import subprocess
                     result = subprocess.run(
                         ["/Users/ericthomas/.local/bin/uv", "venv", ".venv"],
                         cwd=str(project_dir),
@@ -1655,7 +1654,6 @@ if custom_lineage_edges:
 
                 # Install dagster-dg-cli and dagster-dg-core (provides the dg CLI)
                 log(f"📦 Step 1/3: Installing dagster-dg-cli and dagster-dg-core...")
-                import subprocess
                 import time
 
                 # Use uv pip install with --python flag
@@ -2471,7 +2469,7 @@ if custom_lineage_file.exists():
 # This approach works for both Python assets and dbt assets (dbt models are skipped)
 if custom_lineage_edges:
     # First, get all asset specs to check which ones are from dbt
-    all_specs = list(defs.get_all_asset_specs())
+    all_specs = list(defs.resolve_all_asset_specs())
     dbt_asset_keys = set()
 
     # Identify dbt assets by checking if they have dbt metadata

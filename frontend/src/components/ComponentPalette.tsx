@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useComponentRegistry } from '@/hooks/useComponentRegistry';
-import { Database, ArrowRight, Download, RefreshCw, Box, Search, Plus, Code, FileText, Play, Clock, Radar, CheckCircle, FileCode, Zap, Package } from 'lucide-react';
+import { Database, ArrowRight, Download, RefreshCw, Box, Search, Plus, Code, FileText, Play, Clock, Radar, CheckCircle, FileCode, Package } from 'lucide-react';
 import { CreatePythonAssetDialog } from './CreatePythonAssetDialog';
 import { useProjectStore } from '@/hooks/useProject';
 import { useQuery } from '@tanstack/react-query';

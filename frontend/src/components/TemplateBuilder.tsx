@@ -23,6 +23,7 @@ import { CommunityTemplates } from './CommunityTemplates';
 import { PipelineTemplates } from './PipelineTemplates';
 import { CronBuilder } from './CronBuilder';
 import { EnhancedDataQualityChecksBuilder } from './EnhancedDataQualityChecksBuilder';
+import { notify } from './Notifications';
 import {
   templatesApi,
   type PythonAssetParams,
@@ -35,12 +36,17 @@ import {
 } from '@/services/api';
 import { useProjectStore } from '@/hooks/useProject';
 
-export function TemplateBuilder() {
+interface TemplateBuilderProps {
+  initialTab?: string | null;
+  initialAssetKey?: string | null;
+  hideSubNav?: boolean;
+}
+
+export function TemplateBuilder({ initialTab, initialAssetKey, hideSubNav = false }: TemplateBuilderProps = {}) {
   const { currentProject, loadProject } = useProjectStore();
   const queryClient = useQueryClient();
-  const [activeTab, setActiveTab] = useState('python_asset');
+  const [activeTab, setActiveTab] = useState(initialTab || 'schedule');
   const [generatedCode, setGeneratedCode] = useState('');
-  const [pendingTab, setPendingTab] = useState<string | null>(null);
   const [scheduleType, setScheduleType] = useState<'job' | 'assets'>('job');
 
   // Fetch available jobs - only when needed (for schedules and sensors)
@@ -244,6 +250,24 @@ export function TemplateBuilder() {
     cron_env_var: '',
   });
 
+  // Pre-fill from initialAssetKey (when opened via "Add for this asset" on the graph).
+  useEffect(() => {
+    if (!initialAssetKey || !initialTab) return;
+    if (initialTab === 'schedule') {
+      setScheduleType('assets');
+      setSchedule((prev) => ({ ...prev, job_name: initialAssetKey }));
+    } else if (initialTab === 'job') {
+      setJob((prev) => ({ ...prev, asset_selection: [initialAssetKey] }));
+    } else if (initialTab === 'sensor') {
+      setSensor((prev) => ({ ...prev, sensor_type: 'asset', asset_key: initialAssetKey }));
+    } else if (initialTab === 'asset_check') {
+      setAssetCheck((prev) => ({ ...prev, asset_name: initialAssetKey }));
+    } else if (initialTab === 'freshness_policy') {
+      // freshness policy is per-asset; asset key applied at save time in yaml
+      // (no per-form field to set here).
+    }
+  }, [initialAssetKey, initialTab]);
+
   // Handle URL parameters for pre-selecting values
   useEffect(() => {
     const params = new URLSearchParams(window.location.hash.split('?')[1]);
@@ -285,10 +309,10 @@ export function TemplateBuilder() {
         params.job_name = schedule.job_name;
       } else {
         // Parse comma-separated asset names
-        const assets = schedule.job_name
+        const assets = (schedule.job_name || '')
           .split(',')
-          .map(s => s.trim())
-          .filter(s => s.length > 0);
+          .map((s: string) => s.trim())
+          .filter((s: string) => s.length > 0);
         params.asset_selection = assets;
       }
 
@@ -446,14 +470,14 @@ ${generateYamlAttributes(communityAssetCheckAttributes, 1)}`;
     },
     onSuccess: async (data) => {
       if (selectedCommunityAssetCheck) {
-        alert(`Component configured successfully!\n\nYAML file: ${data.yaml_file}`);
+        notify.success(`Component configured successfully!\n\nYAML file: ${data.yaml_file}`);
         // Invalidate installed components cache and reload project
         if (currentProject) {
           queryClient.invalidateQueries({ queryKey: ['installed-components', currentProject.id] });
           loadProject(currentProject.id);
         }
       } else {
-        alert(`Saved to ${data.file_path}`);
+        notify.success(`Saved to ${data.file_path}`);
 
         // Invalidate primitives and definitions cache so jobs/schedules/sensors appear immediately
         if (currentProject) {
@@ -503,7 +527,7 @@ ${generateYamlAttributes(communityAssetCheckAttributes, 1)}`;
 
   const handleSave = () => {
     if (!generatedCode) {
-      alert('Generate code first');
+      notify.info('Generate code first');
       return;
     }
     saveMutation.mutate();
@@ -514,8 +538,8 @@ ${generateYamlAttributes(communityAssetCheckAttributes, 1)}`;
       {/* Left Panel - Form */}
       <div className={`${activeTab === 'community' || activeTab === 'pipelines' ? 'w-full' : 'w-1/2 border-r border-gray-200'} flex flex-col`}>
         <Tabs.Root value={activeTab} onValueChange={handleTabChange} className="flex-1 min-h-0 flex flex-col">
-          {/* Tab List */}
-          <Tabs.List className="flex flex-shrink-0 border-b border-gray-200 overflow-x-auto">
+          {/* Tab List — hidden in modal mode; still rendered for Radix a11y */}
+          <Tabs.List className={hideSubNav ? 'sr-only' : 'flex flex-shrink-0 border-b border-gray-200 overflow-x-auto'}>
             <Tabs.Trigger
               value="python_asset"
               className="flex items-center space-x-2 px-4 py-3 text-sm text-gray-600 hover:text-gray-900 border-b-2 border-transparent data-[state=active]:border-blue-600 data-[state=active]:text-blue-600"
@@ -982,10 +1006,10 @@ ${generateYamlAttributes(communityAssetCheckAttributes, 1)}`;
                       .map((node: any) => node.data.asset_key || node.id) || [];
 
                     // Parse current comma-separated value into array
-                    const selectedAssets = schedule.job_name
+                    const selectedAssets = (schedule.job_name || '')
                       .split(',')
-                      .map(s => s.trim())
-                      .filter(s => s.length > 0);
+                      .map((s: string) => s.trim())
+                      .filter((s: string) => s.length > 0);
 
                     return availableAssets.length > 0 ? (
                       <div className="space-y-2">
@@ -1214,6 +1238,7 @@ ${generateYamlAttributes(communityAssetCheckAttributes, 1)}`;
 
                         // Check for incompatibility
                         const firstPartition = selectedAssetPartitions[0];
+                        if (!firstPartition) return null;
                         const incompatibleAssets = selectedAssetPartitions.filter((p: any) => {
                           return (
                             p.partitionType !== firstPartition.partitionType ||
@@ -1530,7 +1555,7 @@ ${generateYamlAttributes(communityAssetCheckAttributes, 1)}`;
 
                 {assetSensorMode === 'select' ? (
                   <>
-                    {currentProject?.graph.nodes.filter((node: any) => node.node_kind === 'asset' || node.type === 'asset').length > 0 ? (
+                    {currentProject && currentProject.graph.nodes.filter((node: any) => node.node_kind === 'asset' || node.type === 'asset').length > 0 ? (
                       <select
                         value={sensor.asset_key || ''}
                         onChange={(e) => setSensor({ ...sensor, asset_key: e.target.value })}
