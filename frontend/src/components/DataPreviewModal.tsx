@@ -1022,8 +1022,9 @@ export function DataPreviewModal({
         }
       });
 
-      // Apply column selection if any
-      if (columnsArray.length > 0 && columnsArray.length < (data.columns?.length || 0)) {
+      // Apply column selection — treat "unchecked some columns" as a step
+      // so it appears in the recipe and step-view honors it.
+      if (columnsArray.length > 0 && columnsArray.length < (data.columns?.length || 0) && gate()) {
         const renamedSelected = columnsArray.map(col => columnRenames[col] || col);
         // Always include calculated columns even if not explicitly selected
         const calcColNames = Object.keys(calculatedColumns);
@@ -1491,9 +1492,22 @@ export function DataPreviewModal({
         onRemove: () => setCalculatedColumns((prev) => { const next = { ...prev }; delete next[name]; return next; }),
       });
     });
-    // 19. drop columns
+    // 19. drop columns (via column-menu Hide action)
     if (columnsToDrop.size > 0) {
       steps.push({ id: 'dropcols', icon: 'cols', label: 'Drop columns', detail: Array.from(columnsToDrop).join(', '), onRemove: () => setColumnsToDrop(new Set()) });
+    }
+    // 19b. Column-selection filter (checkboxes in Columns accordion). Only
+    // shows up if at least one column has been unchecked. Restoring means
+    // adding every original column back to the set.
+    if (data?.columns && selectedColumns.size > 0 && selectedColumns.size < data.columns.length) {
+      const unchecked = data.columns.filter((c) => !selectedColumns.has(c));
+      steps.push({
+        id: 'colselect',
+        icon: 'cols',
+        label: 'Hide columns',
+        detail: unchecked.join(', '),
+        onRemove: () => setSelectedColumns(new Set(data.columns)),
+      });
     }
     // 20. pivot / unpivot
     if (pivotConfig) {
