@@ -21,13 +21,37 @@ router = APIRouter(prefix="/assets", tags=["assets"])
 _PREVIEW_CACHE: dict[tuple[str, str], tuple[float, dict]] = {}
 _PREVIEW_TTL_SECONDS = 120
 
+# Longer-lived schema cache: once we've seen an asset's actual columns and
+# dtypes (via a successful preview), remember them for the whole project.
+# Used by Dagster AI to inject real upstream schemas into planning prompts —
+# so the model doesn't have to hallucinate column names for dynamic-schema
+# sources (file readers, dataframe_from_sql, etc.). Cleared on materialize
+# alongside the row cache.
+_SCHEMA_CACHE: dict[tuple[str, str], dict] = {}
+
 
 def clear_preview_cache(project_id: str) -> None:
-    """Invalidate every cached preview for a project. Called after materializes
-    so stale rows don't outlive the underlying data change."""
+    """Invalidate every cached preview + schema for a project. Called after
+    materializes so stale rows / stale column lists don't outlive the
+    underlying data change."""
     for key in list(_PREVIEW_CACHE.keys()):
         if key[0] == project_id:
             del _PREVIEW_CACHE[key]
+    for key in list(_SCHEMA_CACHE.keys()):
+        if key[0] == project_id:
+            del _SCHEMA_CACHE[key]
+
+
+def get_known_schemas(project_id: str) -> dict[str, dict]:
+    """Return `{asset_key: {columns, dtypes}}` for every asset in this
+    project we've successfully previewed. Genie planner uses this to give
+    the LLM real, current column info instead of relying on component
+    hints alone."""
+    return {
+        key[1]: value
+        for key, value in _SCHEMA_CACHE.items()
+        if key[0] == project_id
+    }
 
 
 class AssetDataResponse(BaseModel):
@@ -134,6 +158,16 @@ async def preview_asset_data(project_id: str, asset_key: str, no_cache: bool = F
         # materialized yet" and should re-check on next click.
         if output_data.get('success'):
             _PREVIEW_CACHE[cache_key] = (time.time(), output_data)
+            # Also remember the observed schema (columns + dtypes) so the
+            # Dagster AI planner can inject a real schema into future prompts
+            # instead of the model having to guess columns for dynamic
+            # sources (file readers, SQL queries, upstream chains, etc.).
+            cols = output_data.get('columns')
+            if cols:
+                _SCHEMA_CACHE[cache_key] = {
+                    'columns': list(cols),
+                    'dtypes': dict(output_data.get('dtypes') or {}),
+                }
         return AssetDataResponse(**output_data)
 
     except json.JSONDecodeError as e:

@@ -323,9 +323,28 @@ def _build_user_prompt(
     previous_plan: list[dict[str, Any]] | None = None,
     refinement: str | None = None,
 ) -> str:
-    existing = "\n".join(
-        f'- {a.get("name")} ({a.get("component_type") or "asset"})' for a in existing_assets[:80]
-    ) or "(none)"
+    # Render existing assets with their observed schemas (when previewed at
+    # least once) so the planner can reference REAL columns instead of
+    # guessing. This is the primary defense against column hallucination on
+    # dynamic-schema sources like file readers and SQL queries.
+    def _existing_line(a: dict[str, Any]) -> str:
+        name = a.get("name")
+        ct = a.get("component_type") or "asset"
+        base = f"- {name} ({ct})"
+        cols = a.get("columns") or []
+        if cols:
+            dtypes = a.get("dtypes") or {}
+            # Show up to 20 cols with types when known, so the LLM sees the
+            # actual schema of already-materialized upstreams.
+            col_strs = []
+            for c in cols[:20]:
+                t = dtypes.get(c)
+                col_strs.append(f"{c}:{t}" if t else c)
+            more = f" (+{len(cols) - 20} more)" if len(cols) > 20 else ""
+            base += f"\n    columns: [{', '.join(col_strs)}]{more}"
+        return base
+
+    existing = "\n".join(_existing_line(a) for a in existing_assets[:80]) or "(none)"
     catalog = "\n".join(catalog_lines)
     parts = [
         f"Task:\n{task}",

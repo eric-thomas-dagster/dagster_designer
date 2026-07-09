@@ -13,6 +13,7 @@ from ..services.genie_service import (
     GenieError,
     plan,
 )
+from .assets import get_known_schemas
 
 router = APIRouter(prefix="/ai", tags=["ai"])
 
@@ -43,6 +44,10 @@ class GeniePlanRequest(BaseModel):
     model: str | None = None
     previous_plan: list[dict[str, Any]] | None = None
     refinement: str | None = None
+    # Optional: when set, the backend fills each existing_asset's `columns`
+    # and `dtypes` from the known-schemas cache before planning. Cheaper
+    # than the frontend having to fetch schemas per-asset.
+    project_id: str | None = None
 
 
 class GeniePickResponse(BaseModel):
@@ -65,10 +70,23 @@ class GeniePlanResponse(BaseModel):
 @router.post("/plan", response_model=GeniePlanResponse)
 async def genie_plan(req: GeniePlanRequest) -> GeniePlanResponse:
     """Plan a set of asset picks from a natural-language task."""
+    # Enrich existing_assets with cached column schemas so the LLM knows
+    # what columns are actually available for each already-materialized
+    # asset. Only fills in columns/dtypes we've seen from a real preview —
+    # nothing invented.
+    existing = list(req.existing_assets or [])
+    if req.project_id:
+        known = get_known_schemas(req.project_id)
+        for a in existing:
+            name = a.get("name")
+            if name and name in known:
+                a.setdefault("columns", known[name].get("columns"))
+                a.setdefault("dtypes", known[name].get("dtypes"))
+
     try:
         result = await plan(
             task=req.task,
-            existing_assets=req.existing_assets or [],
+            existing_assets=existing,
             model=req.model or DEFAULT_MODEL,
             previous_plan=req.previous_plan,
             refinement=req.refinement,

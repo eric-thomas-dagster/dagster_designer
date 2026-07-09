@@ -104,6 +104,7 @@ export function DagsterAIBar() {
         task: task.trim(),
         existing_assets: existing,
         model,
+        project_id: currentProject.id,
       };
       if (isRefinement && plan) {
         body.previous_plan = plan.picks;
