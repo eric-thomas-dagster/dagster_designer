@@ -7,10 +7,16 @@ interface ProjectComponentsListProps {
   onDeleteComponent: (component: ComponentInstance) => void;
 }
 
-// Internal components users shouldn't manage directly.
-// DependencyGraphComponent is auto-created when the user draws manual edges;
-// they should edit those edges on the graph canvas, not through this list.
-const HIDDEN_COMPONENT_TYPES = /DependencyGraphComponent$|dependency_graph$/i;
+// Components users shouldn't manage from this sidebar.
+//
+//  * DependencyGraphComponent is auto-created when the user draws manual edges;
+//    they should edit those edges on the graph canvas, not through this list.
+//  * Schedule / Sensor / AssetCheck are primitives with their own Automation
+//    tab. Showing them here just gives users a gear icon that opens the
+//    generic component-config modal for a primitive it doesn't know how
+//    to render, which is worse than not showing them at all.
+const HIDDEN_COMPONENT_TYPES =
+  /(?:DependencyGraph|Schedule|Sensor|AssetCheck)Component$|(?:dependency_graph|schedule|sensor|asset_check)$/i;
 
 export function ProjectComponentsList({ onEditComponent, onDeleteComponent }: ProjectComponentsListProps) {
   const { currentProject } = useProjectStore();
