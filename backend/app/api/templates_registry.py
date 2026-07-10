@@ -1018,6 +1018,33 @@ async def install_component_via_cli(
                 detail=f"Installed but failed to write attributes to {defs_yaml_path}: {e}",
             )
 
+    # If the caller didn't supply any attributes, they installed the
+    # TEMPLATE (Library UI) and did NOT ask to create an instance. The
+    # community CLI's stub defs.yaml ships with demo values like
+    # `upstream_asset_key: raw_customers` — great for docs, terrible for
+    # a real project since Dagster tries to load the demo instance and
+    # fails validation ("Input asset raw_customers is not produced by
+    # any of the provided asset ops"). Remove the stub so the template
+    # is installed but no bogus instance runs. Instances get created
+    # explicitly via the graph builder / AI apply path (which DO supply
+    # attributes and would land here with a merged, valid config).
+    if not request.attributes:
+        try:
+            import shutil as _sh
+            _sh.rmtree(defs_yaml_path.parent)
+            print(
+                f"[CLI Install] Removed demo defs at {defs_yaml_path.parent} — "
+                f"template installed but no instance created (no attributes supplied)."
+            )
+        except Exception as e:
+            print(f"[CLI Install] Warning: couldn't remove demo defs: {e}")
+        return {
+            "success": True,
+            "component_id": component_id,
+            "component_type": component_type,
+            "defs_yaml": None,
+        }
+
     # If the caller wants a different instance directory name (needed when the
     # same component_id is being installed more than once), rename the defs
     # directory now. defs.yaml itself is unchanged.

@@ -490,6 +490,35 @@ async def plan(
                 raise GenieError(f"Could not parse LLM response: {e}") from e
 
     valid_ids = {c["id"] for c in filtered}
+
+    def _resolve_component_id(raw: str) -> str | None:
+        """The prompt asks for the bare catalog id (e.g. `synthetic_data_generator`),
+        but LLMs sometimes echo the fully-qualified module path from a prior
+        example (e.g. `project_foo.components.synthetic_data_generator.component.SyntheticDataGeneratorComponent`).
+        Rather than skip those and give the user zero picks, extract the
+        catalog id from anywhere in the dotted path."""
+        if not raw:
+            return None
+        if raw in valid_ids:
+            return raw
+        # Try each dotted segment — the catalog id appears as one segment
+        # of the fully-qualified path in every case we've observed.
+        for seg in raw.split('.'):
+            if seg in valid_ids:
+                return seg
+        # Fall back to snake_case of the final class name minus 'Component'.
+        last = raw.rsplit('.', 1)[-1]
+        if last.endswith('Component'):
+            last = last[: -len('Component')]
+        snake = ''
+        for i, ch in enumerate(last):
+            if ch.isupper() and i > 0:
+                snake += '_'
+            snake += ch.lower()
+        if snake in valid_ids:
+            return snake
+        return None
+
     picks: list[GeniePick] = []
     seen_names: set[str] = {str(a["name"]) for a in (existing_assets or []) if a.get("name")}
     notes: list[str] = []
@@ -511,11 +540,17 @@ async def plan(
         if component_type == "noop":
             notes.append(p.get("reason") or "planner could not build from catalog")
             continue
-        if component_type not in valid_ids:
+        resolved = _resolve_component_id(component_type)
+        if resolved is None:
             notes.append(
                 f"⚠︎ Pick #{i + 1} references unknown component '{component_type}' — skipped."
             )
             continue
+        if resolved != component_type:
+            notes.append(
+                f"ℹ Pick #{i + 1}: resolved '{component_type}' → '{resolved}'."
+            )
+        component_type = resolved
 
         original_name = (p.get("asset_name") or "").strip()
         if not original_name:
