@@ -417,6 +417,35 @@ export const projectsApi = {
     return response.data as any;
   },
 
+  addDbtTest: async (
+    projectId: string,
+    body: {
+      dbt_relative_path: string;
+      model_unique_id: string;
+      kind: 'not_null' | 'unique' | 'accepted_values' | 'relationships' | 'dbt_utils' | 'singular';
+      column?: string | null;
+      values?: string[] | null;
+      to_model_name?: string | null;
+      to_field?: string | null;
+      package_test_name?: string | null;
+      package_test_config?: Record<string, any> | null;
+      test_name?: string | null;
+      sql?: string | null;
+      description?: string | null;
+    },
+  ): Promise<{ success: boolean; relative_path: string; detail: string | null }> => {
+    const response = await api.post(`/projects/${projectId}/dbt-test`, body);
+    return response.data as any;
+  },
+
+  deleteDbtTest: async (
+    projectId: string,
+    body: { dbt_relative_path: string; test_unique_id: string },
+  ): Promise<{ success: boolean; relative_path: string; detail: string | null }> => {
+    const response = await api.post(`/projects/${projectId}/dbt-test/delete`, body);
+    return response.data as any;
+  },
+
   addDbtSource: async (
     projectId: string,
     body: {

@@ -4,6 +4,7 @@ import sys
 import json
 import subprocess
 from pathlib import Path
+from typing import Any
 
 from fastapi import APIRouter, HTTPException, BackgroundTasks
 from pydantic import BaseModel, Field
@@ -2921,6 +2922,296 @@ async def add_dbt_source(project_id: str, request: AddDbtSourceRequest):
     src_path.parent.mkdir(parents=True, exist_ok=True)
     src_path.write_text(_yaml.dump(existing, sort_keys=False))
     return {'success': True, 'relative_path': str(src_path.relative_to(dbt_root))}
+
+
+# ---------------------------------------------------------------------------
+# dbt test authoring — add/remove tests from schema.yml (generic tests)
+# or tests/ directory (singular / custom SQL tests). The frontend
+# drawer's Tests section calls these to add/remove without users
+# having to edit yaml by hand.
+# ---------------------------------------------------------------------------
+
+class AddDbtTestRequest(BaseModel):
+    """Add a test to the given model. Kind determines what shape of yaml
+    is written:
+      • not_null / unique — column-level, no config
+      • accepted_values — column-level, `values: [...]`
+      • relationships — column-level, `to: ref('...')`, `field: ...`
+      • dbt_utils — package test, pass through raw `config` dict
+      • singular — writes a new SQL file under `tests/<name>.sql`
+    """
+    dbt_relative_path: str
+    model_unique_id: str
+    kind: str                              # not_null | unique | accepted_values | relationships | dbt_utils | singular
+    # column: required for column-level generic tests + accepted_values + relationships
+    column: str | None = None
+    # accepted_values config
+    values: list[str] | None = None
+    # relationships config
+    to_model_name: str | None = None       # bare model name — we wrap in ref(...)
+    to_field: str | None = None
+    # dbt_utils / package tests
+    package_test_name: str | None = None   # e.g. 'dbt_utils.expression_is_true'
+    package_test_config: dict | None = None
+    # singular test
+    test_name: str | None = None
+    sql: str | None = None
+    description: str | None = None
+
+
+class DbtTestOpResponse(BaseModel):
+    success: bool
+    relative_path: str                     # where the change was applied
+    detail: str | None = None
+
+
+@router.post('/{project_id}/dbt-test', response_model=DbtTestOpResponse)
+async def add_dbt_test(project_id: str, request: AddDbtTestRequest):
+    """Persist a dbt test. Locates the model's schema.yml via manifest
+    patch_path (falling back to models/schema.yml next to the model
+    file) and merges the test into the existing yaml — non-destructive
+    to other models/columns/tests in that file."""
+    import yaml as _yaml
+    project = project_service.get_project(project_id)
+    dbt_root = _resolve_dbt_root_for_write(project, request.dbt_relative_path)
+
+    manifest = _load_dbt_artifact(dbt_root / 'target' / 'manifest.json')
+    node = (manifest.get('nodes') or {}).get(request.model_unique_id)
+    if not node:
+        raise HTTPException(status_code=404, detail=f"Model '{request.model_unique_id}' not found in manifest — run `dbt parse` and try again.")
+    model_name = node.get('name')
+
+    # Singular test — write to tests/<name>.sql and return.
+    if request.kind == 'singular':
+        if not request.test_name or not request.sql:
+            raise HTTPException(status_code=400, detail="Singular tests require test_name + sql.")
+        name = request.test_name.strip()
+        if not name or not name.replace('_', '').isalnum():
+            raise HTTPException(status_code=400, detail="Test name must be snake_case (letters/digits/underscore).")
+        tests_dir = dbt_root / 'tests'
+        tests_dir.mkdir(parents=True, exist_ok=True)
+        test_path = tests_dir / f'{name}.sql'
+        if test_path.exists():
+            raise HTTPException(status_code=409, detail=f"Test already exists at {test_path.relative_to(dbt_root)}")
+        header = f"-- {request.description or f'Custom test: {name}'}\n\n"
+        test_path.write_text(header + request.sql.strip() + '\n')
+        return DbtTestOpResponse(success=True, relative_path=str(test_path.relative_to(dbt_root)), detail=f"Wrote {name}.sql")
+
+    # Generic tests — need a schema.yml to edit. Use the manifest's
+    # patch_path if the model already has a yml entry; otherwise write
+    # to models/schema.yml adjacent to the sql file so dbt picks it up.
+    patch_path = node.get('patch_path')  # e.g. "jaffle_shop://models/schema.yml"
+    if patch_path:
+        # Strip the "<package>://" prefix
+        rel = patch_path.split('://', 1)[-1]
+        yml_path = dbt_root / rel
+    else:
+        sql_rel = node.get('original_file_path') or ''
+        yml_path = dbt_root / (Path(sql_rel).parent / 'schema.yml' if sql_rel else 'models/schema.yml')
+
+    existing: dict = {}
+    if yml_path.exists():
+        try:
+            existing = _yaml.safe_load(yml_path.read_text()) or {}
+        except Exception:
+            existing = {}
+    existing.setdefault('version', 2)
+    models = list(existing.get('models') or [])
+
+    model_entry = next((m for m in models if m.get('name') == model_name), None)
+    if model_entry is None:
+        model_entry = {'name': model_name}
+        models.append(model_entry)
+
+    # Build the test entry — dbt yaml accepts either a bare string
+    # (e.g. `- not_null`) or a `- name: config` mapping.
+    def _test_entry() -> Any:
+        if request.kind == 'not_null':
+            return 'not_null'
+        if request.kind == 'unique':
+            return 'unique'
+        if request.kind == 'accepted_values':
+            values = request.values or []
+            if not values:
+                raise HTTPException(status_code=400, detail="accepted_values needs at least one value.")
+            return {'accepted_values': {'values': values}}
+        if request.kind == 'relationships':
+            if not request.to_model_name or not request.to_field:
+                raise HTTPException(status_code=400, detail="relationships needs to_model_name + to_field.")
+            return {'relationships': {'to': f"ref('{request.to_model_name}')", 'field': request.to_field}}
+        if request.kind == 'dbt_utils':
+            if not request.package_test_name:
+                raise HTTPException(status_code=400, detail="package_test_name required for dbt_utils tests.")
+            return {request.package_test_name: (request.package_test_config or {})}
+        raise HTTPException(status_code=400, detail=f"Unknown test kind: {request.kind}")
+
+    entry = _test_entry()
+
+    if request.column:
+        # Column-level test — upsert the column block, then append.
+        cols = list(model_entry.get('columns') or [])
+        col_entry = next((c for c in cols if c.get('name') == request.column), None)
+        if col_entry is None:
+            col_entry = {'name': request.column}
+            cols.append(col_entry)
+        tests = list(col_entry.get('tests') or [])
+        # De-dupe: if identical entry already exists, skip.
+        tests.append(entry)
+        col_entry['tests'] = _dedupe_tests(tests)
+        model_entry['columns'] = cols
+    else:
+        # Model-level test.
+        tests = list(model_entry.get('tests') or [])
+        tests.append(entry)
+        model_entry['tests'] = _dedupe_tests(tests)
+
+    existing['models'] = models
+    yml_path.parent.mkdir(parents=True, exist_ok=True)
+    yml_path.write_text(_yaml.dump(existing, sort_keys=False))
+    return DbtTestOpResponse(success=True, relative_path=str(yml_path.relative_to(dbt_root)), detail=f"Added {request.kind} test to {model_name}")
+
+
+def _dedupe_tests(tests: list) -> list:
+    """Preserve order but drop exact duplicates (e.g. hitting Add twice
+    on `not_null` for the same column)."""
+    seen = []
+    out = []
+    for t in tests:
+        key = json.dumps(t, sort_keys=True) if not isinstance(t, str) else t
+        if key in seen: continue
+        seen.append(key)
+        out.append(t)
+    return out
+
+
+class DeleteDbtTestRequest(BaseModel):
+    dbt_relative_path: str
+    test_unique_id: str
+
+
+@router.post('/{project_id}/dbt-test/delete', response_model=DbtTestOpResponse)
+async def delete_dbt_test(project_id: str, request: DeleteDbtTestRequest):
+    """Remove a test. We use POST rather than DELETE because axios's
+    default DELETE without-body support is spotty. The test_unique_id
+    is looked up in manifest.json — for singular tests we delete the
+    .sql file; for generic tests we scrub the corresponding entry from
+    the schema.yml identified by patch_path."""
+    import yaml as _yaml
+    project = project_service.get_project(project_id)
+    dbt_root = _resolve_dbt_root_for_write(project, request.dbt_relative_path)
+
+    manifest = _load_dbt_artifact(dbt_root / 'target' / 'manifest.json')
+    test_node = (manifest.get('nodes') or {}).get(request.test_unique_id)
+    if not test_node:
+        raise HTTPException(status_code=404, detail=f"Test '{request.test_unique_id}' not found in manifest.")
+
+    meta = test_node.get('test_metadata') or {}
+    test_kind = meta.get('name')            # not_null / unique / etc; None for singular
+    kwargs = meta.get('kwargs') or {}
+    target_col = kwargs.get('column_name') or test_node.get('column_name')
+
+    # Singular test — one .sql file per test. Delete it.
+    if not test_kind:
+        rel = test_node.get('original_file_path')
+        if not rel:
+            raise HTTPException(status_code=400, detail="Cannot locate the source file for this singular test.")
+        p = dbt_root / rel
+        if p.exists() and p.suffix == '.sql':
+            p.unlink()
+            return DbtTestOpResponse(success=True, relative_path=str(p.relative_to(dbt_root)), detail="Removed singular test file.")
+        raise HTTPException(status_code=404, detail=f"Singular test file not found at {rel}")
+
+    # Generic test — locate schema.yml via patch_path on the *model*
+    # this test attaches to.
+    depends_on = (test_node.get('depends_on') or {}).get('nodes') or []
+    model_uid = next((d for d in depends_on if d.startswith('model.') or d.startswith('source.') or d.startswith('seed.')), None)
+    if not model_uid:
+        raise HTTPException(status_code=400, detail="Cannot locate the model this test attaches to.")
+    model_node = (manifest.get('nodes') or {}).get(model_uid) or (manifest.get('sources') or {}).get(model_uid)
+    if not model_node:
+        raise HTTPException(status_code=404, detail=f"Model {model_uid} not found in manifest.")
+    patch_path = model_node.get('patch_path')
+    if not patch_path:
+        raise HTTPException(status_code=400, detail="This test's model has no schema.yml patch — cannot locate the yaml to edit.")
+    rel = patch_path.split('://', 1)[-1]
+    yml_path = dbt_root / rel
+    if not yml_path.exists():
+        raise HTTPException(status_code=404, detail=f"schema.yml not found at {rel}")
+
+    try:
+        yml_data = _yaml.safe_load(yml_path.read_text()) or {}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to parse schema.yml: {e}")
+
+    changed = False
+    for entries_key in ('models', 'sources'):
+        for m in (yml_data.get(entries_key) or []):
+            if m.get('name') != model_node.get('name'):
+                continue
+            # For sources: iterate the tables list to find the matching one
+            tables = m.get('tables') if entries_key == 'sources' else [m]
+            for tbl in tables or []:
+                if target_col:
+                    cols = tbl.get('columns') or []
+                    for c in cols:
+                        if c.get('name') != target_col:
+                            continue
+                        tests = c.get('tests') or []
+                        new_tests = _filter_out_test(tests, test_kind, kwargs)
+                        if len(new_tests) != len(tests):
+                            c['tests'] = new_tests
+                            changed = True
+                else:
+                    tests = tbl.get('tests') or []
+                    new_tests = _filter_out_test(tests, test_kind, kwargs)
+                    if len(new_tests) != len(tests):
+                        tbl['tests'] = new_tests
+                        changed = True
+
+    if not changed:
+        raise HTTPException(status_code=404, detail="Test entry not found in schema.yml (may have been removed manually).")
+
+    yml_path.write_text(_yaml.dump(yml_data, sort_keys=False))
+    return DbtTestOpResponse(success=True, relative_path=str(yml_path.relative_to(dbt_root)), detail=f"Removed {test_kind} test from {model_node.get('name')}")
+
+
+def _filter_out_test(tests: list, kind: str, kwargs: dict) -> list:
+    """Return `tests` with the matching entry stripped. Handles both
+    bare-string form (`- not_null`) and mapping form (`- accepted_values:
+    values: [...]`). For mapping-form tests, match on the config keys
+    that mirror `kwargs` so we drop the right one when a column has
+    multiple accepted_values / relationships tests."""
+    result = []
+    dropped = False
+    for t in tests:
+        if isinstance(t, str):
+            if not dropped and t == kind:
+                dropped = True
+                continue
+            result.append(t)
+            continue
+        if isinstance(t, dict) and len(t) == 1:
+            k = next(iter(t.keys()))
+            if not dropped and k == kind:
+                cfg = t[k] or {}
+                # For accepted_values: compare `values`. For
+                # relationships: compare `to` + `field`. Otherwise
+                # drop the first match (best-effort).
+                if kind == 'accepted_values':
+                    if list(cfg.get('values') or []) == list(kwargs.get('values') or []):
+                        dropped = True
+                        continue
+                elif kind == 'relationships':
+                    if (cfg.get('field') == kwargs.get('field')) and (str(cfg.get('to') or '').replace(" ", "") == str(kwargs.get('to') or '').replace(" ", "")):
+                        dropped = True
+                        continue
+                else:
+                    dropped = True
+                    continue
+            result.append(t)
+            continue
+        result.append(t)
+    return result
 
 
 class DbtModelSqlDiffResponse(BaseModel):

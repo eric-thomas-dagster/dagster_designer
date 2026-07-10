@@ -14,6 +14,7 @@ import { AddDbtProjectDialog } from './AddDbtProjectDialog';
 import { AddDbtSelectorDialog } from './AddDbtSelectorDialog';
 import { AddDbtExposureDialog } from './AddDbtExposureDialog';
 import { AddDbtSourceDialog } from './AddDbtSourceDialog';
+import { AddDbtTestDialog } from './AddDbtTestDialog';
 
 interface DbtPanelProps {
   onOpenFile?: (path: string) => void;
@@ -47,7 +48,13 @@ export function DbtPanel({ onOpenFile }: DbtPanelProps) {
   const [showGitCommit, setShowGitCommit] = useState(false);
   const [lineage, setLineage] = useState<Awaited<ReturnType<typeof projectsApi.getDbtColumnLineage>> | null>(null);
   const [diffFor, setDiffFor] = useState<{ path: string; name: string } | null>(null);
-  const [view, setView] = useState<'models' | 'lineage' | 'docs' | 'selectors' | 'exposures' | 'freshness'>('models');
+  const [view, setView] = useState<'models' | 'lineage' | 'tests' | 'docs' | 'selectors' | 'exposures' | 'freshness'>('models');
+  // Add-test dialog state — one flow used by drawer + Tests tab. The
+  // target model + column are populated by whichever button opens it.
+  const [addTestFor, setAddTestFor] = useState<{ model: Model; column?: string } | null>(null);
+  const [testSearch, setTestSearch] = useState('');
+  const [testStatusFilter, setTestStatusFilter] = useState<'all' | 'pass' | 'fail' | 'never'>('all');
+  const [testKindFilter, setTestKindFilter] = useState<string>('all');
   // Docs / selectors / exposures — fetched lazily when the user visits
   // the tab. Small responses so we can also grab them proactively if
   // ever needed.
@@ -201,6 +208,29 @@ export function DbtPanel({ onOpenFile }: DbtPanelProps) {
       notify.error(formatEndpointError(e, 'Docs generate failed'));
     } finally {
       setGeneratingDocs(false);
+    }
+  };
+
+  // Delete a test by unique_id — backend removes it from schema.yml
+  // (generic tests) or deletes the file under tests/ (singular tests).
+  // Refresh the models list so the drawer reflects reality.
+  const handleDeleteTest = async (testUniqueId: string) => {
+    if (!currentProject || !data?.dbt_project_relative_path) return;
+    if (!window.confirm('Remove this test? It will be stripped from schema.yml or deleted from tests/.')) return;
+    try {
+      const r = await projectsApi.deleteDbtTest(currentProject.id, {
+        dbt_relative_path: data.dbt_project_relative_path,
+        test_unique_id: testUniqueId,
+      });
+      notify.success(r.detail || 'Test removed.');
+      refresh();
+    } catch (e: any) {
+      const detail = e?.response?.data?.detail;
+      if (e?.response?.status === 404) {
+        notify.error('Endpoint not found — restart the backend so the new dbt-test endpoints load.');
+      } else {
+        notify.error(detail || e?.message || 'Failed to remove test.');
+      }
     }
   };
 
@@ -406,6 +436,7 @@ export function DbtPanel({ onOpenFile }: DbtPanelProps) {
           {([
             { v: 'models',    label: 'Models',    icon: Layers },
             { v: 'lineage',   label: 'Lineage',   icon: Network },
+            { v: 'tests',     label: 'Tests',     icon: TestTube2 },
             { v: 'docs',      label: 'Docs',      icon: Book },
             { v: 'selectors', label: 'Selectors', icon: Filter },
             { v: 'exposures', label: 'Exposures', icon: Share2 },
@@ -635,6 +666,21 @@ export function DbtPanel({ onOpenFile }: DbtPanelProps) {
             {data.models.length} models · click a node to inspect
           </div>
         </div>
+      )}
+
+      {/* Tests view — cross-model list of every test with status,
+          filters, and delete. Global "+ Add test" button opens the
+          dialog scoped to a picked model. */}
+      {data && view === 'tests' && (
+        <TestsView
+          data={data}
+          onAdd={(model) => setAddTestFor({ model })}
+          onDelete={handleDeleteTest}
+          onOpenModel={(uid) => setSelectedUniqueId(uid)}
+          search={testSearch} setSearch={setTestSearch}
+          statusFilter={testStatusFilter} setStatusFilter={setTestStatusFilter}
+          kindFilter={testKindFilter} setKindFilter={setTestKindFilter}
+        />
       )}
 
       {/* Docs view — renders overview.md + every {% docs %} block found
@@ -1058,6 +1104,8 @@ export function DbtPanel({ onOpenFile }: DbtPanelProps) {
           }
           onPreview={() => runPreview(selected)}
           onColumnLineage={() => setColumnLineageFor(selected)}
+          onAddTest={() => setAddTestFor({ model: selected })}
+          onDeleteTest={(uid) => handleDeleteTest(uid)}
           running={runningModel === selected.unique_id}
         />
       )}
@@ -1155,10 +1203,218 @@ export function DbtPanel({ onOpenFile }: DbtPanelProps) {
               } catch {}
             }}
           />
+          {addTestFor && (
+            <AddDbtTestDialog
+              open={!!addTestFor}
+              onOpenChange={(o) => { if (!o) setAddTestFor(null); }}
+              projectId={currentProject.id}
+              dbtRelativePath={data.dbt_project_relative_path}
+              modelUniqueId={addTestFor.model.unique_id}
+              modelName={addTestFor.model.name}
+              columns={Object.keys(addTestFor.model.columns ?? {})}
+              defaultColumn={addTestFor.column ?? null}
+              onSaved={() => { refresh(); }}
+            />
+          )}
         </>
       )}
     </div>
   );
+}
+
+// ---------------------------------------------------------------------------
+// Tests view — cross-model list. All tests in one place, filterable by
+// status + kind + free-text search. Groups by model with counts + a
+// per-model "+ Add test" button. Rows are clickable to jump into the
+// Models drawer.
+// ---------------------------------------------------------------------------
+
+function TestsView({
+  data, onAdd, onDelete, onOpenModel,
+  search, setSearch,
+  statusFilter, setStatusFilter,
+  kindFilter, setKindFilter,
+}: {
+  data: NonNullable<Awaited<ReturnType<typeof projectsApi.listDbtModels>>>;
+  onAdd: (model: Model) => void;
+  onDelete: (testUniqueId: string) => void;
+  onOpenModel: (uid: string) => void;
+  search: string; setSearch: (v: string) => void;
+  statusFilter: 'all' | 'pass' | 'fail' | 'never'; setStatusFilter: (v: 'all' | 'pass' | 'fail' | 'never') => void;
+  kindFilter: string; setKindFilter: (v: string) => void;
+}) {
+  const all = data.models.flatMap((m) =>
+    (m.tests_detail ?? []).map((t) => ({ model: m, test: t })),
+  );
+  const kinds = Array.from(new Set(all.map((r) => r.test.test_kind))).sort();
+  const q = search.trim().toLowerCase();
+  const filtered = all.filter(({ model, test }) => {
+    if (statusFilter !== 'all') {
+      const s = test.last_run_status?.toLowerCase();
+      const passLike = s === 'pass' || s === 'success';
+      const failLike = s === 'fail' || s === 'error' || s === 'runtime error';
+      if (statusFilter === 'pass' && !passLike) return false;
+      if (statusFilter === 'fail' && !failLike) return false;
+      if (statusFilter === 'never' && !!s) return false;
+    }
+    if (kindFilter !== 'all' && test.test_kind !== kindFilter) return false;
+    if (q) {
+      const hay = `${model.name} ${test.test_kind} ${test.target_column ?? ''} ${test.unique_id}`.toLowerCase();
+      if (!hay.includes(q)) return false;
+    }
+    return true;
+  });
+  // Aggregate stats for the header
+  const total = all.length;
+  const passing = all.filter((r) => ['pass', 'success'].includes((r.test.last_run_status ?? '').toLowerCase())).length;
+  const failing = all.filter((r) => ['fail', 'error', 'runtime error'].includes((r.test.last_run_status ?? '').toLowerCase())).length;
+  const never = all.filter((r) => !r.test.last_run_status).length;
+
+  // Group by model for the render
+  const byModel = new Map<string, { model: Model; tests: typeof filtered[number]['test'][] }>();
+  for (const { model, test } of filtered) {
+    const entry = byModel.get(model.unique_id) ?? { model, tests: [] };
+    entry.tests.push(test);
+    byModel.set(model.unique_id, entry);
+  }
+
+  return (
+    <div className="px-8 py-6 space-y-4">
+      {/* KPI band */}
+      <div className="grid grid-cols-4 gap-4">
+        <TestKpi label="Total tests" value={total} tone="neutral" />
+        <TestKpi label="Passing" value={passing} tone="success" hint={total ? `${Math.round((passing / total) * 100)}%` : undefined} />
+        <TestKpi label="Failing" value={failing} tone={failing > 0 ? 'warning' : 'neutral'} />
+        <TestKpi label="Never run" value={never} tone="neutral" />
+      </div>
+
+      {/* Filter row */}
+      <div className="bg-white border border-gray-200 rounded-lg px-3 py-2 flex items-center gap-2 flex-wrap">
+        <div className="relative flex-1 min-w-[220px]">
+          <Search className="w-3.5 h-3.5 text-gray-400 absolute left-2 top-1/2 -translate-y-1/2" />
+          <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search by model, column, kind…"
+            className="w-full pl-7 pr-2 py-1.5 text-xs border border-gray-300 rounded" />
+        </div>
+        <div className="flex items-center gap-0.5 bg-gray-100 rounded p-0.5">
+          {(['all', 'pass', 'fail', 'never'] as const).map((s) => (
+            <button key={s} onClick={() => setStatusFilter(s)}
+              className={`px-2 py-1 text-[11px] rounded ${statusFilter === s ? 'bg-white text-gray-900 shadow-sm font-medium' : 'text-gray-600'}`}>
+              {s === 'all' ? 'All' : s === 'pass' ? 'Passing' : s === 'fail' ? 'Failing' : 'Never run'}
+            </button>
+          ))}
+        </div>
+        <select value={kindFilter} onChange={(e) => setKindFilter(e.target.value)}
+          className="px-2 py-1 text-xs border border-gray-300 rounded bg-white">
+          <option value="all">All kinds</option>
+          {kinds.map((k) => <option key={k} value={k}>{k}</option>)}
+        </select>
+        <span className="text-[11px] text-gray-500 ml-auto">{filtered.length} / {total}</span>
+      </div>
+
+      {/* Grouped list */}
+      {byModel.size === 0 ? (
+        <div className="bg-white border border-dashed border-gray-300 rounded-lg p-8 text-center">
+          <TestTube2 className="w-8 h-8 text-gray-300 mx-auto mb-3" />
+          <p className="text-sm text-gray-700 font-medium">
+            {total === 0 ? "No tests defined in this dbt project yet." : "No tests match the current filters."}
+          </p>
+          {total === 0 && (
+            <p className="text-xs text-gray-500 mt-1">
+              Click "+ Add test" on any model in the Models tab (or its drawer) to protect it with not_null / unique / accepted_values / relationships / custom SQL assertions.
+            </p>
+          )}
+        </div>
+      ) : (
+        <div className="bg-white border border-gray-200 rounded-lg overflow-hidden">
+          {Array.from(byModel.values()).map(({ model, tests }) => {
+            const modelFailing = tests.filter((t) => ['fail', 'error', 'runtime error'].includes((t.last_run_status ?? '').toLowerCase())).length;
+            return (
+              <div key={model.unique_id} className="border-b border-gray-100 last:border-0">
+                <div className="px-4 py-2.5 bg-gray-50/50 flex items-center gap-2 border-b border-gray-100">
+                  <button
+                    onClick={() => onOpenModel(model.unique_id)}
+                    className="font-mono text-sm font-semibold text-gray-900 hover:text-blue-600"
+                  >
+                    {model.name}
+                  </button>
+                  <span className="text-[10px] text-gray-500">· {model.resource_type}</span>
+                  <span className="text-[10px] text-gray-500">· {tests.length} test{tests.length === 1 ? '' : 's'}</span>
+                  {modelFailing > 0 && (
+                    <span className="text-[10px] text-rose-700 font-medium">{modelFailing} failing</span>
+                  )}
+                  <button
+                    onClick={() => onAdd(model)}
+                    className="ml-auto inline-flex items-center gap-0.5 text-[10px] font-medium text-emerald-700 hover:text-emerald-900"
+                  >
+                    <Plus className="w-3 h-3" /> Add test
+                  </button>
+                </div>
+                <ul className="divide-y divide-gray-50">
+                  {tests.map((t) => (
+                    <li key={t.unique_id} className="px-4 py-1.5 flex items-center gap-2 text-xs group">
+                      <TestStatusIcon status={t.last_run_status} />
+                      <span className="font-mono text-gray-800">
+                        {t.test_kind}
+                        {t.target_column && (
+                          <span className="text-gray-500">.<span className="text-gray-700">{t.target_column}</span></span>
+                        )}
+                      </span>
+                      {t.last_run_failures != null && t.last_run_failures > 0 && (
+                        <span className="text-[10px] text-rose-700 font-medium">{t.last_run_failures} failed</span>
+                      )}
+                      <span className="text-[10px] text-gray-500 ml-auto">
+                        {t.last_run_status ? t.last_run_status : 'never run'}
+                        {t.duration_ms != null && ` · ${(t.duration_ms / 1000).toFixed(1)}s`}
+                      </span>
+                      <button
+                        onClick={() => onDelete(t.unique_id)}
+                        className="opacity-0 group-hover:opacity-100 p-0.5 text-gray-400 hover:text-rose-600"
+                        title="Remove test"
+                      >
+                        <X className="w-3 h-3" />
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function TestKpi({ label, value, hint, tone }: { label: string; value: number; hint?: string; tone: 'neutral' | 'success' | 'warning' }) {
+  const cls = {
+    neutral: 'text-gray-500 bg-gray-100',
+    success: 'text-emerald-600 bg-emerald-50',
+    warning: 'text-rose-600 bg-rose-50',
+  }[tone];
+  return (
+    <div className="bg-white border border-gray-200 rounded-lg p-3 flex items-start gap-3">
+      <div className={`w-8 h-8 rounded-lg flex items-center justify-center ${cls}`}>
+        <TestTube2 className="w-4 h-4" />
+      </div>
+      <div className="min-w-0 flex-1">
+        <div className="text-[10px] text-gray-500 uppercase tracking-wider font-medium">{label}</div>
+        <div className="flex items-baseline gap-1.5">
+          <div className="text-xl font-semibold text-gray-900 tabular-nums">{value.toLocaleString()}</div>
+          {hint && <div className="text-[11px] text-gray-500">{hint}</div>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function TestStatusIcon({ status }: { status: string | null }) {
+  const s = status?.toLowerCase();
+  const ok = s === 'pass' || s === 'success';
+  const fail = s === 'fail' || s === 'error' || s === 'runtime error';
+  const warn = s === 'warn';
+  const Icon = ok ? CheckCircle2 : fail ? XCircle : warn ? AlertTriangle : TestTube2;
+  const tone = ok ? 'text-emerald-500' : fail ? 'text-rose-500' : warn ? 'text-amber-500' : 'text-gray-300';
+  return <Icon className={`w-3.5 h-3.5 flex-shrink-0 ${tone}`} />;
 }
 
 function LastRunPill({ status, durationMs }: { status: string | null; durationMs: number | null }) {
@@ -1195,6 +1451,8 @@ function ModelDetail({
   onDiff,
   onPreview,
   onColumnLineage,
+  onAddTest,
+  onDeleteTest,
   running,
 }: {
   model: Model;
@@ -1208,6 +1466,10 @@ function ModelDetail({
   onDiff?: () => void;
   onPreview?: () => void;
   onColumnLineage?: () => void;
+  /** Open the AddTest dialog scoped to this model. */
+  onAddTest?: () => void;
+  /** Remove a specific test by unique_id. */
+  onDeleteTest?: (testUniqueId: string) => void;
   running: boolean;
 }) {
   const cols = Object.entries(model.columns);
@@ -1366,21 +1628,39 @@ function ModelDetail({
           </section>
         )}
 
-        {/* Tests — first-class, clickable list of individual tests with
-            pass/fail from the last run. This is what users came looking
-            for when they clicked the tests count on the model row. */}
-        {model.tests_detail && model.tests_detail.length > 0 && (
-          <section>
-            <h4 className="text-[10px] uppercase tracking-wider text-gray-500 mb-1 flex items-center gap-1">
-              <TestTube2 className="w-3 h-3" /> Tests ({model.tests_detail.length})
+        {/* Tests — first-class list of individual tests with pass/fail
+            from the last run. + Add test opens the authoring dialog; a
+            small × per row lets users remove tests without editing yml. */}
+        <section>
+          <div className="flex items-center justify-between mb-1">
+            <h4 className="text-[10px] uppercase tracking-wider text-gray-500 flex items-center gap-1">
+              <TestTube2 className="w-3 h-3" /> Tests ({model.tests_detail?.length ?? 0})
             </h4>
+            {onAddTest && (
+              <button
+                onClick={() => onAddTest()}
+                className="inline-flex items-center gap-0.5 text-[10px] font-medium text-emerald-700 hover:text-emerald-900"
+              >
+                <Plus className="w-3 h-3" /> Add test
+              </button>
+            )}
+          </div>
+          {model.tests_detail && model.tests_detail.length > 0 ? (
             <div className="space-y-1">
               {model.tests_detail.map((t) => (
-                <TestRow key={t.unique_id} test={t} />
+                <TestRow
+                  key={t.unique_id}
+                  test={t}
+                  onDelete={onDeleteTest ? () => onDeleteTest(t.unique_id) : undefined}
+                />
               ))}
             </div>
-          </section>
-        )}
+          ) : (
+            <div className="text-[11px] text-gray-500 italic px-1">
+              No tests yet. Click "Add test" to protect this model with not_null / unique / custom SQL assertions.
+            </div>
+          )}
+        </section>
 
         {/* Dependencies */}
         {model.depends_on_nodes.length > 0 && (
@@ -1535,7 +1815,7 @@ function ModelDetail({
  * The unique_id becomes a tooltip so users can jump to the file if
  * needed.
  */
-function TestRow({ test }: { test: NonNullable<Model['tests_detail']>[number] }) {
+function TestRow({ test, onDelete }: { test: NonNullable<Model['tests_detail']>[number]; onDelete?: () => void }) {
   const status = test.last_run_status?.toLowerCase();
   const ok = status === 'pass' || status === 'success';
   const fail = status === 'fail' || status === 'error' || status === 'runtime error';
@@ -1544,7 +1824,7 @@ function TestRow({ test }: { test: NonNullable<Model['tests_detail']>[number] })
   const Icon = ok ? CheckCircle2 : fail ? XCircle : warn ? AlertTriangle : TestTube2;
   return (
     <div
-      className="text-[11px] flex items-center gap-1.5 px-2 py-1 border border-gray-100 rounded hover:bg-gray-50"
+      className="group text-[11px] flex items-center gap-1.5 px-2 py-1 border border-gray-100 rounded hover:bg-gray-50"
       title={test.last_run_message || test.unique_id}
     >
       <Icon className={`w-3 h-3 flex-shrink-0 ${tone}`} />
@@ -1560,6 +1840,15 @@ function TestRow({ test }: { test: NonNullable<Model['tests_detail']>[number] })
       <span className={`text-[10px] flex-shrink-0 ${tone}`}>
         {status ? status : 'never run'}
       </span>
+      {onDelete && (
+        <button
+          onClick={onDelete}
+          className="opacity-0 group-hover:opacity-100 p-0.5 text-gray-400 hover:text-rose-600 transition-opacity flex-shrink-0"
+          title="Remove test"
+        >
+          <X className="w-3 h-3" />
+        </button>
+      )}
     </div>
   );
 }
