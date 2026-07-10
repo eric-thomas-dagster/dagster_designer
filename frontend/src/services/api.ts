@@ -193,6 +193,28 @@ export const projectsApi = {
     return response.data as any;
   },
 
+  getDbtColumnLineage: async (
+    projectId: string,
+    dbtRelativePath?: string,
+  ): Promise<{
+    dbt_project_relative_path: string;
+    project_name: string | null;
+    columns_by_model: Record<string, string[]>;
+    edges: Array<{
+      from_unique_id: string;
+      from_column: string;
+      to_unique_id: string;
+      to_column: string;
+      confidence: number;
+    }>;
+    warnings: string[];
+  }> => {
+    const response = await api.get(`/projects/${projectId}/dbt-column-lineage`, {
+      params: dbtRelativePath ? { dbt_relative_path: dbtRelativePath } : {},
+    });
+    return response.data as any;
+  },
+
   runDbtModel: async (
     projectId: string,
     body: {

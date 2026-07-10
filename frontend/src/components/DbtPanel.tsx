@@ -36,6 +36,7 @@ export function DbtPanel({ onOpenFile }: DbtPanelProps) {
   const [runOutput, setRunOutput] = useState<{ uid: string; stdout: string; stderr: string; success: boolean } | null>(null);
   const [showAddModel, setShowAddModel] = useState(false);
   const [showGitCommit, setShowGitCommit] = useState(false);
+  const [lineage, setLineage] = useState<Awaited<ReturnType<typeof projectsApi.getDbtColumnLineage>> | null>(null);
 
   const refresh = async () => {
     if (!currentProject) return;
@@ -53,6 +54,18 @@ export function DbtPanel({ onOpenFile }: DbtPanelProps) {
   };
 
   useEffect(() => { refresh(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [currentProject?.id]);
+
+  // Fetch column-level lineage lazily — it's only needed when the
+  // drawer is open. Reuses one fetch across every model the user
+  // clicks so switching between models is instant.
+  useEffect(() => {
+    if (!currentProject || !data?.dbt_project_relative_path) return;
+    let cancelled = false;
+    projectsApi.getDbtColumnLineage(currentProject.id, data.dbt_project_relative_path).then((r) => {
+      if (!cancelled) setLineage(r);
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [currentProject?.id, data?.dbt_project_relative_path]);
 
   const filtered = useMemo(() => {
     if (!data) return [] as Model[];
@@ -134,6 +147,22 @@ export function DbtPanel({ onOpenFile }: DbtPanelProps) {
       {error && (
         <div className="mx-8 mt-4 p-3 bg-rose-50 border border-rose-200 rounded text-sm text-rose-800">
           {error}
+        </div>
+      )}
+      {/* No dbt projects at all — friendlier than an empty table. */}
+      {data && !data.dbt_project_relative_path && (
+        <div className="mx-8 mt-6 p-8 bg-white border border-dashed border-gray-300 rounded-lg text-center">
+          <FileCode className="w-8 h-8 text-gray-300 mx-auto mb-3" />
+          <p className="text-sm text-gray-700 font-medium">No dbt project yet</p>
+          <p className="text-xs text-gray-500 mt-1 mb-4">
+            Import a dbt repo at project creation, or scaffold a new model right here to bootstrap one.
+          </p>
+          <button
+            onClick={() => setShowAddModel(true)}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium bg-orange-500 text-white rounded"
+          >
+            <FileCode className="w-4 h-4" /> Scaffold a model
+          </button>
         </div>
       )}
       {data && (
@@ -280,6 +309,7 @@ export function DbtPanel({ onOpenFile }: DbtPanelProps) {
                 model={selected}
                 dbtRelativePath={data.dbt_project_relative_path}
                 runOutput={runOutput?.uid === selected.unique_id ? runOutput : null}
+                lineage={lineage}
                 onOpenFile={onOpenFile}
                 onClose={() => setSelectedUniqueId(null)}
                 onRun={() => runOne(selected)}
@@ -336,6 +366,7 @@ function ModelDetail({
   model,
   dbtRelativePath,
   runOutput,
+  lineage,
   onOpenFile,
   onClose,
   onRun,
@@ -344,12 +375,33 @@ function ModelDetail({
   model: Model;
   dbtRelativePath: string;
   runOutput: { stdout: string; stderr: string; success: boolean } | null;
+  lineage: Awaited<ReturnType<typeof projectsApi.getDbtColumnLineage>> | null;
   onOpenFile?: (path: string) => void;
   onClose: () => void;
   onRun: () => void;
   running: boolean;
 }) {
   const cols = Object.entries(model.columns);
+  // Column-level edges scoped to this model — group by which output
+  // column they feed so users see "col X ← foo.col_a, bar.col_b".
+  const incomingByCol = useMemo(() => {
+    const map = new Map<string, Array<{ from_unique_id: string; from_column: string; confidence: number }>>();
+    for (const e of lineage?.edges ?? []) {
+      if (e.to_unique_id !== model.unique_id) continue;
+      if (!map.has(e.to_column)) map.set(e.to_column, []);
+      map.get(e.to_column)!.push({ from_unique_id: e.from_unique_id, from_column: e.from_column, confidence: e.confidence });
+    }
+    return map;
+  }, [lineage, model.unique_id]);
+  const outgoingByCol = useMemo(() => {
+    const map = new Map<string, Array<{ to_unique_id: string; to_column: string; confidence: number }>>();
+    for (const e of lineage?.edges ?? []) {
+      if (e.from_unique_id !== model.unique_id) continue;
+      if (!map.has(e.from_column)) map.set(e.from_column, []);
+      map.get(e.from_column)!.push({ to_unique_id: e.to_unique_id, to_column: e.to_column, confidence: e.confidence });
+    }
+    return map;
+  }, [lineage, model.unique_id]);
   return (
     <div className="w-[420px] flex-shrink-0 bg-white border border-gray-200 rounded-lg overflow-hidden flex flex-col self-start max-h-[calc(100vh-260px)]">
       <div className="px-4 py-3 border-b border-gray-200 flex items-start justify-between gap-2">
@@ -458,6 +510,79 @@ function ModelDetail({
                   {d.replace(/^(model|source|seed)\./, '')}
                 </span>
               ))}
+            </div>
+          </section>
+        )}
+
+        {/* Column-level lineage — heuristic edges parsed from manifest.
+            Incoming shows "what feeds each output col"; outgoing shows
+            "who reads each of my cols". Confidence is dimmed for
+            uncertain edges (0.5 = SQL-text match, 1.0 = name match). */}
+        {(incomingByCol.size > 0 || outgoingByCol.size > 0) && (
+          <section>
+            <h4 className="text-[10px] uppercase tracking-wider text-gray-500 mb-1">Column lineage</h4>
+            <div className="space-y-2">
+              {incomingByCol.size > 0 && (
+                <div>
+                  <div className="text-[10px] text-gray-500 mb-1">Incoming — reads from</div>
+                  <div className="space-y-1">
+                    {Array.from(incomingByCol.entries()).slice(0, 12).map(([col, srcs]) => (
+                      <div key={col} className="text-[11px] flex items-start gap-1.5">
+                        <span className="font-mono text-gray-900 flex-shrink-0">{col}</span>
+                        <span className="text-gray-400 flex-shrink-0">←</span>
+                        <div className="flex flex-wrap gap-1 min-w-0">
+                          {srcs.slice(0, 4).map((s, i) => (
+                            <span
+                              key={i}
+                              className="px-1.5 py-0.5 text-[10px] rounded bg-emerald-50 border border-emerald-200 text-emerald-700 font-mono"
+                              style={{ opacity: 0.5 + s.confidence * 0.5 }}
+                              title={`Confidence ${Math.round(s.confidence * 100)}%`}
+                            >
+                              {s.from_unique_id.replace(/^(model|source|seed)\./, '')}.
+                              <span className="text-emerald-900">{s.from_column}</span>
+                            </span>
+                          ))}
+                          {srcs.length > 4 && (
+                            <span className="text-[10px] text-gray-400 self-center">+{srcs.length - 4}</span>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {outgoingByCol.size > 0 && (
+                <div>
+                  <div className="text-[10px] text-gray-500 mb-1">Outgoing — read by</div>
+                  <div className="space-y-1">
+                    {Array.from(outgoingByCol.entries()).slice(0, 12).map(([col, targets]) => (
+                      <div key={col} className="text-[11px] flex items-start gap-1.5">
+                        <span className="font-mono text-gray-900 flex-shrink-0">{col}</span>
+                        <span className="text-gray-400 flex-shrink-0">→</span>
+                        <div className="flex flex-wrap gap-1 min-w-0">
+                          {targets.slice(0, 4).map((t, i) => (
+                            <span
+                              key={i}
+                              className="px-1.5 py-0.5 text-[10px] rounded bg-blue-50 border border-blue-200 text-blue-700 font-mono"
+                              style={{ opacity: 0.5 + t.confidence * 0.5 }}
+                              title={`Confidence ${Math.round(t.confidence * 100)}%`}
+                            >
+                              {t.to_unique_id.replace(/^(model|source|seed)\./, '')}.
+                              <span className="text-blue-900">{t.to_column}</span>
+                            </span>
+                          ))}
+                          {targets.length > 4 && (
+                            <span className="text-[10px] text-gray-400 self-center">+{targets.length - 4}</span>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+              <p className="text-[10px] text-gray-400 italic">
+                Heuristic lineage — pale chips are lower confidence. Add column docs to schema.yml for tighter matching.
+              </p>
             </div>
           </section>
         )}

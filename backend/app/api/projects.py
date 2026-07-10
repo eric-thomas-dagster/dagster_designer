@@ -1963,7 +1963,16 @@ async def list_dbt_models(project_id: str, dbt_relative_path: str | None = None)
     root = project_service._get_project_dir(project)
     dbt_projects = _find_dbt_projects(root)
     if not dbt_projects:
-        raise HTTPException(status_code=404, detail="No dbt_project.yml found in this project")
+        # Not an error — the project just doesn't have a dbt project yet.
+        # The frontend renders an empty state prompting the user to scaffold
+        # or import one. Returning 404 here made the UI say "Not Found",
+        # which is worse UX than the empty state.
+        return DbtModelListResponse(
+            dbt_project_relative_path='',
+            project_name=None,
+            models=[],
+            stats={'total': 0},
+        )
 
     chosen = dbt_projects[0]
     if dbt_relative_path:
@@ -2080,6 +2089,141 @@ async def list_dbt_models(project_id: str, dbt_relative_path: str | None = None)
         project_name=chosen.name,
         models=models,
         stats=stats,
+    )
+
+
+class ColumnLineageEdge(BaseModel):
+    """One column-to-column dependency: the `to` model's `to_column`
+    reads from the `from` model's `from_column`. Heuristic — sourced
+    from a regex over compiled/raw SQL, not a formal SQL parser, so
+    treat as best-effort. Confidence is included so the frontend can
+    dim low-confidence edges."""
+    from_unique_id: str
+    from_column: str
+    to_unique_id: str
+    to_column: str
+    confidence: float = 1.0    # 0..1
+
+
+class ColumnLineageResponse(BaseModel):
+    dbt_project_relative_path: str
+    project_name: str | None = None
+    columns_by_model: dict[str, list[str]]
+    edges: list[ColumnLineageEdge]
+    warnings: list[str] = []
+
+
+def _extract_column_lineage(manifest: dict) -> tuple[dict[str, list[str]], list[ColumnLineageEdge], list[str]]:
+    """Heuristic column-level lineage extractor.
+
+    We do NOT parse SQL — a proper implementation would need a real
+    parser like sqlglot's lineage traversal. Instead we combine three
+    signals to get "good enough" column edges:
+
+      1. Each model declares its output columns in manifest.nodes.<uid>.columns.
+      2. depends_on.nodes gives cross-model edges we already have.
+      3. For each output column NAME, if the same name exists on any
+         upstream model, we assume an edge from upstream.col → this.col
+         with high confidence. If it doesn't match any upstream col by
+         name, we look for `<col>` mentioned in the raw SQL body — same
+         name in the SELECT/GROUP BY etc. gives a lower-confidence
+         edge (~0.5).
+
+    This gives users a passable column lineage view for the common
+    `select foo.a, foo.b from {{ ref('foo') }}` case without dragging
+    in a heavy SQL parser dep. Users needing exact lineage can run
+    dbt with the built-in column-level tools.
+    """
+    import re
+    nodes = manifest.get('nodes') or {}
+    sources = manifest.get('sources') or {}
+    # Map unique_id → column names (as declared in schema.yml/manifest).
+    cols_by_uid: dict[str, list[str]] = {}
+    for uid, node in {**nodes, **sources}.items():
+        rt = node.get('resource_type')
+        if rt not in ('model', 'seed', 'snapshot', 'source'):
+            continue
+        cols = list((node.get('columns') or {}).keys())
+        cols_by_uid[uid] = cols
+
+    edges: list[ColumnLineageEdge] = []
+    warnings: list[str] = []
+    for uid, node in nodes.items():
+        if node.get('resource_type') != 'model':
+            continue
+        my_cols = cols_by_uid.get(uid, [])
+        deps = list((node.get('depends_on') or {}).get('nodes') or [])
+        raw_code = node.get('raw_code') or node.get('compiled_code') or ''
+        raw_lower = raw_code.lower()
+        for my_col in my_cols:
+            # Same-name match against any upstream first — highest confidence.
+            matched = False
+            for dep in deps:
+                dep_cols = cols_by_uid.get(dep, [])
+                if my_col in dep_cols:
+                    edges.append(ColumnLineageEdge(
+                        from_unique_id=dep,
+                        from_column=my_col,
+                        to_unique_id=uid,
+                        to_column=my_col,
+                        confidence=1.0,
+                    ))
+                    matched = True
+            if matched:
+                continue
+            # Fall back: look for the column name in the raw SQL body of
+            # this model. Word-boundary match. Confidence 0.5 because we
+            # can't tell which upstream it actually came from — split
+            # the edge across each declared dep.
+            token = re.compile(rf'\b{re.escape(my_col.lower())}\b')
+            if token.search(raw_lower):
+                if not deps:
+                    continue
+                share = round(0.5 / max(1, len(deps)), 3)
+                for dep in deps:
+                    edges.append(ColumnLineageEdge(
+                        from_unique_id=dep,
+                        from_column='?',
+                        to_unique_id=uid,
+                        to_column=my_col,
+                        confidence=share,
+                    ))
+        if not my_cols and node.get('description'):
+            warnings.append(f"{uid} has description but no columns declared — add them to schema.yml for column lineage.")
+    return cols_by_uid, edges, warnings
+
+
+@router.get('/{project_id}/dbt-column-lineage', response_model=ColumnLineageResponse)
+async def dbt_column_lineage(project_id: str, dbt_relative_path: str | None = None):
+    """Return heuristic column-level lineage across the dbt project's
+    manifest. Empty edge list is fine — projects without column-level
+    schema.yml just get an empty response; the frontend renders "add
+    column docs to enable column-level lineage" then."""
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    root = project_service._get_project_dir(project)
+    dbt_projects = _find_dbt_projects(root)
+    if not dbt_projects:
+        return ColumnLineageResponse(
+            dbt_project_relative_path='',
+            columns_by_model={},
+            edges=[],
+        )
+    chosen = dbt_projects[0]
+    if dbt_relative_path:
+        for p in dbt_projects:
+            if p.relative_path == dbt_relative_path:
+                chosen = p
+                break
+    manifest = _load_dbt_artifact((root / chosen.relative_path).resolve() / 'target' / 'manifest.json')
+    cols_by_uid, edges, warnings = _extract_column_lineage(manifest)
+    return ColumnLineageResponse(
+        dbt_project_relative_path=chosen.relative_path,
+        project_name=chosen.name,
+        columns_by_model=cols_by_uid,
+        edges=edges,
+        warnings=warnings,
     )
 
 
