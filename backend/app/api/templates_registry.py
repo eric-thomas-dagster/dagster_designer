@@ -929,6 +929,46 @@ async def install_component_via_cli(
         detail = (stderr or stdout or "unknown error").strip().splitlines()
         raise HTTPException(status_code=500, detail=f"CLI install failed: {' | '.join(detail[-5:])}")
 
+    # Safety-net dependency install. Some community templates ship a
+    # `requirements.txt` (e.g. airtable_ingestion needs dlt[airtable])
+    # that `dagster-component add --auto-install` doesn't reliably pick
+    # up — we've hit at least one case where the CLI reported success
+    # but the deps never made it into the venv, leaving Dagster with a
+    # ModuleNotFoundError on the next load. Read the template's
+    # requirements.txt and `uv add` anything listed. Errors here are
+    # non-fatal so a bad line doesn't kill the whole install.
+    try:
+        comp_dirs = list(project_dir.glob(f"src/*/components/{component_id}")) + list(project_dir.glob(f"*/components/{component_id}"))
+        req_path = None
+        for cd in comp_dirs:
+            candidate = cd / "requirements.txt"
+            if candidate.exists():
+                req_path = candidate
+                break
+        if req_path:
+            reqs: list[str] = []
+            for line in req_path.read_text().splitlines():
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                reqs.append(line)
+            if reqs:
+                print(f"[CLI Install] Installing template requirements: {reqs}")
+                add_result = subprocess.run(
+                    ["uv", "add", *reqs],
+                    cwd=str(project_dir),
+                    capture_output=True,
+                    text=True,
+                    timeout=300,
+                )
+                if add_result.returncode != 0:
+                    tail = (add_result.stderr or add_result.stdout or "").strip().splitlines()[-5:]
+                    print(f"[CLI Install] Warning: `uv add` for template deps failed: {' | '.join(tail)}")
+                else:
+                    print(f"[CLI Install] Installed template requirements successfully.")
+    except Exception as _dep_e:
+        print(f"[CLI Install] Warning: could not install template requirements: {_dep_e}")
+
     # The CLI writes a defs.yaml stub at <project>/src/<module>/defs/<id>/defs.yaml
     # (or the flat-layout equivalent). Find it and pull out the canonical type.
     candidates = [
