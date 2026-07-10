@@ -1049,6 +1049,7 @@ async def install_component_via_cli(
     # same component_id is being installed more than once), rename the defs
     # directory now. defs.yaml itself is unchanged.
     final_defs_yaml_path = defs_yaml_path
+    final_instance_id = component_id
     if request.instance_name and request.instance_name != component_id:
         target_dir = defs_yaml_path.parent.parent / request.instance_name
         if target_dir.exists():
@@ -1060,8 +1061,37 @@ async def install_component_via_cli(
         try:
             defs_yaml_path.parent.rename(target_dir)
             final_defs_yaml_path = target_dir / "defs.yaml"
+            final_instance_id = target_dir.name
         except Exception as e:
             print(f"[CLI Install] Rename to {target_dir} failed, leaving default name: {e}")
+
+    # Register this instance on the project so the Project Components sidebar
+    # shows it. Previously install-via-cli only wrote defs.yaml on disk, so
+    # AI-applied picks (which use this endpoint) never showed up in the
+    # sidebar even though they were live in the graph.
+    try:
+        from ..models.project import ComponentInstance, ProjectUpdate
+        existing_ids = {c.id for c in project.components}
+        if final_instance_id not in existing_ids:
+            new_component = ComponentInstance(
+                id=final_instance_id,
+                component_type=component_type,
+                label=final_instance_id.replace('_', ' ').title(),
+                attributes=parsed.get("attributes") or {},
+                translation=None,
+                post_processing=None,
+                is_asset_factory=False,
+            )
+            updated_components = project.components + [new_component]
+            project_service.update_project(
+                request.project_id,
+                ProjectUpdate(components=updated_components),
+            )
+            print(f"[CLI Install] Registered component instance '{final_instance_id}' on project.")
+    except Exception as e:
+        # Non-fatal — the defs.yaml is already written, so the asset will
+        # still be introspectable. Just log so the sidebar-miss is visible.
+        print(f"[CLI Install] Warning: could not add {final_instance_id} to project.components: {e}")
 
     return {
         "success": True,
