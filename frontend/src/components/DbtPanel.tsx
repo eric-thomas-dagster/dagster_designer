@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { FileCode, Play, Loader2, CheckCircle2, XCircle, AlertTriangle, TestTube2, Book, FileText, Search, Layers, GitCommit, GitCompare, Clock } from 'lucide-react';
+import { FileCode, Play, Loader2, CheckCircle2, XCircle, AlertTriangle, TestTube2, Book, FileText, Search, Layers, GitCommit, GitCompare, Clock, Eye, DollarSign, X } from 'lucide-react';
 import { projectsApi } from '@/services/api';
 import { useProjectStore } from '@/hooks/useProject';
 import { notify } from './Notifications';
@@ -47,6 +47,13 @@ export function DbtPanel({ onOpenFile }: DbtPanelProps) {
   // up front so the header can offer a picker.
   const [dbtProjects, setDbtProjects] = useState<Awaited<ReturnType<typeof projectsApi.listDbtProjects>>['projects']>([]);
   const [selectedDbtPath, setSelectedDbtPath] = useState<string>('');
+  // Query preview modal state — populated by clicking "Preview data"
+  // in the drawer. Runs `dbt show --select <name> --limit N`.
+  const [previewOf, setPreviewOf] = useState<Model | null>(null);
+  const [previewData, setPreviewData] = useState<Awaited<ReturnType<typeof projectsApi.previewDbtModel>> | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  // Cost data — parsed from run_results.json's adapter_response.
+  const [cost, setCost] = useState<Awaited<ReturnType<typeof projectsApi.getDbtCost>> | null>(null);
 
   const refresh = async (path?: string) => {
     if (!currentProject) return;
@@ -98,8 +105,41 @@ export function DbtPanel({ onOpenFile }: DbtPanelProps) {
     projectsApi.getDbtSourceFreshness(currentProject.id, data.dbt_project_relative_path).then((r) => {
       if (!cancelled) setFreshness(r);
     }).catch(() => {});
+    projectsApi.getDbtCost(currentProject.id, data.dbt_project_relative_path).then((r) => {
+      if (!cancelled) setCost(r);
+    }).catch(() => {});
     return () => { cancelled = true; };
   }, [currentProject?.id, data?.dbt_project_relative_path]);
+
+  const runPreview = async (model: Model) => {
+    if (!currentProject || !data?.dbt_project_relative_path) return;
+    setPreviewOf(model);
+    setPreviewData(null);
+    setPreviewLoading(true);
+    try {
+      const r = await projectsApi.previewDbtModel(currentProject.id, {
+        dbt_relative_path: data.dbt_project_relative_path,
+        model_name: model.name,
+        limit: 100,
+      });
+      setPreviewData(r);
+    } catch (e: any) {
+      setPreviewData({
+        success: false,
+        columns: [], dtypes: {}, data: [], row_count: 0, compiled_sql: null,
+        error: e?.response?.data?.detail || e?.message || String(e),
+        duration_ms: 0,
+      });
+    } finally {
+      setPreviewLoading(false);
+    }
+  };
+  // Look up per-model cost data by unique_id — used in the drawer.
+  const costByUid = useMemo(() => {
+    const m = new Map<string, Awaited<ReturnType<typeof projectsApi.getDbtCost>>['per_model'][number]>();
+    for (const c of cost?.per_model ?? []) m.set(c.unique_id, c);
+    return m;
+  }, [cost]);
 
   // "Run modified" — CI-mode-lite. Instead of relying on dbt --state,
   // read git status for the dbt project, extract .sql files changed
@@ -274,9 +314,12 @@ export function DbtPanel({ onOpenFile }: DbtPanelProps) {
       {data && !data.dbt_project_relative_path && (
         <div className="mx-8 mt-6 p-8 bg-white border border-dashed border-gray-300 rounded-lg text-center">
           <FileCode className="w-8 h-8 text-gray-300 mx-auto mb-3" />
-          <p className="text-sm text-gray-700 font-medium">No dbt project yet</p>
-          <p className="text-xs text-gray-500 mt-1 mb-4">
+          <p className="text-sm text-gray-700 font-medium">No dbt project detected in this Dagster project</p>
+          <p className="text-xs text-gray-500 mt-1 mb-3">
             Import a dbt repo at project creation, or scaffold a new model right here to bootstrap one.
+          </p>
+          <p className="text-[11px] text-amber-700 mb-4">
+            If you know you have a dbt project here, <strong>restart the backend</strong> so the new dbt endpoints load — this tab needs them.
           </p>
           <button
             onClick={() => setShowAddModel(true)}
@@ -311,6 +354,25 @@ export function DbtPanel({ onOpenFile }: DbtPanelProps) {
               tone={(stats.run_failure ?? 0) > 0 ? 'warning' : 'success'}
             />
           </div>
+
+          {/* Cost summary — shown when at least one run has surfaced
+              adapter_response numbers. Empty projects skip the strip. */}
+          {cost && (cost.total_bytes > 0 || cost.total_usd > 0) && (
+            <div className="px-8 pb-3">
+              <div className="p-3 bg-white border border-gray-200 rounded-lg flex items-center gap-4 text-xs">
+                <DollarSign className="w-4 h-4 text-emerald-600" />
+                <div>
+                  <div className="text-gray-900 font-medium">
+                    ~${cost.total_usd.toFixed(4)} across {cost.per_model.length} model{cost.per_model.length === 1 ? '' : 's'}
+                    <span className="text-gray-500 font-normal ml-2">
+                      · {formatBytes(cost.total_bytes)} scanned · {cost.total_rows.toLocaleString()} rows processed
+                    </span>
+                  </div>
+                  <div className="text-[10px] text-gray-500 mt-0.5">{cost.pricing_note}</div>
+                </div>
+              </div>
+            </div>
+          )}
 
           {/* Search + table + drawer split */}
           <div className="px-8 pb-8 flex gap-4">
@@ -431,6 +493,7 @@ export function DbtPanel({ onOpenFile }: DbtPanelProps) {
                 dbtRelativePath={data.dbt_project_relative_path}
                 runOutput={runOutput?.uid === selected.unique_id ? runOutput : null}
                 lineage={lineage}
+                cost={costByUid.get(selected.unique_id) ?? null}
                 onOpenFile={onOpenFile}
                 onClose={() => setSelectedUniqueId(null)}
                 onRun={() => runOne(selected)}
@@ -439,6 +502,7 @@ export function DbtPanel({ onOpenFile }: DbtPanelProps) {
                     ? () => setDiffFor({ path: selected.relative_sql_path!, name: selected.name })
                     : undefined
                 }
+                onPreview={() => runPreview(selected)}
                 running={runningModel === selected.unique_id}
               />
             )}
@@ -537,6 +601,17 @@ export function DbtPanel({ onOpenFile }: DbtPanelProps) {
           title={diffFor.name}
         />
       )}
+
+      {/* Query result preview modal — dbt show compiles + executes. */}
+      {previewOf && (
+        <PreviewModal
+          model={previewOf}
+          preview={previewData}
+          loading={previewLoading}
+          onClose={() => { setPreviewOf(null); setPreviewData(null); }}
+          onRerun={() => runPreview(previewOf)}
+        />
+      )}
       <GitCommitDialog
         open={showGitCommit}
         onOpenChange={setShowGitCommit}
@@ -575,20 +650,24 @@ function ModelDetail({
   dbtRelativePath,
   runOutput,
   lineage,
+  cost,
   onOpenFile,
   onClose,
   onRun,
   onDiff,
+  onPreview,
   running,
 }: {
   model: Model;
   dbtRelativePath: string;
   runOutput: { stdout: string; stderr: string; success: boolean } | null;
   lineage: Awaited<ReturnType<typeof projectsApi.getDbtColumnLineage>> | null;
+  cost: Awaited<ReturnType<typeof projectsApi.getDbtCost>>['per_model'][number] | null;
   onOpenFile?: (path: string) => void;
   onClose: () => void;
   onRun: () => void;
   onDiff?: () => void;
+  onPreview?: () => void;
   running: boolean;
 }) {
   const cols = Object.entries(model.columns);
@@ -659,7 +738,41 @@ function ModelDetail({
               <GitCompare className="w-3 h-3" /> Diff
             </button>
           )}
+          {onPreview && (
+            <button
+              onClick={onPreview}
+              className="inline-flex items-center gap-1 px-2.5 py-1 text-xs text-gray-700 border border-gray-200 rounded hover:bg-gray-50"
+              title="Compile the SQL and preview results against the dev warehouse (dbt show)"
+            >
+              <Eye className="w-3 h-3" /> Preview data
+            </button>
+          )}
         </div>
+
+        {/* Cost — only when at least one run has surfaced adapter numbers. */}
+        {cost && (cost.bytes_processed || cost.usd_estimate || cost.rows_processed) && (
+          <section>
+            <h4 className="text-[10px] uppercase tracking-wider text-gray-500 mb-1 flex items-center gap-1">
+              <DollarSign className="w-3 h-3" /> Cost estimate (last run)
+            </h4>
+            <div className="grid grid-cols-2 gap-2 text-xs">
+              {cost.usd_estimate != null && (
+                <Fact label="USD" value={`~$${cost.usd_estimate.toFixed(6)}`} />
+              )}
+              {cost.bytes_processed != null && (
+                <Fact label="Bytes scanned" value={formatBytes(cost.bytes_processed)} />
+              )}
+              {cost.rows_processed != null && (
+                <Fact label="Rows processed" value={cost.rows_processed.toLocaleString()} />
+              )}
+              {cost.slot_ms != null && (
+                <Fact label="Slot time" value={`${(cost.slot_ms / 1000).toFixed(1)}s`} />
+              )}
+              {cost.warehouse && <Fact label="Warehouse" value={cost.warehouse} mono />}
+              {cost.query_id && <Fact label="Query ID" value={cost.query_id.slice(0, 12) + '…'} mono />}
+            </div>
+          </section>
+        )}
 
         {/* Facts */}
         <div className="grid grid-cols-2 gap-2 text-xs">
@@ -879,6 +992,125 @@ function formatDuration(seconds: number): string {
   if (seconds < 3600) return `${Math.round(seconds / 60)}m`;
   if (seconds < 86400) return `${Math.round(seconds / 3600)}h`;
   return `${Math.round(seconds / 86400)}d`;
+}
+
+function PreviewModal({
+  model,
+  preview,
+  loading,
+  onClose,
+  onRerun,
+}: {
+  model: Model;
+  preview: Awaited<ReturnType<typeof projectsApi.previewDbtModel>> | null;
+  loading: boolean;
+  onClose: () => void;
+  onRerun: () => void;
+}) {
+  const [tab, setTab] = useState<'data' | 'sql'>('data');
+  return (
+    <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-6" onClick={onClose}>
+      <div
+        className="bg-white rounded-lg shadow-xl w-[1000px] max-w-full h-[80vh] flex flex-col overflow-hidden"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between px-4 py-3 border-b border-gray-200">
+          <div>
+            <div className="text-sm font-semibold text-gray-900 flex items-center gap-1.5">
+              <Eye className="w-4 h-4 text-primary" /> Preview · <span className="font-mono">{model.name}</span>
+            </div>
+            <div className="text-[11px] text-gray-500 mt-0.5">
+              {preview?.success
+                ? <>{preview.row_count} rows returned in {(preview.duration_ms / 1000).toFixed(1)}s</>
+                : loading
+                  ? 'Running dbt show…'
+                  : 'Compile + execute against the dev warehouse — read-only.'}
+            </div>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={onRerun}
+              className="inline-flex items-center gap-1 px-2 py-1 text-xs text-gray-700 border border-gray-300 rounded hover:bg-gray-50"
+            >
+              Rerun
+            </button>
+            <button onClick={onClose} className="p-1 hover:bg-gray-100 rounded" aria-label="Close">
+              <X className="w-4 h-4 text-gray-500" />
+            </button>
+          </div>
+        </div>
+
+        {/* Tabs */}
+        <div className="border-b border-gray-100 bg-gray-50 flex items-center px-2 gap-0.5">
+          {(['data', 'sql'] as const).map((t) => (
+            <button
+              key={t}
+              onClick={() => setTab(t)}
+              className={`px-3 py-1.5 text-xs rounded-t ${tab === t ? 'bg-white text-gray-900 border-t border-l border-r border-gray-200 border-b-white -mb-px' : 'text-gray-600 hover:text-gray-800'}`}
+            >
+              {t === 'data' ? 'Data' : 'Compiled SQL'}
+            </button>
+          ))}
+        </div>
+
+        <div className="flex-1 overflow-auto">
+          {loading && (
+            <div className="h-full flex items-center justify-center text-sm text-gray-500 gap-2">
+              <Loader2 className="w-4 h-4 animate-spin" /> Running dbt show…
+            </div>
+          )}
+          {!loading && preview && !preview.success && (
+            <div className="p-4">
+              <div className="p-3 bg-rose-50 border border-rose-200 rounded text-xs font-mono text-rose-900 whitespace-pre-wrap max-h-full overflow-auto">
+                {preview.error || 'Unknown error'}
+              </div>
+            </div>
+          )}
+          {!loading && preview && preview.success && tab === 'data' && (
+            preview.columns.length === 0 ? (
+              <div className="p-8 text-center text-sm text-gray-500">
+                Query returned no columns. Check the model's SQL.
+              </div>
+            ) : (
+              <table className="w-full text-xs">
+                <thead className="bg-gray-50 border-b border-gray-200 sticky top-0">
+                  <tr>
+                    {preview.columns.map((c) => (
+                      <th key={c} className="text-left px-3 py-2 font-medium text-gray-700 whitespace-nowrap">
+                        <div>{c}</div>
+                        {preview.dtypes[c] && (
+                          <div className="text-[10px] font-normal text-gray-400">{preview.dtypes[c]}</div>
+                        )}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {preview.data.map((row, i) => (
+                    <tr key={i} className={i % 2 === 0 ? 'bg-white' : 'bg-gray-50/40'}>
+                      {preview.columns.map((c) => {
+                        const v = row[c];
+                        return (
+                          <td key={c} className="px-3 py-1.5 text-gray-800 border-b border-gray-100 max-w-xs truncate" title={String(v ?? '')}>
+                            {v === null || v === undefined ? <span className="italic text-gray-400">null</span> : String(v)}
+                          </td>
+                        );
+                      })}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )
+          )}
+          {!loading && preview && preview.success && tab === 'sql' && (
+            <pre className="p-3 text-xs font-mono text-gray-800 whitespace-pre-wrap">
+              {preview.compiled_sql || <span className="text-gray-400 italic">Compiled SQL not available.</span>}
+            </pre>
+          )}
+        </div>
+      </div>
+    </div>
+  );
 }
 
 function FreshnessPill({ status }: { status: string | null }) {

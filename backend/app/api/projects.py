@@ -2360,6 +2360,274 @@ async def dbt_column_lineage(project_id: str, dbt_relative_path: str | None = No
     )
 
 
+class DbtModelPreviewResponse(BaseModel):
+    """Materialized preview of a single dbt model against the dev
+    warehouse. Compiled SQL is included so users can see what dbt
+    generated + copy-paste it. Row/column data mirrors the shape the
+    AssetPreview endpoints use so we can render with the same table."""
+    success: bool
+    columns: list[str] = []
+    dtypes: dict[str, str] = {}
+    data: list[dict] = []
+    row_count: int = 0
+    compiled_sql: str | None = None
+    error: str | None = None
+    duration_ms: int = 0
+
+
+class DbtModelPreviewRequest(BaseModel):
+    dbt_relative_path: str
+    model_name: str
+    limit: int = 100
+    target: str | None = None
+
+
+@router.post('/{project_id}/dbt-model-preview', response_model=DbtModelPreviewResponse)
+async def dbt_model_preview(project_id: str, request: DbtModelPreviewRequest):
+    """Preview a dbt model's compiled SQL result against the dev warehouse
+    without materializing anything. Uses `dbt show --limit N` which
+    compiles refs+sources and executes read-only. Also parses the
+    compiled SQL from target/compiled/ so the frontend can display it
+    alongside the results."""
+    import subprocess as _sp
+    import time as _time
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    root = project_service._get_project_dir(project)
+    dbt_root = (root / request.dbt_relative_path).resolve()
+    if not (dbt_root / 'dbt_project.yml').exists():
+        raise HTTPException(status_code=404, detail=f"No dbt_project.yml at {request.dbt_relative_path}")
+
+    dbt_bin = root / '.venv' / 'bin' / 'dbt'
+    if not dbt_bin.exists():
+        return DbtModelPreviewResponse(
+            success=False,
+            error="dbt CLI not found in the project venv — install a dbt adapter first.",
+        )
+
+    cmd = [
+        str(dbt_bin),
+        'show',
+        '--select', request.model_name,
+        '--limit', str(max(1, min(request.limit, 1000))),
+        '--output', 'json',
+        '--no-use-colors',
+    ]
+    if request.target:
+        cmd.extend(['--target', request.target])
+
+    started = _time.time()
+    try:
+        r = _sp.run(cmd, cwd=str(dbt_root), capture_output=True, text=True, timeout=180)
+    except _sp.TimeoutExpired:
+        return DbtModelPreviewResponse(success=False, error="dbt show timed out after 3 minutes.", duration_ms=int((_time.time() - started) * 1000))
+
+    duration_ms = int((_time.time() - started) * 1000)
+
+    if r.returncode != 0:
+        # Pull the useful error out of stderr/stdout. dbt writes friendly
+        # multi-line errors that we should surface as-is.
+        tail = (r.stderr or r.stdout or 'unknown error').splitlines()
+        detail = '\n'.join(tail[-8:])
+        return DbtModelPreviewResponse(success=False, error=detail, duration_ms=duration_ms)
+
+    # dbt show --output json emits a JSON *stream* — one line per event —
+    # with the last one containing a payload including `show` with the
+    # rows. Parse each line, keep the last with columns+rows.
+    columns: list[str] = []
+    rows: list[dict] = []
+    for line in r.stdout.splitlines():
+        line = line.strip()
+        if not line or not line.startswith('{'):
+            continue
+        try:
+            evt = json.loads(line)
+        except Exception:
+            continue
+        data = evt.get('data') or {}
+        preview = data.get('preview') or data.get('show')
+        if isinstance(preview, list) and preview:
+            first = preview[0]
+            if isinstance(first, dict):
+                columns = list(first.keys())
+                rows = preview
+                break
+
+    # Pull the compiled SQL from disk if it exists — target/compiled/
+    # is written by dbt on any show/build.
+    compiled_sql = None
+    # dbt writes to target/compiled/<project>/<original_file_path>
+    # Search shallowly rather than guessing the project layout.
+    compiled_dir = dbt_root / 'target' / 'compiled'
+    if compiled_dir.exists():
+        for cand in compiled_dir.rglob(f"{request.model_name}.sql"):
+            try:
+                compiled_sql = cand.read_text()
+                break
+            except Exception:
+                pass
+
+    # Rough dtype inference from the first non-null value per column.
+    dtypes: dict[str, str] = {}
+    for c in columns:
+        for row in rows:
+            v = row.get(c)
+            if v is None:
+                continue
+            if isinstance(v, bool):
+                dtypes[c] = 'bool'
+            elif isinstance(v, int):
+                dtypes[c] = 'int'
+            elif isinstance(v, float):
+                dtypes[c] = 'float'
+            else:
+                dtypes[c] = 'string'
+            break
+
+    return DbtModelPreviewResponse(
+        success=True,
+        columns=columns,
+        dtypes=dtypes,
+        data=rows,
+        row_count=len(rows),
+        compiled_sql=compiled_sql,
+        duration_ms=duration_ms,
+    )
+
+
+class DbtCostSummary(BaseModel):
+    """Cost estimate for one model run — derived from run_results.json's
+    `adapter_response`. Different warehouses expose different metrics
+    (bytes_processed on BigQuery, rows_processed on Snowflake) so the
+    shape is intentionally loose. USD is best-effort; users can drop
+    in their negotiated per-warehouse rate."""
+    unique_id: str
+    name: str
+    duration_ms: int | None = None
+    bytes_processed: int | None = None
+    rows_processed: int | None = None
+    slot_ms: int | None = None
+    query_id: str | None = None
+    warehouse: str | None = None
+    usd_estimate: float | None = None
+    raw_adapter_response: dict = {}
+
+
+class DbtCostResponse(BaseModel):
+    dbt_project_relative_path: str
+    project_name: str | None = None
+    total_bytes: int = 0
+    total_rows: int = 0
+    total_usd: float = 0.0
+    per_model: list[DbtCostSummary] = []
+    # Pricing constants used for the USD math; frontend surfaces
+    # these so users understand the estimate isn't magic.
+    pricing_note: str = ''
+
+
+# Rough per-TiB / per-hour US-East list prices (April 2026-ish).
+# Users override in the response if their contract differs.
+_BIGQUERY_USD_PER_TB = 6.25
+_SNOWFLAKE_USD_PER_CREDIT = 3.0            # ~standard tier
+_SNOWFLAKE_CREDITS_PER_SEC = 1 / 3600.0    # 1 credit / hour on the smallest warehouse
+
+
+def _cost_for_row(name: str, adapter: dict, duration_s: float) -> DbtCostSummary:
+    """Best-effort cost extraction across the common warehouses.
+    adapter_response keys differ across adapters, so we grab whatever
+    fields we recognize and leave the rest under raw_adapter_response
+    for the frontend to render on hover."""
+    b = adapter.get('bytes_processed') or adapter.get('scanned_bytes')
+    rows = adapter.get('rows_affected') or adapter.get('rows_processed') or adapter.get('num_rows')
+    slot_ms = adapter.get('slot_ms')
+    query_id = adapter.get('query_id')
+    warehouse = adapter.get('warehouse') or adapter.get('database_type')
+
+    usd: float | None = None
+    if b is not None:
+        # BigQuery on-demand pricing — $/TB scanned.
+        try:
+            usd = (float(b) / (1024 ** 4)) * _BIGQUERY_USD_PER_TB
+        except Exception:
+            pass
+    elif duration_s > 0 and (warehouse or '').lower().startswith('snowflake'):
+        try:
+            usd = duration_s * _SNOWFLAKE_CREDITS_PER_SEC * _SNOWFLAKE_USD_PER_CREDIT
+        except Exception:
+            pass
+
+    return DbtCostSummary(
+        unique_id='',
+        name=name,
+        duration_ms=int(duration_s * 1000) if duration_s else None,
+        bytes_processed=int(b) if b else None,
+        rows_processed=int(rows) if rows else None,
+        slot_ms=int(slot_ms) if slot_ms else None,
+        query_id=str(query_id) if query_id else None,
+        warehouse=str(warehouse) if warehouse else None,
+        usd_estimate=usd,
+        raw_adapter_response=adapter,
+    )
+
+
+@router.get('/{project_id}/dbt-cost', response_model=DbtCostResponse)
+async def dbt_cost(project_id: str, dbt_relative_path: str | None = None):
+    """Parse run_results.json's adapter_response per model to estimate
+    warehouse cost. Empty when the project has never been built."""
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    root = project_service._get_project_dir(project)
+    dbt_projects = _find_dbt_projects(root)
+    if not dbt_projects:
+        return DbtCostResponse(dbt_project_relative_path='', total_bytes=0, total_rows=0, total_usd=0.0)
+    chosen = dbt_projects[0]
+    if dbt_relative_path:
+        for p in dbt_projects:
+            if p.relative_path == dbt_relative_path:
+                chosen = p
+                break
+    dbt_root = (root / chosen.relative_path).resolve()
+    run_results = _load_dbt_artifact(dbt_root / 'target' / 'run_results.json')
+    manifest = _load_dbt_artifact(dbt_root / 'target' / 'manifest.json')
+
+    per_model: list[DbtCostSummary] = []
+    total_bytes = 0
+    total_rows = 0
+    total_usd = 0.0
+    for r in run_results.get('results', []):
+        uid = r.get('unique_id') or ''
+        if not uid.startswith('model.'):
+            continue
+        adapter = r.get('adapter_response') or {}
+        exec_time = float(r.get('execution_time') or 0)
+        summary = _cost_for_row(
+            name=(manifest.get('nodes') or {}).get(uid, {}).get('name') or uid.split('.')[-1],
+            adapter=adapter,
+            duration_s=exec_time,
+        )
+        summary.unique_id = uid
+        per_model.append(summary)
+        total_bytes += summary.bytes_processed or 0
+        total_rows += summary.rows_processed or 0
+        total_usd += summary.usd_estimate or 0.0
+
+    return DbtCostResponse(
+        dbt_project_relative_path=chosen.relative_path,
+        project_name=chosen.name,
+        total_bytes=total_bytes,
+        total_rows=total_rows,
+        total_usd=round(total_usd, 4),
+        per_model=per_model,
+        pricing_note=(
+            f'BigQuery on-demand ${_BIGQUERY_USD_PER_TB}/TB scanned; '
+            f'Snowflake standard ${_SNOWFLAKE_USD_PER_CREDIT}/credit at 1 credit/hour. '
+            f'Rough estimates — override in the API for your negotiated pricing.'
+        ),
+    )
+
+
 class RunDbtModelRequest(BaseModel):
     """Run one (or a small set of) dbt models via `dbt build`. Uses the
     project's venv so it inherits every adapter the user installed."""

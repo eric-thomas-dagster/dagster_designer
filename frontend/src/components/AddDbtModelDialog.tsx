@@ -155,7 +155,9 @@ export function AddDbtModelDialog({ open, onOpenChange, projectId, onCreated }: 
                 </select>
                 {dbtProjects.length === 0 && !loadingProjects && (
                   <p className="text-[11px] text-amber-700 mt-1">
-                    No <code className="bg-gray-100 px-1 rounded">dbt_project.yml</code> found in this project. Clone a dbt repo first.
+                    No <code className="bg-gray-100 px-1 rounded">dbt_project.yml</code> found in this project.
+                    <br />
+                    If you know you have a dbt project here, try restarting the backend so the new dbt endpoints load.
                   </p>
                 )}
               </div>

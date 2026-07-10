@@ -193,6 +193,52 @@ export const projectsApi = {
     return response.data as any;
   },
 
+  previewDbtModel: async (
+    projectId: string,
+    body: { dbt_relative_path: string; model_name: string; limit?: number; target?: string | null },
+  ): Promise<{
+    success: boolean;
+    columns: string[];
+    dtypes: Record<string, string>;
+    data: Array<Record<string, any>>;
+    row_count: number;
+    compiled_sql: string | null;
+    error: string | null;
+    duration_ms: number;
+  }> => {
+    const response = await api.post(`/projects/${projectId}/dbt-model-preview`, body);
+    return response.data as any;
+  },
+
+  getDbtCost: async (
+    projectId: string,
+    dbtRelativePath?: string,
+  ): Promise<{
+    dbt_project_relative_path: string;
+    project_name: string | null;
+    total_bytes: number;
+    total_rows: number;
+    total_usd: number;
+    per_model: Array<{
+      unique_id: string;
+      name: string;
+      duration_ms: number | null;
+      bytes_processed: number | null;
+      rows_processed: number | null;
+      slot_ms: number | null;
+      query_id: string | null;
+      warehouse: string | null;
+      usd_estimate: number | null;
+      raw_adapter_response: Record<string, any>;
+    }>;
+    pricing_note: string;
+  }> => {
+    const response = await api.get(`/projects/${projectId}/dbt-cost`, {
+      params: dbtRelativePath ? { dbt_relative_path: dbtRelativePath } : {},
+    });
+    return response.data as any;
+  },
+
   getDbtModelDiff: async (
     projectId: string,
     dbtRelativePath: string,
