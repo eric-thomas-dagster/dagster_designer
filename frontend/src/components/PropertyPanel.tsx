@@ -12,6 +12,7 @@ import { notify, confirmDialog } from './Notifications';
 import { assetsApi, projectsApi, primitivesApi, partitionsApi, templatesApi, type BackfillRequest } from '@/services/api';
 import type { ComponentInstance } from '@/types';
 import { InlineAttributesForm } from './InlineAttributesForm';
+import { pickSpecializedSidebar } from './SpecializedSidebar';
 
 // Icon mapping for component icons
 const iconMap: Record<string, any> = {
@@ -1153,8 +1154,24 @@ export function PropertyPanel({ nodeId, onConfigureComponent, onOpenFile, onNewP
                   them here saves a modal round-trip. Falls back to the
                   Advanced modal for special widgets (sql_template,
                   upstream_asset_keys, translation, etc.). */}
-              {sourceComponentSchema?.schema?.properties && (
+              {sourceComponentSchema?.schema?.properties && (() => {
+                // If we have a hand-tuned sidebar for this component
+                // (join, filter, etc.), render it instead of the
+                // schema-driven generic form. Users still get the
+                // Advanced escape hatch to reach less-common fields.
+                const Specialized = pickSpecializedSidebar(sourceComponent.component_type);
+                return (
                 <div className="mt-3 p-3 bg-white border border-gray-200 rounded-lg">
+                  {Specialized ? (
+                    <Specialized
+                      attributes={inlineAttrs}
+                      onChange={(name, val) => {
+                        setInlineAttrs((prev) => ({ ...prev, [name]: val }));
+                        setInlineDirty(true);
+                      }}
+                      onOpenAdvanced={() => onConfigureComponent(sourceComponent)}
+                    />
+                  ) : (
                   <InlineAttributesForm
                     properties={sourceComponentSchema.schema.properties}
                     required={sourceComponentSchema.schema.required}
@@ -1171,6 +1188,7 @@ export function PropertyPanel({ nodeId, onConfigureComponent, onOpenFile, onNewP
                         .filter(Boolean) ?? []
                     }
                   />
+                  )}
                   {inlineDirty && (
                     <div className="mt-3 flex items-center gap-2">
                       <button
@@ -1209,7 +1227,8 @@ export function PropertyPanel({ nodeId, onConfigureComponent, onOpenFile, onNewP
                     </div>
                   )}
                 </div>
-              )}
+                );
+              })()}
 
               {/* Partition Configuration for Component-Generated Assets */}
               {componentSupportsPartitions && (
