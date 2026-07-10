@@ -249,7 +249,7 @@ export function IngestionsPanel({ onAddDataSource, onEditComponent }: Ingestions
             Ingestions
           </h1>
           <p className="text-sm text-gray-500 mt-1">
-            Every data source flowing into the project — Fivetran / Airbyte / dlt style.
+            Every data source flowing into the project, and how it's performing.
           </p>
         </div>
         <button
