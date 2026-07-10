@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { FileCode, Play, Loader2, CheckCircle2, XCircle, AlertTriangle, TestTube2, Book, FileText, Search, Layers, GitCommit, GitCompare, Clock, Eye, DollarSign, X, Network, Filter, Share2, ExternalLink } from 'lucide-react';
+import { FileCode, Play, Loader2, CheckCircle2, XCircle, AlertTriangle, TestTube2, Book, FileText, Search, Layers, GitCommit, GitCompare, Clock, Eye, DollarSign, X, Network, Filter, Share2, ExternalLink, Sparkles } from 'lucide-react';
 import { projectsApi } from '@/services/api';
 import { useProjectStore } from '@/hooks/useProject';
 import { notify } from './Notifications';
@@ -7,6 +7,7 @@ import { AddDbtModelDialog } from './AddDbtModelDialog';
 import { GitCommitDialog } from './GitCommitDialog';
 import { SqlDiffDialog } from './SqlDiffDialog';
 import { DbtLineageView } from './DbtLineageView';
+import { DbtColumnLineageOverlay } from './DbtColumnLineageOverlay';
 
 interface DbtPanelProps {
   onOpenFile?: (path: string) => void;
@@ -50,6 +51,11 @@ export function DbtPanel({ onOpenFile }: DbtPanelProps) {
   const [runningSelector, setRunningSelector] = useState<string | null>(null);
   const [scaffoldingDocs, setScaffoldingDocs] = useState(false);
   const [generatingDocs, setGeneratingDocs] = useState(false);
+  // Column-lineage modal — opened from the drawer's action row. Holds
+  // the focal model so the modal is standalone and can outlive the
+  // drawer (users often want to keep the modal open while switching
+  // models in the drawer isn't a supported flow yet).
+  const [columnLineageFor, setColumnLineageFor] = useState<Model | null>(null);
   const [freshness, setFreshness] = useState<Awaited<ReturnType<typeof projectsApi.getDbtSourceFreshness>> | null>(null);
   const [runningModified, setRunningModified] = useState(false);
   // A Dagster project can orchestrate multiple dbt projects (e.g. a
@@ -349,28 +355,6 @@ export function DbtPanel({ onOpenFile }: DbtPanelProps) {
           </p>
         </div>
         <div className="flex items-center gap-2">
-          {/* view toggle — models · lineage · docs · selectors · exposures · freshness */}
-          <div className="flex items-center gap-0.5 bg-gray-100 rounded p-0.5 mr-2">
-            {([
-              { v: 'models',    label: 'Models',    icon: Layers },
-              { v: 'lineage',   label: 'Lineage',   icon: Network },
-              { v: 'docs',      label: 'Docs',      icon: Book },
-              { v: 'selectors', label: 'Selectors', icon: Filter },
-              { v: 'exposures', label: 'Exposures', icon: Share2 },
-              { v: 'freshness', label: 'Freshness', icon: Clock },
-            ] as const).map(({ v, label, icon: Icon }) => (
-              <button
-                key={v}
-                onClick={() => setView(v)}
-                className={`inline-flex items-center gap-1 px-2.5 py-1 text-xs rounded ${
-                  view === v ? 'bg-white text-gray-900 shadow-sm font-medium' : 'text-gray-600'
-                }`}
-              >
-                <Icon className="w-3 h-3" />
-                {label}
-              </button>
-            ))}
-          </div>
           <button
             onClick={runModified}
             disabled={runningModified}
@@ -392,6 +376,35 @@ export function DbtPanel({ onOpenFile }: DbtPanelProps) {
           >
             <FileCode className="w-4 h-4" /> New model
           </button>
+        </div>
+      </div>
+
+      {/* Full-tab bar — sits on its own row under the header, styled like
+          the Automation panel's tabs (blue underline for active). Gives
+          each dbt sub-surface real presence instead of a tiny pill. */}
+      <div className="bg-white border-b border-gray-200 px-8">
+        <div className="flex items-center gap-1">
+          {([
+            { v: 'models',    label: 'Models',    icon: Layers },
+            { v: 'lineage',   label: 'Lineage',   icon: Network },
+            { v: 'docs',      label: 'Docs',      icon: Book },
+            { v: 'selectors', label: 'Selectors', icon: Filter },
+            { v: 'exposures', label: 'Exposures', icon: Share2 },
+            { v: 'freshness', label: 'Freshness', icon: Clock },
+          ] as const).map(({ v, label, icon: Icon }) => (
+            <button
+              key={v}
+              onClick={() => setView(v)}
+              className={`inline-flex items-center gap-1.5 px-4 py-3 text-sm font-medium border-b-2 -mb-px transition-colors ${
+                view === v
+                  ? 'text-blue-600 border-blue-600'
+                  : 'text-gray-600 border-transparent hover:text-gray-900'
+              }`}
+            >
+              <Icon className="w-4 h-4" />
+              {label}
+            </button>
+          ))}
         </div>
       </div>
 
@@ -979,7 +992,21 @@ export function DbtPanel({ onOpenFile }: DbtPanelProps) {
               : undefined
           }
           onPreview={() => runPreview(selected)}
+          onColumnLineage={() => setColumnLineageFor(selected)}
           running={runningModel === selected.unique_id}
+        />
+      )}
+
+      {/* Visual column-to-column lineage modal — opens from the drawer's
+          "Column lineage" button. Standalone so users can keep it open
+          while comparing models. */}
+      {columnLineageFor && data?.dbt_project_relative_path && (
+        <DbtColumnLineageOverlay
+          projectId={currentProject.id}
+          dbtRelativePath={data.dbt_project_relative_path}
+          modelUniqueId={columnLineageFor.unique_id}
+          modelName={columnLineageFor.name}
+          onClose={() => setColumnLineageFor(null)}
         />
       )}
     </div>
@@ -1019,6 +1046,7 @@ function ModelDetail({
   onRun,
   onDiff,
   onPreview,
+  onColumnLineage,
   running,
 }: {
   model: Model;
@@ -1031,6 +1059,7 @@ function ModelDetail({
   onRun: () => void;
   onDiff?: () => void;
   onPreview?: () => void;
+  onColumnLineage?: () => void;
   running: boolean;
 }) {
   const cols = Object.entries(model.columns);
@@ -1121,6 +1150,15 @@ function ModelDetail({
               title="Compile the SQL and preview results against the dev warehouse (dbt show)"
             >
               <Eye className="w-3 h-3" /> Preview data
+            </button>
+          )}
+          {onColumnLineage && (
+            <button
+              onClick={onColumnLineage}
+              className="inline-flex items-center gap-1 px-2.5 py-1 text-xs text-gray-700 border border-gray-200 rounded hover:bg-gray-50"
+              title="Visual column-to-column lineage — bezier lines between matched columns across models"
+            >
+              <Sparkles className="w-3 h-3" /> Column lineage
             </button>
           )}
         </div>
