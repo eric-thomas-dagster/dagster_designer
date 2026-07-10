@@ -1908,6 +1908,21 @@ async def list_dbt_projects(project_id: str):
     return DbtProjectListResponse(projects=_find_dbt_projects(root))
 
 
+class DbtTestDetail(BaseModel):
+    """One dbt test — the pieces users actually want to see in the UI:
+    the test kind (not_null / unique / accepted_values / custom), which
+    column it applies to, and the most recent pass / fail from
+    run_results.json. Keeps the model drawer's Tests section useful."""
+    unique_id: str
+    name: str
+    test_kind: str                     # not_null | unique | accepted_values | relationships | singular | <custom>
+    target_column: str | None = None   # the column this test applies to, when generic
+    last_run_status: str | None = None # pass | fail | error | warn | skipped | None
+    last_run_message: str | None = None
+    last_run_failures: int | None = None
+    duration_ms: int | None = None
+
+
 class DbtModelSummary(BaseModel):
     """Summarized info about a single dbt model, parsed from manifest.json
     and (when available) catalog.json + run_results.json."""
@@ -1923,7 +1938,8 @@ class DbtModelSummary(BaseModel):
     package_name: str | None = None
     relative_sql_path: str | None = None  # from repo root
     columns: dict[str, dict] = {}         # {col_name: {description, data_type, tests}}
-    tests: list[str] = []                 # unique test ids referencing this model
+    tests: list[str] = []                 # unique test ids referencing this model (legacy id list)
+    tests_detail: list[DbtTestDetail] = [] # enriched list — for the Tests section in the drawer
     last_run_status: str | None = None    # success | fail | error | skip | None
     last_run_duration_ms: int | None = None
     row_count: int | None = None
@@ -1995,14 +2011,43 @@ async def list_dbt_models(project_id: str, dbt_relative_path: str | None = None)
         if uid:
             run_by_id[uid] = r
 
-    # Aggregate tests that reference each model.
+    # Aggregate tests that reference each model. We keep the legacy
+    # `unique_id list per model` for backwards compatibility AND build
+    # a richer per-model list of DbtTestDetail with test kind, column,
+    # and last run status — that's what the drawer's Tests section
+    # actually renders.
     tests_by_model: dict[str, list[str]] = {}
+    tests_detail_by_model: dict[str, list[DbtTestDetail]] = {}
     for uid, node in (manifest.get('nodes') or {}).items():
         if node.get('resource_type') != 'test':
             continue
         refs = node.get('depends_on', {}).get('nodes', []) or []
+        test_meta = node.get('test_metadata') or {}
+        # Kind: generic tests have test_metadata.name (unique/not_null/etc);
+        # singular (custom SQL) tests don't — fall back to 'singular'.
+        kind = test_meta.get('name') or 'singular'
+        # dbt encodes the target column in test_metadata.kwargs.column_name
+        # for generic tests. Singular tests can be attached to a column
+        # via the column_name attr on the node itself.
+        target_col = None
+        if test_meta:
+            target_col = (test_meta.get('kwargs') or {}).get('column_name')
+        if not target_col:
+            target_col = node.get('column_name')
+        rr = run_by_id.get(uid) or {}
+        detail = DbtTestDetail(
+            unique_id=uid,
+            name=node.get('name', uid.split('.')[-1]),
+            test_kind=kind,
+            target_column=target_col,
+            last_run_status=rr.get('status'),
+            last_run_message=(rr.get('message') or None),
+            last_run_failures=rr.get('failures') if isinstance(rr.get('failures'), int) else None,
+            duration_ms=int(rr.get('execution_time', 0) * 1000) if rr.get('execution_time') is not None else None,
+        )
         for target in refs:
             tests_by_model.setdefault(target, []).append(uid)
+            tests_detail_by_model.setdefault(target, []).append(detail)
 
     models: list[DbtModelSummary] = []
     for uid, node in (manifest.get('nodes') or {}).items():
@@ -2070,6 +2115,7 @@ async def list_dbt_models(project_id: str, dbt_relative_path: str | None = None)
             relative_sql_path=sql_path,
             columns=cols,
             tests=tests_by_model.get(uid, []),
+            tests_detail=tests_detail_by_model.get(uid, []),
             last_run_status=(rr or {}).get('status'),
             last_run_duration_ms=int((rr or {}).get('execution_time', 0) * 1000) if rr and (rr.get('execution_time') is not None) else None,
             row_count=row_count,
@@ -2089,6 +2135,424 @@ async def list_dbt_models(project_id: str, dbt_relative_path: str | None = None)
         project_name=chosen.name,
         models=models,
         stats=stats,
+    )
+
+
+# ---------------------------------------------------------------------------
+# dbt docs — overview.md + docs blocks. dbt lets users write
+# `{% docs block_name %}...{% enddocs %}` markdown snippets in any
+# .md file under the project, then reference them from schema.yml
+# via `{{ doc('block_name') }}`. This endpoint parses them all and
+# also picks up the project-level overview.md, so the UI can render
+# a proper "dbt docs" experience without shelling out to `dbt docs`.
+# ---------------------------------------------------------------------------
+
+class DbtDocsBlock(BaseModel):
+    name: str
+    content: str
+    relative_path: str  # from dbt project root, so the UI can link to source
+
+
+class DbtDocsResponse(BaseModel):
+    dbt_project_relative_path: str
+    overview_markdown: str | None = None
+    overview_relative_path: str | None = None
+    blocks: list[DbtDocsBlock] = []
+
+
+_DOCS_BLOCK_RE = None
+def _docs_block_pattern():
+    global _DOCS_BLOCK_RE
+    if _DOCS_BLOCK_RE is None:
+        import re as _re
+        # Capture {% docs block_name %}...{% enddocs %} — whitespace
+        # around the tag is flexible in dbt. DOTALL to span newlines.
+        _DOCS_BLOCK_RE = _re.compile(
+            r"\{%\s*docs\s+([A-Za-z0-9_]+)\s*%\}(.*?)\{%\s*enddocs\s*%\}",
+            _re.DOTALL,
+        )
+    return _DOCS_BLOCK_RE
+
+
+@router.get('/{project_id}/dbt-docs', response_model=DbtDocsResponse)
+async def get_dbt_docs(project_id: str, dbt_relative_path: str | None = None):
+    """Return the project-level overview markdown + every {% docs %}
+    block declared under the dbt project. Powers the Docs sub-tab in
+    the dbt panel."""
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    root = project_service._get_project_dir(project)
+    dbt_projects = _find_dbt_projects(root)
+    if not dbt_projects:
+        return DbtDocsResponse(dbt_project_relative_path='', blocks=[])
+    chosen = dbt_projects[0]
+    if dbt_relative_path:
+        for p in dbt_projects:
+            if p.relative_path == dbt_relative_path:
+                chosen = p
+                break
+    dbt_root = (root / chosen.relative_path).resolve()
+
+    overview_md: str | None = None
+    overview_rel: str | None = None
+    # dbt's default location is models/overview.md; some projects use
+    # docs/overview.md. Fall back to any *_overview.md at the project
+    # root as well.
+    for candidate in [
+        dbt_root / 'models' / 'overview.md',
+        dbt_root / 'docs' / 'overview.md',
+        dbt_root / 'overview.md',
+    ]:
+        if candidate.exists() and candidate.is_file():
+            try:
+                overview_md = candidate.read_text()
+                overview_rel = str(candidate.relative_to(dbt_root))
+                break
+            except Exception:
+                pass
+
+    blocks: list[DbtDocsBlock] = []
+    pat = _docs_block_pattern()
+    # Walk .md files under the dbt project, skipping vendored dirs.
+    skip = {'target', 'dbt_packages', '.venv', 'venv', 'node_modules', '__pycache__'}
+    for path in dbt_root.rglob('*.md'):
+        try:
+            rel = path.relative_to(dbt_root)
+        except Exception:
+            continue
+        if any(part in skip for part in rel.parts):
+            continue
+        try:
+            text = path.read_text()
+        except Exception:
+            continue
+        for m in pat.finditer(text):
+            blocks.append(DbtDocsBlock(
+                name=m.group(1),
+                content=m.group(2).strip(),
+                relative_path=str(rel),
+            ))
+
+    return DbtDocsResponse(
+        dbt_project_relative_path=chosen.relative_path,
+        overview_markdown=overview_md,
+        overview_relative_path=overview_rel,
+        blocks=sorted(blocks, key=lambda b: b.name),
+    )
+
+
+class ScaffoldDbtDocsRequest(BaseModel):
+    dbt_relative_path: str
+    generate_blocks: bool = True  # also write a starter doc-blocks file
+
+
+class ScaffoldDbtDocsResponse(BaseModel):
+    success: bool
+    overview_written: str | None = None      # relative path (dbt-root-relative)
+    blocks_written: str | None = None        # ditto, if generate_blocks
+    already_existed: bool = False
+
+
+@router.post('/{project_id}/dbt-docs/scaffold', response_model=ScaffoldDbtDocsResponse)
+async def scaffold_dbt_docs(project_id: str, request: ScaffoldDbtDocsRequest):
+    """Bootstrap dbt docs content from the current manifest so users
+    don't stare at an empty Docs tab. Writes two files (both dbt-root
+    relative):
+
+      • models/overview.md — a project-level index grouped by subfolder,
+        listing every model + its description. Non-destructive: leaves
+        an existing overview.md untouched.
+      • models/_generated_docs.md (opt-in) — one `{% docs %}` block per
+        model that already has a description. Users can then reference
+        these via `{{ doc('block_name') }}` from schema.yml without
+        having to write the block themselves.
+    """
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    root = project_service._get_project_dir(project)
+    dbt_root = (root / request.dbt_relative_path).resolve()
+    if not dbt_root.exists() or not (dbt_root / 'dbt_project.yml').exists():
+        raise HTTPException(status_code=404, detail=f"No dbt_project.yml at {request.dbt_relative_path}")
+
+    manifest = _load_dbt_artifact(dbt_root / 'target' / 'manifest.json')
+    nodes = manifest.get('nodes') or {}
+    sources = manifest.get('sources') or {}
+
+    # Group models by their first-level subfolder under models/ so the
+    # overview reads like a table of contents ("staging", "marts",
+    # "intermediate" — the folder shape most dbt projects use).
+    models_by_folder: dict[str, list[dict]] = {}
+    for uid, node in nodes.items():
+        if node.get('resource_type') != 'model':
+            continue
+        path = node.get('original_file_path') or ''
+        parts = path.split('/')
+        # Expect models/<folder>/<file>.sql — if flatter, bucket under
+        # "models".
+        folder = parts[1] if len(parts) >= 3 and parts[0] == 'models' else 'models'
+        models_by_folder.setdefault(folder, []).append({
+            'name': node.get('name', ''),
+            'description': (node.get('description') or '').strip(),
+            'materialization': (node.get('config') or {}).get('materialized'),
+            'tags': node.get('tags') or [],
+        })
+    for arr in models_by_folder.values():
+        arr.sort(key=lambda m: m['name'])
+
+    # Compose overview.md — safe to iterate on manually afterward. We
+    # include one YAML-esque "at a glance" line per model so it's
+    # scannable even before humans add prose.
+    overview_lines: list[str] = []
+    project_name = None
+    try:
+        import yaml as _yaml
+        pj = _yaml.safe_load((dbt_root / 'dbt_project.yml').read_text()) or {}
+        project_name = pj.get('name')
+    except Exception:
+        project_name = None
+    title = project_name or dbt_root.name
+    overview_lines.append(f'# {title}')
+    overview_lines.append('')
+    overview_lines.append(f'{{% docs __overview__ %}}')
+    overview_lines.append('')
+    overview_lines.append(f'Welcome to the **{title}** dbt project.')
+    overview_lines.append('')
+    total_models = sum(len(a) for a in models_by_folder.values())
+    total_sources = len([s for s in sources.values() if s.get('resource_type') == 'source'])
+    overview_lines.append(f'This project has **{total_models} models** across {len(models_by_folder)} folder(s) and **{total_sources} sources**.')
+    overview_lines.append('')
+    overview_lines.append('## Models')
+    overview_lines.append('')
+    for folder in sorted(models_by_folder.keys()):
+        overview_lines.append(f'### `{folder}/`')
+        overview_lines.append('')
+        for m in models_by_folder[folder]:
+            mat = f' _[{m["materialization"]}]_' if m['materialization'] else ''
+            desc = m['description'] or '_No description yet._'
+            overview_lines.append(f'- **`{m["name"]}`**{mat} — {desc}')
+        overview_lines.append('')
+    if total_sources > 0:
+        overview_lines.append('## Sources')
+        overview_lines.append('')
+        for uid, node in sorted(sources.items()):
+            src_name = node.get('source_name') or ''
+            tbl = node.get('name') or ''
+            desc = (node.get('description') or '').strip() or '_No description yet._'
+            overview_lines.append(f'- **`{src_name}.{tbl}`** — {desc}')
+        overview_lines.append('')
+    overview_lines.append('{% enddocs %}')
+    overview_lines.append('')
+
+    overview_path = dbt_root / 'models' / 'overview.md'
+    already_existed = overview_path.exists()
+    overview_written: str | None = None
+    if not already_existed:
+        overview_path.parent.mkdir(parents=True, exist_ok=True)
+        overview_path.write_text('\n'.join(overview_lines))
+        overview_written = str(overview_path.relative_to(dbt_root))
+
+    blocks_written: str | None = None
+    if request.generate_blocks:
+        # Write one {% docs %} block per model that has a description,
+        # so users can reference them via {{ doc('<name>__doc') }}.
+        block_lines: list[str] = ['<!-- Auto-generated dbt doc blocks.', '     Edit these to enrich descriptions, then reference them from', '     schema.yml via {{ doc(\'<name>__doc\') }}. -->', '']
+        wrote_any = False
+        for folder in sorted(models_by_folder.keys()):
+            for m in models_by_folder[folder]:
+                desc = m['description']
+                if not desc:
+                    continue
+                block_lines.append(f'{{% docs {m["name"]}__doc %}}')
+                block_lines.append(desc)
+                block_lines.append('{% enddocs %}')
+                block_lines.append('')
+                wrote_any = True
+        if wrote_any:
+            blocks_path = dbt_root / 'models' / '_generated_docs.md'
+            if not blocks_path.exists():
+                blocks_path.parent.mkdir(parents=True, exist_ok=True)
+                blocks_path.write_text('\n'.join(block_lines))
+                blocks_written = str(blocks_path.relative_to(dbt_root))
+
+    return ScaffoldDbtDocsResponse(
+        success=True,
+        overview_written=overview_written,
+        blocks_written=blocks_written,
+        already_existed=already_existed,
+    )
+
+
+class DocsGenerateResponse(BaseModel):
+    success: bool
+    duration_ms: int
+    stdout: str
+    stderr: str
+
+
+@router.post('/{project_id}/dbt-docs/generate', response_model=DocsGenerateResponse)
+async def dbt_docs_generate(project_id: str, request: ScaffoldDbtDocsRequest):
+    """Shell out to `dbt docs generate` for the target project — this
+    populates target/catalog.json (column data types, row counts, byte
+    sizes from the warehouse) which then feeds the Columns section in
+    the drawer and the KPI cards.
+
+    The scaffold endpoint above handles the "docs source content" side
+    of the story (overview.md + doc blocks); this endpoint is for the
+    dbt-native step that reads back from the warehouse."""
+    import subprocess as _sp
+    import time as _time
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    root = project_service._get_project_dir(project)
+    dbt_root = (root / request.dbt_relative_path).resolve()
+    if not dbt_root.exists() or not (dbt_root / 'dbt_project.yml').exists():
+        raise HTTPException(status_code=404, detail=f"No dbt_project.yml at {request.dbt_relative_path}")
+
+    # Use the venv's dbt if present; falls back to whatever is on PATH.
+    venv_bin = project_service._get_project_dir(project) / '.venv' / 'bin' / 'dbt'
+    dbt_bin = str(venv_bin) if venv_bin.exists() else 'dbt'
+    started = _time.time()
+    try:
+        r = _sp.run(
+            [dbt_bin, 'docs', 'generate', '--no-use-colors'],
+            cwd=str(dbt_root), capture_output=True, text=True, timeout=600,
+        )
+    except _sp.TimeoutExpired:
+        raise HTTPException(status_code=504, detail="dbt docs generate timed out after 10 minutes")
+    except FileNotFoundError:
+        raise HTTPException(status_code=500, detail="dbt CLI not found — install a dbt adapter in the project venv first.")
+    duration_ms = int((_time.time() - started) * 1000)
+    return DocsGenerateResponse(
+        success=r.returncode == 0,
+        duration_ms=duration_ms,
+        stdout=r.stdout,
+        stderr=r.stderr,
+    )
+
+
+# ---------------------------------------------------------------------------
+# dbt selectors — saved `--select` recipes users define in selectors.yml
+# (or selectors.json in older projects). The Selectors sub-tab lists
+# them and offers a one-click run button.
+# ---------------------------------------------------------------------------
+
+class DbtSelector(BaseModel):
+    name: str
+    description: str | None = None
+    definition: dict = {}     # raw yaml — we render it as tree, not parse deeply
+    default: bool = False
+
+
+class DbtSelectorsResponse(BaseModel):
+    dbt_project_relative_path: str
+    selectors: list[DbtSelector] = []
+
+
+@router.get('/{project_id}/dbt-selectors', response_model=DbtSelectorsResponse)
+async def get_dbt_selectors(project_id: str, dbt_relative_path: str | None = None):
+    """Parse selectors.yml at the dbt project root — returns the saved
+    selection recipes. Empty list when the file doesn't exist (which is
+    the common case for smaller projects)."""
+    import yaml as _yaml
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    root = project_service._get_project_dir(project)
+    dbt_projects = _find_dbt_projects(root)
+    if not dbt_projects:
+        return DbtSelectorsResponse(dbt_project_relative_path='', selectors=[])
+    chosen = dbt_projects[0]
+    if dbt_relative_path:
+        for p in dbt_projects:
+            if p.relative_path == dbt_relative_path:
+                chosen = p
+                break
+    dbt_root = (root / chosen.relative_path).resolve()
+    sel_yml = dbt_root / 'selectors.yml'
+    selectors: list[DbtSelector] = []
+    if sel_yml.exists():
+        try:
+            parsed = _yaml.safe_load(sel_yml.read_text()) or {}
+            for s in parsed.get('selectors', []) or []:
+                selectors.append(DbtSelector(
+                    name=s.get('name', 'unnamed'),
+                    description=s.get('description'),
+                    definition=s.get('definition') or {},
+                    default=bool(s.get('default')),
+                ))
+        except Exception:
+            pass
+    return DbtSelectorsResponse(
+        dbt_project_relative_path=chosen.relative_path,
+        selectors=selectors,
+    )
+
+
+# ---------------------------------------------------------------------------
+# dbt exposures — declared downstream consumers (dashboards, ML models,
+# notebooks). Parsed straight out of manifest.json.
+# ---------------------------------------------------------------------------
+
+class DbtExposure(BaseModel):
+    unique_id: str
+    name: str
+    type: str | None = None            # dashboard | notebook | analysis | ml | application
+    label: str | None = None
+    description: str | None = None
+    owner_name: str | None = None
+    owner_email: str | None = None
+    url: str | None = None
+    maturity: str | None = None
+    tags: list[str] = []
+    depends_on_nodes: list[str] = []
+
+
+class DbtExposuresResponse(BaseModel):
+    dbt_project_relative_path: str
+    exposures: list[DbtExposure] = []
+
+
+@router.get('/{project_id}/dbt-exposures', response_model=DbtExposuresResponse)
+async def get_dbt_exposures(project_id: str, dbt_relative_path: str | None = None):
+    """List exposures declared in the dbt project's manifest. Empty when
+    manifest hasn't been generated yet — recommend running `dbt parse`."""
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    root = project_service._get_project_dir(project)
+    dbt_projects = _find_dbt_projects(root)
+    if not dbt_projects:
+        return DbtExposuresResponse(dbt_project_relative_path='', exposures=[])
+    chosen = dbt_projects[0]
+    if dbt_relative_path:
+        for p in dbt_projects:
+            if p.relative_path == dbt_relative_path:
+                chosen = p
+                break
+    dbt_root = (root / chosen.relative_path).resolve()
+    manifest = _load_dbt_artifact(dbt_root / 'target' / 'manifest.json')
+    exposures: list[DbtExposure] = []
+    for uid, node in (manifest.get('exposures') or {}).items():
+        owner = node.get('owner') or {}
+        exposures.append(DbtExposure(
+            unique_id=uid,
+            name=node.get('name', uid.split('.')[-1]),
+            type=node.get('type'),
+            label=node.get('label'),
+            description=node.get('description'),
+            owner_name=owner.get('name'),
+            owner_email=owner.get('email'),
+            url=node.get('url'),
+            maturity=node.get('maturity'),
+            tags=list(node.get('tags') or []),
+            depends_on_nodes=list((node.get('depends_on') or {}).get('nodes') or []),
+        ))
+    return DbtExposuresResponse(
+        dbt_project_relative_path=chosen.relative_path,
+        exposures=sorted(exposures, key=lambda e: e.name),
     )
 
 

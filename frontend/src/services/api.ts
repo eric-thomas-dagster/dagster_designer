@@ -180,6 +180,16 @@ export const projectsApi = {
       relative_sql_path: string | null;
       columns: Record<string, { description?: string | null; data_type?: string | null; tests: string[] }>;
       tests: string[];
+      tests_detail: Array<{
+        unique_id: string;
+        name: string;
+        test_kind: string;
+        target_column: string | null;
+        last_run_status: string | null;
+        last_run_message: string | null;
+        last_run_failures: number | null;
+        duration_ms: number | null;
+      }>;
       last_run_status: string | null;
       last_run_duration_ms: number | null;
       row_count: number | null;
@@ -292,6 +302,85 @@ export const projectsApi = {
     warnings: string[];
   }> => {
     const response = await api.get(`/projects/${projectId}/dbt-column-lineage`, {
+      params: dbtRelativePath ? { dbt_relative_path: dbtRelativePath } : {},
+    });
+    return response.data as any;
+  },
+
+  getDbtDocs: async (
+    projectId: string,
+    dbtRelativePath?: string,
+  ): Promise<{
+    dbt_project_relative_path: string;
+    overview_markdown: string | null;
+    overview_relative_path: string | null;
+    blocks: Array<{ name: string; content: string; relative_path: string }>;
+  }> => {
+    const response = await api.get(`/projects/${projectId}/dbt-docs`, {
+      params: dbtRelativePath ? { dbt_relative_path: dbtRelativePath } : {},
+    });
+    return response.data as any;
+  },
+
+  scaffoldDbtDocs: async (
+    projectId: string,
+    body: { dbt_relative_path: string; generate_blocks?: boolean },
+  ): Promise<{
+    success: boolean;
+    overview_written: string | null;
+    blocks_written: string | null;
+    already_existed: boolean;
+  }> => {
+    const response = await api.post(`/projects/${projectId}/dbt-docs/scaffold`, body);
+    return response.data as any;
+  },
+
+  generateDbtDocs: async (
+    projectId: string,
+    body: { dbt_relative_path: string },
+  ): Promise<{ success: boolean; duration_ms: number; stdout: string; stderr: string }> => {
+    const response = await api.post(`/projects/${projectId}/dbt-docs/generate`, body);
+    return response.data as any;
+  },
+
+  getDbtSelectors: async (
+    projectId: string,
+    dbtRelativePath?: string,
+  ): Promise<{
+    dbt_project_relative_path: string;
+    selectors: Array<{
+      name: string;
+      description: string | null;
+      definition: Record<string, any>;
+      default: boolean;
+    }>;
+  }> => {
+    const response = await api.get(`/projects/${projectId}/dbt-selectors`, {
+      params: dbtRelativePath ? { dbt_relative_path: dbtRelativePath } : {},
+    });
+    return response.data as any;
+  },
+
+  getDbtExposures: async (
+    projectId: string,
+    dbtRelativePath?: string,
+  ): Promise<{
+    dbt_project_relative_path: string;
+    exposures: Array<{
+      unique_id: string;
+      name: string;
+      type: string | null;
+      label: string | null;
+      description: string | null;
+      owner_name: string | null;
+      owner_email: string | null;
+      url: string | null;
+      maturity: string | null;
+      tags: string[];
+      depends_on_nodes: string[];
+    }>;
+  }> => {
+    const response = await api.get(`/projects/${projectId}/dbt-exposures`, {
       params: dbtRelativePath ? { dbt_relative_path: dbtRelativePath } : {},
     });
     return response.data as any;
