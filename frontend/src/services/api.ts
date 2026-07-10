@@ -1395,6 +1395,30 @@ export const assetsApi = {
     return response.data;
   },
 
+  /** Heuristic column-level lineage for one asset, generated from the
+   *  preview cache (name-match passthrough + derived/dropped tagging).
+   *  Universal across every component in the catalog — no
+   *  per-component instrumentation needed to light this up. */
+  columnLineage: async (
+    projectId: string,
+    assetKey: string,
+  ): Promise<{
+    asset_key: string;
+    upstream: Array<{ asset_key: string; columns: string[] }>;
+    downstream: Array<{ asset_key: string; columns: string[] }>;
+    columns: string[];
+    dtypes: Record<string, string>;
+    upstream_edges: Array<{ from_asset: string; from_column: string; to_asset: string; to_column: string; confidence: number }>;
+    downstream_edges: Array<{ from_asset: string; from_column: string; to_asset: string; to_column: string; confidence: number }>;
+    derived_columns: string[];
+    dropped_from_upstream: string[];
+  }> => {
+    const response = await api.get(`/assets/${projectId}/column-lineage`, {
+      params: { asset_key: assetKey },
+    });
+    return response.data as any;
+  },
+
   /** Read the ingestion event log — every materialize and every successful
    *  preview appends a record. The Ingestions tab computes its KPIs and
    *  the trend chart client-side from this list. */

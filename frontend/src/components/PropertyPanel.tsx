@@ -15,6 +15,7 @@ import { InlineAttributesForm } from './InlineAttributesForm';
 import { pickSpecializedSidebar } from './SpecializedSidebar';
 import { AddDbtModelDialog } from './AddDbtModelDialog';
 import { GitCommitDialog } from './GitCommitDialog';
+import { ColumnLineageOverlay } from './ColumnLineageOverlay';
 
 // Icon mapping for component icons
 const iconMap: Record<string, any> = {
@@ -314,6 +315,7 @@ export function PropertyPanel({ nodeId, onConfigureComponent, onOpenFile, onNewP
   const [showBackfillModal, setShowBackfillModal] = useState(false);
   const [showAddDbtModel, setShowAddDbtModel] = useState(false);
   const [showGitCommit, setShowGitCommit] = useState(false);
+  const [showColumnLineage, setShowColumnLineage] = useState(false);
   const [showDataPreview, setShowDataPreview] = useState(false);
   const [isPartitioned, setIsPartitioned] = useState(false);
 
@@ -831,6 +833,16 @@ export function PropertyPanel({ nodeId, onConfigureComponent, onOpenFile, onNewP
                       >
                         <Table className="w-4 h-4" />
                         View Data
+                      </button>
+                      <button
+                        onClick={() => {
+                          setShowColumnLineage(true);
+                          setShowMaterializeMenu(false);
+                        }}
+                        className="w-full flex items-center gap-2 px-4 py-2 text-sm text-gray-700 hover:bg-gray-50 text-left"
+                      >
+                        <Radar className="w-4 h-4" />
+                        Column lineage
                       </button>
                     </div>
                   </>
@@ -1902,6 +1914,17 @@ export function PropertyPanel({ nodeId, onConfigureComponent, onOpenFile, onNewP
             projectId={currentProject.id}
             assetKey={node.data.asset_key || node.id}
             onLaunch={handleBackfillSubmit}
+          />
+        )}
+
+        {/* Column-lineage overlay — universal (works for any previewed
+            asset, no per-component code). Opens from the "Column
+            lineage" item in the asset actions menu. */}
+        {showColumnLineage && currentProject && (
+          <ColumnLineageOverlay
+            projectId={currentProject.id}
+            assetKey={node.data.asset_key || node.id}
+            onClose={() => setShowColumnLineage(false)}
           />
         )}
 

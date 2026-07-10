@@ -64,6 +64,156 @@ async def known_schemas_endpoint(project_id: str):
     return get_known_schemas(project_id)
 
 
+class ColumnLineageAsset(BaseModel):
+    asset_key: str
+    columns: list[str]
+
+
+class ColumnLineageEdge(BaseModel):
+    """Column-to-column edge inferred from preview cache. Confidence is
+    high when the column name matches upstream exactly (passthrough
+    heuristic), and lower when we can only tell "these upstreams feed
+    that column somehow" (derived columns)."""
+    from_asset: str
+    from_column: str
+    to_asset: str
+    to_column: str
+    confidence: float = 1.0
+
+
+class ColumnLineageResponse(BaseModel):
+    asset_key: str
+    upstream: list[ColumnLineageAsset]     # upstream assets + their observed columns
+    downstream: list[ColumnLineageAsset]   # downstream assets + their observed columns
+    columns: list[str]                     # this asset's columns
+    dtypes: dict[str, str]
+    upstream_edges: list[ColumnLineageEdge]      # upstream.col → this.col
+    downstream_edges: list[ColumnLineageEdge]    # this.col → downstream.col
+    derived_columns: list[str] = []              # this asset's cols with NO upstream name match
+    dropped_from_upstream: list[str] = []        # upstream cols with no downstream / this-asset match
+
+
+@router.get("/{project_id}/column-lineage", response_model=ColumnLineageResponse)
+async def column_lineage(project_id: str, asset_key: str):
+    """Heuristic column-level lineage for one asset, derived from the
+    preview cache. When both sides of an edge have been previewed at
+    least once we can generate name-match edges (high confidence);
+    columns that don't line up show as derived / dropped so users know
+    the heuristic didn't cover them. Same primitive works across every
+    component in the catalog — no per-component instrumentation
+    required.
+
+    For an asset that hasn't been previewed yet, the response is empty
+    on that side; the frontend renders "preview to enable" instead of
+    hallucinating edges.
+    """
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    schemas = get_known_schemas(project_id)
+
+    # Walk the persisted graph edges to find the upstream + downstream
+    # asset keys of this asset. Handles both `asset_key/asset_key` and
+    # bare-id references.
+    upstream_keys: list[str] = []
+    downstream_keys: list[str] = []
+    for e in project.graph.edges:
+        if e.target == asset_key:
+            upstream_keys.append(e.source)
+        if e.source == asset_key:
+            downstream_keys.append(e.target)
+    # Some graphs store asset_key via node.data.asset_key rather than
+    # the node id. Fall back to matching that way too so we don't miss
+    # legit deps when ids and keys diverge.
+    node_id_to_key: dict[str, str] = {}
+    for n in project.graph.nodes:
+        key = (n.data or {}).get('asset_key') or n.id
+        node_id_to_key[n.id] = key
+
+    def _to_key(id_or_key: str) -> str:
+        return node_id_to_key.get(id_or_key, id_or_key)
+
+    upstream_keys = list(dict.fromkeys(_to_key(k) for k in upstream_keys))
+    downstream_keys = list(dict.fromkeys(_to_key(k) for k in downstream_keys))
+
+    this_schema = schemas.get(asset_key) or {}
+    this_cols: list[str] = list(this_schema.get('columns') or [])
+    this_dtypes: dict[str, str] = dict(this_schema.get('dtypes') or {})
+
+    # Build upstream + downstream ColumnLineageAsset entries. Missing
+    # schemas render as empty lists so the frontend can flag them.
+    upstream = [
+        ColumnLineageAsset(
+            asset_key=k,
+            columns=list((schemas.get(k) or {}).get('columns') or []),
+        )
+        for k in upstream_keys
+    ]
+    downstream = [
+        ColumnLineageAsset(
+            asset_key=k,
+            columns=list((schemas.get(k) or {}).get('columns') or []),
+        )
+        for k in downstream_keys
+    ]
+
+    upstream_edges: list[ColumnLineageEdge] = []
+    dropped_from_upstream: list[str] = []
+
+    # Heuristic 1 — name match: if this asset has column X and any
+    # upstream also has X, edge upstream.X → this.X with confidence 1.
+    for up in upstream:
+        this_cols_set = set(this_cols)
+        for col in up.columns:
+            if col in this_cols_set:
+                upstream_edges.append(ColumnLineageEdge(
+                    from_asset=up.asset_key,
+                    from_column=col,
+                    to_asset=asset_key,
+                    to_column=col,
+                    confidence=1.0,
+                ))
+            else:
+                # Column exists on upstream but not this asset — dropped.
+                dropped_from_upstream.append(f"{up.asset_key}.{col}")
+
+    # Heuristic 2 — derived: any of THIS asset's columns without a
+    # name match on any upstream is a derived / calculated / renamed
+    # column. Frontend renders these as "derived" chips (no
+    # incoming edge, marked with a small ✨ badge).
+    upstream_col_names = {c for up in upstream for c in up.columns}
+    derived_columns = [c for c in this_cols if c not in upstream_col_names]
+
+    # Downstream edges — mirror image. For every downstream asset,
+    # match its columns against this asset's columns to build outgoing
+    # edges.
+    downstream_edges: list[ColumnLineageEdge] = []
+    for dn in downstream:
+        this_cols_set = set(this_cols)
+        for col in dn.columns:
+            if col in this_cols_set:
+                downstream_edges.append(ColumnLineageEdge(
+                    from_asset=asset_key,
+                    from_column=col,
+                    to_asset=dn.asset_key,
+                    to_column=col,
+                    confidence=1.0,
+                ))
+
+    return ColumnLineageResponse(
+        asset_key=asset_key,
+        upstream=upstream,
+        downstream=downstream,
+        columns=this_cols,
+        dtypes=this_dtypes,
+        upstream_edges=upstream_edges,
+        downstream_edges=downstream_edges,
+        derived_columns=derived_columns,
+        dropped_from_upstream=dropped_from_upstream,
+    )
+
+
 @router.get("/{project_id}/ingestion-history")
 async def ingestion_history_endpoint(project_id: str, limit: int = 1000):
     """Read the ingestion event log — every materialize and successful
