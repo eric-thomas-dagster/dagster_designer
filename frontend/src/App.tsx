@@ -785,7 +785,7 @@ function App() {
             {/* Left Sidebar - Component Palette + Project Components */}
             <aside
               data-sidebar
-              className="w-64 bg-white border-r border-gray-200 flex flex-col overflow-hidden"
+              className="w-64 flex-shrink-0 bg-white border-r border-gray-200 flex flex-col overflow-hidden"
             >
               {/* Project Components Section */}
               <div
