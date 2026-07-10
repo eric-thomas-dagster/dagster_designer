@@ -1,4 +1,7 @@
 import { JoinSidebar } from './JoinSidebar';
+import { FilterSidebar } from './FilterSidebar';
+import { AggregateSidebar } from './AggregateSidebar';
+import { SqlTransformSidebar } from './SqlTransformSidebar';
 
 /**
  * Dispatcher for component-specific config panels. If a component_type
@@ -26,6 +29,29 @@ const MATCHERS: Array<{ test: (componentType: string) => boolean; Sidebar: Sideb
       /(?:^|[._])(?:dataframe|warehouse|spatial|cross|left|right|inner|outer|anti)_?join(?:$|[._])/i.test(t) ||
       /\.(?:Dataframe|Warehouse|Spatial|Cross|Left|Right|Inner|Outer|Anti)?Join(?:Component)?$/i.test(t),
     Sidebar: JoinSidebar,
+  },
+  {
+    // filter (community pandas-query variant) + warehouse_filter (SQL
+    // predicate). Also matches bare `.FilterComponent` types.
+    test: (t) =>
+      /(?:^|[._])(?:warehouse_)?filter(?:$|[._])/i.test(t) ||
+      /\.(?:Warehouse)?FilterComponent$/i.test(t),
+    Sidebar: FilterSidebar,
+  },
+  {
+    // summarize + warehouse_summarize. Also SummarizeComponent /
+    // aggregate names for user forks.
+    test: (t) =>
+      /(?:^|[._])(?:warehouse_)?(?:summarize|aggregate|group_by)(?:$|[._])/i.test(t) ||
+      /\.(?:Warehouse)?(?:Summarize|Aggregate)Component$/i.test(t),
+    Sidebar: AggregateSidebar,
+  },
+  {
+    // Community sql_transform + our built-in SqlTransformerComponent.
+    test: (t) =>
+      /(?:^|[._])sql_transform(?:er)?(?:$|[._])/i.test(t) ||
+      /\.SqlTransform(?:er)?Component$/i.test(t),
+    Sidebar: SqlTransformSidebar,
   },
 ];
 
