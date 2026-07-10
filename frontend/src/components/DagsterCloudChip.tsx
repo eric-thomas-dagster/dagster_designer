@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Cloud, MapPin, X, Loader2, Plus } from 'lucide-react';
 import { notify, confirmDialog } from './Notifications';
+import { useProjectStore } from '@/hooks/useProject';
 
 interface DagsterCloudLocation {
   location_name: string;
@@ -25,6 +26,7 @@ interface DagsterCloudChipProps {
 
 export function DagsterCloudChip({ projectId }: DagsterCloudChipProps) {
   const queryClient = useQueryClient();
+  const { currentProject } = useProjectStore();
   const [modalOpen, setModalOpen] = useState(false);
   const [editing, setEditing] = useState<DagsterCloudLocation[]>([]);
 
@@ -39,19 +41,12 @@ export function DagsterCloudChip({ projectId }: DagsterCloudChipProps) {
     staleTime: 30_000,
   });
 
-  const scaffoldMutation = useMutation({
-    mutationFn: async () => {
-      const res = await fetch(`/api/v1/projects/${projectId}/dagster-cloud/scaffold`, { method: 'POST' });
-      if (!res.ok) throw new Error('Scaffold failed');
-      return res.json() as Promise<DagsterCloudConfig>;
-    },
-    onSuccess: (data) => {
-      queryClient.setQueryData(['dagster-cloud', projectId], data);
-      notify.success('Created dagster_cloud.yaml with defaults.');
-      openEditor(data);
-    },
-    onError: (e: Error) => notify.error(`Scaffold failed: ${e.message}`),
-  });
+  // NOTE: we intentionally do NOT scaffold on chip click. The old flow
+  // POSTed to /dagster-cloud/scaffold as soon as the pill was clicked,
+  // which meant just opening the editor to look at defaults created a
+  // dagster_cloud.yaml on disk — cancelling didn't undo it. Now we
+  // seed `editing` with in-memory defaults, and the file only exists
+  // once the user actually hits Save (saveMutation).
 
   const saveMutation = useMutation({
     mutationFn: async (locations: DagsterCloudLocation[]) => {
@@ -77,20 +72,21 @@ export function DagsterCloudChip({ projectId }: DagsterCloudChipProps) {
     if (src && src.locations.length > 0) {
       setEditing(src.locations.map((l) => ({ ...l })));
     } else {
+      // In-memory defaults matching what the backend scaffold endpoint
+      // would produce — location_name = project module, code_source
+      // module_name = "<module>.definitions", build directory = ".".
+      // If no project is loaded yet, fall back to a blank row.
+      const mod = currentProject?.directory_name || '';
       setEditing([{
-        location_name: '',
-        module_name: null,
+        location_name: mod,
+        module_name: mod ? `${mod}.definitions` : null,
         package_name: null,
         executable_path: null,
-        build_directory: null,
+        build_directory: mod ? '.' : null,
         build_registry: null,
       }]);
     }
     setModalOpen(true);
-  };
-
-  const handleScaffold = async () => {
-    scaffoldMutation.mutate();
   };
 
   const handleSave = () => {
@@ -140,12 +136,12 @@ export function DagsterCloudChip({ projectId }: DagsterCloudChipProps) {
   return (
     <>
       <button
-        onClick={() => (config?.exists ? openEditor() : handleScaffold())}
-        disabled={isLoading || scaffoldMutation.isPending}
+        onClick={() => openEditor()}
+        disabled={isLoading}
         className="flex items-center gap-1.5 px-2.5 py-1 text-xs rounded-md border border-gray-200 bg-white text-gray-700 hover:border-primary/40 hover:bg-primary/5 disabled:opacity-50"
         title={
           !config?.exists
-            ? 'No dagster_cloud.yaml. Click to scaffold one.'
+            ? 'No dagster_cloud.yaml yet — click to open the editor. Nothing is written until you hit Save.'
             : `Edit dagster_cloud.yaml (${config.path})`
         }
       >
