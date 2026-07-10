@@ -13,6 +13,8 @@ import { assetsApi, projectsApi, primitivesApi, partitionsApi, templatesApi, typ
 import type { ComponentInstance } from '@/types';
 import { InlineAttributesForm } from './InlineAttributesForm';
 import { pickSpecializedSidebar } from './SpecializedSidebar';
+import { AddDbtModelDialog } from './AddDbtModelDialog';
+import { GitCommitDialog } from './GitCommitDialog';
 
 // Icon mapping for component icons
 const iconMap: Record<string, any> = {
@@ -310,6 +312,8 @@ export function PropertyPanel({ nodeId, onConfigureComponent, onOpenFile, onNewP
   const [showMaterializeMenu, setShowMaterializeMenu] = useState(false);
   const [showLaunchpad, setShowLaunchpad] = useState(false);
   const [showBackfillModal, setShowBackfillModal] = useState(false);
+  const [showAddDbtModel, setShowAddDbtModel] = useState(false);
+  const [showGitCommit, setShowGitCommit] = useState(false);
   const [showDataPreview, setShowDataPreview] = useState(false);
   const [isPartitioned, setIsPartitioned] = useState(false);
 
@@ -855,9 +859,9 @@ export function PropertyPanel({ nodeId, onConfigureComponent, onOpenFile, onNewP
         </div>
 
         <div className="flex-1 overflow-y-auto p-4 space-y-4">
-          {/* dbt Asset Notice */}
+          {/* dbt Asset Notice + authoring actions */}
           {isDbtComponentType(sourceComponent?.component_type) && (
-            <div className="text-xs bg-blue-50 border border-blue-200 rounded-md p-3">
+            <div className="text-xs bg-blue-50 border border-blue-200 rounded-md p-3 space-y-3">
               <div className="flex items-start space-x-2">
                 <div className="flex-shrink-0 mt-0.5">
                   <svg className="w-4 h-4 text-blue-600" fill="currentColor" viewBox="0 0 20 20">
@@ -871,6 +875,21 @@ export function PropertyPanel({ nodeId, onConfigureComponent, onOpenFile, onNewP
                     Changes will be applied via <code className="bg-blue-100 px-1 rounded">translation</code>.
                   </p>
                 </div>
+              </div>
+              {/* Author actions — scaffold a new model, commit the repo. */}
+              <div className="flex flex-wrap gap-2 pt-2 border-t border-blue-200">
+                <button
+                  onClick={() => setShowAddDbtModel(true)}
+                  className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium bg-white border border-blue-300 text-blue-700 rounded hover:bg-blue-100"
+                >
+                  <FileCode className="w-3.5 h-3.5" /> New dbt model…
+                </button>
+                <button
+                  onClick={() => setShowGitCommit(true)}
+                  className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium bg-white border border-blue-300 text-blue-700 rounded hover:bg-blue-100"
+                >
+                  <Save className="w-3.5 h-3.5" /> Commit & push…
+                </button>
               </div>
             </div>
           )}
@@ -1884,6 +1903,36 @@ export function PropertyPanel({ nodeId, onConfigureComponent, onOpenFile, onNewP
             assetKey={node.data.asset_key || node.id}
             onLaunch={handleBackfillSubmit}
           />
+        )}
+
+        {/* dbt authoring dialogs — only rendered for dbt assets, but
+            live at the panel root so they overlay everything else. */}
+        {currentProject && isDbtComponentType(sourceComponent?.component_type) && (
+          <>
+            <AddDbtModelDialog
+              open={showAddDbtModel}
+              onOpenChange={setShowAddDbtModel}
+              projectId={currentProject.id}
+              onCreated={async (sqlPath) => {
+                // Open the newly-written SQL file in the code editor so
+                // the user can keep iterating on it right away, then
+                // regenerate assets so the new dbt model shows up in
+                // the graph without a manual refresh.
+                if (onOpenFile) onOpenFile(sqlPath);
+                try {
+                  await projectsApi.regenerateAssets(currentProject.id, false);
+                } catch (e) {
+                  console.warn('[PropertyPanel] regenerate after new dbt model failed:', e);
+                }
+              }}
+            />
+            <GitCommitDialog
+              open={showGitCommit}
+              onOpenChange={setShowGitCommit}
+              projectId={currentProject.id}
+              defaultMessage="Add new dbt model"
+            />
+          </>
         )}
 
         {/* Data Preview Modal */}

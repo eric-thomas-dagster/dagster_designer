@@ -1841,3 +1841,274 @@ async def launch_backfill(project_id: str, request: BackfillRequest):
                 config_file.unlink()
             except Exception:
                 pass
+
+
+# ---------------------------------------------------------------------------
+# dbt authoring: discover dbt projects, add new models, commit + push
+# ---------------------------------------------------------------------------
+
+class DbtProjectSummary(BaseModel):
+    name: str                       # display name (dir name or dbt_project.name)
+    relative_path: str              # relative to the project's data dir
+    model_paths: list[str]          # dbt_project.yml `model-paths` (defaults to ["models"])
+    profile: str | None = None
+    version: str | None = None
+    is_git_repo: bool = False
+
+
+class DbtProjectListResponse(BaseModel):
+    projects: list[DbtProjectSummary]
+
+
+def _find_dbt_projects(project_root: Path) -> list[DbtProjectSummary]:
+    """Walk the project root for `dbt_project.yml` files. Ignores common
+    generated / vendor folders so we don't surface junk. Returns display-
+    ready summaries the UI can present in a picker."""
+    import yaml as _yaml
+    out: list[DbtProjectSummary] = []
+    if not project_root.exists():
+        return out
+    skip_parts = {'.venv', 'venv', 'node_modules', '.git', 'target', 'dbt_packages', '__pycache__'}
+    for p in project_root.rglob('dbt_project.yml'):
+        if any(part in skip_parts for part in p.parts):
+            continue
+        try:
+            parsed = _yaml.safe_load(p.read_text()) or {}
+        except Exception:
+            continue
+        model_paths = parsed.get('model-paths') or parsed.get('source-paths') or ['models']
+        if isinstance(model_paths, str):
+            model_paths = [model_paths]
+        try:
+            rel = p.parent.relative_to(project_root).as_posix()
+        except ValueError:
+            rel = str(p.parent)
+        is_git = (p.parent / '.git').exists()
+        out.append(DbtProjectSummary(
+            name=parsed.get('name', p.parent.name),
+            relative_path=rel or '.',
+            model_paths=[str(m) for m in model_paths],
+            profile=parsed.get('profile'),
+            version=str(parsed.get('version')) if parsed.get('version') else None,
+            is_git_repo=is_git,
+        ))
+    return out
+
+
+@router.get('/{project_id}/dbt-projects', response_model=DbtProjectListResponse)
+async def list_dbt_projects(project_id: str):
+    """Discover every dbt project inside this Dagster project's data
+    directory. Used by the "Add dbt model" dialog to seed the target
+    picker — a Dagster project can reference multiple dbt projects
+    (e.g. cloned repos + a local vendored copy)."""
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    root = project_service._get_project_dir(project)
+    return DbtProjectListResponse(projects=_find_dbt_projects(root))
+
+
+class AddDbtModelRequest(BaseModel):
+    """Write a new .sql model into a dbt project.
+
+    Optional test config appends a matching schema.yml block so the
+    model is testable out of the box.
+    """
+    dbt_project_relative_path: str  # from DbtProjectSummary.relative_path
+    model_name: str                 # foo (no .sql extension)
+    subfolder: str | None = None    # e.g. 'staging', optional
+    materialization: str = 'view'   # view | table | incremental | ephemeral
+    sql: str                        # the SELECT statement
+    description: str | None = None
+    tests: list[dict] | None = None # optional list of test blocks
+
+
+@router.post('/{project_id}/dbt-model')
+async def add_dbt_model(project_id: str, request: AddDbtModelRequest):
+    """Create a new dbt model file under `<dbt_project>/models/<subfolder>/<name>.sql`
+    and optionally append a schema.yml entry for tests / description.
+
+    Non-destructive: refuses to overwrite an existing model file. Writes
+    a proper `{{ config(materialized='...') }}` header so users see the
+    materialization decision in the file itself.
+    """
+    import yaml as _yaml
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    root = project_service._get_project_dir(project)
+
+    dbt_root = (root / request.dbt_project_relative_path).resolve()
+    if not dbt_root.exists() or not (dbt_root / 'dbt_project.yml').exists():
+        raise HTTPException(status_code=404, detail=f"No dbt_project.yml at {request.dbt_project_relative_path}")
+
+    # Enforce name shape — dbt models must be valid SQL identifiers so
+    # they can be referenced from `ref()` calls.
+    name = request.model_name.strip()
+    if not name or not name.replace('_', '').isalnum() or name[0].isdigit():
+        raise HTTPException(status_code=400, detail="Model name must be snake_case and start with a letter.")
+
+    models_dir = dbt_root / 'models'
+    if request.subfolder:
+        models_dir = models_dir / request.subfolder
+    models_dir.mkdir(parents=True, exist_ok=True)
+
+    sql_path = models_dir / f'{name}.sql'
+    if sql_path.exists():
+        raise HTTPException(
+            status_code=409,
+            detail=f"Model already exists at {sql_path.relative_to(root)}",
+        )
+
+    # Compose the file. Config header uses dbt's native comment-free
+    # form so users can edit the SQL below without stumbling over it.
+    materialization = request.materialization.strip() or 'view'
+    header = f"{{{{ config(materialized='{materialization}') }}}}\n\n"
+    sql_body = request.sql.strip() + '\n'
+    sql_path.write_text(header + sql_body)
+
+    # If tests + description supplied, upsert a schema.yml block next
+    # to the model. Merge with an existing schema.yml rather than
+    # replacing so we don't clobber tests on other models in the folder.
+    schema_written = False
+    if request.tests or request.description:
+        schema_path = models_dir / 'schema.yml'
+        existing: dict = {}
+        if schema_path.exists():
+            try:
+                existing = _yaml.safe_load(schema_path.read_text()) or {}
+            except Exception:
+                existing = {}
+        existing.setdefault('version', 2)
+        models = existing.setdefault('models', [])
+        # Replace any existing entry with the same name.
+        models = [m for m in models if m.get('name') != name]
+        entry: dict = {'name': name}
+        if request.description:
+            entry['description'] = request.description
+        if request.tests:
+            entry['tests'] = request.tests
+        models.append(entry)
+        existing['models'] = models
+        schema_path.write_text(_yaml.dump(existing, sort_keys=False))
+        schema_written = True
+
+    return {
+        'success': True,
+        'sql_path': str(sql_path.relative_to(root)),
+        'schema_written': schema_written,
+    }
+
+
+class GitStatusResponse(BaseModel):
+    is_git_repo: bool
+    branch: str | None = None
+    ahead: int = 0
+    behind: int = 0
+    modified: list[str] = []
+    untracked: list[str] = []
+    staged: list[str] = []
+
+
+@router.get('/{project_id}/git/status', response_model=GitStatusResponse)
+async def project_git_status(project_id: str, subpath: str | None = None):
+    """Git status for a repo inside the project. `subpath` targets a
+    specific dbt project directory when there are multiple; defaults to
+    the project root. Returns is_git_repo=false with everything empty
+    when there's no repo — the UI can hide the commit surface based on
+    that."""
+    from git import Repo, InvalidGitRepositoryError
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    root = project_service._get_project_dir(project)
+    target = (root / subpath).resolve() if subpath else root
+    try:
+        repo = Repo(target, search_parent_directories=True)
+    except InvalidGitRepositoryError:
+        return GitStatusResponse(is_git_repo=False)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to read git repo: {e}")
+
+    try:
+        branch = repo.active_branch.name
+    except Exception:
+        branch = None
+
+    ahead = behind = 0
+    try:
+        if branch and repo.remotes:
+            counts = repo.git.rev_list('--left-right', '--count', f'HEAD...origin/{branch}')
+            a, b = counts.split()
+            ahead, behind = int(a), int(b)
+    except Exception:
+        pass
+
+    modified = [item.a_path for item in repo.index.diff(None)]
+    staged = [item.a_path for item in repo.index.diff('HEAD')] if repo.head.is_valid() else []
+    untracked = list(repo.untracked_files)
+    return GitStatusResponse(
+        is_git_repo=True,
+        branch=branch,
+        ahead=ahead,
+        behind=behind,
+        modified=modified,
+        untracked=untracked,
+        staged=staged,
+    )
+
+
+class GitCommitPushRequest(BaseModel):
+    subpath: str | None = None
+    files: list[str]
+    message: str
+    token: str | None = None
+    push: bool = True
+
+
+class GitCommitPushResponse(BaseModel):
+    success: bool
+    committed_sha: str | None = None
+    pushed: bool = False
+    detail: str | None = None
+
+
+@router.post('/{project_id}/git/commit-push', response_model=GitCommitPushResponse)
+async def project_git_commit_push(project_id: str, request: GitCommitPushRequest):
+    """Stage a chosen file list, commit with a message, optionally push
+    to the remote. Uses a token if provided by rewriting the origin
+    URL — the token itself isn't persisted. Works for both the project
+    root repo and any nested cloned dbt repo (via `subpath`)."""
+    from git import Repo, InvalidGitRepositoryError, GitCommandError
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    root = project_service._get_project_dir(project)
+    target = (root / request.subpath).resolve() if request.subpath else root
+    try:
+        repo = Repo(target, search_parent_directories=True)
+    except InvalidGitRepositoryError:
+        raise HTTPException(status_code=400, detail=f"{target} is not a git repository")
+
+    try:
+        # Stage everything the caller asked for. Files are paths
+        # relative to the repo root; both existing and untracked land
+        # in the index with `add`.
+        if not request.files:
+            raise HTTPException(status_code=400, detail="No files to commit")
+        repo.index.add(request.files)
+        commit = repo.index.commit(request.message or 'Update dbt models')
+        pushed = False
+        if request.push and repo.remotes:
+            origin = repo.remote(name='origin')
+            if request.token and 'github.com' in origin.url and f"{request.token}@" not in origin.url:
+                origin.set_url(origin.url.replace('https://', f'https://{request.token}@'))
+            origin.push()
+            pushed = True
+        return GitCommitPushResponse(
+            success=True,
+            committed_sha=commit.hexsha[:12],
+            pushed=pushed,
+        )
+    except GitCommandError as e:
+        raise HTTPException(status_code=500, detail=f"git failed: {e}")

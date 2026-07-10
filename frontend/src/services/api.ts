@@ -143,6 +143,71 @@ export const projectsApi = {
     return response.data;
   },
 
+  // dbt authoring: discover the dbt project(s) inside this Dagster
+  // project (local + git-cloned repos), scaffold new models, commit
+  // changes back to the origin remote.
+  listDbtProjects: async (projectId: string): Promise<{
+    projects: Array<{
+      name: string;
+      relative_path: string;
+      model_paths: string[];
+      profile: string | null;
+      version: string | null;
+      is_git_repo: boolean;
+    }>;
+  }> => {
+    const response = await api.get(`/projects/${projectId}/dbt-projects`);
+    return response.data as any;
+  },
+
+  addDbtModel: async (
+    projectId: string,
+    body: {
+      dbt_project_relative_path: string;
+      model_name: string;
+      subfolder?: string | null;
+      materialization: 'view' | 'table' | 'incremental' | 'ephemeral';
+      sql: string;
+      description?: string | null;
+      tests?: Array<Record<string, any>> | null;
+    },
+  ): Promise<{ success: boolean; sql_path: string; schema_written: boolean }> => {
+    const response = await api.post(`/projects/${projectId}/dbt-model`, body);
+    return response.data as any;
+  },
+
+  projectGitStatus: async (
+    projectId: string,
+    subpath?: string,
+  ): Promise<{
+    is_git_repo: boolean;
+    branch: string | null;
+    ahead: number;
+    behind: number;
+    modified: string[];
+    untracked: string[];
+    staged: string[];
+  }> => {
+    const response = await api.get(`/projects/${projectId}/git/status`, {
+      params: subpath ? { subpath } : {},
+    });
+    return response.data as any;
+  },
+
+  projectGitCommitPush: async (
+    projectId: string,
+    body: {
+      subpath?: string | null;
+      files: string[];
+      message: string;
+      token?: string | null;
+      push?: boolean;
+    },
+  ): Promise<{ success: boolean; committed_sha: string | null; pushed: boolean; detail?: string | null }> => {
+    const response = await api.post(`/projects/${projectId}/git/commit-push`, body);
+    return response.data as any;
+  },
+
   exportYAML: async (projectId: string) => {
     const response = await api.get<{ yaml_content: string; filename: string }>(
       `/projects/${projectId}/export-yaml`
