@@ -1170,6 +1170,7 @@ export function PropertyPanel({ nodeId, onConfigureComponent, onOpenFile, onNewP
                         setInlineDirty(true);
                       }}
                       onOpenAdvanced={() => onConfigureComponent(sourceComponent)}
+                      componentType={sourceComponent.component_type}
                     />
                   ) : (
                   <InlineAttributesForm

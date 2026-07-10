@@ -3,6 +3,7 @@ import { FilterSidebar } from './FilterSidebar';
 import { AggregateSidebar } from './AggregateSidebar';
 import { SqlTransformSidebar } from './SqlTransformSidebar';
 import { GeoBoundingBoxSidebar } from './GeoBoundingBoxSidebar';
+import { LLMSidebar } from './LLMSidebar';
 
 /**
  * Dispatcher for component-specific config panels. If a component_type
@@ -19,6 +20,10 @@ type Sidebar = React.ComponentType<{
   attributes: Record<string, any>;
   onChange: (name: string, next: any) => void;
   onOpenAdvanced?: () => void;
+  /** Full component_type passed through so provider-aware sidebars
+   *  (e.g. LLMSidebar picking Anthropic vs OpenAI vs Gemini) can
+   *  adapt without a separate registration entry per provider. */
+  componentType?: string;
 }>;
 
 // Engine prefixes we accept in front of each transform kind. Written
@@ -80,6 +85,20 @@ const MATCHERS: Array<{ test: (componentType: string) => boolean; Sidebar: Sideb
       /(?:^|\.)bounding_box_filter(?:$|\.)/i.test(t) ||
       /\.BoundingBoxFilterComponent$/i.test(t),
     Sidebar: GeoBoundingBoxSidebar,
+  },
+  {
+    // Per-row LLM enrichment — anthropic_llm, openai_llm, gemini_llm,
+    // groq_llm, huggingface_chat_completion. All share the same shape
+    // (model + system + user_prompt_template + input/output columns +
+    // sampling knobs) so one sidebar covers them. The sidebar itself
+    // detects which provider based on component_type and swaps the
+    // model list + docs link accordingly.
+    test: (t) => {
+      const id = /(?:^|\.)([a-z_]+_llm|[a-z_]*chat_completion)(?:$|\.)/i.test(t);
+      const cls = /\.(?:Anthropic|Openai|OpenAI|Gemini|Groq|Huggingface|HuggingFace)?(?:LLM|ChatCompletion)Component$/i.test(t);
+      return id || cls;
+    },
+    Sidebar: LLMSidebar,
   },
   {
     // Any engine-prefixed join, plus specialty joins (cross / spatial / anti).
