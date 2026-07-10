@@ -829,7 +829,7 @@ function App() {
             </aside>
 
             {/* Graph Editor */}
-            <main className="flex-1 relative">
+            <main className="flex-1 min-w-0 relative">
               <GraphEditor
                 onNodeSelect={setSelectedNodeId}
                 onPrimitiveClick={async (category, name) => {
