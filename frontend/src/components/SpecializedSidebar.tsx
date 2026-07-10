@@ -2,6 +2,7 @@ import { JoinSidebar } from './JoinSidebar';
 import { FilterSidebar } from './FilterSidebar';
 import { AggregateSidebar } from './AggregateSidebar';
 import { SqlTransformSidebar } from './SqlTransformSidebar';
+import { GeoBoundingBoxSidebar } from './GeoBoundingBoxSidebar';
 
 /**
  * Dispatcher for component-specific config panels. If a component_type
@@ -69,6 +70,17 @@ function makeMatcher(kindPatterns: string[], classPatterns: string[]) {
 }
 
 const MATCHERS: Array<{ test: (componentType: string) => boolean; Sidebar: Sidebar }> = [
+  {
+    // Geographic bounding box filter — gets a real map + draggable
+    // rectangle instead of four raw number inputs. Only matches the
+    // one component today; other geo-shaped things (spatial_join,
+    // geo_buffer) have different config shapes and can get their own
+    // dedicated sidebars later.
+    test: (t) =>
+      /(?:^|\.)bounding_box_filter(?:$|\.)/i.test(t) ||
+      /\.BoundingBoxFilterComponent$/i.test(t),
+    Sidebar: GeoBoundingBoxSidebar,
+  },
   {
     // Any engine-prefixed join, plus specialty joins (cross / spatial / anti).
     // Keep the regex specific enough to exclude names that just contain
