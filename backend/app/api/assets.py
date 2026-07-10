@@ -55,6 +55,15 @@ def get_known_schemas(project_id: str) -> dict[str, dict]:
     }
 
 
+@router.get("/{project_id}/known-schemas")
+async def known_schemas_endpoint(project_id: str):
+    """HTTP surface over the schema cache — used by ComponentConfigModal
+    to render column-picker dropdowns for fields like `partition_date_column`
+    without every form having to spawn a preview. The cache is populated
+    lazily as users preview assets; unknown assets return {}."""
+    return get_known_schemas(project_id)
+
+
 def _infer_upstream_resource_key(src_dir: Path, source_asset_key: str) -> str | None:
     """Look up the upstream asset's defs.yaml and return its declared Dagster
     resource_key, if any. Enables the SqlTransformer to inherit warehouse

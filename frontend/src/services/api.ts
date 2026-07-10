@@ -1163,6 +1163,19 @@ export const assetsApi = {
     );
     return response.data;
   },
+
+  /** Fetch the schema cache — `{asset_key: {columns: [...], dtypes: {...}}}`
+   *  for every asset that's been previewed at least once. Powers the
+   *  column-picker dropdowns in ComponentConfigModal so `*_column` fields
+   *  don't force users to type column names blindly. */
+  knownSchemas: async (
+    projectId: string,
+  ): Promise<Record<string, { columns: string[]; dtypes: Record<string, string> }>> => {
+    const response = await api.get<Record<string, { columns: string[]; dtypes: Record<string, string> }>>(
+      `/assets/${projectId}/known-schemas`,
+    );
+    return response.data;
+  },
 };
 
 export default api;

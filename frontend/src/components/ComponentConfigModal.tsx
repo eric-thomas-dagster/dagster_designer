@@ -44,6 +44,21 @@ export function ComponentConfigModal({
   const [translation, setTranslation] = useState<Record<string, any>>(component?.translation || {});
   const [sqlMode, setSqlMode] = useState<'inline' | 'file'>('inline');
   const [instanceNameError, setInstanceNameError] = useState<string | null>(null);
+  // Cache of {asset_key: {columns, dtypes}} for upstreams — powers the
+  // column-picker dropdowns on `*_column` / `*_columns` fields so users
+  // aren't guessing column names into a blank text box.
+  const [knownSchemas, setKnownSchemas] = useState<Record<string, { columns: string[]; dtypes: Record<string, string> }>>({});
+
+  useEffect(() => {
+    if (!currentProject) return;
+    let cancelled = false;
+    import('@/services/api').then((m) => {
+      m.assetsApi.knownSchemas(currentProject.id).then((s) => {
+        if (!cancelled) setKnownSchemas(s || {});
+      }).catch(() => { /* cache empty is fine */ });
+    });
+    return () => { cancelled = true; };
+  }, [currentProject?.id]);
 
   // DBT adapter state
   const [adapterInfo, setAdapterInfo] = useState<AdapterInfo[]>([]);
@@ -464,6 +479,72 @@ export function ComponentConfigModal({
     );
   };
 
+  // Resolve which widget to render for a given field. Explicit
+  // `x-dagster-widget` schema hint wins; otherwise fall back to a
+  // name-based heuristic so common patterns (partition_date_column,
+  // partition_start, sort_by, group_by) get sensible pickers even for
+  // community templates that don't set the hint.
+  const pickWidget = (fieldName: string, fieldSchema: any): 'column' | 'columns' | 'date' | 'default' => {
+    const hint = (fieldSchema?.['x-dagster-widget'] || '').toString().toLowerCase();
+    if (hint === 'column' || hint === 'column-single') return 'column';
+    if (hint === 'columns' || hint === 'column-multi' || hint === 'column-list') return 'columns';
+    if (hint === 'date' || hint === 'datetime') return 'date';
+
+    const lower = fieldName.toLowerCase();
+    // Multi-column fields — plural, or names that clearly imply a list
+    // (group_by, sort_by, columns_to_keep, partition_by, etc.).
+    if (
+      lower === 'columns' ||
+      lower.endsWith('_columns') ||
+      lower === 'group_by' ||
+      lower === 'sort_by' ||
+      lower === 'partition_by' ||
+      lower === 'order_by' ||
+      lower.endsWith('_columns_to_keep') ||
+      lower.endsWith('_columns_to_drop')
+    ) return 'columns';
+    // Single-column fields.
+    if (
+      lower.endsWith('_column') ||
+      lower.endsWith('_col') ||
+      lower === 'column' ||
+      lower === 'col'
+    ) return 'column';
+    // Date-ish fields.
+    if (
+      lower === 'partition_start' ||
+      lower === 'partition_end' ||
+      lower.endsWith('_date') ||
+      lower.endsWith('_datetime') ||
+      lower.endsWith('_timestamp') ||
+      lower === 'start_date' ||
+      lower === 'end_date'
+    ) return 'date';
+    return 'default';
+  };
+
+  // Return the union of columns available from every upstream asset the
+  // form currently references. Read via `formData.upstream_asset_key(s)`
+  // — supports both singular and plural, comma-separated. Falls back to
+  // empty when nothing's connected yet.
+  const upstreamColumnsForField = (): string[] => {
+    const raw =
+      formData['upstream_asset_keys'] ??
+      formData['upstream_asset_key'] ??
+      '';
+    const keys = String(raw)
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+    if (keys.length === 0) return [];
+    const cols = new Set<string>();
+    for (const k of keys) {
+      const schema = knownSchemas[k];
+      if (schema?.columns) schema.columns.forEach((c) => cols.add(c));
+    }
+    return Array.from(cols);
+  };
+
   const renderField = (fieldName: string, fieldSchema: any) => {
     // Check if there's a display version of this field (e.g., project_path_display)
     const displayFieldName = `${fieldName}_display`;
@@ -471,6 +552,80 @@ export function ComponentConfigModal({
     const value = formData[fieldName] || '';
     const displayValue = hasDisplayVersion ? formData[displayFieldName] : value;
     const fieldType = fieldSchema.type;
+
+    // Smart widget dispatch — happens BEFORE the plain-text fallback so
+    // column-name fields don't drop back to a bare input.
+    const widget = pickWidget(fieldName, fieldSchema);
+    if (widget === 'column') {
+      const cols = upstreamColumnsForField();
+      if (cols.length > 0) {
+        return (
+          <select
+            value={typeof value === 'string' ? value : ''}
+            onChange={(e) => handleFieldChange(fieldName, e.target.value)}
+            className="w-full px-3 py-2 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+          >
+            <option value="">— pick a column —</option>
+            {cols.map((c) => (
+              <option key={c} value={c}>{c}</option>
+            ))}
+          </select>
+        );
+      }
+      // No cached schema yet — fall through to the text input with a
+      // helpful placeholder so the user can still type a column name.
+    }
+    if (widget === 'columns') {
+      const cols = upstreamColumnsForField();
+      if (cols.length > 0) {
+        const selected = String(value)
+          .split(',')
+          .map((s: string) => s.trim())
+          .filter(Boolean);
+        return (
+          <div>
+            <div className="flex flex-wrap gap-1 mb-1.5">
+              {selected.map((c: string) => (
+                <span key={c} className="inline-flex items-center gap-1 px-2 py-0.5 text-xs bg-blue-50 border border-blue-200 rounded text-blue-700">
+                  {c}
+                  <button
+                    type="button"
+                    onClick={() => handleFieldChange(fieldName, selected.filter((x: string) => x !== c).join(', '))}
+                    className="hover:text-blue-900"
+                  >
+                    <X className="w-3 h-3" />
+                  </button>
+                </span>
+              ))}
+            </div>
+            <select
+              value=""
+              onChange={(e) => {
+                const c = e.target.value;
+                if (!c || selected.includes(c)) return;
+                handleFieldChange(fieldName, [...selected, c].join(', '));
+              }}
+              className="w-full px-3 py-2 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+            >
+              <option value="">+ add a column…</option>
+              {cols.filter((c) => !selected.includes(c)).map((c) => (
+                <option key={c} value={c}>{c}</option>
+              ))}
+            </select>
+          </div>
+        );
+      }
+    }
+    if (widget === 'date') {
+      return (
+        <input
+          type="date"
+          value={typeof value === 'string' ? value : ''}
+          onChange={(e) => handleFieldChange(fieldName, e.target.value)}
+          className="w-full px-3 py-2 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+        />
+      );
+    }
 
     console.log('[ComponentConfigModal] Rendering field:', fieldName, 'type:', fieldType, 'has properties:', !!fieldSchema.properties, 'hasDisplayVersion:', hasDisplayVersion);
 
@@ -657,13 +812,21 @@ export function ComponentConfigModal({
         );
       }
 
+      // For column-picker fields where we haven't cached a schema yet,
+      // hint the user in the placeholder so they know they can preview
+      // the upstream to unlock a proper dropdown.
+      const columnWidget = widget === 'column' || widget === 'columns';
+      const placeholder = columnWidget
+        ? (widget === 'columns' ? 'e.g. col_a, col_b (preview upstream to enable dropdown)' : 'e.g. my_column (preview upstream to enable dropdown)')
+        : (fieldSchema.description || fieldName);
+
       return (
         <input
           type="text"
           value={displayValue}
           onChange={(e) => handleFieldChange(fieldName, e.target.value)}
           className="w-full px-3 py-2 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-          placeholder={fieldSchema.description || fieldName}
+          placeholder={placeholder}
           readOnly={hasDisplayVersion}
           title={hasDisplayVersion ? `Actual path: ${value}` : undefined}
         />
