@@ -832,6 +832,7 @@ function App() {
             <main className="flex-1 min-w-0 relative">
               <GraphEditor
                 onNodeSelect={setSelectedNodeId}
+                onAddDataSource={setAddingComponentType}
                 onPrimitiveClick={async (category, name) => {
                   // For asset checks — many are dbt-derived and don't live in
                   // our managed primitives list. Route via the backend search

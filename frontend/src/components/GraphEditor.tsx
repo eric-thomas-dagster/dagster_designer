@@ -28,10 +28,11 @@ import { Launchpad } from './Launchpad';
 import { DataPreviewModal } from './DataPreviewModal';
 import { AssetIOPanel } from './AssetIOPanel';
 import { DagsterAIBar } from './DagsterAIBar';
+import { AddDataDialog } from './AddDataDialog';
 import { notify } from './Notifications';
 import { useProjectStore } from '@/hooks/useProject';
 import { projectsApi, componentsApi } from '@/services/api';
-import { Play } from 'lucide-react';
+import { Play, Plus } from 'lucide-react';
 import type { GraphNode, GraphEdge, ComponentSchema } from '@/types';
 
 const nodeTypes: NodeTypes = {
@@ -370,9 +371,14 @@ function calculateEdgeHandles(sourceNode: Node | undefined, targetNode: Node | u
 interface GraphEditorProps {
   onNodeSelect: (nodeId: string | null) => void;
   onPrimitiveClick?: (category: 'job' | 'schedule' | 'sensor' | 'asset_check', name: string) => void;
+  /** Callback fired when the user picks a data source from the "+ Add data"
+   *  dialog after the CLI install completes. Wire the same way ComponentPalette
+   *  passes the component_type up so App can open the config modal. */
+  onAddDataSource?: (componentType: string) => void;
 }
 
-function GraphEditorInner({ onNodeSelect, onPrimitiveClick }: GraphEditorProps) {
+function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource }: GraphEditorProps) {
+  const [addDataOpen, setAddDataOpen] = useState(false);
   const { currentProject, updateGraph, setCurrentProject } = useProjectStore();
   const [nodes, setNodes, onNodesChange] = useNodesState([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState([]);
@@ -1876,6 +1882,14 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick }: GraphEditorProps) 
           </>
         )}
         <button
+          onClick={() => setAddDataOpen(true)}
+          className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium bg-primary text-primary-foreground rounded-md hover:bg-accent"
+          title="Connect a database, warehouse, SaaS app, file, or API"
+        >
+          <Plus className="w-4 h-4" />
+          <span>Add data</span>
+        </button>
+        <button
           onClick={arrangeGroups}
           className="flex items-center gap-1.5 px-2.5 py-1.5 text-sm text-gray-700 hover:bg-gray-100 rounded"
           title="Arrange groups in a grid to prevent overlaps (preserves positions within groups)"
@@ -2003,6 +2017,17 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick }: GraphEditorProps) 
           }}
         />
       )}
+
+      {/* + Add data — curated ingestion picker (Lakeflow-style). Falls
+          through to the same setAddingComponentType path the palette
+          uses so the config modal opens right after install. */}
+      <AddDataDialog
+        open={addDataOpen}
+        onOpenChange={setAddDataOpen}
+        onSourcePicked={(componentType) => {
+          onAddDataSource?.(componentType);
+        }}
+      />
     </div>
   );
 }
