@@ -1164,6 +1164,12 @@ export function PropertyPanel({ nodeId, onConfigureComponent, onOpenFile, onNewP
                       setInlineDirty(true);
                     }}
                     knownSchemas={knownSchemas}
+                    availableAssets={
+                      currentProject?.graph.nodes
+                        .filter((n: any) => n.node_kind === 'asset' || n.type === 'asset')
+                        .map((n: any) => n.data?.asset_key || n.data?.label || n.id)
+                        .filter(Boolean) ?? []
+                    }
                   />
                   {inlineDirty && (
                     <div className="mt-3 flex items-center gap-2">

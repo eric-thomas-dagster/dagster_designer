@@ -12,6 +12,10 @@ interface InlineAttributesFormProps {
    *  Powers column-picker dropdowns for `*_column` fields when the
    *  upstream has been previewed at least once. */
   knownSchemas?: Record<string, { columns: string[]; dtypes: Record<string, string> }>;
+  /** All asset keys in the current project — used to render a proper
+   *  multi-select for `deps` / `asset_selection` fields instead of a
+   *  bare text box. */
+  availableAssets?: string[];
   /** Field names to hide (usually because there's a dedicated UI for
    *  them elsewhere — upstream_asset_keys, sql_template, deps). */
   hideFields?: string[];
@@ -34,6 +38,7 @@ export function InlineAttributesForm({
   values,
   onChange,
   knownSchemas = {},
+  availableAssets = [],
   hideFields,
 }: InlineAttributesFormProps) {
   const hiddenSet = new Set([
@@ -76,7 +81,7 @@ export function InlineAttributesForm({
             {fieldName}
             {requiredSet.has(fieldName) && <span className="text-red-500 ml-0.5">*</span>}
           </label>
-          {renderField(fieldName, fieldSchema, values[fieldName], onChange, upstreamColumns())}
+          {renderField(fieldName, fieldSchema, values[fieldName], onChange, upstreamColumns(), availableAssets)}
           {fieldSchema.description && (
             <p className="text-[11px] text-gray-500 mt-0.5">{fieldSchema.description}</p>
           )}
@@ -84,6 +89,22 @@ export function InlineAttributesForm({
       ))}
     </div>
   );
+}
+
+// If a schema doesn't declare enum but the description reads like a
+// short list of choices ("fail, replace, or append") pull the values
+// out. Covers a bunch of community templates that only put the enum
+// choices in the human description.
+function inferEnumFromDescription(desc: string | undefined): string[] | null {
+  if (!desc) return null;
+  const m = desc.match(/([\w-]+(?:\s*,\s*[\w-]+)+(?:\s*,?\s*or\s+[\w-]+))/i);
+  if (!m) return null;
+  const parts = m[1].split(/\s*,\s*|\s+or\s+/i).map((s) => s.trim()).filter(Boolean);
+  if (parts.length < 2 || parts.length > 12) return null;
+  // Reject lowercase-english-sentence false positives — accept only if
+  // every token is short identifier-shaped (no spaces).
+  if (parts.some((p) => /\s/.test(p) || p.length > 24)) return null;
+  return parts;
 }
 
 type Widget = 'column' | 'columns' | 'date' | 'default';
@@ -124,9 +145,62 @@ function renderField(
   value: any,
   onChange: (name: string, next: any) => void,
   upstreamCols: string[],
+  availableAssets: string[],
 ) {
   const widget = pickWidget(fieldName, fieldSchema);
   const fieldType = fieldSchema.type;
+
+  // `deps` / `asset_selection` — asset multi-select. Ingestion authors
+  // often list this on their schema even when it's usually empty; give
+  // users a proper picker so they don't have to type asset keys by hand.
+  if (fieldName === 'deps' || fieldName === 'asset_selection') {
+    const selected: string[] = Array.isArray(value)
+      ? value
+      : (value ? String(value).split(',').map((s) => s.trim()).filter(Boolean) : []);
+    if (availableAssets.length === 0) {
+      return (
+        <input
+          type="text"
+          value={selected.join(', ')}
+          onChange={(e) => onChange(fieldName, e.target.value.split(',').map((s) => s.trim()).filter(Boolean))}
+          placeholder="No assets in project yet — comma-separated keys"
+          className="w-full px-2 py-1.5 text-xs border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+        />
+      );
+    }
+    return (
+      <div>
+        <div className="flex flex-wrap gap-1 mb-1">
+          {selected.map((k) => (
+            <span key={k} className="inline-flex items-center gap-1 px-1.5 py-0.5 text-[11px] bg-blue-50 border border-blue-200 rounded text-blue-700">
+              {k}
+              <button
+                type="button"
+                onClick={() => onChange(fieldName, selected.filter((x) => x !== k))}
+                className="hover:text-blue-900"
+              >
+                <X className="w-3 h-3" />
+              </button>
+            </span>
+          ))}
+        </div>
+        <select
+          value=""
+          onChange={(e) => {
+            const k = e.target.value;
+            if (!k || selected.includes(k)) return;
+            onChange(fieldName, [...selected, k]);
+          }}
+          className="w-full px-2 py-1.5 text-xs border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+        >
+          <option value="">+ add an asset dependency…</option>
+          {availableAssets.filter((k) => !selected.includes(k)).map((k) => (
+            <option key={k} value={k}>{k}</option>
+          ))}
+        </select>
+      </div>
+    );
+  }
 
   if (widget === 'column' && upstreamCols.length > 0) {
     return (
@@ -218,7 +292,13 @@ function renderField(
     );
   }
 
-  if (fieldSchema.enum && Array.isArray(fieldSchema.enum)) {
+  // Explicit enum (declared in schema) OR inferred from description text
+  // (e.g. "fail, replace, or append") — community templates often only
+  // put the choices in the human description, so infer as a fallback.
+  const enumValues: string[] | null = fieldSchema.enum && Array.isArray(fieldSchema.enum)
+    ? fieldSchema.enum
+    : inferEnumFromDescription(fieldSchema.description);
+  if (enumValues && enumValues.length > 0) {
     return (
       <select
         value={value ?? ''}
@@ -226,7 +306,7 @@ function renderField(
         className="w-full px-2 py-1.5 text-xs border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
       >
         <option value=""></option>
-        {fieldSchema.enum.map((v: string) => (
+        {enumValues.map((v) => (
           <option key={v} value={v}>{v}</option>
         ))}
       </select>
