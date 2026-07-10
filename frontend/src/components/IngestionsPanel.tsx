@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Download, Cloud, Database, FileText, Globe, Sparkles, Boxes, CheckCircle2, AlertTriangle, Play, Settings, Activity, TrendingUp, Loader2, XCircle } from 'lucide-react';
+import { Download, Cloud, Database, FileText, Globe, Sparkles, Boxes, CheckCircle2, AlertTriangle, Play, Settings, Activity, TrendingUp, Loader2, XCircle, Layers, CalendarClock, Clock, X } from 'lucide-react';
 import { useProjectStore } from '@/hooks/useProject';
 import { assetsApi, projectsApi, type IngestionEvent } from '@/services/api';
 import { notify } from './Notifications';
@@ -89,6 +89,11 @@ export function IngestionsPanel({ onAddDataSource, onEditComponent }: Ingestions
   const [schemas, setSchemas] = useState<Record<string, { columns: string[]; dtypes: Record<string, string> }>>({});
   const [events, setEvents] = useState<IngestionEvent[]>([]);
   const [window, setWindow] = useState<'24h' | '7d' | '30d'>('7d');
+  const [search, setSearch] = useState('');
+  const [kindFilter, setKindFilter] = useState<SourceKind | 'all'>('all');
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [drawerFor, setDrawerFor] = useState<string | null>(null);
+  const [runningBulk, setRunningBulk] = useState(false);
 
   useEffect(() => {
     if (!currentProject) return;
@@ -102,6 +107,67 @@ export function IngestionsPanel({ onAddDataSource, onEditComponent }: Ingestions
     return () => { cancelled = true; };
   }, [currentProject?.id]);
 
+  // Cross-reference schedule components in the project so each ingestion
+  // row can show its cadence. A schedule "targets" an ingestion if the
+  // schedule's target_asset_keys / asset_keys / selection includes the
+  // ingestion's asset_name.
+  const scheduleByAssetKey = useMemo(() => {
+    const map = new Map<string, { label: string; cron?: string }[]>();
+    if (!currentProject) return map;
+    for (const c of currentProject.components) {
+      if (!/Schedule(Component)?$|\bschedule\b/i.test(c.component_type)) continue;
+      const targets: string[] = [];
+      const attrs = (c.attributes || {}) as Record<string, any>;
+      for (const key of ['target_asset_keys', 'asset_keys', 'asset_selection', 'assets']) {
+        const v = attrs[key];
+        if (typeof v === 'string' && v) targets.push(...v.split(',').map((s) => s.trim()));
+        else if (Array.isArray(v)) targets.push(...v.map(String));
+      }
+      const cron = attrs.cron || attrs.cron_schedule || attrs.schedule;
+      for (const t of targets) {
+        if (!map.has(t)) map.set(t, []);
+        map.get(t)!.push({ label: c.label || c.id, cron });
+      }
+    }
+    return map;
+  }, [currentProject]);
+
+  // Partition config lives on the graph node (Dagster's partitioning is
+  // separate from the component's own attribute bag). A node with a
+  // partition_config is Dagster's incremental / delta ingestion.
+  const partitionByAssetKey = useMemo(() => {
+    const map = new Map<string, { kind: string; description: string }>();
+    if (!currentProject) return map;
+    for (const n of currentProject.graph.nodes) {
+      const cfg = (n.data as any)?.partition_config;
+      if (!cfg) continue;
+      const key = (n.data as any)?.asset_key || n.id;
+      const kind = cfg.type || cfg.kind || 'partitioned';
+      const bits: string[] = [];
+      if (cfg.type) bits.push(cfg.type);
+      if (cfg.start_date) bits.push(`from ${cfg.start_date}`);
+      if (cfg.cron_schedule || cfg.schedule) bits.push(cfg.cron_schedule || cfg.schedule);
+      if (cfg.partition_keys?.length) bits.push(`${cfg.partition_keys.length} keys`);
+      map.set(key, { kind, description: bits.join(' · ') || 'partitioned' });
+    }
+    return map;
+  }, [currentProject]);
+
+  // Group ingestion events by asset_key so per-row widgets (sparkline,
+  // freshness clock, drawer) don't have to re-filter on every render.
+  const eventsByAssetKey = useMemo(() => {
+    const map = new Map<string, IngestionEvent[]>();
+    for (const e of events) {
+      if (!map.has(e.asset_key)) map.set(e.asset_key, []);
+      map.get(e.asset_key)!.push(e);
+    }
+    // Sort ascending so sparklines read left→right in time order.
+    for (const arr of map.values()) {
+      arr.sort((a, b) => new Date(a.ts).getTime() - new Date(b.ts).getTime());
+    }
+    return map;
+  }, [events]);
+
   const ingestions = useMemo(() => {
     if (!currentProject) return [];
     return currentProject.components
@@ -111,6 +177,13 @@ export function IngestionsPanel({ onAddDataSource, onEditComponent }: Ingestions
         const assetKey = (c.attributes?.asset_name as string) || c.id;
         const configured = isConfigured(c.attributes || {});
         const schema = schemas[assetKey];
+        const history = eventsByAssetKey.get(assetKey) ?? [];
+        const materializes = history.filter((e) => e.type === 'materialize');
+        const lastRun = materializes[materializes.length - 1];
+        const previews = history.filter((e) => e.type === 'preview');
+        const lastPreview = previews[previews.length - 1];
+        const partition = partitionByAssetKey.get(assetKey);
+        const schedules = scheduleByAssetKey.get(assetKey) ?? [];
         return {
           component: c,
           assetKey,
@@ -118,9 +191,16 @@ export function IngestionsPanel({ onAddDataSource, onEditComponent }: Ingestions
           configured,
           columnCount: schema?.columns?.length ?? null,
           previewed: !!schema,
+          history,
+          materializes,
+          lastRun,
+          lastPreview,
+          partition,
+          schedules,
+          latestStatus: lastRun?.status ?? null,
         };
       });
-  }, [currentProject, schemas]);
+  }, [currentProject, schemas, eventsByAssetKey, partitionByAssetKey, scheduleByAssetKey]);
 
   const kpis = useMemo(() => {
     const total = ingestions.length;
@@ -133,6 +213,76 @@ export function IngestionsPanel({ onAddDataSource, onEditComponent }: Ingestions
     for (const i of ingestions) byKind[i.kind]++;
     return { total, configured, unconfigured, previewed, byKind };
   }, [ingestions]);
+
+  // Recently-failed ingestions power the alerts strip at the top so
+  // "this thing needs my attention" is the first thing the user sees.
+  const recentFailures = useMemo(() => {
+    const dayAgo = Date.now() - 24 * 3600e3;
+    return ingestions
+      .filter((i) => {
+        const last = i.materializes[i.materializes.length - 1];
+        return last && last.status === 'failure' && new Date(last.ts).getTime() >= dayAgo;
+      })
+      .map((i) => ({
+        assetKey: i.assetKey,
+        label: i.component.label || i.component.id,
+        when: i.materializes[i.materializes.length - 1]?.ts,
+      }));
+  }, [ingestions]);
+
+  // Filtered view for the table — driven by search box + kind selector.
+  const filteredIngestions = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    return ingestions.filter((i) => {
+      if (kindFilter !== 'all' && i.kind !== kindFilter) return false;
+      if (q) {
+        const blob = (
+          i.component.label + ' ' + i.component.id + ' ' + i.assetKey + ' ' + i.component.component_type
+        ).toLowerCase();
+        if (!blob.includes(q)) return false;
+      }
+      return true;
+    });
+  }, [ingestions, search, kindFilter]);
+
+  const toggleSelect = (id: string) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+  const selectAllFiltered = () => {
+    setSelectedIds(new Set(filteredIngestions.filter((i) => i.configured).map((i) => i.component.id)));
+  };
+  const clearSelection = () => setSelectedIds(new Set());
+
+  const handleRunSelected = async () => {
+    if (!currentProject || selectedIds.size === 0) return;
+    const assetKeys = ingestions
+      .filter((i) => selectedIds.has(i.component.id) && i.configured)
+      .map((i) => i.assetKey);
+    if (assetKeys.length === 0) return;
+    setRunningBulk(true);
+    try {
+      const r = await projectsApi.materialize(currentProject.id, assetKeys);
+      if (!r.success) {
+        notify.error(`Bulk materialize failed. See console.`);
+        console.warn('[Ingestions] bulk stderr:', r.stderr);
+      } else {
+        notify.success(`Materialized ${assetKeys.length} ingestion${assetKeys.length === 1 ? '' : 's'}.`);
+      }
+      // Refresh the event log so KPIs + sparklines reflect the new runs.
+      const fresh = await assetsApi.ingestionHistory(currentProject.id, 5000);
+      setEvents(fresh.events || []);
+      clearSelection();
+    } catch (e: any) {
+      notify.error(`Bulk materialize failed: ${e?.message ?? e}`);
+    } finally {
+      setRunningBulk(false);
+    }
+  };
 
   // Ingestion-only event view: filter the raw log down to events whose
   // asset_key belongs to one of the ingestion components we know about
@@ -260,6 +410,33 @@ export function IngestionsPanel({ onAddDataSource, onEditComponent }: Ingestions
         </button>
       </div>
 
+      {/* Alerts strip — surfaced first because "which ingestions need my
+          attention right now" is the whole reason to visit this page. */}
+      {recentFailures.length > 0 && (
+        <div className="mx-8 mt-4 px-4 py-2.5 bg-rose-50 border border-rose-200 rounded-md flex items-center gap-3">
+          <AlertTriangle className="w-5 h-5 text-rose-600 flex-shrink-0" />
+          <div className="flex-1 min-w-0">
+            <div className="text-sm font-semibold text-rose-900">
+              {recentFailures.length} ingestion{recentFailures.length === 1 ? '' : 's'} failed in the last 24h
+            </div>
+            <div className="text-xs text-rose-700 truncate">
+              {recentFailures.slice(0, 4).map((f) => f.label).join(', ')}
+              {recentFailures.length > 4 && ` +${recentFailures.length - 4} more`}
+            </div>
+          </div>
+          <button
+            onClick={() => {
+              const firstFailed = recentFailures[0];
+              const target = ingestions.find((i) => i.assetKey === firstFailed.assetKey);
+              if (target) setDrawerFor(target.component.id);
+            }}
+            className="text-xs font-medium text-rose-700 hover:text-rose-900 flex-shrink-0"
+          >
+            Investigate →
+          </button>
+        </div>
+      )}
+
       {/* KPI band + time-window switcher. The KPIs pivot with the switch
           so 24h / 7d / 30d all use one place. */}
       <div className="px-8 py-6 space-y-4">
@@ -370,44 +547,134 @@ export function IngestionsPanel({ onAddDataSource, onEditComponent }: Ingestions
       {/* Ingestions table */}
       <div className="px-8 pb-8">
         <div className="bg-white border border-gray-200 rounded-lg overflow-hidden">
-          <div className="px-4 py-3 border-b border-gray-100 flex items-center justify-between">
-            <h2 className="text-sm font-semibold text-gray-900">Ingestion sources</h2>
-            <span className="text-xs text-gray-500">{ingestions.length} total</span>
+          {/* Table toolbar — search, kind filter, bulk actions. Stays
+              visible even when the empty-state is showing so users
+              understand the shape of the surface. */}
+          <div className="px-4 py-3 border-b border-gray-100 flex items-center gap-2 flex-wrap">
+            <h2 className="text-sm font-semibold text-gray-900 mr-2">Ingestion sources</h2>
+            <div className="relative flex-1 max-w-md">
+              <input
+                type="text"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder="Search sources…"
+                className="w-full pl-2 pr-2 py-1 text-xs border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+              />
+            </div>
+            <select
+              value={kindFilter}
+              onChange={(e) => setKindFilter(e.target.value as SourceKind | 'all')}
+              className="text-xs border border-gray-300 rounded px-2 py-1"
+            >
+              <option value="all">All kinds</option>
+              {(Object.keys(KIND_META) as SourceKind[]).map((k) => (
+                <option key={k} value={k}>{KIND_META[k].label}</option>
+              ))}
+            </select>
+            {selectedIds.size > 0 && (
+              <>
+                <div className="h-4 w-px bg-gray-200 mx-1" />
+                <span className="text-xs text-gray-600">{selectedIds.size} selected</span>
+                <button
+                  onClick={handleRunSelected}
+                  disabled={runningBulk}
+                  className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium bg-primary text-primary-foreground rounded disabled:opacity-60"
+                >
+                  {runningBulk ? <Loader2 className="w-3 h-3 animate-spin" /> : <Play className="w-3 h-3" />}
+                  {runningBulk ? 'Running…' : 'Materialize selected'}
+                </button>
+                <button
+                  onClick={clearSelection}
+                  className="text-xs text-gray-500 hover:text-gray-700"
+                >
+                  Clear
+                </button>
+              </>
+            )}
+            <div className="ml-auto text-xs text-gray-500">
+              {filteredIngestions.length} of {ingestions.length}
+            </div>
           </div>
-          {ingestions.length === 0 ? (
+          {filteredIngestions.length === 0 ? (
             <div className="p-8 text-center">
               <Download className="w-8 h-8 text-gray-300 mx-auto mb-3" />
               <p className="text-sm text-gray-600 mb-3">
-                You don't have any ingestion sources in this project yet.
+                {ingestions.length === 0
+                  ? "You don't have any ingestion sources in this project yet."
+                  : 'No sources match the current search/filter.'}
               </p>
-              <button
-                onClick={() => setAddDataOpen(true)}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium bg-primary text-primary-foreground rounded"
-              >
-                <Download className="w-4 h-4" /> Add your first source
-              </button>
+              {ingestions.length === 0 && (
+                <button
+                  onClick={() => setAddDataOpen(true)}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium bg-primary text-primary-foreground rounded"
+                >
+                  <Download className="w-4 h-4" /> Add your first source
+                </button>
+              )}
             </div>
           ) : (
             <table className="w-full text-sm">
               <thead className="bg-gray-50 border-b border-gray-100">
                 <tr>
+                  <th className="px-3 py-2 w-8">
+                    <input
+                      type="checkbox"
+                      checked={selectedIds.size > 0 && filteredIngestions.every((i) => selectedIds.has(i.component.id) || !i.configured)}
+                      onChange={(e) => (e.target.checked ? selectAllFiltered() : clearSelection())}
+                      className="w-3.5 h-3.5"
+                      title="Select all configured"
+                    />
+                  </th>
                   <th className="text-left px-4 py-2 text-xs font-medium text-gray-700 uppercase tracking-wider">Name</th>
-                  <th className="text-left px-4 py-2 text-xs font-medium text-gray-700 uppercase tracking-wider">Source type</th>
-                  <th className="text-left px-4 py-2 text-xs font-medium text-gray-700 uppercase tracking-wider">Destination asset</th>
+                  <th className="text-left px-4 py-2 text-xs font-medium text-gray-700 uppercase tracking-wider">Kind</th>
+                  <th className="text-left px-4 py-2 text-xs font-medium text-gray-700 uppercase tracking-wider">Cadence</th>
+                  <th className="text-left px-4 py-2 text-xs font-medium text-gray-700 uppercase tracking-wider">Last 8 runs</th>
+                  <th className="text-left px-4 py-2 text-xs font-medium text-gray-700 uppercase tracking-wider">Freshness</th>
                   <th className="text-left px-4 py-2 text-xs font-medium text-gray-700 uppercase tracking-wider">Status</th>
-                  <th className="text-left px-4 py-2 text-xs font-medium text-gray-700 uppercase tracking-wider">Schema</th>
                   <th className="text-right px-4 py-2 text-xs font-medium text-gray-700 uppercase tracking-wider">Actions</th>
                 </tr>
               </thead>
               <tbody>
-                {ingestions.map(({ component, assetKey, kind, configured, columnCount, previewed }) => {
+                {filteredIngestions.map((row) => {
+                  const { component, assetKey, kind, configured, materializes, lastRun, partition, schedules } = row;
                   const KindIcon = KIND_META[kind].icon;
+                  const isSelected = selectedIds.has(component.id);
                   return (
-                    <tr key={component.id} className="border-b border-gray-50 last:border-0 hover:bg-gray-50/50">
+                    <tr
+                      key={component.id}
+                      className={`border-b border-gray-50 last:border-0 hover:bg-gray-50/50 cursor-pointer ${
+                        isSelected ? 'bg-blue-50/40' : ''
+                      }`}
+                      onClick={(e) => {
+                        const target = e.target as HTMLElement;
+                        if (target.closest('button, input, select, a')) return;
+                        setDrawerFor(component.id);
+                      }}
+                    >
+                      <td className="px-3 py-2.5" onClick={(e) => e.stopPropagation()}>
+                        <input
+                          type="checkbox"
+                          checked={isSelected}
+                          onChange={() => toggleSelect(component.id)}
+                          disabled={!configured}
+                          className="w-3.5 h-3.5"
+                          title={configured ? 'Select for bulk actions' : 'Configure first'}
+                        />
+                      </td>
                       <td className="px-4 py-2.5">
-                        <div className="font-medium text-gray-900">{component.label || component.id}</div>
+                        <div className="font-medium text-gray-900 flex items-center gap-1.5">
+                          {component.label || component.id}
+                          {partition && (
+                            <span
+                              className="inline-flex items-center gap-0.5 px-1.5 py-0.5 text-[10px] rounded bg-indigo-50 text-indigo-700 border border-indigo-200"
+                              title={`Partitioned (${partition.description}) — Dagster runs this incrementally per partition key.`}
+                            >
+                              <Layers className="w-2.5 h-2.5" /> incremental
+                            </span>
+                          )}
+                        </div>
                         <div className="text-[11px] text-gray-500 font-mono truncate max-w-[240px]" title={component.component_type}>
-                          {component.component_type.split('.').pop()}
+                          {assetKey}
                         </div>
                       </td>
                       <td className="px-4 py-2.5">
@@ -417,26 +684,58 @@ export function IngestionsPanel({ onAddDataSource, onEditComponent }: Ingestions
                           <span className="text-xs text-gray-700">{KIND_META[kind].label}</span>
                         </div>
                       </td>
-                      <td className="px-4 py-2.5 font-mono text-xs text-gray-700">{assetKey}</td>
-                      <td className="px-4 py-2.5">
-                        {configured ? (
-                          <span className="inline-flex items-center gap-1 px-2 py-0.5 text-[11px] rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200">
-                            <CheckCircle2 className="w-3 h-3" /> Configured
-                          </span>
+                      <td className="px-4 py-2.5 text-xs">
+                        {schedules.length > 0 ? (
+                          <div className="flex flex-col gap-0.5">
+                            {schedules.slice(0, 2).map((s, i) => (
+                              <div key={i} className="inline-flex items-center gap-1 text-gray-700" title={s.label}>
+                                <CalendarClock className="w-3 h-3 text-gray-500" />
+                                <span className="font-mono text-[11px]">{s.cron || 'scheduled'}</span>
+                              </div>
+                            ))}
+                            {schedules.length > 2 && <span className="text-[10px] text-gray-400">+{schedules.length - 2}</span>}
+                          </div>
                         ) : (
+                          <span className="text-gray-400 italic">manual</span>
+                        )}
+                      </td>
+                      <td className="px-4 py-2.5">
+                        <Sparkline runs={materializes} />
+                      </td>
+                      <td className="px-4 py-2.5 text-xs">
+                        {lastRun ? (
+                          <div className="flex flex-col">
+                            <span className="text-gray-700">{formatRelative(lastRun.ts)}</span>
+                            {lastRun.duration_ms != null && (
+                              <span className="text-[10px] text-gray-400">
+                                took {(lastRun.duration_ms / 1000).toFixed(1)}s
+                              </span>
+                            )}
+                          </div>
+                        ) : (
+                          <span className="text-gray-400 italic">never run</span>
+                        )}
+                      </td>
+                      <td className="px-4 py-2.5">
+                        {!configured ? (
                           <span className="inline-flex items-center gap-1 px-2 py-0.5 text-[11px] rounded-full bg-amber-50 text-amber-700 border border-amber-200">
                             <AlertTriangle className="w-3 h-3" /> Needs config
                           </span>
-                        )}
-                      </td>
-                      <td className="px-4 py-2.5 text-xs">
-                        {previewed ? (
-                          <span className="text-gray-700">{columnCount} columns</span>
+                        ) : lastRun?.status === 'failure' ? (
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 text-[11px] rounded-full bg-rose-50 text-rose-700 border border-rose-200">
+                            <XCircle className="w-3 h-3" /> Failed
+                          </span>
+                        ) : lastRun?.status === 'success' ? (
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 text-[11px] rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200">
+                            <CheckCircle2 className="w-3 h-3" /> Healthy
+                          </span>
                         ) : (
-                          <span className="text-gray-400 italic">not previewed</span>
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 text-[11px] rounded-full bg-gray-100 text-gray-600 border border-gray-200">
+                            <Clock className="w-3 h-3" /> Idle
+                          </span>
                         )}
                       </td>
-                      <td className="px-4 py-2.5 text-right">
+                      <td className="px-4 py-2.5 text-right" onClick={(e) => e.stopPropagation()}>
                         <div className="inline-flex items-center gap-1">
                           <button
                             onClick={() => handleRun(assetKey, component.id)}
@@ -464,6 +763,25 @@ export function IngestionsPanel({ onAddDataSource, onEditComponent }: Ingestions
           )}
         </div>
       </div>
+
+      {/* Row detail drawer — opens on row click. Shows recent runs and
+          errors so users can debug without opening the modal. */}
+      {drawerFor && (() => {
+        const target = ingestions.find((i) => i.component.id === drawerFor);
+        if (!target) return null;
+        return (
+          <RowDetailDrawer
+            target={target}
+            onClose={() => setDrawerFor(null)}
+            onEdit={() => {
+              onEditComponent(target.component);
+              setDrawerFor(null);
+            }}
+            onRun={() => handleRun(target.assetKey, target.component.id)}
+            running={runningId === target.component.id}
+          />
+        );
+      })()}
 
       <AddDataDialog
         open={addDataOpen}
@@ -620,4 +938,191 @@ function formatBytes(n: number): string {
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
   if (n < 1024 * 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)} MB`;
   return `${(n / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+}
+
+function formatRelative(ts: string): string {
+  const dt = Date.now() - new Date(ts).getTime();
+  if (dt < 60_000) return 'just now';
+  if (dt < 3600_000) return `${Math.floor(dt / 60_000)}m ago`;
+  if (dt < 24 * 3600_000) return `${Math.floor(dt / 3600_000)}h ago`;
+  if (dt < 7 * 24 * 3600_000) return `${Math.floor(dt / (24 * 3600_000))}d ago`;
+  return new Date(ts).toLocaleDateString([], { month: 'short', day: 'numeric' });
+}
+
+// Per-row status squares — last N materializes, green/red left→right.
+// Empty runs render as a light grey placeholder so the width is stable
+// across rows even when a source has never been materialized.
+function Sparkline({ runs, size = 8 }: { runs: IngestionEvent[]; size?: number }) {
+  const N = 8;
+  const recent = runs.slice(-N);
+  const empty = N - recent.length;
+  return (
+    <div className="flex items-end gap-0.5" title={`Last ${recent.length} runs`}>
+      {Array.from({ length: empty }).map((_, i) => (
+        <div
+          key={`e${i}`}
+          style={{ width: size, height: size }}
+          className="rounded-sm bg-gray-100"
+        />
+      ))}
+      {recent.map((e, i) => {
+        const color =
+          e.status === 'success' ? 'bg-emerald-400'
+          : e.status === 'failure' ? 'bg-rose-400'
+          : 'bg-gray-300';
+        return (
+          <div
+            key={i}
+            style={{ width: size, height: size }}
+            className={`rounded-sm ${color}`}
+            title={`${new Date(e.ts).toLocaleString()} — ${e.status}${e.duration_ms != null ? ` (${(e.duration_ms / 1000).toFixed(1)}s)` : ''}`}
+          />
+        );
+      })}
+    </div>
+  );
+}
+
+// Row-detail drawer — recent runs, errors, quick actions. Slides in on
+// row click, gives users a debug surface without leaving the page.
+function RowDetailDrawer({
+  target,
+  onClose,
+  onEdit,
+  onRun,
+  running,
+}: {
+  target: any;
+  onClose: () => void;
+  onEdit: () => void;
+  onRun: () => void;
+  running: boolean;
+}) {
+  const runs = (target.materializes as IngestionEvent[]).slice(-20).reverse();
+  const KindIcon = KIND_META[target.kind as SourceKind].icon;
+  return (
+    <div className="fixed inset-0 z-50 flex" onClick={onClose}>
+      <div className="flex-1 bg-black/30" />
+      <div
+        className="w-[420px] max-w-full bg-white h-full shadow-2xl flex flex-col overflow-hidden"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="px-4 py-3 border-b border-gray-200 flex items-start justify-between gap-2">
+          <div className="min-w-0">
+            <div className="flex items-center gap-2 min-w-0">
+              <KindIcon className="w-4 h-4 text-gray-500 flex-shrink-0" />
+              <h3 className="text-sm font-semibold text-gray-900 truncate">
+                {target.component.label || target.component.id}
+              </h3>
+            </div>
+            <p className="text-[11px] text-gray-500 font-mono truncate mt-0.5" title={target.component.component_type}>
+              {target.component.component_type.split('.').pop()}
+            </p>
+          </div>
+          <button onClick={onClose} className="p-1 hover:bg-gray-100 rounded" aria-label="Close">
+            <X className="w-4 h-4 text-gray-500" />
+          </button>
+        </div>
+
+        {/* Quick facts */}
+        <div className="p-4 space-y-3 flex-shrink-0 border-b border-gray-100 bg-gray-50">
+          <div className="grid grid-cols-2 gap-2 text-xs">
+            <Fact label="Destination asset" value={target.assetKey} mono />
+            <Fact label="Kind" value={KIND_META[target.kind as SourceKind].label} />
+            <Fact
+              label="Cadence"
+              value={
+                target.schedules.length > 0
+                  ? target.schedules.map((s: any) => s.cron || 'scheduled').join(', ')
+                  : 'manual'
+              }
+            />
+            <Fact
+              label="Partition"
+              value={target.partition ? `${target.partition.kind} · ${target.partition.description}` : 'none'}
+            />
+            <Fact
+              label="Configured"
+              value={target.configured ? '✓ yes' : '⚠ needs config'}
+              tone={target.configured ? 'success' : 'warning'}
+            />
+            <Fact
+              label="Last run"
+              value={target.lastRun ? formatRelative(target.lastRun.ts) : 'never'}
+            />
+          </div>
+          <div className="flex items-center gap-2 pt-2">
+            <button
+              onClick={onRun}
+              disabled={!target.configured || running}
+              className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium bg-primary text-primary-foreground rounded disabled:opacity-40"
+            >
+              {running ? <Loader2 className="w-3 h-3 animate-spin" /> : <Play className="w-3 h-3" />}
+              {running ? 'Running…' : 'Run now'}
+            </button>
+            <button
+              onClick={onEdit}
+              className="inline-flex items-center gap-1 px-2.5 py-1 text-xs text-gray-700 hover:bg-gray-100 rounded"
+            >
+              <Settings className="w-3 h-3" />
+              Configure
+            </button>
+          </div>
+        </div>
+
+        {/* Recent runs */}
+        <div className="flex-1 overflow-y-auto">
+          <div className="px-4 py-3 border-b border-gray-100">
+            <h4 className="text-xs font-semibold text-gray-700 uppercase tracking-wider">Recent runs</h4>
+          </div>
+          {runs.length === 0 ? (
+            <div className="p-8 text-center text-xs text-gray-400">
+              No runs recorded yet. Materialize this ingestion to see history here.
+            </div>
+          ) : (
+            <ul className="divide-y divide-gray-50">
+              {runs.map((e, i) => (
+                <li key={i} className="px-4 py-2 flex items-center gap-2 text-xs">
+                  {e.status === 'success' && <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500 flex-shrink-0" />}
+                  {e.status === 'failure' && <XCircle className="w-3.5 h-3.5 text-rose-500 flex-shrink-0" />}
+                  {e.status === 'running' && <Loader2 className="w-3.5 h-3.5 text-blue-500 animate-spin flex-shrink-0" />}
+                  <div className="flex-1 min-w-0">
+                    <div className="text-gray-800">{formatRelative(e.ts)}</div>
+                    <div className="text-[10px] text-gray-400 tabular-nums">
+                      {new Date(e.ts).toLocaleString()}
+                      {e.duration_ms != null && ` · ${(e.duration_ms / 1000).toFixed(1)}s`}
+                      {e.rows != null && ` · ${e.rows.toLocaleString()} rows`}
+                    </div>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function Fact({
+  label,
+  value,
+  mono,
+  tone,
+}: {
+  label: string;
+  value: string;
+  mono?: boolean;
+  tone?: 'success' | 'warning';
+}) {
+  const toneClass =
+    tone === 'success' ? 'text-emerald-700'
+    : tone === 'warning' ? 'text-amber-700'
+    : 'text-gray-800';
+  return (
+    <div className="flex flex-col gap-0.5">
+      <span className="text-[10px] uppercase tracking-wider text-gray-500">{label}</span>
+      <span className={`${mono ? 'font-mono' : ''} ${toneClass} break-all`}>{value}</span>
+    </div>
+  );
 }
