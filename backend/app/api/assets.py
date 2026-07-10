@@ -64,6 +64,22 @@ async def known_schemas_endpoint(project_id: str):
     return get_known_schemas(project_id)
 
 
+@router.get("/{project_id}/ingestion-history")
+async def ingestion_history_endpoint(project_id: str, limit: int = 1000):
+    """Read the ingestion event log — every materialize and successful
+    preview is appended to a per-project JSONL file. The Ingestions tab
+    computes KPIs (total rows, 24h count, success rate) and the trend
+    chart client-side from these events, so we don't need to add a new
+    aggregate endpoint every time we want a new panel."""
+    from ..services.ingestion_history import read_events
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    project_dir = project_service._get_project_dir(project)
+    events = read_events(project_dir, limit=limit)
+    return {"events": events}
+
+
 def _infer_upstream_resource_key(src_dir: Path, source_asset_key: str) -> str | None:
     """Look up the upstream asset's defs.yaml and return its declared Dagster
     resource_key, if any. Enables the SqlTransformer to inherit warehouse
@@ -249,6 +265,28 @@ async def preview_asset_data(
         # materialized yet" and should re-check on next click.
         if output_data.get('success'):
             _PREVIEW_CACHE[cache_key] = (time.time(), output_data)
+            # Log a preview event so the Ingestions tab has row-count data
+            # to trend on. `row_count` is the TRUE total (from COUNT(*) on
+            # warehouse-sourced previews, len(df) on in-memory). Bytes are
+            # a very rough estimate — assume 30 bytes/cell — but at least
+            # gives the "bytes ingested" tile something to move.
+            try:
+                from ..services.ingestion_history import record_event
+                rows = output_data.get('row_count') or (
+                    len(output_data.get('data') or [])
+                )
+                col_count = output_data.get('column_count') or len(output_data.get('columns') or [])
+                bytes_est = rows * col_count * 30 if rows and col_count else None
+                record_event(
+                    project_dir,
+                    event_type="preview",
+                    asset_key=asset_key,
+                    rows=int(rows) if rows is not None else None,
+                    bytes_ingested=int(bytes_est) if bytes_est else None,
+                    status="success",
+                )
+            except Exception as _e:
+                print(f"[preview] Warning: could not record ingestion event: {_e}")
             # Also remember the observed schema (columns + dtypes) so the
             # Dagster AI planner can inject a real schema into future prompts
             # instead of the model having to guess columns for dynamic

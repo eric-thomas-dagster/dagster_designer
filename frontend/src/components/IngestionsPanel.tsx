@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Download, Cloud, Database, FileText, Globe, Sparkles, Boxes, CheckCircle2, AlertTriangle, Clock, Play, Settings } from 'lucide-react';
+import { Download, Cloud, Database, FileText, Globe, Sparkles, Boxes, CheckCircle2, AlertTriangle, Play, Settings, Activity, TrendingUp, Loader2, XCircle } from 'lucide-react';
 import { useProjectStore } from '@/hooks/useProject';
-import { assetsApi, projectsApi } from '@/services/api';
+import { assetsApi, projectsApi, type IngestionEvent } from '@/services/api';
 import { notify } from './Notifications';
 import { AddDataDialog } from './AddDataDialog';
 import type { ComponentInstance } from '@/types';
@@ -87,12 +87,17 @@ export function IngestionsPanel({ onAddDataSource, onEditComponent }: Ingestions
   // {asset_key: {columns, dtypes}} — powers the "rows ingested" hint.
   // Populated on any successful preview elsewhere in the app.
   const [schemas, setSchemas] = useState<Record<string, { columns: string[]; dtypes: Record<string, string> }>>({});
+  const [events, setEvents] = useState<IngestionEvent[]>([]);
+  const [window, setWindow] = useState<'24h' | '7d' | '30d'>('7d');
 
   useEffect(() => {
     if (!currentProject) return;
     let cancelled = false;
     assetsApi.knownSchemas(currentProject.id).then((s) => {
       if (!cancelled) setSchemas(s || {});
+    }).catch(() => { /* empty is fine */ });
+    assetsApi.ingestionHistory(currentProject.id, 5000).then((r) => {
+      if (!cancelled) setEvents(r.events || []);
     }).catch(() => { /* empty is fine */ });
     return () => { cancelled = true; };
   }, [currentProject?.id]);
@@ -128,6 +133,81 @@ export function IngestionsPanel({ onAddDataSource, onEditComponent }: Ingestions
     for (const i of ingestions) byKind[i.kind]++;
     return { total, configured, unconfigured, previewed, byKind };
   }, [ingestions]);
+
+  // Ingestion-only event view: filter the raw log down to events whose
+  // asset_key belongs to one of the ingestion components we know about
+  // in this project. Prevents transform / sink activity from muddying
+  // the "state of your ingestions" KPIs.
+  const ingestionAssetKeys = useMemo(
+    () => new Set(ingestions.map((i) => i.assetKey)),
+    [ingestions],
+  );
+  const ingestionEvents = useMemo(
+    () => events.filter((e) => ingestionAssetKeys.has(e.asset_key)),
+    [events, ingestionAssetKeys],
+  );
+
+  // Time-windowed analytics — 24h / 7d / 30d switch drives the KPIs
+  // AND the trend chart together so users can pivot the whole board.
+  const windowMs = window === '24h' ? 24 * 3600e3 : window === '7d' ? 7 * 24 * 3600e3 : 30 * 24 * 3600e3;
+  const now = Date.now();
+  const windowedEvents = useMemo(
+    () => ingestionEvents.filter((e) => now - new Date(e.ts).getTime() <= windowMs),
+    [ingestionEvents, windowMs, now],
+  );
+
+  // "Total rows ingested" — sum the LATEST successful preview row count
+  // per asset (not cumulative across preview calls) so re-previewing a
+  // static table doesn't double-count. Windowed variant only counts
+  // assets that ran inside the window.
+  const analytics = useMemo(() => {
+    const latestPerAsset = new Map<string, IngestionEvent>();
+    for (const e of ingestionEvents) {
+      if (e.status !== 'success' || (e.rows ?? null) === null) continue;
+      const prev = latestPerAsset.get(e.asset_key);
+      if (!prev || new Date(e.ts) > new Date(prev.ts)) latestPerAsset.set(e.asset_key, e);
+    }
+    const totalRows = Array.from(latestPerAsset.values()).reduce((s, e) => s + (e.rows ?? 0), 0);
+    const totalBytes = Array.from(latestPerAsset.values()).reduce((s, e) => s + (e.bytes ?? 0), 0);
+
+    const windowMats = windowedEvents.filter((e) => e.type === 'materialize');
+    const successes = windowMats.filter((e) => e.status === 'success').length;
+    const failures = windowMats.filter((e) => e.status === 'failure').length;
+    const running = ingestionEvents.filter((e) => e.status === 'running').length;
+    const successRate = windowMats.length > 0 ? successes / windowMats.length : null;
+
+    const durations = windowMats.filter((e) => e.duration_ms != null).map((e) => e.duration_ms!);
+    const avgDurationMs = durations.length > 0
+      ? durations.reduce((a, b) => a + b, 0) / durations.length
+      : null;
+
+    return { totalRows, totalBytes, successes, failures, running, successRate, avgDurationMs };
+  }, [ingestionEvents, windowedEvents]);
+
+  // Trend series — one bucket per day (or hour for 24h) of the window,
+  // counting materializes. Simple SVG line + area chart below.
+  const trend = useMemo(() => {
+    const bucketMs = window === '24h' ? 3600e3 : 24 * 3600e3;      // 1h or 1d
+    const bucketCount = window === '24h' ? 24 : window === '7d' ? 7 : 30;
+    const startMs = now - bucketCount * bucketMs;
+    const buckets: { t: number; success: number; failure: number; rows: number }[] = [];
+    for (let i = 0; i < bucketCount; i++) {
+      buckets.push({ t: startMs + i * bucketMs, success: 0, failure: 0, rows: 0 });
+    }
+    for (const e of windowedEvents) {
+      const dt = new Date(e.ts).getTime();
+      if (dt < startMs) continue;
+      const idx = Math.min(bucketCount - 1, Math.floor((dt - startMs) / bucketMs));
+      if (e.type === 'materialize') {
+        if (e.status === 'success') buckets[idx].success++;
+        else if (e.status === 'failure') buckets[idx].failure++;
+      }
+      if (e.type === 'preview' && e.status === 'success') {
+        buckets[idx].rows += e.rows ?? 0;
+      }
+    }
+    return { buckets, bucketMs, bucketCount };
+  }, [windowedEvents, window, now]);
 
   const handleRun = async (assetKey: string, componentId: string) => {
     if (!currentProject) return;
@@ -180,42 +260,75 @@ export function IngestionsPanel({ onAddDataSource, onEditComponent }: Ingestions
         </button>
       </div>
 
-      {/* KPI cards — the top-of-page vitals */}
-      <div className="px-8 py-6 grid grid-cols-2 md:grid-cols-4 gap-4">
-        <KpiCard
-          label="Total ingestions"
-          value={kpis.total}
-          icon={Download}
-          tone="neutral"
-        />
-        <KpiCard
-          label="Configured"
-          value={kpis.configured}
-          hint={kpis.total > 0 ? `${Math.round((kpis.configured / kpis.total) * 100)}%` : undefined}
-          icon={CheckCircle2}
-          tone="success"
-        />
-        <KpiCard
-          label="Needs config"
-          value={kpis.unconfigured}
-          icon={AlertTriangle}
-          tone={kpis.unconfigured > 0 ? 'warning' : 'neutral'}
-        />
-        <KpiCard
-          label="Previewed at least once"
-          value={kpis.previewed}
-          hint={kpis.total > 0 ? `of ${kpis.total}` : undefined}
-          icon={Clock}
-          tone="neutral"
-        />
-      </div>
+      {/* KPI band + time-window switcher. The KPIs pivot with the switch
+          so 24h / 7d / 30d all use one place. */}
+      <div className="px-8 py-6 space-y-4">
+        <div className="flex items-center justify-between">
+          <h2 className="text-sm font-semibold text-gray-900">Overview</h2>
+          <div className="flex items-center gap-0.5 bg-gray-100 rounded p-0.5">
+            {(['24h', '7d', '30d'] as const).map((w) => (
+              <button
+                key={w}
+                onClick={() => setWindow(w)}
+                className={`px-2.5 py-1 text-xs rounded ${
+                  window === w ? 'bg-white text-gray-900 shadow-sm font-medium' : 'text-gray-600'
+                }`}
+              >
+                Last {w}
+              </button>
+            ))}
+          </div>
+        </div>
 
-      {/* Source-mix visual — horizontal stacked bar segmented by kind */}
-      <div className="px-8 pb-6">
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+          <KpiCard
+            label="Total rows ingested"
+            value={formatCompact(analytics.totalRows)}
+            hint={analytics.totalBytes > 0 ? `≈ ${formatBytes(analytics.totalBytes)}` : 'across all sources'}
+            icon={TrendingUp}
+            tone="success"
+          />
+          <KpiCard
+            label="Active now"
+            value={String(analytics.running)}
+            hint={analytics.running > 0 ? 'currently running' : 'no runs in flight'}
+            icon={analytics.running > 0 ? Loader2 : Activity}
+            iconSpin={analytics.running > 0}
+            tone={analytics.running > 0 ? 'success' : 'neutral'}
+          />
+          <KpiCard
+            label={`Successful runs (${window})`}
+            value={String(analytics.successes)}
+            hint={
+              analytics.successRate !== null
+                ? `${Math.round((analytics.successRate ?? 0) * 100)}% success rate`
+                : 'no runs yet'
+            }
+            icon={CheckCircle2}
+            tone="success"
+          />
+          <KpiCard
+            label={`Failed runs (${window})`}
+            value={String(analytics.failures)}
+            hint={
+              analytics.avgDurationMs !== null
+                ? `avg run ${(analytics.avgDurationMs / 1000).toFixed(1)}s`
+                : undefined
+            }
+            icon={XCircle}
+            tone={analytics.failures > 0 ? 'warning' : 'neutral'}
+          />
+        </div>
+
+        {/* Trend chart — successes/failures per bucket, area rows-ingested. */}
+        <TrendChart trend={trend} window={window} />
+
+        {/* Existing source-mix strip kept below the trend so users still
+            see composition at a glance. */}
         <div className="bg-white border border-gray-200 rounded-lg p-4">
           <div className="flex items-center justify-between mb-3">
             <h2 className="text-sm font-semibold text-gray-900">Source mix</h2>
-            <span className="text-xs text-gray-500">{kpis.total} sources</span>
+            <span className="text-xs text-gray-500">{kpis.total} sources · {kpis.configured} configured · {kpis.unconfigured} needing config</span>
           </div>
           {kpis.total === 0 ? (
             <div className="text-xs text-gray-400 py-4 text-center">No ingestion sources yet — click <strong>Add data</strong> to connect one.</div>
@@ -228,7 +341,7 @@ export function IngestionsPanel({ onAddDataSource, onEditComponent }: Ingestions
                   return (
                     <div
                       key={kind}
-                      className={`${KIND_META[kind].color}`}
+                      className={KIND_META[kind].color}
                       style={{ width: `${pct}%` }}
                       title={`${KIND_META[kind].label}: ${n}`}
                     />
@@ -366,12 +479,14 @@ function KpiCard({
   value,
   hint,
   icon: Icon,
+  iconSpin = false,
   tone,
 }: {
   label: string;
-  value: number;
+  value: string | number;
   hint?: string;
   icon: any;
+  iconSpin?: boolean;
   tone: 'neutral' | 'success' | 'warning';
 }) {
   const toneClasses = {
@@ -382,15 +497,127 @@ function KpiCard({
   return (
     <div className="bg-white border border-gray-200 rounded-lg p-4 flex items-start gap-3">
       <div className={`w-9 h-9 rounded-lg flex items-center justify-center flex-shrink-0 ${toneClasses}`}>
-        <Icon className="w-5 h-5" />
+        <Icon className={`w-5 h-5 ${iconSpin ? 'animate-spin' : ''}`} />
       </div>
       <div className="min-w-0 flex-1">
         <div className="text-xs text-gray-500 uppercase tracking-wider font-medium">{label}</div>
         <div className="flex items-baseline gap-1.5 mt-0.5">
-          <div className="text-2xl font-semibold text-gray-900 tabular-nums">{value.toLocaleString()}</div>
+          <div className="text-2xl font-semibold text-gray-900 tabular-nums">
+            {typeof value === 'number' ? value.toLocaleString() : value}
+          </div>
           {hint && <div className="text-xs text-gray-500">{hint}</div>}
         </div>
       </div>
     </div>
   );
+}
+
+// Trend chart — one bar per bucket, green successes on top of red
+// failures, with a rows-ingested area behind. Pure SVG so we don't pull
+// in a charting lib for one view.
+function TrendChart({
+  trend,
+  window,
+}: {
+  trend: { buckets: Array<{ t: number; success: number; failure: number; rows: number }>; bucketMs: number; bucketCount: number };
+  window: '24h' | '7d' | '30d';
+}) {
+  const buckets = trend.buckets;
+  const maxCount = Math.max(1, ...buckets.map((b) => b.success + b.failure));
+  const maxRows = Math.max(1, ...buckets.map((b) => b.rows));
+  const anyActivity = buckets.some((b) => b.success + b.failure + b.rows > 0);
+  const width = 100; // percent
+  const height = 100; // scaled via viewBox
+  const barW = width / buckets.length;
+
+  const fmtLabel = (t: number) => {
+    const d = new Date(t);
+    return window === '24h'
+      ? d.toLocaleTimeString([], { hour: 'numeric' })
+      : d.toLocaleDateString([], { month: 'short', day: 'numeric' });
+  };
+
+  const rowsPath = buckets
+    .map((b, i) => {
+      const x = i * barW + barW / 2;
+      const y = height - (b.rows / maxRows) * (height * 0.9);
+      return `${i === 0 ? 'M' : 'L'} ${x} ${y}`;
+    })
+    .join(' ');
+
+  return (
+    <div className="bg-white border border-gray-200 rounded-lg p-4">
+      <div className="flex items-center justify-between mb-3">
+        <div>
+          <h2 className="text-sm font-semibold text-gray-900">Ingestion activity</h2>
+          <p className="text-xs text-gray-500 mt-0.5">
+            {window === '24h' ? 'Hourly' : 'Daily'} runs + rows ingested across all sources
+          </p>
+        </div>
+        <div className="flex items-center gap-3 text-[11px] text-gray-500">
+          <div className="flex items-center gap-1"><span className="w-2.5 h-2.5 bg-emerald-400 rounded-sm" /> success</div>
+          <div className="flex items-center gap-1"><span className="w-2.5 h-2.5 bg-rose-400 rounded-sm" /> failure</div>
+          <div className="flex items-center gap-1"><span className="w-2.5 h-2.5 bg-blue-400/60 rounded-sm" /> rows</div>
+        </div>
+      </div>
+      {!anyActivity ? (
+        <div className="py-8 text-center text-xs text-gray-400">
+          No activity yet in the last {window}. Materialize or preview an ingestion to start populating this chart.
+        </div>
+      ) : (
+        <>
+          <svg viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" className="w-full h-40">
+            {/* rows-ingested line */}
+            <path d={rowsPath} fill="none" stroke="rgb(59 130 246 / 0.6)" strokeWidth={0.5} vectorEffect="non-scaling-stroke" />
+            {/* bars */}
+            {buckets.map((b, i) => {
+              const failH = (b.failure / maxCount) * (height * 0.9);
+              const succH = (b.success / maxCount) * (height * 0.9);
+              const x = i * barW + barW * 0.15;
+              const w = barW * 0.7;
+              const failY = height - failH;
+              const succY = failY - succH;
+              return (
+                <g key={i}>
+                  {failH > 0 && <rect x={x} y={failY} width={w} height={failH} fill="rgb(251 113 133)" />}
+                  {succH > 0 && <rect x={x} y={succY} width={w} height={succH} fill="rgb(52 211 153)" />}
+                  {b.success + b.failure === 0 && b.rows === 0 && (
+                    <rect x={x} y={height - 0.6} width={w} height={0.6} fill="rgb(229 231 235)" />
+                  )}
+                  <title>
+                    {new Date(b.t).toLocaleString()} · {b.success} success · {b.failure} failure · {b.rows.toLocaleString()} rows
+                  </title>
+                </g>
+              );
+            })}
+          </svg>
+          <div className="mt-1 grid text-[10px] text-gray-400 tabular-nums" style={{ gridTemplateColumns: `repeat(${buckets.length}, 1fr)` }}>
+            {buckets.map((b, i) => {
+              const showLabel = window === '24h' ? i % 4 === 0 : window === '7d' ? true : i % 5 === 0;
+              return (
+                <div key={i} className="text-center truncate">
+                  {showLabel ? fmtLabel(b.t) : ''}
+                </div>
+              );
+            })}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function formatCompact(n: number): string {
+  if (!isFinite(n)) return '—';
+  if (n >= 1e9) return `${(n / 1e9).toFixed(1)}B`;
+  if (n >= 1e6) return `${(n / 1e6).toFixed(1)}M`;
+  if (n >= 1e3) return `${(n / 1e3).toFixed(1)}k`;
+  return n.toLocaleString();
+}
+
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  if (n < 1024 * 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(n / (1024 * 1024 * 1024)).toFixed(2)} GB`;
 }

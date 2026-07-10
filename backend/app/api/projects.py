@@ -853,6 +853,7 @@ async def materialize_assets(project_id: str, request: MaterializeRequest):
     If no asset_keys are provided, all assets will be materialized.
     """
     import subprocess
+    import time
     from pathlib import Path
 
     project = project_service.get_project(project_id)
@@ -865,6 +866,8 @@ async def materialize_assets(project_id: str, request: MaterializeRequest):
     project_path = Path("./projects") / project_dir_name
     if not project_path.exists():
         raise HTTPException(status_code=404, detail=f"Project directory not found: {project_path}")
+
+    _materialize_started_at = time.time()
 
     try:
         # Build dg launch command using project's venv
@@ -966,6 +969,33 @@ async def materialize_assets(project_id: str, request: MaterializeRequest):
 
         success = result.returncode == 0
         message = "Materialization completed successfully" if success else "Materialization failed"
+
+        # Log an ingestion event per asset key we materialized so the
+        # Ingestions tab has real numbers to trend on. We can't cheaply
+        # count rows from `dg launch`, so leave rows/bytes unset — the
+        # preview endpoint records those separately on next preview.
+        try:
+            from ..services.ingestion_history import record_event
+            asset_keys_logged = request.asset_keys or [
+                node.data.get("asset_key", node.id)
+                for node in project.graph.nodes
+                if node.node_kind == "asset"
+            ]
+            duration_ms = None
+            try:
+                duration_ms = int((time.time() - _materialize_started_at) * 1000)
+            except Exception:
+                pass
+            for ak in asset_keys_logged:
+                record_event(
+                    project_path,
+                    event_type="materialize",
+                    asset_key=ak,
+                    duration_ms=duration_ms,
+                    status="success" if success else "failure",
+                )
+        except Exception as _log_e:
+            print(f"[materialize] Warning: Failed to record ingestion event: {_log_e}")
 
         # Clean up temporary config file
         if config_file_path:

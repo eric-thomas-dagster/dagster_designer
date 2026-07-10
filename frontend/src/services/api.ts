@@ -1176,6 +1176,31 @@ export const assetsApi = {
     );
     return response.data;
   },
+
+  /** Read the ingestion event log — every materialize and every successful
+   *  preview appends a record. The Ingestions tab computes its KPIs and
+   *  the trend chart client-side from this list. */
+  ingestionHistory: async (
+    projectId: string,
+    limit: number = 1000,
+  ): Promise<{ events: IngestionEvent[] }> => {
+    const response = await api.get<{ events: IngestionEvent[] }>(
+      `/assets/${projectId}/ingestion-history`,
+      { params: { limit } },
+    );
+    return response.data;
+  },
 };
+
+export interface IngestionEvent {
+  ts: string;                          // ISO-8601 UTC
+  type: 'materialize' | 'preview';
+  asset_key: string;
+  component?: string;
+  rows?: number;
+  bytes?: number;
+  duration_ms?: number;
+  status: 'success' | 'failure' | 'running';
+}
 
 export default api;
