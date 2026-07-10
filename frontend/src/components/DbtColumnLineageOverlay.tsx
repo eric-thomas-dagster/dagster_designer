@@ -47,7 +47,7 @@ export function DbtColumnLineageOverlay({
   const [error, setError] = useState<string | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const colRefs = useRef(new Map<string, HTMLDivElement | null>());
-  const [connectorPaths, setConnectorPaths] = useState<Array<{ d: string; confidence: number; className: string; touchesHl: boolean }>>([]);
+  const [connectorPaths, setConnectorPaths] = useState<Array<{ d: string; confidence: number; className: string; touchesHl: boolean; dashed: boolean }>>([]);
 
   useEffect(() => {
     let cancelled = false;
@@ -79,58 +79,67 @@ export function DbtColumnLineageOverlay({
     return t.length > 0 && t !== '?';
   };
 
-  const { incoming, outgoing, thisColumns } = useMemo(() => {
-    if (!data) return { incoming: new Map<string, Array<{ from_uid: string; from_col: string; confidence: number }>>(), outgoing: new Map<string, Array<{ to_uid: string; to_col: string; confidence: number }>>(), thisColumns: [] as string[] };
-    const inc = new Map<string, Array<{ from_uid: string; from_col: string; confidence: number }>>();
-    const out = new Map<string, Array<{ to_uid: string; to_col: string; confidence: number }>>();
+  // Group edges around the focal model. Track both "real" edges (both
+  // endpoints have concrete column names) and "unknown" edges (one or
+  // both sides are `?` — the backend knows a link exists but couldn't
+  // attribute it to a specific column). We render real edges as solid
+  // lines and unknown edges as dashed lines anchored to the model's
+  // header rectangle, so users can see the connection exists even
+  // when the exact column isn't known.
+  const { incomingUids, outgoingUids, thisColumns } = useMemo(() => {
+    if (!data) return { incomingUids: [] as string[], outgoingUids: [] as string[], thisColumns: [] as string[] };
+    const incSet = new Set<string>();
+    const outSet = new Set<string>();
     const cols = new Set<string>((data.columns_by_model[modelUniqueId] ?? []).filter(isRealCol));
     for (const e of data.edges) {
-      if (!isRealCol(e.from_column) || !isRealCol(e.to_column)) continue;
-      if (e.to_unique_id === modelUniqueId) {
-        cols.add(e.to_column);
-        const arr = inc.get(e.from_unique_id) ?? [];
-        arr.push({ from_uid: e.from_unique_id, from_col: e.from_column, confidence: e.confidence });
-        inc.set(e.from_unique_id, arr);
+      if (e.to_unique_id === modelUniqueId && e.from_unique_id !== modelUniqueId) {
+        incSet.add(e.from_unique_id);
+        if (isRealCol(e.to_column)) cols.add(e.to_column);
       }
-      if (e.from_unique_id === modelUniqueId) {
-        cols.add(e.from_column);
-        const arr = out.get(e.to_unique_id) ?? [];
-        arr.push({ to_uid: e.to_unique_id, to_col: e.to_column, confidence: e.confidence });
-        out.set(e.to_unique_id, arr);
+      if (e.from_unique_id === modelUniqueId && e.to_unique_id !== modelUniqueId) {
+        outSet.add(e.to_unique_id);
+        if (isRealCol(e.from_column)) cols.add(e.from_column);
       }
     }
-    return { incoming: inc, outgoing: out, thisColumns: Array.from(cols).sort() };
+    return {
+      incomingUids: Array.from(incSet).sort(),
+      outgoingUids: Array.from(outSet).sort(),
+      thisColumns: Array.from(cols).sort(),
+    };
   }, [data, modelUniqueId]);
 
-  // For each upstream/downstream model, which of its columns actually
-  // touch the focal model? We render all real columns but fade the
-  // ones without an edge so users see "dropped" columns as well.
+  // Which real columns of an upstream/downstream model actually touch
+  // the focal model? Used to fade "dropped" columns.
   const upstreamModels = useMemo(() => {
-    if (!data) return [] as Array<{ uid: string; columns: string[]; edgesByCol: Map<string, number> }>;
-    return Array.from(incoming.keys()).map((uid) => {
+    if (!data) return [] as Array<{ uid: string; columns: string[]; edgesByCol: Map<string, number>; hasUnknownEdge: boolean }>;
+    return incomingUids.map((uid) => {
       const cols = (data.columns_by_model[uid] ?? []).filter(isRealCol);
       const edgesByCol = new Map<string, number>();
-      for (const e of incoming.get(uid) ?? []) {
-        if (!isRealCol(e.from_col)) continue;
-        edgesByCol.set(e.from_col, Math.max(edgesByCol.get(e.from_col) ?? 0, e.confidence));
-        if (!cols.includes(e.from_col)) cols.push(e.from_col);
+      let hasUnknownEdge = false;
+      for (const e of data.edges) {
+        if (e.from_unique_id !== uid || e.to_unique_id !== modelUniqueId) continue;
+        if (!isRealCol(e.from_column)) { hasUnknownEdge = true; continue; }
+        edgesByCol.set(e.from_column, Math.max(edgesByCol.get(e.from_column) ?? 0, e.confidence));
+        if (!cols.includes(e.from_column)) cols.push(e.from_column);
       }
-      return { uid, columns: cols.slice().sort(), edgesByCol };
+      return { uid, columns: cols.slice().sort(), edgesByCol, hasUnknownEdge };
     });
-  }, [data, incoming]);
+  }, [data, incomingUids, modelUniqueId]);
   const downstreamModels = useMemo(() => {
-    if (!data) return [] as Array<{ uid: string; columns: string[]; edgesByCol: Map<string, number> }>;
-    return Array.from(outgoing.keys()).map((uid) => {
+    if (!data) return [] as Array<{ uid: string; columns: string[]; edgesByCol: Map<string, number>; hasUnknownEdge: boolean }>;
+    return outgoingUids.map((uid) => {
       const cols = (data.columns_by_model[uid] ?? []).filter(isRealCol);
       const edgesByCol = new Map<string, number>();
-      for (const e of outgoing.get(uid) ?? []) {
-        if (!isRealCol(e.to_col)) continue;
-        edgesByCol.set(e.to_col, Math.max(edgesByCol.get(e.to_col) ?? 0, e.confidence));
-        if (!cols.includes(e.to_col)) cols.push(e.to_col);
+      let hasUnknownEdge = false;
+      for (const e of data.edges) {
+        if (e.from_unique_id !== modelUniqueId || e.to_unique_id !== uid) continue;
+        if (!isRealCol(e.to_column)) { hasUnknownEdge = true; continue; }
+        edgesByCol.set(e.to_column, Math.max(edgesByCol.get(e.to_column) ?? 0, e.confidence));
+        if (!cols.includes(e.to_column)) cols.push(e.to_column);
       }
-      return { uid, columns: cols.slice().sort(), edgesByCol };
+      return { uid, columns: cols.slice().sort(), edgesByCol, hasUnknownEdge };
     });
-  }, [data, outgoing]);
+  }, [data, outgoingUids, modelUniqueId]);
 
   // Compute SVG connector paths on data change / resize / scroll.
   // We iterate the raw edge list once and only draw edges where both
@@ -138,8 +147,8 @@ export function DbtColumnLineageOverlay({
   const recomputePaths = () => {
     if (!containerRef.current || !data) return;
     const cbox = containerRef.current.getBoundingClientRect();
-    const paths: Array<{ d: string; confidence: number; className: string; touchesHl: boolean }> = [];
-    const draw = (fromKey: string, toKey: string, confidence: number, cls: string, touchesHl: boolean) => {
+    const paths: Array<{ d: string; confidence: number; className: string; touchesHl: boolean; dashed: boolean }> = [];
+    const draw = (fromKey: string, toKey: string, confidence: number, cls: string, touchesHl: boolean, dashed: boolean) => {
       const a = colRefs.current.get(fromKey);
       const b = colRefs.current.get(toKey);
       if (!a || !b) return;
@@ -151,24 +160,35 @@ export function DbtColumnLineageOverlay({
       const y2 = br.top + br.height / 2 - cbox.top;
       const dx = Math.max(30, (x2 - x1) / 2);
       const d = `M ${x1} ${y1} C ${x1 + dx} ${y1}, ${x2 - dx} ${y2}, ${x2} ${y2}`;
-      paths.push({ d, confidence, className: cls, touchesHl });
+      paths.push({ d, confidence, className: cls, touchesHl, dashed });
     };
     // Highlight semantics: an edge touches the highlight when either
-    // endpoint matches. When no highlight is set, everything is
-    // considered "touched" so nothing fades.
-    const edgeTouches = (uid1: string, col1: string, uid2: string, col2: string) => {
+    // endpoint matches. Header refs (col = null) match if the model
+    // matches — clicking a column highlights everything from its
+    // model that touches the same target.
+    const edgeTouches = (uid1: string, col1: string | null, uid2: string, col2: string | null) => {
       if (!hlColumn) return true;
-      return (hlColumn.uid === uid1 && hlColumn.col === col1)
-        || (hlColumn.uid === uid2 && hlColumn.col === col2);
+      const m1 = hlColumn.uid === uid1 && (col1 === null || hlColumn.col === col1);
+      const m2 = hlColumn.uid === uid2 && (col2 === null || hlColumn.col === col2);
+      return m1 || m2;
     };
     for (const e of data.edges) {
-      if (!isRealCol(e.from_column) || !isRealCol(e.to_column)) continue;
-      if (e.to_unique_id === modelUniqueId) {
-        const t = edgeTouches(e.from_unique_id, e.from_column, modelUniqueId, e.to_column);
-        draw(`up:${e.from_unique_id}:${e.from_column}`, `this:${e.to_column}`, e.confidence, 'stroke-emerald-500', t);
-      } else if (e.from_unique_id === modelUniqueId) {
-        const t = edgeTouches(modelUniqueId, e.from_column, e.to_unique_id, e.to_column);
-        draw(`this:${e.from_column}`, `down:${e.to_unique_id}:${e.to_column}`, e.confidence, 'stroke-blue-500', t);
+      if (e.to_unique_id === modelUniqueId && e.from_unique_id !== modelUniqueId) {
+        // Incoming edge → from upstream (or its header) to focal col
+        // (or focal header when we don't know which column it feeds).
+        const fromReal = isRealCol(e.from_column);
+        const toReal = isRealCol(e.to_column);
+        const fromKey = fromReal ? `up:${e.from_unique_id}:${e.from_column}` : `up:${e.from_unique_id}:__header__`;
+        const toKey = toReal ? `this:${e.to_column}` : `this:__header__`;
+        const t = edgeTouches(e.from_unique_id, fromReal ? e.from_column : null, modelUniqueId, toReal ? e.to_column : null);
+        draw(fromKey, toKey, e.confidence, 'stroke-emerald-500', t, !fromReal || !toReal);
+      } else if (e.from_unique_id === modelUniqueId && e.to_unique_id !== modelUniqueId) {
+        const fromReal = isRealCol(e.from_column);
+        const toReal = isRealCol(e.to_column);
+        const fromKey = fromReal ? `this:${e.from_column}` : `this:__header__`;
+        const toKey = toReal ? `down:${e.to_unique_id}:${e.to_column}` : `down:${e.to_unique_id}:__header__`;
+        const t = edgeTouches(modelUniqueId, fromReal ? e.from_column : null, e.to_unique_id, toReal ? e.to_column : null);
+        draw(fromKey, toKey, e.confidence, 'stroke-blue-500', t, !fromReal || !toReal);
       }
     }
     setConnectorPaths(paths);
@@ -186,8 +206,14 @@ export function DbtColumnLineageOverlay({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [data, upstreamModels, downstreamModels, hlColumn]);
 
-  const totalUpEdges = useMemo(() => Array.from(incoming.values()).reduce((s, arr) => s + arr.length, 0), [incoming]);
-  const totalDownEdges = useMemo(() => Array.from(outgoing.values()).reduce((s, arr) => s + arr.length, 0), [outgoing]);
+  const totalUpEdges = useMemo(() => {
+    if (!data) return 0;
+    return data.edges.filter((e) => e.to_unique_id === modelUniqueId && e.from_unique_id !== modelUniqueId).length;
+  }, [data, modelUniqueId]);
+  const totalDownEdges = useMemo(() => {
+    if (!data) return 0;
+    return data.edges.filter((e) => e.from_unique_id === modelUniqueId && e.to_unique_id !== modelUniqueId).length;
+  }, [data, modelUniqueId]);
 
   return (
     <div className="fixed inset-0 z-50 bg-gray-900/60 backdrop-blur-sm flex items-center justify-center p-6" onClick={onClose}>
@@ -243,6 +269,8 @@ export function DbtColumnLineageOverlay({
                       tone="upstream"
                       side="right"
                       colRef={(col, el) => colRefs.current.set(`up:${u.uid}:${col}`, el)}
+                      headerRef={(el) => colRefs.current.set(`up:${u.uid}:__header__`, el)}
+                      hasUnknownEdge={u.hasUnknownEdge}
                       annotate={(col) => (u.edgesByCol.has(col) ? null : 'dropped')}
                       onModelClick={u.uid.startsWith('model.') ? () => onFocalChange?.(u.uid) : undefined}
                       onColumnClick={(col) => setHlColumn(hlColumn?.uid === u.uid && hlColumn?.col === col ? null : { uid: u.uid, col })}
@@ -262,6 +290,7 @@ export function DbtColumnLineageOverlay({
                     tone="focal"
                     side="both"
                     colRef={(col, el) => colRefs.current.set(`this:${col}`, el)}
+                    headerRef={(el) => colRefs.current.set(`this:__header__`, el)}
                     annotate={(col) => {
                       const hasIncoming = data.edges.some((e) => e.to_unique_id === modelUniqueId && e.to_column === col);
                       const isSource = modelUniqueId.startsWith('source.');
@@ -286,6 +315,8 @@ export function DbtColumnLineageOverlay({
                       tone="downstream"
                       side="left"
                       colRef={(col, el) => colRefs.current.set(`down:${d.uid}:${col}`, el)}
+                      headerRef={(el) => colRefs.current.set(`down:${d.uid}:__header__`, el)}
+                      hasUnknownEdge={d.hasUnknownEdge}
                       annotate={(col) => (d.edgesByCol.has(col) ? null : 'derived-here')}
                       onModelClick={d.uid.startsWith('model.') ? () => onFocalChange?.(d.uid) : undefined}
                       onColumnClick={(col) => setHlColumn(hlColumn?.uid === d.uid && hlColumn?.col === col ? null : { uid: d.uid, col })}
@@ -315,6 +346,7 @@ export function DbtColumnLineageOverlay({
                       fill="none"
                       strokeWidth={p.touchesHl ? 2 : 1.75}
                       strokeLinecap="round"
+                      strokeDasharray={p.dashed ? '4 4' : undefined}
                       className={p.className}
                       filter="url(#line-shadow)"
                       style={{ opacity: p.touchesHl ? 0.45 + p.confidence * 0.5 : 0.08 }}
@@ -410,6 +442,8 @@ function ModelBlock({
   tone,
   side,
   colRef,
+  headerRef,
+  hasUnknownEdge,
   annotate,
   onModelClick,
   onOpenClick,
@@ -423,6 +457,11 @@ function ModelBlock({
   tone: Tone;
   side: 'left' | 'right' | 'both';
   colRef: (col: string, el: HTMLDivElement | null) => void;
+  /** Attaches a ref to the card header so `?` edges (unknown source
+   *  column) can anchor to the model rectangle instead of a specific
+   *  column row. */
+  headerRef?: (el: HTMLDivElement | null) => void;
+  hasUnknownEdge?: boolean;
   annotate?: (col: string) => 'dropped' | 'derived' | 'derived-here' | null;
   /** Click the header → refocus the overlay on this model. */
   onModelClick?: () => void;
@@ -439,8 +478,10 @@ function ModelBlock({
   return (
     <div className={`rounded-lg border ${styles.card} shadow-sm mb-3 overflow-hidden transition-shadow ${headerClickable ? 'hover:shadow-md' : ''}`}>
       {/* Card header — clickable to refocus the overlay onto this model
-          when it's a real model (not a source/seed). */}
+          when it's a real model (not a source/seed). Also serves as the
+          anchor for `?` (unknown-source-column) edges. */}
       <div
+        ref={headerRef}
         className={`px-3 py-2 border-b border-gray-100 flex items-baseline justify-between gap-2 bg-gradient-to-b from-white to-gray-50/40 ${headerClickable ? 'cursor-pointer' : ''}`}
         onClick={headerClickable ? onModelClick : undefined}
         title={headerClickable ? 'Click to refocus column lineage on this model' : undefined}
@@ -450,7 +491,14 @@ function ModelBlock({
             {title}
             {headerClickable && <ArrowRight className="w-3 h-3 text-gray-400" />}
           </div>
-          <div className={`text-[9px] uppercase tracking-wider ${styles.subtitle} font-medium`}>{subtitle}</div>
+          <div className={`text-[9px] uppercase tracking-wider ${styles.subtitle} font-medium flex items-center gap-1.5`}>
+            <span>{subtitle}</span>
+            {hasUnknownEdge && (
+              <span className="inline-flex items-center gap-0.5 text-[8px] text-gray-500 normal-case tracking-normal" title="This model has edges the backend couldn't attribute to a specific column — rendered as dashed lines.">
+                · dashed = unknown col
+              </span>
+            )}
+          </div>
         </div>
         {onOpenClick ? (
           <button
