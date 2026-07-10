@@ -107,13 +107,15 @@ function inferEnumFromDescription(desc: string | undefined): string[] | null {
   return parts;
 }
 
-type Widget = 'column' | 'columns' | 'date' | 'default';
+type Widget = 'column' | 'columns' | 'date' | 'cron' | 'default';
 
 function pickWidget(fieldName: string, fieldSchema: any): Widget {
   const hint = (fieldSchema?.['x-dagster-widget'] || '').toString().toLowerCase();
   if (hint === 'column' || hint === 'column-single') return 'column';
   if (hint === 'columns' || hint === 'column-multi' || hint === 'column-list') return 'columns';
   if (hint === 'date' || hint === 'datetime') return 'date';
+  if (hint === 'cron' || hint === 'crontab') return 'cron';
+  if (/cron|schedule/i.test(fieldName) && !/kind|type|display/i.test(fieldName)) return 'cron';
 
   const lower = fieldName.toLowerCase();
   if (
@@ -266,6 +268,53 @@ function renderField(
       />
     );
   }
+  if (widget === 'cron') {
+    const presets: { label: string; value: string }[] = [
+      { label: '15m', value: '*/15 * * * *' },
+      { label: 'Hourly', value: '0 * * * *' },
+      { label: 'Daily 2am', value: '0 2 * * *' },
+      { label: 'Weekdays 9am', value: '0 9 * * 1-5' },
+      { label: 'Weekly Mon', value: '0 6 * * 1' },
+    ];
+    const cur = typeof value === 'string' ? value : '';
+    return (
+      <div className="space-y-1">
+        <input
+          type="text"
+          value={cur}
+          onChange={(e) => onChange(fieldName, e.target.value)}
+          placeholder="0 9 * * 1-5"
+          className="w-full px-2 py-1.5 text-xs font-mono border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+        />
+        <div className="flex flex-wrap gap-1">
+          {presets.map((p) => (
+            <button
+              key={p.value}
+              type="button"
+              onClick={() => onChange(fieldName, p.value)}
+              className={`px-1.5 py-0.5 text-[10px] rounded border ${
+                cur === p.value
+                  ? 'bg-primary/10 border-primary/40 text-primary'
+                  : 'border-gray-200 text-gray-600 hover:bg-gray-50'
+              }`}
+            >
+              {p.label}
+            </button>
+          ))}
+          {cur && (
+            <a
+              href={`https://crontab.guru/#${encodeURIComponent(cur.replace(/\s+/g, '_'))}`}
+              target="_blank"
+              rel="noreferrer"
+              className="ml-auto text-[10px] text-blue-600 hover:underline"
+            >
+              explain ↗
+            </a>
+          )}
+        </div>
+      </div>
+    );
+  }
 
   if (fieldType === 'boolean') {
     return (
@@ -313,12 +362,22 @@ function renderField(
     );
   }
 
-  // Fall through to text input. Special placeholder when this looked
-  // like a column field but no upstream schema is cached yet.
+  // Fall through to text input. When the field LOOKED like a column
+  // picker but we have no upstream schema (common on ingestion sources
+  // — the upstream is external, not a Dagster asset), give a hint that
+  // fits the domain instead of the misleading "preview upstream…".
   const columnPending = (widget === 'column' || widget === 'columns') && upstreamCols.length === 0;
-  const placeholder = columnPending
-    ? 'preview upstream to enable column picker'
-    : fieldSchema.description || fieldName;
+  let placeholder = fieldSchema.description || fieldName;
+  if (columnPending) {
+    const lower = fieldName.toLowerCase();
+    if (lower.includes('date') || lower.includes('time')) {
+      placeholder = 'e.g. event_date, created_at, updated_at';
+    } else if (lower.includes('id') || lower.includes('key')) {
+      placeholder = 'e.g. id, user_id, primary_key';
+    } else {
+      placeholder = 'Type the column name in your source data';
+    }
+  }
   return (
     <input
       type="text"

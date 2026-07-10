@@ -479,16 +479,33 @@ export function ComponentConfigModal({
     );
   };
 
+  // Enum inference — some community templates put the choice list only
+  // in the description text ("fail, replace, or append") without
+  // declaring enum. Match a comma-list-terminated-by-"or" pattern and
+  // treat it as a dropdown fallback.
+  const inferEnumFromDescription = (desc: string | undefined): string[] | null => {
+    if (!desc) return null;
+    const m = desc.match(/([\w-]+(?:\s*,\s*[\w-]+)+(?:\s*,?\s*or\s+[\w-]+))/i);
+    if (!m) return null;
+    const parts = m[1].split(/\s*,\s*|\s+or\s+/i).map((s) => s.trim()).filter(Boolean);
+    if (parts.length < 2 || parts.length > 12) return null;
+    if (parts.some((p) => /\s/.test(p) || p.length > 24)) return null;
+    return parts;
+  };
+
   // Resolve which widget to render for a given field. Explicit
   // `x-dagster-widget` schema hint wins; otherwise fall back to a
   // name-based heuristic so common patterns (partition_date_column,
   // partition_start, sort_by, group_by) get sensible pickers even for
   // community templates that don't set the hint.
-  const pickWidget = (fieldName: string, fieldSchema: any): 'column' | 'columns' | 'date' | 'default' => {
+  const pickWidget = (fieldName: string, fieldSchema: any): 'column' | 'columns' | 'date' | 'cron' | 'default' => {
     const hint = (fieldSchema?.['x-dagster-widget'] || '').toString().toLowerCase();
     if (hint === 'column' || hint === 'column-single') return 'column';
     if (hint === 'columns' || hint === 'column-multi' || hint === 'column-list') return 'columns';
     if (hint === 'date' || hint === 'datetime') return 'date';
+    if (hint === 'cron' || hint === 'crontab') return 'cron';
+    // Cron by name — freshness_cron / cron_schedule / any *_cron field.
+    if (/cron|schedule/i.test(fieldName) && !/kind|type|display/i.test(fieldName)) return 'cron';
 
     const lower = fieldName.toLowerCase();
     // Multi-column fields — plural, or names that clearly imply a list
@@ -624,6 +641,58 @@ export function ComponentConfigModal({
           onChange={(e) => handleFieldChange(fieldName, e.target.value)}
           className="w-full px-3 py-2 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
         />
+      );
+    }
+    if (widget === 'cron') {
+      // Cron widget = text input with common presets + a link to a
+      // human-readable interpretation via crontab.guru. No dependency
+      // on a full parser — the user picks a preset or types their own.
+      const presets: { label: string; value: string }[] = [
+        { label: 'Every 15 min', value: '*/15 * * * *' },
+        { label: 'Hourly', value: '0 * * * *' },
+        { label: 'Daily 2am', value: '0 2 * * *' },
+        { label: 'Weekdays 9am', value: '0 9 * * 1-5' },
+        { label: 'Weekly Mon 6am', value: '0 6 * * 1' },
+        { label: 'Monthly (1st 3am)', value: '0 3 1 * *' },
+      ];
+      const currentStr = typeof value === 'string' ? value : '';
+      return (
+        <div className="space-y-1">
+          <input
+            type="text"
+            value={currentStr}
+            onChange={(e) => handleFieldChange(fieldName, e.target.value)}
+            placeholder="e.g. 0 9 * * 1-5"
+            className="w-full px-3 py-2 text-sm font-mono border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+          />
+          <div className="flex flex-wrap gap-1">
+            {presets.map((p) => (
+              <button
+                key={p.value}
+                type="button"
+                onClick={() => handleFieldChange(fieldName, p.value)}
+                className={`px-1.5 py-0.5 text-[10px] rounded border ${
+                  currentStr === p.value
+                    ? 'bg-primary/10 border-primary/40 text-primary'
+                    : 'border-gray-200 text-gray-600 hover:bg-gray-50'
+                }`}
+                title={p.value}
+              >
+                {p.label}
+              </button>
+            ))}
+            {currentStr && (
+              <a
+                href={`https://crontab.guru/#${encodeURIComponent(currentStr.replace(/\s+/g, '_'))}`}
+                target="_blank"
+                rel="noreferrer"
+                className="ml-auto text-[10px] text-blue-600 hover:underline"
+              >
+                explain ↗
+              </a>
+            )}
+          </div>
+        </div>
       );
     }
 
@@ -780,8 +849,16 @@ export function ComponentConfigModal({
       );
     }
 
-    // Check if field has enum values - render as dropdown
-    if (fieldSchema.enum && Array.isArray(fieldSchema.enum) && fieldSchema.enum.length > 0) {
+    // Check if field has enum values - render as dropdown. If not
+    // declared, try to infer from a description like "fail, replace, or
+    // append" — community templates often put the choice list only in
+    // the description text.
+    const declaredEnum: string[] | undefined = fieldSchema.enum && Array.isArray(fieldSchema.enum) && fieldSchema.enum.length > 0
+      ? fieldSchema.enum
+      : undefined;
+    const inferredEnum = declaredEnum ? null : inferEnumFromDescription(fieldSchema.description);
+    const enumValues = declaredEnum ?? inferredEnum;
+    if (enumValues && enumValues.length > 0) {
       return (
         <select
           value={value || ''}
@@ -789,7 +866,7 @@ export function ComponentConfigModal({
           className="w-full px-3 py-2 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
         >
           <option value="">Select {fieldName}...</option>
-          {fieldSchema.enum.map((option: string) => (
+          {enumValues.map((option: string) => (
             <option key={option} value={option}>
               {option}
             </option>
