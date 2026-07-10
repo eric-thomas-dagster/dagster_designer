@@ -19,7 +19,8 @@ import { DataPreviewModal } from './components/DataPreviewModal';
 import { DagsterCloudChip } from './components/DagsterCloudChip';
 import { NotificationHost, notify, confirmDialog } from './components/Notifications';
 import { useProjectStore } from './hooks/useProject';
-import { Network, FileCode, Zap, Package, ExternalLink, Settings, Workflow, ChevronDown, Skull, AlertTriangle, X, Loader2, CheckCircle, XCircle, PanelLeftClose, PanelLeft, Clock, Play, Radar, Timer } from 'lucide-react';
+import { Network, FileCode, Zap, Package, ExternalLink, Settings, Workflow, ChevronDown, Skull, AlertTriangle, X, Loader2, CheckCircle, XCircle, PanelLeftClose, PanelLeft, Clock, Play, Radar, Timer, Download } from 'lucide-react';
+import { IngestionsPanel } from './components/IngestionsPanel';
 import { dagsterUIApi, projectsApi, filesApi, primitivesApi } from './services/api';
 import type { ComponentInstance } from './types';
 
@@ -656,6 +657,7 @@ function App() {
 
   const navItems = [
     { value: 'assets', label: 'Assets', icon: Network },
+    { value: 'ingestions', label: 'Ingestions', icon: Download },
     { value: 'pipelines', label: 'Pipelines', icon: Workflow },
     { value: 'primitives', label: 'Automation', icon: Zap },
     { value: 'library', label: 'Library', icon: Package },
@@ -877,6 +879,13 @@ function App() {
                 />
               </aside>
             )}
+          </Tabs.Content>
+
+          {/* Ingestions Tab Content — Fivetran/Airbyte-style monitoring
+              surface over the ingestion-shaped components already in the
+              project. Reuses AddDataDialog for the "add" flow. */}
+          <Tabs.Content value="ingestions" className="flex-1 overflow-hidden">
+            <IngestionsPanel onAddDataSource={setAddingComponentType} onEditComponent={setEditingComponent} />
           </Tabs.Content>
 
           {/* Pipelines Tab Content */}
