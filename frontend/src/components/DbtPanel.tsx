@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
-import { FileCode, Play, Loader2, CheckCircle2, XCircle, AlertTriangle, TestTube2, Book, FileText, Search, Layers, GitCommit, GitCompare, Clock, Eye, DollarSign, X, Network, Filter, Share2, ExternalLink, Sparkles } from 'lucide-react';
+import { FileCode, Play, Loader2, CheckCircle2, XCircle, AlertTriangle, TestTube2, Book, FileText, Search, Layers, GitCommit, GitCompare, Clock, Eye, DollarSign, X, Network, Filter, Share2, ExternalLink, Sparkles, Plus } from 'lucide-react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import { projectsApi } from '@/services/api';
 import { useProjectStore } from '@/hooks/useProject';
 import { notify } from './Notifications';
@@ -8,6 +10,7 @@ import { GitCommitDialog } from './GitCommitDialog';
 import { SqlDiffDialog } from './SqlDiffDialog';
 import { DbtLineageView } from './DbtLineageView';
 import { DbtColumnLineageOverlay } from './DbtColumnLineageOverlay';
+import { AddDbtProjectDialog } from './AddDbtProjectDialog';
 
 interface DbtPanelProps {
   onOpenFile?: (path: string) => void;
@@ -51,6 +54,7 @@ export function DbtPanel({ onOpenFile }: DbtPanelProps) {
   const [runningSelector, setRunningSelector] = useState<string | null>(null);
   const [scaffoldingDocs, setScaffoldingDocs] = useState(false);
   const [generatingDocs, setGeneratingDocs] = useState(false);
+  const [showAddDbtProject, setShowAddDbtProject] = useState(false);
   // Column-lineage modal — opened from the drawer's action row. Holds
   // the focal model so the modal is standalone and can outlive the
   // drawer (users often want to keep the modal open while switching
@@ -355,6 +359,13 @@ export function DbtPanel({ onOpenFile }: DbtPanelProps) {
               {data.project_name}
             </span>
           ) : null}
+          <button
+            onClick={() => setShowAddDbtProject(true)}
+            className="inline-flex items-center gap-1 px-2 py-1 text-xs text-gray-600 border border-gray-200 rounded hover:bg-gray-50"
+            title="Clone another dbt repo or scaffold a new one"
+          >
+            <Plus className="w-3 h-3" /> Add dbt project
+          </button>
         </div>
         <div className="flex items-center gap-2">
           <button
@@ -1009,8 +1020,45 @@ export function DbtPanel({ onOpenFile }: DbtPanelProps) {
           modelUniqueId={columnLineageFor.unique_id}
           modelName={columnLineageFor.name}
           onClose={() => setColumnLineageFor(null)}
+          onFocalChange={(uid) => {
+            // Refocus on a neighboring model without closing the modal —
+            // user clicked one of the upstream/downstream cards.
+            const m = data.models.find((x) => x.unique_id === uid);
+            if (m) {
+              setColumnLineageFor(m);
+            } else {
+              // Not a model in this project (probably a source) — close
+              // the overlay so the user isn't stranded on a dead node.
+              notify.info('That node isn\'t a model in this project — closing lineage view.');
+              setColumnLineageFor(null);
+            }
+          }}
+          onOpenModel={(uid) => {
+            // "Open in drawer" — switch the drawer to this model and
+            // close the lineage overlay. Same click target that the
+            // model row uses.
+            setSelectedUniqueId(uid);
+            setColumnLineageFor(null);
+          }}
         />
       )}
+
+      {/* Add dbt project — clone a repo or scaffold a fresh dbt_project.yml.
+          After success we refresh the project list so the picker shows
+          the new one. */}
+      <AddDbtProjectDialog
+        open={showAddDbtProject}
+        onOpenChange={setShowAddDbtProject}
+        projectId={currentProject.id}
+        onAdded={async (relativePath) => {
+          // Re-fetch the dbt project list so the picker updates.
+          try {
+            const r = await projectsApi.listDbtProjects(currentProject.id);
+            setDbtProjects(r.projects);
+            setSelectedDbtPath(relativePath);
+          } catch {}
+        }}
+      />
     </div>
   );
 }
@@ -1419,61 +1467,69 @@ function TestRow({ test }: { test: NonNullable<Model['tests_detail']>[number] })
 }
 
 /**
- * Bare-bones markdown renderer for dbt model descriptions. Handles
- * the constructs users actually put in schema.yml: **bold**, *italic*,
- * `code`, [link](url), and paragraph breaks. Full markdown is
- * overkill here — descriptions are typically 1–5 lines.
+ * Full markdown renderer for dbt content — descriptions, overview.md,
+ * doc blocks. Uses react-markdown + remark-gfm so we get real support
+ * for tables, headers, lists, code blocks, blockquotes, and the
+ * inline stuff (bold/italic/code/links). dbt docs frequently ship
+ * markdown tables and headers so a "handle bold/italic only" renderer
+ * left too much unrendered.
  */
 function SimpleMarkdown({ text }: { text: string }) {
-  const paragraphs = text.split(/\n{2,}/);
   return (
-    <div className="text-xs text-gray-700 space-y-2">
-      {paragraphs.map((p, i) => (
-        <p key={i} className="whitespace-pre-wrap leading-relaxed">
-          {renderInline(p)}
-        </p>
-      ))}
+    <div className="text-xs text-gray-700 leading-relaxed dbt-markdown">
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        components={{
+          h1: ({ children }) => <h1 className="text-base font-semibold text-gray-900 mt-4 mb-2">{children}</h1>,
+          h2: ({ children }) => <h2 className="text-sm font-semibold text-gray-900 mt-3 mb-2">{children}</h2>,
+          h3: ({ children }) => <h3 className="text-xs font-semibold text-gray-900 uppercase tracking-wider mt-3 mb-1.5">{children}</h3>,
+          p: ({ children }) => <p className="text-xs text-gray-700 mb-2 last:mb-0">{children}</p>,
+          ul: ({ children }) => <ul className="list-disc pl-5 mb-2 space-y-0.5">{children}</ul>,
+          ol: ({ children }) => <ol className="list-decimal pl-5 mb-2 space-y-0.5">{children}</ol>,
+          li: ({ children }) => <li className="text-xs text-gray-700">{children}</li>,
+          strong: ({ children }) => <strong className="font-semibold text-gray-900">{children}</strong>,
+          em: ({ children }) => <em className="italic">{children}</em>,
+          code: ({ children, className }) => {
+            const isBlock = className?.startsWith('language-');
+            if (isBlock) {
+              return (
+                <pre className="bg-gray-50 border border-gray-200 rounded p-2 my-2 text-[11px] font-mono overflow-x-auto">
+                  <code>{children}</code>
+                </pre>
+              );
+            }
+            return <code className="bg-gray-100 px-1 rounded font-mono text-[11px]">{children}</code>;
+          },
+          pre: ({ children }) => <>{children}</>,
+          a: ({ children, href }) => (
+            <a href={href} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">
+              {children}
+            </a>
+          ),
+          blockquote: ({ children }) => (
+            <blockquote className="border-l-2 border-gray-300 pl-3 my-2 text-gray-600 italic">
+              {children}
+            </blockquote>
+          ),
+          table: ({ children }) => (
+            <div className="overflow-x-auto my-2 -mx-1">
+              <table className="min-w-full text-[11px] border border-gray-200 rounded">
+                {children}
+              </table>
+            </div>
+          ),
+          thead: ({ children }) => <thead className="bg-gray-50 border-b border-gray-200">{children}</thead>,
+          tbody: ({ children }) => <tbody className="divide-y divide-gray-100">{children}</tbody>,
+          tr: ({ children }) => <tr>{children}</tr>,
+          th: ({ children }) => <th className="px-2 py-1.5 text-left font-semibold text-gray-800 whitespace-nowrap">{children}</th>,
+          td: ({ children }) => <td className="px-2 py-1.5 text-gray-700 align-top">{children}</td>,
+          hr: () => <hr className="my-3 border-gray-200" />,
+        }}
+      >
+        {text}
+      </ReactMarkdown>
     </div>
   );
-}
-
-function renderInline(text: string): (string | JSX.Element)[] {
-  // Tokenise on bold/italic/code/link, in a single pass. Order
-  // matters: match bold before italic so **foo** wins over *foo*.
-  const parts: (string | JSX.Element)[] = [];
-  const re = /(\*\*[^*]+\*\*|\*[^*]+\*|`[^`]+`|\[[^\]]+\]\([^)]+\))/g;
-  let last = 0;
-  let m: RegExpExecArray | null;
-  let key = 0;
-  while ((m = re.exec(text)) !== null) {
-    if (m.index > last) parts.push(text.slice(last, m.index));
-    const tok = m[0];
-    if (tok.startsWith('**')) {
-      parts.push(<strong key={key++}>{tok.slice(2, -2)}</strong>);
-    } else if (tok.startsWith('*')) {
-      parts.push(<em key={key++}>{tok.slice(1, -1)}</em>);
-    } else if (tok.startsWith('`')) {
-      parts.push(<code key={key++} className="bg-gray-100 px-1 rounded font-mono text-[11px]">{tok.slice(1, -1)}</code>);
-    } else if (tok.startsWith('[')) {
-      const cut = tok.indexOf('](');
-      const label = tok.slice(1, cut);
-      const url = tok.slice(cut + 2, -1);
-      parts.push(
-        <a
-          key={key++}
-          href={url}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="text-blue-600 hover:underline"
-        >
-          {label}
-        </a>,
-      );
-    }
-    last = m.index + tok.length;
-  }
-  if (last < text.length) parts.push(text.slice(last));
-  return parts;
 }
 
 function Kpi({

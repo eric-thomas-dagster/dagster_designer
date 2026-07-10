@@ -343,6 +343,23 @@ export const projectsApi = {
     return response.data as any;
   },
 
+  addDbtProject: async (
+    projectId: string,
+    body: {
+      mode: 'clone' | 'scaffold';
+      name: string;
+      git_url?: string;
+      git_token?: string;
+      git_branch?: string;
+      subpath?: string;
+      profile?: string;
+      adapter?: string;
+    },
+  ): Promise<{ success: boolean; relative_path: string; message: string | null }> => {
+    const response = await api.post(`/projects/${projectId}/dbt-project/add`, body);
+    return response.data as any;
+  },
+
   getDbtSelectors: async (
     projectId: string,
     dbtRelativePath?: string,

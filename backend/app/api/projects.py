@@ -1895,6 +1895,157 @@ def _find_dbt_projects(project_root: Path) -> list[DbtProjectSummary]:
     return out
 
 
+class AddDbtProjectRequest(BaseModel):
+    """Add a new dbt project to this Dagster project — either clone
+    an existing repo or scaffold a fresh dbt_project.yml + models/."""
+    mode: str                       # 'clone' | 'scaffold'
+    name: str                       # folder name under the Dagster project (e.g. 'my_dbt')
+    git_url: str | None = None      # clone mode only
+    git_token: str | None = None    # optional PAT for private repos
+    git_branch: str | None = None   # optional branch to check out after clone
+    subpath: str | None = None      # clone mode: path within cloned repo where dbt_project.yml lives
+    profile: str | None = None      # scaffold: default profile name (defaults to name)
+    adapter: str | None = None      # scaffold: connection adapter (snowflake / bigquery / duckdb / postgres)
+
+
+class AddDbtProjectResponse(BaseModel):
+    success: bool
+    relative_path: str              # path (from Dagster project root) where dbt_project.yml lives
+    message: str | None = None
+
+
+@router.post('/{project_id}/dbt-project/add', response_model=AddDbtProjectResponse)
+async def add_dbt_project(project_id: str, request: AddDbtProjectRequest):
+    """Materialize a new dbt project inside this Dagster project.
+    Two modes:
+
+    - **clone**: `git clone <git_url> <name>` inside the project dir.
+      Optional PAT / branch. Verifies dbt_project.yml exists (under
+      `subpath` if the repo nests it).
+    - **scaffold**: writes a minimal dbt_project.yml + a starter
+      models/example/my_first_model.sql so users can iterate.
+
+    Both modes return the dbt-root path (relative to the Dagster
+    project root) so the frontend picker can select it immediately.
+    """
+    import yaml as _yaml
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    root = project_service._get_project_dir(project)
+
+    # Sanitise the folder name — it becomes a directory + shows up in
+    # dbt_project.yml as `name:`. dbt names must be snake_case.
+    name = (request.name or '').strip()
+    if not name or not name.replace('_', '').replace('-', '').isalnum():
+        raise HTTPException(status_code=400, detail="Project name must be alphanumeric (underscores/hyphens allowed).")
+
+    target = (root / name).resolve()
+    # Prevent path traversal (name must resolve inside root).
+    if not str(target).startswith(str(root.resolve())):
+        raise HTTPException(status_code=400, detail="Invalid project name.")
+    if target.exists():
+        raise HTTPException(status_code=409, detail=f"'{name}' already exists at {target.relative_to(root)}")
+
+    if request.mode == 'clone':
+        if not request.git_url:
+            raise HTTPException(status_code=400, detail="git_url is required for clone mode")
+        from git import Repo, GitCommandError
+        url = request.git_url.strip()
+        # Rewrite URL to embed the token if provided. Same pattern as
+        # commit-push — token isn't persisted anywhere else.
+        if request.git_token and url.startswith('https://') and 'github.com' in url and f"{request.git_token}@" not in url:
+            url = url.replace('https://', f'https://{request.git_token}@')
+        try:
+            repo = Repo.clone_from(url, str(target))
+            if request.git_branch:
+                repo.git.checkout(request.git_branch)
+        except GitCommandError as e:
+            # Clean up partial clone directory so re-tries work.
+            if target.exists():
+                import shutil as _shutil
+                _shutil.rmtree(target, ignore_errors=True)
+            raise HTTPException(status_code=500, detail=f"git clone failed: {e}")
+        dbt_dir = target
+        if request.subpath:
+            dbt_dir = (target / request.subpath).resolve()
+            if not str(dbt_dir).startswith(str(target.resolve())):
+                raise HTTPException(status_code=400, detail="Invalid subpath.")
+        if not (dbt_dir / 'dbt_project.yml').exists():
+            raise HTTPException(
+                status_code=400,
+                detail=f"Cloned repo has no dbt_project.yml at '{request.subpath or '.'}' — check the repo layout and try again with a subpath.",
+            )
+        return AddDbtProjectResponse(
+            success=True,
+            relative_path=str(dbt_dir.relative_to(root)),
+            message=f'Cloned {url.split("@")[-1]} → {dbt_dir.relative_to(root)}',
+        )
+
+    if request.mode == 'scaffold':
+        # Write dbt_project.yml with sensible defaults and a starter
+        # model so users see something in the graph right away.
+        target.mkdir(parents=True, exist_ok=False)
+        profile = (request.profile or name).strip()
+        dbt_project_yml = {
+            'name': name,
+            'version': '1.0.0',
+            'config-version': 2,
+            'profile': profile,
+            'model-paths': ['models'],
+            'analysis-paths': ['analyses'],
+            'test-paths': ['tests'],
+            'seed-paths': ['seeds'],
+            'macro-paths': ['macros'],
+            'snapshot-paths': ['snapshots'],
+            'target-path': 'target',
+            'clean-targets': ['target', 'dbt_packages'],
+            'models': {
+                name: {
+                    'example': {'+materialized': 'view'},
+                },
+            },
+        }
+        (target / 'dbt_project.yml').write_text(_yaml.dump(dbt_project_yml, sort_keys=False))
+        (target / 'models' / 'example').mkdir(parents=True, exist_ok=True)
+        (target / 'models' / 'example' / 'my_first_model.sql').write_text(
+            "{{ config(materialized='view') }}\n\n"
+            "-- Your first dbt model! Try changing this select and clicking Run.\n"
+            "select 1 as id, 'hello' as message\n"
+        )
+        (target / 'models' / 'example' / 'schema.yml').write_text(
+            _yaml.dump({
+                'version': 2,
+                'models': [
+                    {
+                        'name': 'my_first_model',
+                        'description': 'A starter model — safe to delete or replace.',
+                        'columns': [
+                            {'name': 'id', 'description': 'The primary key.', 'tests': ['not_null', 'unique']},
+                            {'name': 'message', 'description': 'A friendly greeting.'},
+                        ],
+                    }
+                ],
+            }, sort_keys=False),
+        )
+        # Adapter hint — dropped into README.md rather than profiles.yml
+        # so we don't commit warehouse credentials by accident.
+        readme = f"# {name}\n\nA dbt project scaffolded from Dagster Designer.\n\n"
+        if request.adapter:
+            readme += (
+                f"## Connection\n\nAdapter: `{request.adapter}`. Configure your connection in "
+                f"`~/.dbt/profiles.yml` under the `{profile}` profile before running `dbt build`.\n"
+            )
+        (target / 'README.md').write_text(readme)
+        return AddDbtProjectResponse(
+            success=True,
+            relative_path=str(target.relative_to(root)),
+            message=f'Scaffolded {name}/ with a starter model.',
+        )
+
+    raise HTTPException(status_code=400, detail=f"Unknown mode: {request.mode}")
+
+
 @router.get('/{project_id}/dbt-projects', response_model=DbtProjectListResponse)
 async def list_dbt_projects(project_id: str):
     """Discover every dbt project inside this Dagster project's data

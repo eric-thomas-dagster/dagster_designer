@@ -8,6 +8,12 @@ interface DbtColumnLineageOverlayProps {
   modelUniqueId: string;
   modelName: string;
   onClose: () => void;
+  /** Called when the user clicks a neighboring model card — re-scope
+   *  the overlay to that model as the new focal. */
+  onFocalChange?: (uniqueId: string) => void;
+  /** Called when the user clicks "Open in drawer" on a model — jumps
+   *  to that model in the underlying Models view. */
+  onOpenModel?: (uniqueId: string) => void;
 }
 
 /**
@@ -30,13 +36,18 @@ export function DbtColumnLineageOverlay({
   modelUniqueId,
   modelName,
   onClose,
+  onFocalChange,
+  onOpenModel,
 }: DbtColumnLineageOverlayProps) {
+  // Highlighted column — when non-null we fade every connector that
+  // doesn't touch it. Clicking a column row toggles this.
+  const [hlColumn, setHlColumn] = useState<{ uid: string; col: string } | null>(null);
   const [data, setData] = useState<Awaited<ReturnType<typeof projectsApi.getDbtColumnLineage>> | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const colRefs = useRef(new Map<string, HTMLDivElement | null>());
-  const [connectorPaths, setConnectorPaths] = useState<Array<{ d: string; confidence: number; className: string }>>([]);
+  const [connectorPaths, setConnectorPaths] = useState<Array<{ d: string; confidence: number; className: string; touchesHl: boolean }>>([]);
 
   useEffect(() => {
     let cancelled = false;
@@ -52,13 +63,29 @@ export function DbtColumnLineageOverlay({
     return () => { cancelled = true; };
   }, [projectId, dbtRelativePath]);
 
-  // Group edges around the focal model.
+  // Group edges around the focal model. Guard against empty column
+  // names — the backend can emit `""` when it knows there's a
+  // structural dep but couldn't identify a specific column (e.g. no
+  // catalog data yet). Empty names would render as blank rows and
+  // collapse every unrelated edge onto the same point, so we drop
+  // them cleanly here.
+  const isRealCol = (s: string | null | undefined): s is string => {
+    if (!s) return false;
+    const t = s.trim();
+    // Backend emits '?' when it knows an edge exists but can't
+    // resolve a specific column (e.g. `select *` upstream). We treat
+    // those as non-columns so they don't pollute the render + collapse
+    // unrelated edges onto the same anchor point.
+    return t.length > 0 && t !== '?';
+  };
+
   const { incoming, outgoing, thisColumns } = useMemo(() => {
     if (!data) return { incoming: new Map<string, Array<{ from_uid: string; from_col: string; confidence: number }>>(), outgoing: new Map<string, Array<{ to_uid: string; to_col: string; confidence: number }>>(), thisColumns: [] as string[] };
     const inc = new Map<string, Array<{ from_uid: string; from_col: string; confidence: number }>>();
     const out = new Map<string, Array<{ to_uid: string; to_col: string; confidence: number }>>();
-    const cols = new Set<string>(data.columns_by_model[modelUniqueId] ?? []);
+    const cols = new Set<string>((data.columns_by_model[modelUniqueId] ?? []).filter(isRealCol));
     for (const e of data.edges) {
+      if (!isRealCol(e.from_column) || !isRealCol(e.to_column)) continue;
       if (e.to_unique_id === modelUniqueId) {
         cols.add(e.to_column);
         const arr = inc.get(e.from_unique_id) ?? [];
@@ -76,14 +103,15 @@ export function DbtColumnLineageOverlay({
   }, [data, modelUniqueId]);
 
   // For each upstream/downstream model, which of its columns actually
-  // touch the focal model? We render all columns but fade the ones
-  // without an edge so users see "dropped" columns as well.
+  // touch the focal model? We render all real columns but fade the
+  // ones without an edge so users see "dropped" columns as well.
   const upstreamModels = useMemo(() => {
     if (!data) return [] as Array<{ uid: string; columns: string[]; edgesByCol: Map<string, number> }>;
     return Array.from(incoming.keys()).map((uid) => {
-      const cols = data.columns_by_model[uid] ?? [];
+      const cols = (data.columns_by_model[uid] ?? []).filter(isRealCol);
       const edgesByCol = new Map<string, number>();
       for (const e of incoming.get(uid) ?? []) {
+        if (!isRealCol(e.from_col)) continue;
         edgesByCol.set(e.from_col, Math.max(edgesByCol.get(e.from_col) ?? 0, e.confidence));
         if (!cols.includes(e.from_col)) cols.push(e.from_col);
       }
@@ -93,9 +121,10 @@ export function DbtColumnLineageOverlay({
   const downstreamModels = useMemo(() => {
     if (!data) return [] as Array<{ uid: string; columns: string[]; edgesByCol: Map<string, number> }>;
     return Array.from(outgoing.keys()).map((uid) => {
-      const cols = data.columns_by_model[uid] ?? [];
+      const cols = (data.columns_by_model[uid] ?? []).filter(isRealCol);
       const edgesByCol = new Map<string, number>();
       for (const e of outgoing.get(uid) ?? []) {
+        if (!isRealCol(e.to_col)) continue;
         edgesByCol.set(e.to_col, Math.max(edgesByCol.get(e.to_col) ?? 0, e.confidence));
         if (!cols.includes(e.to_col)) cols.push(e.to_col);
       }
@@ -104,11 +133,13 @@ export function DbtColumnLineageOverlay({
   }, [data, outgoing]);
 
   // Compute SVG connector paths on data change / resize / scroll.
+  // We iterate the raw edge list once and only draw edges where both
+  // endpoints are real column refs (no '?' / '' pollution).
   const recomputePaths = () => {
     if (!containerRef.current || !data) return;
     const cbox = containerRef.current.getBoundingClientRect();
-    const paths: Array<{ d: string; confidence: number; className: string }> = [];
-    const draw = (fromKey: string, toKey: string, confidence: number, cls: string) => {
+    const paths: Array<{ d: string; confidence: number; className: string; touchesHl: boolean }> = [];
+    const draw = (fromKey: string, toKey: string, confidence: number, cls: string, touchesHl: boolean) => {
       const a = colRefs.current.get(fromKey);
       const b = colRefs.current.get(toKey);
       if (!a || !b) return;
@@ -120,30 +151,24 @@ export function DbtColumnLineageOverlay({
       const y2 = br.top + br.height / 2 - cbox.top;
       const dx = Math.max(30, (x2 - x1) / 2);
       const d = `M ${x1} ${y1} C ${x1 + dx} ${y1}, ${x2 - dx} ${y2}, ${x2} ${y2}`;
-      paths.push({ d, confidence, className: cls });
+      paths.push({ d, confidence, className: cls, touchesHl });
     };
-    for (const [uid, edges] of incoming) {
-      for (const e of edges) {
-        draw(`up:${uid}:${e.from_col}`, `this:${e.from_col === e.from_col ? '' : ''}${e.from_col}`, e.confidence, 'stroke-emerald-500');
-      }
-    }
-    // Correct: the edge target is `to_col` on the focal model, not `from_col`.
-    // Redo — the loop above passed the wrong key. Clear + rebuild properly.
-    paths.length = 0;
-    for (const [uid, edges] of incoming) {
-      for (const e of edges) {
-        // Find the corresponding edge's `to_column` on the focal model.
-        // We stored it in `data.edges`; look it up.
-        const raw = data.edges.find(x => x.from_unique_id === uid && x.from_column === e.from_col && x.to_unique_id === modelUniqueId);
-        if (!raw) continue;
-        draw(`up:${uid}:${e.from_col}`, `this:${raw.to_column}`, e.confidence, 'stroke-emerald-500');
-      }
-    }
-    for (const [uid, edges] of outgoing) {
-      for (const e of edges) {
-        const raw = data.edges.find(x => x.from_unique_id === modelUniqueId && x.to_unique_id === uid && x.to_column === e.to_col);
-        if (!raw) continue;
-        draw(`this:${raw.from_column}`, `down:${uid}:${e.to_col}`, e.confidence, 'stroke-blue-500');
+    // Highlight semantics: an edge touches the highlight when either
+    // endpoint matches. When no highlight is set, everything is
+    // considered "touched" so nothing fades.
+    const edgeTouches = (uid1: string, col1: string, uid2: string, col2: string) => {
+      if (!hlColumn) return true;
+      return (hlColumn.uid === uid1 && hlColumn.col === col1)
+        || (hlColumn.uid === uid2 && hlColumn.col === col2);
+    };
+    for (const e of data.edges) {
+      if (!isRealCol(e.from_column) || !isRealCol(e.to_column)) continue;
+      if (e.to_unique_id === modelUniqueId) {
+        const t = edgeTouches(e.from_unique_id, e.from_column, modelUniqueId, e.to_column);
+        draw(`up:${e.from_unique_id}:${e.from_column}`, `this:${e.to_column}`, e.confidence, 'stroke-emerald-500', t);
+      } else if (e.from_unique_id === modelUniqueId) {
+        const t = edgeTouches(modelUniqueId, e.from_column, e.to_unique_id, e.to_column);
+        draw(`this:${e.from_column}`, `down:${e.to_unique_id}:${e.to_column}`, e.confidence, 'stroke-blue-500', t);
       }
     }
     setConnectorPaths(paths);
@@ -159,7 +184,7 @@ export function DbtColumnLineageOverlay({
       window.removeEventListener('resize', onResize);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [data, upstreamModels, downstreamModels]);
+  }, [data, upstreamModels, downstreamModels, hlColumn]);
 
   const totalUpEdges = useMemo(() => Array.from(incoming.values()).reduce((s, arr) => s + arr.length, 0), [incoming]);
   const totalDownEdges = useMemo(() => Array.from(outgoing.values()).reduce((s, arr) => s + arr.length, 0), [outgoing]);
@@ -211,6 +236,7 @@ export function DbtColumnLineageOverlay({
                   {upstreamModels.map((u) => (
                     <ModelBlock
                       key={u.uid}
+                      uid={u.uid}
                       title={u.uid.replace(/^(model|source|seed|snapshot)\./, '')}
                       subtitle={u.uid.startsWith('source.') ? 'source' : u.uid.startsWith('seed.') ? 'seed' : 'model'}
                       columns={u.columns}
@@ -218,6 +244,9 @@ export function DbtColumnLineageOverlay({
                       side="right"
                       colRef={(col, el) => colRefs.current.set(`up:${u.uid}:${col}`, el)}
                       annotate={(col) => (u.edgesByCol.has(col) ? null : 'dropped')}
+                      onModelClick={u.uid.startsWith('model.') ? () => onFocalChange?.(u.uid) : undefined}
+                      onColumnClick={(col) => setHlColumn(hlColumn?.uid === u.uid && hlColumn?.col === col ? null : { uid: u.uid, col })}
+                      hlColumn={hlColumn}
                     />
                   ))}
                 </div>
@@ -226,6 +255,7 @@ export function DbtColumnLineageOverlay({
                   <SectionHeader label={modelName} count={1} sub={`${thisColumns.length} col${thisColumns.length === 1 ? '' : 's'}`} align="center" tone="focal" />
                   {thisColumns.length === 0 && <EmptyHint text="No columns known — run dbt docs generate to populate the catalog." />}
                   <ModelBlock
+                    uid={modelUniqueId}
                     title={modelName}
                     subtitle="this model"
                     columns={thisColumns}
@@ -237,6 +267,9 @@ export function DbtColumnLineageOverlay({
                       const isSource = modelUniqueId.startsWith('source.');
                       return hasIncoming || isSource ? null : 'derived';
                     }}
+                    onOpenClick={onOpenModel ? () => onOpenModel(modelUniqueId) : undefined}
+                    onColumnClick={(col) => setHlColumn(hlColumn?.uid === modelUniqueId && hlColumn?.col === col ? null : { uid: modelUniqueId, col })}
+                    hlColumn={hlColumn}
                   />
                 </div>
                 {/* Downstream */}
@@ -246,6 +279,7 @@ export function DbtColumnLineageOverlay({
                   {downstreamModels.map((d) => (
                     <ModelBlock
                       key={d.uid}
+                      uid={d.uid}
                       title={d.uid.replace(/^(model|source|seed|snapshot)\./, '')}
                       subtitle={d.uid.startsWith('source.') ? 'source' : d.uid.startsWith('seed.') ? 'seed' : 'model'}
                       columns={d.columns}
@@ -253,6 +287,9 @@ export function DbtColumnLineageOverlay({
                       side="left"
                       colRef={(col, el) => colRefs.current.set(`down:${d.uid}:${col}`, el)}
                       annotate={(col) => (d.edgesByCol.has(col) ? null : 'derived-here')}
+                      onModelClick={d.uid.startsWith('model.') ? () => onFocalChange?.(d.uid) : undefined}
+                      onColumnClick={(col) => setHlColumn(hlColumn?.uid === d.uid && hlColumn?.col === col ? null : { uid: d.uid, col })}
+                      hlColumn={hlColumn}
                     />
                   ))}
                 </div>
@@ -276,17 +313,17 @@ export function DbtColumnLineageOverlay({
                       key={i}
                       d={p.d}
                       fill="none"
-                      strokeWidth={1.75}
+                      strokeWidth={p.touchesHl ? 2 : 1.75}
                       strokeLinecap="round"
                       className={p.className}
                       filter="url(#line-shadow)"
-                      style={{ opacity: 0.45 + p.confidence * 0.5 }}
+                      style={{ opacity: p.touchesHl ? 0.45 + p.confidence * 0.5 : 0.08 }}
                     />
                   ))}
                 </svg>
               </div>
 
-              {/* Footer legend */}
+              {/* Footer legend + click hints */}
               <div className="px-8 py-3 border-t border-gray-100 bg-white flex flex-wrap items-center gap-4 text-[11px] text-gray-500">
                 <span className="inline-flex items-center gap-1.5">
                   <span className="w-3 h-0.5 bg-emerald-500 rounded" /> upstream edge
@@ -300,7 +337,17 @@ export function DbtColumnLineageOverlay({
                 <span className="inline-flex items-center gap-1.5">
                   <span className="text-gray-400 line-through font-mono">dropped</span> not carried through
                 </span>
-                <span className="ml-auto">{totalUpEdges + totalDownEdges} column edges · higher opacity = higher confidence</span>
+                {hlColumn && (
+                  <button
+                    onClick={() => setHlColumn(null)}
+                    className="inline-flex items-center gap-1 text-indigo-600 hover:text-indigo-800 font-medium"
+                  >
+                    Clear highlight
+                  </button>
+                )}
+                <span className="ml-auto">
+                  Tip: click a model card to refocus · click a column to highlight edges
+                </span>
               </div>
             </>
           )}
@@ -356,6 +403,7 @@ function EmptyHint({ text }: { text: string }) {
 }
 
 function ModelBlock({
+  uid,
   title,
   subtitle,
   columns,
@@ -363,7 +411,12 @@ function ModelBlock({
   side,
   colRef,
   annotate,
+  onModelClick,
+  onOpenClick,
+  onColumnClick,
+  hlColumn,
 }: {
+  uid: string;
   title: string;
   subtitle: string;
   columns: string[];
@@ -371,17 +424,45 @@ function ModelBlock({
   side: 'left' | 'right' | 'both';
   colRef: (col: string, el: HTMLDivElement | null) => void;
   annotate?: (col: string) => 'dropped' | 'derived' | 'derived-here' | null;
+  /** Click the header → refocus the overlay on this model. */
+  onModelClick?: () => void;
+  /** Click the "Open" button → open this model in the underlying drawer. */
+  onOpenClick?: () => void;
+  /** Click a column row → toggle highlight of edges touching it. */
+  onColumnClick?: (col: string) => void;
+  /** Currently highlighted column (across the whole overlay) so this
+   *  block can style its own rows accordingly. */
+  hlColumn?: { uid: string; col: string } | null;
 }) {
   const styles = TONE_STYLES[tone];
+  const headerClickable = !!onModelClick;
   return (
-    <div className={`rounded-lg border ${styles.card} shadow-sm mb-3 overflow-hidden`}>
-      {/* Card header */}
-      <div className="px-3 py-2 border-b border-gray-100 flex items-baseline justify-between gap-2 bg-gradient-to-b from-white to-gray-50/40">
+    <div className={`rounded-lg border ${styles.card} shadow-sm mb-3 overflow-hidden transition-shadow ${headerClickable ? 'hover:shadow-md' : ''}`}>
+      {/* Card header — clickable to refocus the overlay onto this model
+          when it's a real model (not a source/seed). */}
+      <div
+        className={`px-3 py-2 border-b border-gray-100 flex items-baseline justify-between gap-2 bg-gradient-to-b from-white to-gray-50/40 ${headerClickable ? 'cursor-pointer' : ''}`}
+        onClick={headerClickable ? onModelClick : undefined}
+        title={headerClickable ? 'Click to refocus column lineage on this model' : undefined}
+      >
         <div className="min-w-0">
-          <div className="text-xs font-mono font-semibold text-gray-900 truncate" title={title}>{title}</div>
+          <div className="text-xs font-mono font-semibold text-gray-900 truncate flex items-center gap-1" title={title}>
+            {title}
+            {headerClickable && <ArrowRight className="w-3 h-3 text-gray-400" />}
+          </div>
           <div className={`text-[9px] uppercase tracking-wider ${styles.subtitle} font-medium`}>{subtitle}</div>
         </div>
-        <span className={`w-1.5 h-1.5 rounded-full ${styles.dot} flex-shrink-0`} />
+        {onOpenClick ? (
+          <button
+            onClick={(e) => { e.stopPropagation(); onOpenClick(); }}
+            className="text-[10px] text-gray-500 hover:text-gray-900 font-medium underline decoration-dotted"
+            title="Open in Models drawer"
+          >
+            open →
+          </button>
+        ) : (
+          <span className={`w-1.5 h-1.5 rounded-full ${styles.dot} flex-shrink-0`} />
+        )}
       </div>
       {/* Columns */}
       <div className="py-1">
@@ -393,13 +474,19 @@ function ModelBlock({
           const isDropped = note === 'dropped';
           const isDerived = note === 'derived';
           const isDerivedHere = note === 'derived-here';
+          const isHl = !!(hlColumn && hlColumn.uid === uid && hlColumn.col === col);
+          const isFaded = !!(hlColumn && !isHl);
           return (
             <div
               key={col}
               ref={(el) => colRef(col, el)}
-              className={`group flex items-center gap-1.5 px-3 py-1 text-[11px] hover:bg-gray-50 ${
+              onClick={onColumnClick ? () => onColumnClick(col) : undefined}
+              className={`group flex items-center gap-1.5 px-3 py-1 text-[11px] transition-opacity ${
                 isDropped ? 'text-gray-400' : 'text-gray-800'
-              }`}
+              } ${isHl ? 'bg-indigo-50 ring-1 ring-indigo-200' : 'hover:bg-gray-50'} ${
+                isFaded ? 'opacity-40' : ''
+              } ${onColumnClick ? 'cursor-pointer' : ''}`}
+              title={onColumnClick ? 'Click to highlight edges touching this column' : undefined}
             >
               {side === 'left' && <span className={`w-1.5 h-1.5 rounded-full ${isDropped ? 'bg-gray-300' : styles.dot} flex-shrink-0`} />}
               {side === 'both' && <span className={`w-1.5 h-1.5 rounded-full ${styles.dot} flex-shrink-0`} />}
