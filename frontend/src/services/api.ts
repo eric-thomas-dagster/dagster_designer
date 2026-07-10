@@ -160,6 +160,55 @@ export const projectsApi = {
     return response.data as any;
   },
 
+  listDbtModels: async (
+    projectId: string,
+    dbtRelativePath?: string,
+  ): Promise<{
+    dbt_project_relative_path: string;
+    project_name: string | null;
+    models: Array<{
+      unique_id: string;
+      name: string;
+      resource_type: string;
+      schema: string | null;
+      database: string | null;
+      description: string | null;
+      materialization: string | null;
+      tags: string[];
+      depends_on_nodes: string[];
+      package_name: string | null;
+      relative_sql_path: string | null;
+      columns: Record<string, { description?: string | null; data_type?: string | null; tests: string[] }>;
+      tests: string[];
+      last_run_status: string | null;
+      last_run_duration_ms: number | null;
+      row_count: number | null;
+      bytes_bytes: number | null;
+    }>;
+    stats: Record<string, number>;
+  }> => {
+    const response = await api.get(`/projects/${projectId}/dbt-models`, {
+      params: dbtRelativePath ? { dbt_relative_path: dbtRelativePath } : {},
+    });
+    return response.data as any;
+  },
+
+  runDbtModel: async (
+    projectId: string,
+    body: {
+      dbt_relative_path: string;
+      select: string;
+      exclude?: string | null;
+      defer?: boolean;
+      state_dir?: string | null;
+      full_refresh?: boolean;
+      target?: string | null;
+    },
+  ): Promise<{ success: boolean; duration_ms: number; stdout: string; stderr: string }> => {
+    const response = await api.post(`/projects/${projectId}/dbt/run`, body);
+    return response.data as any;
+  },
+
   addDbtModel: async (
     projectId: string,
     body: {

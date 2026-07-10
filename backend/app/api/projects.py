@@ -1908,6 +1908,253 @@ async def list_dbt_projects(project_id: str):
     return DbtProjectListResponse(projects=_find_dbt_projects(root))
 
 
+class DbtModelSummary(BaseModel):
+    """Summarized info about a single dbt model, parsed from manifest.json
+    and (when available) catalog.json + run_results.json."""
+    unique_id: str            # model.<project>.<name>
+    name: str
+    resource_type: str        # model | seed | source | snapshot
+    schema: str | None = None
+    database: str | None = None
+    description: str | None = None
+    materialization: str | None = None
+    tags: list[str] = []
+    depends_on_nodes: list[str] = []
+    package_name: str | None = None
+    relative_sql_path: str | None = None  # from repo root
+    columns: dict[str, dict] = {}         # {col_name: {description, data_type, tests}}
+    tests: list[str] = []                 # unique test ids referencing this model
+    last_run_status: str | None = None    # success | fail | error | skip | None
+    last_run_duration_ms: int | None = None
+    row_count: int | None = None
+    bytes_bytes: int | None = None
+
+
+class DbtModelListResponse(BaseModel):
+    dbt_project_relative_path: str
+    project_name: str | None = None
+    models: list[DbtModelSummary]
+    stats: dict[str, int] = {}
+
+
+def _load_dbt_artifact(path: Path) -> dict:
+    """Read a dbt artifact JSON if it exists — manifest.json / catalog.json /
+    run_results.json. Non-fatal if missing; we degrade gracefully across
+    the dbt experience surfaces."""
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text())
+    except Exception:
+        return {}
+
+
+@router.get('/{project_id}/dbt-models', response_model=DbtModelListResponse)
+async def list_dbt_models(project_id: str, dbt_relative_path: str | None = None):
+    """List dbt models in the (chosen) dbt project's manifest, enriched
+    with test / catalog / run-results info when those artifacts exist.
+
+    dbt_relative_path is the value from GET /dbt-projects; when omitted
+    we pick the first dbt project we find (single-repo is the common case).
+    """
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    root = project_service._get_project_dir(project)
+    dbt_projects = _find_dbt_projects(root)
+    if not dbt_projects:
+        raise HTTPException(status_code=404, detail="No dbt_project.yml found in this project")
+
+    chosen = dbt_projects[0]
+    if dbt_relative_path:
+        for p in dbt_projects:
+            if p.relative_path == dbt_relative_path:
+                chosen = p
+                break
+
+    dbt_root = (root / chosen.relative_path).resolve()
+    manifest = _load_dbt_artifact(dbt_root / 'target' / 'manifest.json')
+    catalog = _load_dbt_artifact(dbt_root / 'target' / 'catalog.json')
+    run_results = _load_dbt_artifact(dbt_root / 'target' / 'run_results.json')
+
+    # Build helper maps from the auxiliary artifacts. All optional —
+    # freshly-scaffolded projects have no target/ dir yet.
+    catalog_nodes = (catalog.get('nodes') or {})
+    run_by_id: dict[str, dict] = {}
+    for r in run_results.get('results', []):
+        uid = r.get('unique_id')
+        if uid:
+            run_by_id[uid] = r
+
+    # Aggregate tests that reference each model.
+    tests_by_model: dict[str, list[str]] = {}
+    for uid, node in (manifest.get('nodes') or {}).items():
+        if node.get('resource_type') != 'test':
+            continue
+        refs = node.get('depends_on', {}).get('nodes', []) or []
+        for target in refs:
+            tests_by_model.setdefault(target, []).append(uid)
+
+    models: list[DbtModelSummary] = []
+    for uid, node in (manifest.get('nodes') or {}).items():
+        rt = node.get('resource_type')
+        if rt not in ('model', 'seed', 'snapshot'):
+            continue
+
+        cat = catalog_nodes.get(uid) or {}
+        cat_cols = cat.get('columns') or {}
+        cat_stats = cat.get('stats') or {}
+        rr = run_by_id.get(uid)
+
+        cols: dict[str, dict] = {}
+        for col_name, col in (node.get('columns') or {}).items():
+            entry = {
+                'description': col.get('description'),
+                'data_type': (cat_cols.get(col_name) or {}).get('type') or col.get('data_type'),
+                'tests': col.get('tests') or [],
+            }
+            cols[col_name] = entry
+        # Add catalog columns not in manifest (rare, but possible when
+        # dbt docs was run against a fresh schema).
+        for col_name, col in cat_cols.items():
+            if col_name in cols:
+                continue
+            cols[col_name] = {
+                'description': col.get('description'),
+                'data_type': col.get('type'),
+                'tests': [],
+            }
+
+        cfg = node.get('config') or {}
+        materialization = cfg.get('materialized') or node.get('materialized')
+
+        # Row count / bytes live in catalog.json stats when dbt docs
+        # generate has been run against a real warehouse.
+        row_count = None
+        bytes_bytes = None
+        for k, v in cat_stats.items():
+            if not v.get('include'):
+                continue
+            iid = v.get('id')
+            val = v.get('value')
+            if iid == 'row_count' and isinstance(val, (int, float)):
+                row_count = int(val)
+            elif iid == 'bytes' and isinstance(val, (int, float)):
+                bytes_bytes = int(val)
+
+        # Compute a repo-relative SQL path so the frontend can open the
+        # file in the code editor. `original_file_path` is from the dbt
+        # project root, which is what we want.
+        sql_path = node.get('original_file_path')
+
+        models.append(DbtModelSummary(
+            unique_id=uid,
+            name=node.get('name', ''),
+            resource_type=rt,
+            schema=node.get('schema'),
+            database=node.get('database'),
+            description=node.get('description'),
+            materialization=materialization,
+            tags=list(node.get('tags') or []),
+            depends_on_nodes=list((node.get('depends_on') or {}).get('nodes') or []),
+            package_name=node.get('package_name'),
+            relative_sql_path=sql_path,
+            columns=cols,
+            tests=tests_by_model.get(uid, []),
+            last_run_status=(rr or {}).get('status'),
+            last_run_duration_ms=int((rr or {}).get('execution_time', 0) * 1000) if rr and (rr.get('execution_time') is not None) else None,
+            row_count=row_count,
+            bytes_bytes=bytes_bytes,
+        ))
+
+    stats = {
+        'total': len(models),
+        'with_docs': sum(1 for m in models if m.description),
+        'with_tests': sum(1 for m in models if m.tests),
+        'run_success': sum(1 for m in models if m.last_run_status == 'success'),
+        'run_failure': sum(1 for m in models if m.last_run_status in ('error', 'fail', 'runtime error')),
+    }
+
+    return DbtModelListResponse(
+        dbt_project_relative_path=chosen.relative_path,
+        project_name=chosen.name,
+        models=models,
+        stats=stats,
+    )
+
+
+class RunDbtModelRequest(BaseModel):
+    """Run one (or a small set of) dbt models via `dbt build`. Uses the
+    project's venv so it inherits every adapter the user installed."""
+    dbt_relative_path: str
+    select: str                    # dbt --select expression (e.g. 'stg_orders' or 'stg_orders+')
+    exclude: str | None = None
+    defer: bool = False            # --defer for state-aware dev runs
+    state_dir: str | None = None   # --state path (relative to dbt project root)
+    full_refresh: bool = False
+    target: str | None = None      # dbt --target env override
+
+
+class RunDbtModelResponse(BaseModel):
+    success: bool
+    duration_ms: int
+    stdout: str
+    stderr: str
+
+
+@router.post('/{project_id}/dbt/run', response_model=RunDbtModelResponse)
+async def run_dbt_model(project_id: str, request: RunDbtModelRequest):
+    """Shell out to `dbt build --select <expr>` inside the project's
+    dbt directory. Uses the project's venv so it inherits every adapter
+    the user has installed (Snowflake, BigQuery, DuckDB, etc.). Returns
+    stdout/stderr so the frontend can render dbt's output inline."""
+    import subprocess as _sp
+    import time as _time
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    root = project_service._get_project_dir(project)
+    dbt_root = (root / request.dbt_relative_path).resolve()
+    if not (dbt_root / 'dbt_project.yml').exists():
+        raise HTTPException(status_code=404, detail=f"No dbt_project.yml at {request.dbt_relative_path}")
+
+    venv_bin = root / '.venv' / 'bin'
+    dbt_bin = venv_bin / 'dbt'
+    if not dbt_bin.exists():
+        raise HTTPException(
+            status_code=500,
+            detail="dbt CLI not found in the project venv — install a dbt adapter first (see the dbt component's Adapters section).",
+        )
+
+    cmd: list[str] = [str(dbt_bin), 'build', '--select', request.select]
+    if request.exclude:
+        cmd.extend(['--exclude', request.exclude])
+    if request.defer:
+        cmd.append('--defer')
+        if request.state_dir:
+            cmd.extend(['--state', request.state_dir])
+    if request.full_refresh:
+        cmd.append('--full-refresh')
+    if request.target:
+        cmd.extend(['--target', request.target])
+    # No color codes in stdout so the UI can render as plain text.
+    cmd.append('--no-use-colors')
+
+    env = None
+    started = _time.time()
+    try:
+        r = _sp.run(cmd, cwd=str(dbt_root), env=env, capture_output=True, text=True, timeout=600)
+    except _sp.TimeoutExpired:
+        raise HTTPException(status_code=504, detail="dbt run timed out after 10 minutes")
+    duration_ms = int((_time.time() - started) * 1000)
+    return RunDbtModelResponse(
+        success=r.returncode == 0,
+        duration_ms=duration_ms,
+        stdout=r.stdout,
+        stderr=r.stderr,
+    )
+
+
 class AddDbtModelRequest(BaseModel):
     """Write a new .sql model into a dbt project.
 

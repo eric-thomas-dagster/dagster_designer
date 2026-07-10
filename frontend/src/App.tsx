@@ -19,8 +19,9 @@ import { DataPreviewModal } from './components/DataPreviewModal';
 import { DagsterCloudChip } from './components/DagsterCloudChip';
 import { NotificationHost, notify, confirmDialog } from './components/Notifications';
 import { useProjectStore } from './hooks/useProject';
-import { Network, FileCode, Zap, Package, ExternalLink, Settings, Workflow, ChevronDown, Skull, AlertTriangle, X, Loader2, CheckCircle, XCircle, PanelLeftClose, PanelLeft, Clock, Play, Radar, Timer, Download } from 'lucide-react';
+import { Network, FileCode, Zap, Package, ExternalLink, Settings, Workflow, ChevronDown, Skull, AlertTriangle, X, Loader2, CheckCircle, XCircle, PanelLeftClose, PanelLeft, Clock, Play, Radar, Timer, Download, Database } from 'lucide-react';
 import { IngestionsPanel } from './components/IngestionsPanel';
+import { DbtPanel } from './components/DbtPanel';
 import { dagsterUIApi, projectsApi, filesApi, primitivesApi } from './services/api';
 import type { ComponentInstance } from './types';
 
@@ -658,6 +659,7 @@ function App() {
   const navItems = [
     { value: 'assets', label: 'Assets', icon: Network },
     { value: 'ingestions', label: 'Ingestions', icon: Download },
+    { value: 'dbt', label: 'dbt', icon: Database },
     { value: 'pipelines', label: 'Pipelines', icon: Workflow },
     { value: 'primitives', label: 'Automation', icon: Zap },
     { value: 'library', label: 'Library', icon: Package },
@@ -886,6 +888,12 @@ function App() {
               project. Reuses AddDataDialog for the "add" flow. */}
           <Tabs.Content value="ingestions" className="flex-1 overflow-hidden">
             <IngestionsPanel onAddDataSource={setAddingComponentType} onEditComponent={setEditingComponent} />
+          </Tabs.Content>
+
+          {/* dbt Tab Content — model catalog + docs + one-click runs
+              over any dbt project (local or cloned) in this project. */}
+          <Tabs.Content value="dbt" className="flex-1 overflow-hidden">
+            <DbtPanel onOpenFile={handleOpenFile} />
           </Tabs.Content>
 
           {/* Pipelines Tab Content */}
