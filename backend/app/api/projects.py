@@ -2563,7 +2563,8 @@ async def dbt_docs_generate(project_id: str, request: ScaffoldDbtDocsRequest):
         raise HTTPException(status_code=404, detail=f"No dbt_project.yml at {request.dbt_relative_path}")
 
     # Use the venv's dbt if present; falls back to whatever is on PATH.
-    venv_bin = project_service._get_project_dir(project) / '.venv' / 'bin' / 'dbt'
+    # Resolve to abs path — subprocess runs with cwd=dbt_root.
+    venv_bin = (project_service._get_project_dir(project) / '.venv' / 'bin' / 'dbt').resolve()
     dbt_bin = str(venv_bin) if venv_bin.exists() else 'dbt'
     started = _time.time()
     try:
@@ -3229,7 +3230,10 @@ async def dbt_model_preview(project_id: str, request: DbtModelPreviewRequest):
     if not (dbt_root / 'dbt_project.yml').exists():
         raise HTTPException(status_code=404, detail=f"No dbt_project.yml at {request.dbt_relative_path}")
 
-    dbt_bin = root / '.venv' / 'bin' / 'dbt'
+    # Resolve to an absolute path — subprocess is invoked with
+    # cwd=dbt_root, so a relative dbt_bin path (e.g.
+    # `projects/foo/.venv/bin/dbt`) would fail to be found.
+    dbt_bin = (root / '.venv' / 'bin' / 'dbt').resolve()
     if not dbt_bin.exists():
         return DbtModelPreviewResponse(
             success=False,
@@ -3493,7 +3497,8 @@ async def run_dbt_model(project_id: str, request: RunDbtModelRequest):
     if not (dbt_root / 'dbt_project.yml').exists():
         raise HTTPException(status_code=404, detail=f"No dbt_project.yml at {request.dbt_relative_path}")
 
-    venv_bin = root / '.venv' / 'bin'
+    # Resolve to abs path — subprocess runs with cwd=dbt_root.
+    venv_bin = (root / '.venv' / 'bin').resolve()
     dbt_bin = venv_bin / 'dbt'
     if not dbt_bin.exists():
         raise HTTPException(

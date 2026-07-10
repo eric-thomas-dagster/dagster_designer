@@ -68,7 +68,7 @@ export function SqlDiffDialog({ open, onOpenChange, projectId, dbtRelativePath, 
               </button>
             </Dialog.Close>
           </div>
-          <div className="flex-1 p-3 min-h-0">
+          <div className="flex-1 p-3 min-h-0 overflow-hidden">
             {loading && (
               <div className="h-full flex items-center justify-center text-sm text-gray-500 gap-2">
                 <Loader2 className="w-4 h-4 animate-spin" /> Loading diff…
@@ -78,20 +78,37 @@ export function SqlDiffDialog({ open, onOpenChange, projectId, dbtRelativePath, 
               <div className="p-3 bg-rose-50 border border-rose-200 rounded text-sm text-rose-800">{error}</div>
             )}
             {diff && !loading && !error && (
-              <DiffEditor
-                original={diff.committed}
-                modified={diff.current}
-                language="sql"
-                theme="vs-light"
-                options={{
-                  renderSideBySide: true,
-                  minimap: { enabled: false },
-                  fontSize: 12,
-                  scrollBeyondLastLine: false,
-                  readOnly: true,
-                  originalEditable: false,
-                }}
-              />
+              // Monaco needs explicit dimensions or it renders at its
+              // default height, leaving big gray gutters. Passing 100%
+              // + wrapping in a full-height, overflow-hidden container
+              // fixes the "huge gray bar on the right" + doubled
+              // scrollbar the DiffEditor was leaking.
+              <div className="w-full h-full">
+                <DiffEditor
+                  height="100%"
+                  width="100%"
+                  original={diff.committed}
+                  modified={diff.current}
+                  language="sql"
+                  theme="vs-light"
+                  options={{
+                    renderSideBySide: true,
+                    minimap: { enabled: false },
+                    fontSize: 12,
+                    scrollBeyondLastLine: false,
+                    readOnly: true,
+                    originalEditable: false,
+                    overviewRulerBorder: false,
+                    overviewRulerLanes: 0,
+                    scrollbar: {
+                      verticalScrollbarSize: 10,
+                      horizontalScrollbarSize: 10,
+                      alwaysConsumeMouseWheel: false,
+                    },
+                    renderOverviewRuler: false,
+                  }}
+                />
+              </div>
             )}
           </div>
         </Dialog.Content>
