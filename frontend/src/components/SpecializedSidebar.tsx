@@ -4,6 +4,8 @@ import { AggregateSidebar } from './AggregateSidebar';
 import { SqlTransformSidebar } from './SqlTransformSidebar';
 import { GeoBoundingBoxSidebar } from './GeoBoundingBoxSidebar';
 import { LLMSidebar } from './LLMSidebar';
+import { AgentSidebar } from './AgentSidebar';
+import { DocumentExtractorSidebar } from './DocumentExtractorSidebar';
 
 /**
  * Dispatcher for component-specific config panels. If a component_type
@@ -99,6 +101,30 @@ const MATCHERS: Array<{ test: (componentType: string) => boolean; Sidebar: Sideb
       return id || cls;
     },
     Sidebar: LLMSidebar,
+  },
+  {
+    // MCP-tool LLM agents — anthropic_agent, gemini_agent, openai_agent
+    // etc. Shape = LLM + task + system + max_iterations + mcp_servers.
+    // catalog_agent uses a different shape (planner/executor) so it
+    // stays on the generic form for now.
+    test: (t) => {
+      if (/catalog_agent/i.test(t)) return false;
+      const id = /(?:^|\.)(?:[a-z_]+_)?agent(?:$|\.)/i.test(t);
+      const cls = /\.(?:Anthropic|Openai|OpenAI|Gemini|Groq)AgentComponent$/i.test(t);
+      return id || cls;
+    },
+    Sidebar: AgentSidebar,
+  },
+  {
+    // LLM-powered document extractors + summarizers. Cover the common
+    // shape (input_column + LLM + output_fields[]) across five+
+    // templates. Each preset seeds sensible fields.
+    test: (t) => {
+      const id = /(?:^|\.)(?:contract_extractor|bank_statement_extractor|expense_report_extractor|document_summarizer|entity_extractor|gong_call_summary_asset)(?:$|\.)/i.test(t);
+      const cls = /\.(?:Contract|BankStatement|ExpenseReport|Document|Entity)?(?:Extractor|Summarizer|Summary)Component$/i.test(t);
+      return id || cls;
+    },
+    Sidebar: DocumentExtractorSidebar,
   },
   {
     // Any engine-prefixed join, plus specialty joins (cross / spatial / anti).
