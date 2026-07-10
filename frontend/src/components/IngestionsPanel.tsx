@@ -420,20 +420,15 @@ export function IngestionsPanel({ onAddDataSource, onEditComponent }: Ingestions
 
   return (
     <div className="h-full overflow-y-auto bg-gray-50">
-      {/* Header */}
-      <div className="bg-white border-b border-gray-200 px-8 py-6 flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-semibold text-gray-900 flex items-center gap-2">
-            <Download className="w-6 h-6 text-primary" />
-            Ingestions
-          </h1>
-          <p className="text-sm text-gray-500 mt-1">
-            Every data source flowing into the project, and how it's performing.
-          </p>
+      {/* Slim header ribbon — matches the asset graph: no giant title
+          (the sidebar tells you the page), just actions on the right. */}
+      <div className="flex-shrink-0 bg-white border-b border-gray-200 px-4 py-2 flex items-center justify-between gap-2">
+        <div className="text-xs text-gray-400">
+          Tip: click a row for run history · use bulk actions to materialize many at once
         </div>
         <button
           onClick={() => setAddDataOpen(true)}
-          className="flex items-center gap-1.5 px-4 py-2 text-sm font-medium bg-primary text-primary-foreground rounded-md hover:bg-accent"
+          className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium bg-primary text-primary-foreground rounded-md hover:bg-accent"
         >
           <Download className="w-4 h-4" /> Add data
         </button>

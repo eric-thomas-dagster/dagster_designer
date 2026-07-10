@@ -140,6 +140,18 @@ export function DbtPanel({ onOpenFile }: DbtPanelProps) {
   // "Scaffold docs" — bootstraps models/overview.md from the manifest
   // when the user lands on an empty Docs tab. Safe to click even when
   // an overview already exists (backend leaves it alone).
+  // Common helper: 404s on our new endpoints almost always mean the
+  // backend hasn't been restarted since these routes were added. Show
+  // a helpful hint instead of the raw error.
+  const formatEndpointError = (e: any, action: string): string => {
+    const status = e?.response?.status;
+    const detail = e?.response?.data?.detail;
+    if (status === 404 && (!detail || /not found/i.test(detail))) {
+      return `${action} — endpoint not found. Restart the backend so the new dbt endpoints load.`;
+    }
+    return `${action}: ${detail || e?.message || e}`;
+  };
+
   const scaffoldDocs = async () => {
     if (!currentProject || !data?.dbt_project_relative_path) return;
     setScaffoldingDocs(true);
@@ -156,7 +168,7 @@ export function DbtPanel({ onOpenFile }: DbtPanelProps) {
       const d = await projectsApi.getDbtDocs(currentProject.id, dbtPath);
       setDocs(d);
     } catch (e: any) {
-      notify.error(`Scaffold failed: ${e?.response?.data?.detail || e?.message || e}`);
+      notify.error(formatEndpointError(e, 'Scaffold failed'));
     } finally {
       setScaffoldingDocs(false);
     }
@@ -176,7 +188,7 @@ export function DbtPanel({ onOpenFile }: DbtPanelProps) {
       // Refresh models so the new catalog data lights up column types etc.
       refresh();
     } catch (e: any) {
-      notify.error(`Docs generate failed: ${e?.response?.data?.detail || e?.message || e}`);
+      notify.error(formatEndpointError(e, 'Docs generate failed'));
     } finally {
       setGeneratingDocs(false);
     }
@@ -320,45 +332,35 @@ export function DbtPanel({ onOpenFile }: DbtPanelProps) {
 
   return (
     <div className="h-full overflow-y-auto bg-gray-50">
-      {/* Header */}
-      <div className="bg-white border-b border-gray-200 px-8 py-6 flex items-center justify-between gap-4">
-        <div className="min-w-0">
-          <h1 className="text-2xl font-semibold text-gray-900 flex items-center gap-2 flex-wrap">
-            <FileCode className="w-6 h-6 text-orange-500" />
-            dbt
-            {/* Picker — only when the Dagster project orchestrates
-                more than one dbt project. Single-project stays as a
-                simple label. */}
-            {dbtProjects.length > 1 ? (
-              <select
-                value={selectedDbtPath}
-                onChange={(e) => setSelectedDbtPath(e.target.value)}
-                className="text-base font-mono border border-gray-300 rounded px-2 py-1 focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
-                title="Multiple dbt projects orchestrated by this Dagster project — pick one to view"
-              >
-                {dbtProjects.map((p) => (
-                  <option key={p.relative_path} value={p.relative_path}>
-                    {p.name}{p.is_git_repo ? ' · git' : ''}
-                  </option>
-                ))}
-              </select>
-            ) : (
-              data?.project_name && (
-                <span className="text-lg font-mono text-gray-600">· {data.project_name}</span>
-              )
-            )}
-          </h1>
-          <p className="text-sm text-gray-500 mt-1">
-            {dbtProjects.length > 1
-              ? `${dbtProjects.length} dbt projects orchestrated by this Dagster project`
-              : 'Every model in this dbt project, with docs, tests, and one-click runs.'}
-          </p>
+      {/* Slim header ribbon — matches the asset graph: no giant title
+          (the sidebar tells you the page), just the multi-dbt-project
+          picker (when applicable) and the action buttons. */}
+      <div className="flex-shrink-0 bg-white border-b border-gray-200 px-4 py-2 flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2 min-w-0">
+          {dbtProjects.length > 1 ? (
+            <select
+              value={selectedDbtPath}
+              onChange={(e) => setSelectedDbtPath(e.target.value)}
+              className="text-xs font-mono border border-gray-300 rounded px-2 py-1 focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
+              title="Multiple dbt projects orchestrated by this Dagster project — pick one to view"
+            >
+              {dbtProjects.map((p) => (
+                <option key={p.relative_path} value={p.relative_path}>
+                  {p.name}{p.is_git_repo ? ' · git' : ''}
+                </option>
+              ))}
+            </select>
+          ) : data?.project_name ? (
+            <span className="text-xs font-mono text-gray-500 truncate" title={data.project_name}>
+              {data.project_name}
+            </span>
+          ) : null}
         </div>
         <div className="flex items-center gap-2">
           <button
             onClick={runModified}
             disabled={runningModified}
-            className="flex items-center gap-1.5 px-3 py-2 text-sm font-medium text-gray-700 border border-gray-300 rounded-md hover:bg-gray-50 disabled:opacity-50"
+            className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-gray-700 border border-gray-300 rounded-md hover:bg-gray-50 disabled:opacity-50"
             title="Detects changed .sql files vs the git working tree and dbt-builds only those"
           >
             {runningModified ? <Loader2 className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4" />}
@@ -366,13 +368,13 @@ export function DbtPanel({ onOpenFile }: DbtPanelProps) {
           </button>
           <button
             onClick={() => setShowGitCommit(true)}
-            className="flex items-center gap-1.5 px-3 py-2 text-sm font-medium text-gray-700 border border-gray-300 rounded-md hover:bg-gray-50"
+            className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-gray-700 border border-gray-300 rounded-md hover:bg-gray-50"
           >
             <GitCommit className="w-4 h-4" /> Commit
           </button>
           <button
             onClick={() => setShowAddModel(true)}
-            className="flex items-center gap-1.5 px-4 py-2 text-sm font-medium bg-orange-500 text-white rounded-md hover:bg-orange-600"
+            className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium bg-orange-500 text-white rounded-md hover:bg-orange-600"
           >
             <FileCode className="w-4 h-4" /> New model
           </button>

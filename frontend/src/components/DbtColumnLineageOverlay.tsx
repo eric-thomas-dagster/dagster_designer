@@ -165,49 +165,56 @@ export function DbtColumnLineageOverlay({
   const totalDownEdges = useMemo(() => Array.from(outgoing.values()).reduce((s, arr) => s + arr.length, 0), [outgoing]);
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-6" onClick={onClose}>
+    <div className="fixed inset-0 z-50 bg-gray-900/60 backdrop-blur-sm flex items-center justify-center p-6" onClick={onClose}>
       <div
-        className="bg-white rounded-lg shadow-2xl w-[1200px] max-w-[98vw] max-h-[90vh] flex flex-col overflow-hidden"
+        className="bg-white rounded-xl shadow-2xl w-[1280px] max-w-[98vw] max-h-[92vh] flex flex-col overflow-hidden"
         onClick={(e) => e.stopPropagation()}
         ref={containerRef}
       >
-        <div className="px-4 py-3 border-b border-gray-200 flex items-center justify-between">
+        {/* Header */}
+        <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between bg-gradient-to-b from-white to-gray-50/50">
           <div>
-            <div className="text-sm font-semibold text-gray-900 flex items-center gap-1.5">
-              <Sparkles className="w-4 h-4 text-primary" />
-              Column lineage · <span className="font-mono text-gray-700">{modelName}</span>
+            <div className="text-base font-semibold text-gray-900 flex items-center gap-2">
+              <div className="w-8 h-8 rounded-lg bg-indigo-50 flex items-center justify-center">
+                <Sparkles className="w-4 h-4 text-indigo-600" />
+              </div>
+              <span>Column lineage</span>
+              <span className="text-gray-300">·</span>
+              <span className="font-mono text-gray-700 text-sm">{modelName}</span>
             </div>
-            <div className="text-[11px] text-gray-500 mt-0.5">
-              Heuristic — solid = name match, faded = SQL-scan guess. Dropped columns render greyed with strikethrough.
+            <div className="text-xs text-gray-500 mt-1 ml-10">
+              Trace where each column comes from and where it flows. Bezier lines show heuristic name matches.
             </div>
           </div>
-          <button onClick={onClose} className="p-1 hover:bg-gray-100 rounded" aria-label="Close">
-            <X className="w-4 h-4 text-gray-500" />
+          <button onClick={onClose} className="p-1.5 hover:bg-gray-100 rounded-md text-gray-400 hover:text-gray-700" aria-label="Close">
+            <X className="w-4 h-4" />
           </button>
         </div>
 
-        <div className="relative flex-1 overflow-auto p-6">
+        {/* Content */}
+        <div className="relative flex-1 overflow-auto bg-gray-50/40">
           {loading && (
-            <div className="flex items-center justify-center py-10 text-sm text-gray-500 gap-2">
+            <div className="flex items-center justify-center py-16 text-sm text-gray-500 gap-2">
               Loading column lineage…
             </div>
           )}
           {error && (
-            <div className="p-3 bg-rose-50 border border-rose-200 rounded text-sm text-rose-800">{error}</div>
+            <div className="m-6 p-4 bg-rose-50 border border-rose-200 rounded-lg text-sm text-rose-800">{error}</div>
           )}
           {data && !loading && !error && (
             <>
-              <div className="grid grid-cols-3 gap-6 relative" style={{ minHeight: 240 }}>
+              <div className="grid grid-cols-3 gap-10 relative p-8" style={{ minHeight: 320 }}>
                 {/* Upstream */}
                 <div>
-                  <SectionHeader label="Upstream" count={upstreamModels.length} sub={`${totalUpEdges} edge${totalUpEdges === 1 ? '' : 's'}`} align="left" />
+                  <SectionHeader label="Upstream" count={upstreamModels.length} sub={`${totalUpEdges} edge${totalUpEdges === 1 ? '' : 's'}`} align="left" tone="upstream" />
                   {upstreamModels.length === 0 && <EmptyHint text="No upstream column edges detected." />}
                   {upstreamModels.map((u) => (
                     <ModelBlock
                       key={u.uid}
                       title={u.uid.replace(/^(model|source|seed|snapshot)\./, '')}
+                      subtitle={u.uid.startsWith('source.') ? 'source' : u.uid.startsWith('seed.') ? 'seed' : 'model'}
                       columns={u.columns}
-                      accent="border-emerald-200 bg-emerald-50/40"
+                      tone="upstream"
                       side="right"
                       colRef={(col, el) => colRefs.current.set(`up:${u.uid}:${col}`, el)}
                       annotate={(col) => (u.edgesByCol.has(col) ? null : 'dropped')}
@@ -216,16 +223,16 @@ export function DbtColumnLineageOverlay({
                 </div>
                 {/* This model */}
                 <div>
-                  <SectionHeader label={modelName} count={1} sub={`${thisColumns.length} col${thisColumns.length === 1 ? '' : 's'}`} align="center" />
+                  <SectionHeader label={modelName} count={1} sub={`${thisColumns.length} col${thisColumns.length === 1 ? '' : 's'}`} align="center" tone="focal" />
                   {thisColumns.length === 0 && <EmptyHint text="No columns known — run dbt docs generate to populate the catalog." />}
                   <ModelBlock
                     title={modelName}
+                    subtitle="this model"
                     columns={thisColumns}
-                    accent="border-primary/30 bg-primary/5"
+                    tone="focal"
                     side="both"
                     colRef={(col, el) => colRefs.current.set(`this:${col}`, el)}
                     annotate={(col) => {
-                      // Derived: no incoming edge points at this column.
                       const hasIncoming = data.edges.some((e) => e.to_unique_id === modelUniqueId && e.to_column === col);
                       const isSource = modelUniqueId.startsWith('source.');
                       return hasIncoming || isSource ? null : 'derived';
@@ -234,14 +241,15 @@ export function DbtColumnLineageOverlay({
                 </div>
                 {/* Downstream */}
                 <div>
-                  <SectionHeader label="Downstream" count={downstreamModels.length} sub={`${totalDownEdges} edge${totalDownEdges === 1 ? '' : 's'}`} align="right" />
+                  <SectionHeader label="Downstream" count={downstreamModels.length} sub={`${totalDownEdges} edge${totalDownEdges === 1 ? '' : 's'}`} align="right" tone="downstream" />
                   {downstreamModels.length === 0 && <EmptyHint text="No downstream column edges detected." />}
                   {downstreamModels.map((d) => (
                     <ModelBlock
                       key={d.uid}
                       title={d.uid.replace(/^(model|source|seed|snapshot)\./, '')}
+                      subtitle={d.uid.startsWith('source.') ? 'source' : d.uid.startsWith('seed.') ? 'seed' : 'model'}
                       columns={d.columns}
-                      accent="border-blue-200 bg-blue-50/40"
+                      tone="downstream"
                       side="left"
                       colRef={(col, el) => colRefs.current.set(`down:${d.uid}:${col}`, el)}
                       annotate={(col) => (d.edgesByCol.has(col) ? null : 'derived-here')}
@@ -249,28 +257,50 @@ export function DbtColumnLineageOverlay({
                   ))}
                 </div>
 
+                {/* SVG connectors — overlaid across the whole grid so
+                    they cross columns freely. Larger stroke + soft
+                    shadow makes them read as lines, not scratches. */}
                 <svg
                   className="absolute inset-0 pointer-events-none"
                   width="100%"
                   height="100%"
                   style={{ overflow: 'visible' }}
                 >
+                  <defs>
+                    <filter id="line-shadow" x="-10%" y="-10%" width="120%" height="120%">
+                      <feDropShadow dx="0" dy="1" stdDeviation="0.5" floodColor="#94a3b8" floodOpacity="0.25" />
+                    </filter>
+                  </defs>
                   {connectorPaths.map((p, i) => (
                     <path
                       key={i}
                       d={p.d}
                       fill="none"
-                      strokeWidth={1.5}
+                      strokeWidth={1.75}
+                      strokeLinecap="round"
                       className={p.className}
-                      style={{ opacity: 0.35 + p.confidence * 0.5 }}
+                      filter="url(#line-shadow)"
+                      style={{ opacity: 0.45 + p.confidence * 0.5 }}
                     />
                   ))}
                 </svg>
               </div>
 
-              <div className="mt-6 flex flex-wrap items-center gap-3 text-[11px] text-gray-500">
-                <span>{totalUpEdges + totalDownEdges} column edges</span>
-                <span className="ml-auto">Solid = name-match · faded = SQL-scan guess</span>
+              {/* Footer legend */}
+              <div className="px-8 py-3 border-t border-gray-100 bg-white flex flex-wrap items-center gap-4 text-[11px] text-gray-500">
+                <span className="inline-flex items-center gap-1.5">
+                  <span className="w-3 h-0.5 bg-emerald-500 rounded" /> upstream edge
+                </span>
+                <span className="inline-flex items-center gap-1.5">
+                  <span className="w-3 h-0.5 bg-blue-500 rounded" /> downstream edge
+                </span>
+                <span className="inline-flex items-center gap-1.5">
+                  <Sparkles className="w-3 h-3 text-amber-500" /> derived here
+                </span>
+                <span className="inline-flex items-center gap-1.5">
+                  <span className="text-gray-400 line-through font-mono">dropped</span> not carried through
+                </span>
+                <span className="ml-auto">{totalUpEdges + totalDownEdges} column edges · higher opacity = higher confidence</span>
               </div>
             </>
           )}
@@ -280,41 +310,84 @@ export function DbtColumnLineageOverlay({
   );
 }
 
-function SectionHeader({ label, count, sub, align }: { label: string; count: number; sub: string; align: 'left' | 'center' | 'right' }) {
+type Tone = 'upstream' | 'downstream' | 'focal';
+
+const TONE_STYLES: Record<Tone, { headerText: string; headerBar: string; card: string; dot: string; subtitle: string }> = {
+  upstream: {
+    headerText: 'text-emerald-700',
+    headerBar: 'bg-emerald-500',
+    card: 'border-gray-200 bg-white',
+    dot: 'bg-emerald-500',
+    subtitle: 'text-emerald-600',
+  },
+  downstream: {
+    headerText: 'text-blue-700',
+    headerBar: 'bg-blue-500',
+    card: 'border-gray-200 bg-white',
+    dot: 'bg-blue-500',
+    subtitle: 'text-blue-600',
+  },
+  focal: {
+    headerText: 'text-indigo-700',
+    headerBar: 'bg-indigo-500',
+    card: 'border-indigo-200 bg-indigo-50/30 ring-1 ring-indigo-100',
+    dot: 'bg-indigo-500',
+    subtitle: 'text-indigo-600',
+  },
+};
+
+function SectionHeader({ label, count, sub, align, tone }: { label: string; count: number; sub: string; align: 'left' | 'center' | 'right'; tone: Tone }) {
+  const styles = TONE_STYLES[tone];
   return (
-    <div className={`mb-2 text-xs font-semibold text-gray-700 uppercase tracking-wider flex items-baseline gap-2 ${
+    <div className={`mb-3 flex items-center gap-2 ${
       align === 'right' ? 'justify-end' : align === 'center' ? 'justify-center' : ''
     }`}>
-      <span className="truncate">{label}</span>
-      <span className="text-[10px] font-normal text-gray-400">{sub}</span>
-      <span className="text-[10px] font-normal text-gray-400">({count})</span>
+      <div className={`w-1 h-4 rounded-full ${styles.headerBar}`} />
+      <div className="min-w-0">
+        <div className={`text-xs font-bold uppercase tracking-wider ${styles.headerText} truncate`}>{label}</div>
+        <div className="text-[10px] text-gray-400">{sub} · {count} model{count === 1 ? '' : 's'}</div>
+      </div>
     </div>
   );
 }
 
 function EmptyHint({ text }: { text: string }) {
-  return <div className="p-3 border border-dashed border-gray-200 rounded text-[11px] text-gray-500 text-center">{text}</div>;
+  return <div className="p-4 border border-dashed border-gray-200 rounded-lg text-[11px] text-gray-500 text-center bg-white">{text}</div>;
 }
 
 function ModelBlock({
   title,
+  subtitle,
   columns,
-  accent,
+  tone,
   side,
   colRef,
   annotate,
 }: {
   title: string;
+  subtitle: string;
   columns: string[];
-  accent: string;
+  tone: Tone;
   side: 'left' | 'right' | 'both';
   colRef: (col: string, el: HTMLDivElement | null) => void;
   annotate?: (col: string) => 'dropped' | 'derived' | 'derived-here' | null;
 }) {
+  const styles = TONE_STYLES[tone];
   return (
-    <div className={`rounded border ${accent} p-2 mb-2`}>
-      <div className="text-[11px] font-mono text-gray-700 truncate mb-1.5" title={title}>{title}</div>
-      <div className="space-y-1">
+    <div className={`rounded-lg border ${styles.card} shadow-sm mb-3 overflow-hidden`}>
+      {/* Card header */}
+      <div className="px-3 py-2 border-b border-gray-100 flex items-baseline justify-between gap-2 bg-gradient-to-b from-white to-gray-50/40">
+        <div className="min-w-0">
+          <div className="text-xs font-mono font-semibold text-gray-900 truncate" title={title}>{title}</div>
+          <div className={`text-[9px] uppercase tracking-wider ${styles.subtitle} font-medium`}>{subtitle}</div>
+        </div>
+        <span className={`w-1.5 h-1.5 rounded-full ${styles.dot} flex-shrink-0`} />
+      </div>
+      {/* Columns */}
+      <div className="py-1">
+        {columns.length === 0 && (
+          <div className="px-3 py-2 text-[10px] text-gray-400 italic">no columns known</div>
+        )}
         {columns.map((col) => {
           const note = annotate?.(col) ?? null;
           const isDropped = note === 'dropped';
@@ -324,27 +397,24 @@ function ModelBlock({
             <div
               key={col}
               ref={(el) => colRef(col, el)}
-              className={`flex items-center gap-1.5 px-1.5 py-0.5 text-[11px] rounded ${
-                isDropped ? 'bg-gray-100 text-gray-400 line-through' : 'bg-white text-gray-800'
-              } ${side === 'left' ? 'justify-start' : side === 'right' ? 'justify-end' : 'justify-center'}`}
+              className={`group flex items-center gap-1.5 px-3 py-1 text-[11px] hover:bg-gray-50 ${
+                isDropped ? 'text-gray-400' : 'text-gray-800'
+              }`}
             >
-              {(side === 'left' || side === 'both') && (
-                <span className="w-1.5 h-1.5 rounded-full bg-gray-400 flex-shrink-0" />
-              )}
-              <span className="font-mono truncate" title={col}>{col}</span>
+              {side === 'left' && <span className={`w-1.5 h-1.5 rounded-full ${isDropped ? 'bg-gray-300' : styles.dot} flex-shrink-0`} />}
+              {side === 'both' && <span className={`w-1.5 h-1.5 rounded-full ${styles.dot} flex-shrink-0`} />}
+              <span className={`font-mono truncate flex-1 ${isDropped ? 'line-through' : ''}`} title={col}>{col}</span>
               {isDerived && (
-                <span className="inline-flex items-center gap-0.5 text-[9px] text-amber-700" title="No matching upstream column — likely derived here.">
+                <span className="inline-flex items-center gap-0.5 text-[9px] text-amber-600 font-medium flex-shrink-0" title="No matching upstream column — likely derived here.">
                   <Sparkles className="w-2.5 h-2.5" /> derived
                 </span>
               )}
               {isDerivedHere && (
-                <span className="inline-flex items-center gap-0.5 text-[9px] text-blue-700" title="No matching source column — added downstream.">
+                <span className="inline-flex items-center gap-0.5 text-[9px] text-blue-600 font-medium flex-shrink-0" title="No matching source column — added downstream.">
                   <ArrowRight className="w-2.5 h-2.5" /> new
                 </span>
               )}
-              {(side === 'right' || side === 'both') && (
-                <span className="w-1.5 h-1.5 rounded-full bg-gray-400 flex-shrink-0" />
-              )}
+              {(side === 'right' || side === 'both') && <span className={`w-1.5 h-1.5 rounded-full ${isDropped ? 'bg-gray-300' : styles.dot} flex-shrink-0`} />}
             </div>
           );
         })}
