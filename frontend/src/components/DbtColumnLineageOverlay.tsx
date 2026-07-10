@@ -46,6 +46,11 @@ export function DbtColumnLineageOverlay({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
+  // Grid ref sits on the same element that contains the SVG, so
+  // coordinates computed via getBoundingClientRect() line up with the
+  // SVG's coordinate space. Using the outer card ref caused every
+  // path to be offset down by (header height + top padding).
+  const gridRef = useRef<HTMLDivElement | null>(null);
   const colRefs = useRef(new Map<string, HTMLDivElement | null>());
   const [connectorPaths, setConnectorPaths] = useState<Array<{ d: string; confidence: number; className: string; touchesHl: boolean; dashed: boolean }>>([]);
 
@@ -145,8 +150,8 @@ export function DbtColumnLineageOverlay({
   // We iterate the raw edge list once and only draw edges where both
   // endpoints are real column refs (no '?' / '' pollution).
   const recomputePaths = () => {
-    if (!containerRef.current || !data) return;
-    const cbox = containerRef.current.getBoundingClientRect();
+    if (!gridRef.current || !data) return;
+    const cbox = gridRef.current.getBoundingClientRect();
     const paths: Array<{ d: string; confidence: number; className: string; touchesHl: boolean; dashed: boolean }> = [];
     const draw = (fromKey: string, toKey: string, confidence: number, cls: string, touchesHl: boolean, dashed: boolean) => {
       const a = colRefs.current.get(fromKey);
@@ -254,7 +259,7 @@ export function DbtColumnLineageOverlay({
           )}
           {data && !loading && !error && (
             <>
-              <div className="grid grid-cols-3 gap-10 relative p-8" style={{ minHeight: 320 }}>
+              <div ref={gridRef} className="grid grid-cols-3 gap-10 relative p-8" style={{ minHeight: 320 }}>
                 {/* Upstream */}
                 <div>
                   <SectionHeader label="Upstream" count={upstreamModels.length} sub={`${totalUpEdges} edge${totalUpEdges === 1 ? '' : 's'}`} align="left" tone="upstream" />
