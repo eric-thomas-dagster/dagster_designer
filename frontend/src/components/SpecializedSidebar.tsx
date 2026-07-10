@@ -20,37 +20,87 @@ type Sidebar = React.ComponentType<{
   onOpenAdvanced?: () => void;
 }>;
 
+// Engine prefixes we accept in front of each transform kind. Written
+// this way so a future `databricks_filter` / `snowflake_join` /
+// `duckdb_summarize` community template automatically inherits the
+// specialized sidebar with zero code change. Order doesn't matter —
+// this is joined into one alternation.
+const ENGINE_PREFIXES = [
+  'warehouse',
+  'dataframe',
+  'databricks',
+  'spark',
+  'pyspark',
+  'snowflake',
+  'bigquery',
+  'redshift',
+  'duckdb',
+  'clickhouse',
+  'polars',
+  'pandas',
+  'motherduck',
+  'trino',
+  'presto',
+  'athena',
+];
+const ENGINE_ALT = ENGINE_PREFIXES.join('|');
+// Common class-name variants — CamelCase engine prefixes as they'd
+// appear in a fully-qualified component_type ".DatabricksFilterComponent".
+const ENGINE_CLASS_ALT = ENGINE_PREFIXES
+  .map((p) => p.charAt(0).toUpperCase() + p.slice(1))
+  .join('|');
+
+function makeMatcher(kindPatterns: string[], classPatterns: string[]) {
+  const idAlt = kindPatterns.join('|');
+  const classAlt = classPatterns.join('|');
+  // Only accept `.` (module boundary) or start-of-string before the
+  // engine prefix. Rejects arbitrary `_word_filter` component ids
+  // like `bounding_box_filter` that happen to end in "_filter" but
+  // aren't the row-filter shape our FilterSidebar understands.
+  const idRegex = new RegExp(
+    `(?:^|\\.)(?:(?:${ENGINE_ALT})_)?(?:${idAlt})(?:$|\\.)`,
+    'i',
+  );
+  const classRegex = new RegExp(
+    `\\.(?:(?:${ENGINE_CLASS_ALT}))?(?:${classAlt})Component$`,
+    'i',
+  );
+  return (t: string) => idRegex.test(t) || classRegex.test(t);
+}
+
 const MATCHERS: Array<{ test: (componentType: string) => boolean; Sidebar: Sidebar }> = [
   {
-    // Every DataFrame / warehouse / spatial / cross join maps here.
+    // Any engine-prefixed join, plus specialty joins (cross / spatial / anti).
     // Keep the regex specific enough to exclude names that just contain
     // "join" in a different meaning ("joint_...", "join_asset_check").
-    test: (t) =>
-      /(?:^|[._])(?:dataframe|warehouse|spatial|cross|left|right|inner|outer|anti)_?join(?:$|[._])/i.test(t) ||
-      /\.(?:Dataframe|Warehouse|Spatial|Cross|Left|Right|Inner|Outer|Anti)?Join(?:Component)?$/i.test(t),
+    test: (t) => {
+      const idRegex = new RegExp(
+        `(?:^|\\.)(?:(?:${ENGINE_ALT}|cross|spatial|left|right|inner|outer|anti)_)?join(?:$|\\.)`,
+        'i',
+      );
+      const classRegex = new RegExp(
+        `\\.(?:${ENGINE_CLASS_ALT}|Cross|Spatial|Left|Right|Inner|Outer|Anti)?Join(?:Component)?$`,
+        'i',
+      );
+      return idRegex.test(t) || classRegex.test(t);
+    },
     Sidebar: JoinSidebar,
   },
   {
-    // filter (community pandas-query variant) + warehouse_filter (SQL
-    // predicate). Also matches bare `.FilterComponent` types.
-    test: (t) =>
-      /(?:^|[._])(?:warehouse_)?filter(?:$|[._])/i.test(t) ||
-      /\.(?:Warehouse)?FilterComponent$/i.test(t),
+    // filter (pandas-query) + warehouse_filter (SQL predicate) + any
+    // future <engine>_filter variant.
+    test: makeMatcher(['filter'], ['Filter']),
     Sidebar: FilterSidebar,
   },
   {
-    // summarize + warehouse_summarize. Also SummarizeComponent /
-    // aggregate names for user forks.
-    test: (t) =>
-      /(?:^|[._])(?:warehouse_)?(?:summarize|aggregate|group_by)(?:$|[._])/i.test(t) ||
-      /\.(?:Warehouse)?(?:Summarize|Aggregate)Component$/i.test(t),
+    // summarize / aggregate / group_by across engines.
+    test: makeMatcher(['summarize', 'aggregate', 'group_by'], ['Summarize', 'Aggregate']),
     Sidebar: AggregateSidebar,
   },
   {
-    // Community sql_transform + our built-in SqlTransformerComponent.
-    test: (t) =>
-      /(?:^|[._])sql_transform(?:er)?(?:$|[._])/i.test(t) ||
-      /\.SqlTransform(?:er)?Component$/i.test(t),
+    // Community sql_transform + built-in SqlTransformerComponent + any
+    // engine-prefixed sql transform.
+    test: makeMatcher(['sql_transform', 'sql_transformer'], ['SqlTransform', 'SqlTransformer']),
     Sidebar: SqlTransformSidebar,
   },
 ];
