@@ -864,7 +864,7 @@ function App() {
 
             {/* Property Panel */}
             {selectedNodeId && (
-              <aside className="w-96 bg-white border-l border-gray-200 overflow-y-auto">
+              <aside className="w-96 flex-shrink-0 bg-white border-l border-gray-200 overflow-y-auto">
                 <PropertyPanel
                   nodeId={selectedNodeId}
                   onConfigureComponent={setEditingComponent}
