@@ -2707,6 +2707,221 @@ async def get_dbt_exposures(project_id: str, dbt_relative_path: str | None = Non
     )
 
 
+# ---------------------------------------------------------------------------
+# Write endpoints for selectors / exposures / sources — power the
+# "Add" dialogs on each sub-tab. All three write yml non-destructively:
+# we read any existing file, merge our entry into the collection, and
+# write it back. Users still own the yml files; we're just editing.
+# ---------------------------------------------------------------------------
+
+def _resolve_dbt_root_for_write(project, dbt_relative_path: str | None) -> Path:
+    """Shared helper — locate the (chosen) dbt project's root for the
+    write endpoints. Raises 404 when no dbt project is present so the
+    caller doesn't need to duplicate the enumeration boilerplate."""
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    root = project_service._get_project_dir(project)
+    dbt_projects = _find_dbt_projects(root)
+    if not dbt_projects:
+        raise HTTPException(status_code=404, detail="No dbt project found in this Dagster project.")
+    chosen = dbt_projects[0]
+    if dbt_relative_path:
+        for p in dbt_projects:
+            if p.relative_path == dbt_relative_path:
+                chosen = p
+                break
+    return (root / chosen.relative_path).resolve()
+
+
+class AddDbtSelectorRequest(BaseModel):
+    dbt_relative_path: str
+    name: str
+    description: str | None = None
+    definition: dict            # opaque dbt selector definition tree
+    default: bool = False
+
+
+@router.post('/{project_id}/dbt-selectors', response_model=DbtSelectorsResponse)
+async def add_dbt_selector(project_id: str, request: AddDbtSelectorRequest):
+    """Add a selector to <dbt_root>/selectors.yml. Non-destructive: if
+    the file already exists we upsert by name; if not, we create it."""
+    import yaml as _yaml
+    project = project_service.get_project(project_id)
+    dbt_root = _resolve_dbt_root_for_write(project, request.dbt_relative_path)
+    if not request.name.strip():
+        raise HTTPException(status_code=400, detail="Selector name is required.")
+    sel_path = dbt_root / 'selectors.yml'
+    existing: dict = {}
+    if sel_path.exists():
+        try:
+            existing = _yaml.safe_load(sel_path.read_text()) or {}
+        except Exception:
+            existing = {}
+    selectors = list(existing.get('selectors') or [])
+    entry = {'name': request.name.strip(), 'definition': request.definition}
+    if request.description:
+        entry['description'] = request.description
+    if request.default:
+        entry['default'] = True
+    # Upsert by name so re-submitting overwrites.
+    selectors = [s for s in selectors if s.get('name') != request.name.strip()]
+    selectors.append(entry)
+    existing['selectors'] = selectors
+    sel_path.write_text(_yaml.dump(existing, sort_keys=False))
+    # Return the updated list so the UI refreshes automatically.
+    return await get_dbt_selectors(project_id, dbt_relative_path=request.dbt_relative_path)
+
+
+class AddDbtExposureRequest(BaseModel):
+    dbt_relative_path: str
+    name: str
+    type: str = 'dashboard'      # dashboard | notebook | analysis | ml | application
+    label: str | None = None
+    description: str | None = None
+    owner_name: str | None = None
+    owner_email: str | None = None
+    url: str | None = None
+    maturity: str | None = None  # low | medium | high
+    depends_on: list[str] = []   # ref names or source.<name>.<table>
+
+
+@router.post('/{project_id}/dbt-exposures', response_model=DbtExposuresResponse)
+async def add_dbt_exposure(project_id: str, request: AddDbtExposureRequest):
+    """Write an exposure to <dbt_root>/models/exposures.yml. Non-
+    destructive: merges with existing entries by name."""
+    import yaml as _yaml
+    project = project_service.get_project(project_id)
+    dbt_root = _resolve_dbt_root_for_write(project, request.dbt_relative_path)
+    if not request.name.strip():
+        raise HTTPException(status_code=400, detail="Exposure name is required.")
+
+    exp_path = dbt_root / 'models' / 'exposures.yml'
+    existing: dict = {}
+    if exp_path.exists():
+        try:
+            existing = _yaml.safe_load(exp_path.read_text()) or {}
+        except Exception:
+            existing = {}
+    existing.setdefault('version', 2)
+    exposures = list(existing.get('exposures') or [])
+
+    # dbt expects each depends_on entry to be a jinja expression:
+    #   - ref('my_model')      → pass "my_model"
+    #   - source('foo', 'bar') → pass "source.foo.bar"
+    # We convert on the write side so users just click model names.
+    depends_on = []
+    for d in request.depends_on:
+        if d.startswith('source.'):
+            parts = d.split('.', 2)
+            if len(parts) == 3:
+                depends_on.append(f"source('{parts[1]}', '{parts[2]}')")
+        else:
+            # Strip any leading "model." prefix from unique_ids.
+            depends_on.append(f"ref('{d.split('.')[-1]}')")
+
+    entry: dict = {'name': request.name.strip(), 'type': request.type}
+    if request.label: entry['label'] = request.label
+    if request.description: entry['description'] = request.description
+    if request.maturity: entry['maturity'] = request.maturity
+    if request.url: entry['url'] = request.url
+    if depends_on: entry['depends_on'] = depends_on
+    owner: dict = {}
+    if request.owner_name: owner['name'] = request.owner_name
+    if request.owner_email: owner['email'] = request.owner_email
+    # dbt requires owner: {email}; add a stub email if user only gave a name.
+    if owner:
+        if 'email' not in owner:
+            owner['email'] = f"{(request.owner_name or 'unknown').lower().replace(' ', '.')}@example.com"
+        entry['owner'] = owner
+
+    exposures = [e for e in exposures if e.get('name') != request.name.strip()]
+    exposures.append(entry)
+    existing['exposures'] = exposures
+    exp_path.parent.mkdir(parents=True, exist_ok=True)
+    exp_path.write_text(_yaml.dump(existing, sort_keys=False))
+    return await get_dbt_exposures(project_id, dbt_relative_path=request.dbt_relative_path)
+
+
+class DbtSourceColumn(BaseModel):
+    name: str
+    description: str | None = None
+    tests: list[str] = []           # e.g. ['not_null', 'unique']
+
+
+class DbtFreshnessThreshold(BaseModel):
+    count: int
+    period: str                      # 'minute' | 'hour' | 'day'
+
+
+class AddDbtSourceRequest(BaseModel):
+    dbt_relative_path: str
+    source_name: str                 # top-level source: my_saas
+    schema: str | None = None        # warehouse schema
+    database: str | None = None      # optional
+    table_name: str                  # e.g. orders
+    description: str | None = None
+    loaded_at_field: str | None = None
+    warn_after: DbtFreshnessThreshold | None = None
+    error_after: DbtFreshnessThreshold | None = None
+    columns: list[DbtSourceColumn] = []
+
+
+@router.post('/{project_id}/dbt-sources')
+async def add_dbt_source(project_id: str, request: AddDbtSourceRequest):
+    """Write a source table entry to <dbt_root>/models/sources.yml.
+    Merges tables into an existing source (by name) or creates a new
+    source block. Freshness thresholds are optional."""
+    import yaml as _yaml
+    project = project_service.get_project(project_id)
+    dbt_root = _resolve_dbt_root_for_write(project, request.dbt_relative_path)
+    if not request.source_name.strip() or not request.table_name.strip():
+        raise HTTPException(status_code=400, detail="source_name and table_name are required.")
+
+    src_path = dbt_root / 'models' / 'sources.yml'
+    existing: dict = {}
+    if src_path.exists():
+        try:
+            existing = _yaml.safe_load(src_path.read_text()) or {}
+        except Exception:
+            existing = {}
+    existing.setdefault('version', 2)
+    sources = list(existing.get('sources') or [])
+
+    # Find the source block or create it.
+    src_block: dict | None = next((s for s in sources if s.get('name') == request.source_name.strip()), None)
+    if src_block is None:
+        src_block = {'name': request.source_name.strip(), 'tables': []}
+        sources.append(src_block)
+    if request.schema: src_block['schema'] = request.schema
+    if request.database: src_block['database'] = request.database
+
+    # Compose the table entry.
+    table_entry: dict = {'name': request.table_name.strip()}
+    if request.description: table_entry['description'] = request.description
+    if request.loaded_at_field: table_entry['loaded_at_field'] = request.loaded_at_field
+    freshness: dict = {}
+    if request.warn_after: freshness['warn_after'] = {'count': request.warn_after.count, 'period': request.warn_after.period}
+    if request.error_after: freshness['error_after'] = {'count': request.error_after.count, 'period': request.error_after.period}
+    if freshness: table_entry['freshness'] = freshness
+    if request.columns:
+        table_entry['columns'] = [
+            {k: v for k, v in {
+                'name': c.name, 'description': c.description, 'tests': (c.tests or None),
+            }.items() if v}
+            for c in request.columns
+        ]
+
+    tables = list(src_block.get('tables') or [])
+    tables = [t for t in tables if t.get('name') != request.table_name.strip()]
+    tables.append(table_entry)
+    src_block['tables'] = tables
+
+    existing['sources'] = sources
+    src_path.parent.mkdir(parents=True, exist_ok=True)
+    src_path.write_text(_yaml.dump(existing, sort_keys=False))
+    return {'success': True, 'relative_path': str(src_path.relative_to(dbt_root))}
+
+
 class DbtModelSqlDiffResponse(BaseModel):
     """Current on-disk SQL for a dbt model vs the version committed at
     HEAD. Both are raw strings; the frontend does the diff rendering

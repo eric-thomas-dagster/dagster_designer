@@ -378,6 +378,64 @@ export const projectsApi = {
     return response.data as any;
   },
 
+  addDbtSelector: async (
+    projectId: string,
+    body: {
+      dbt_relative_path: string;
+      name: string;
+      description?: string | null;
+      definition: Record<string, any>;
+      default?: boolean;
+    },
+  ): Promise<{
+    dbt_project_relative_path: string;
+    selectors: Array<{ name: string; description: string | null; definition: Record<string, any>; default: boolean }>;
+  }> => {
+    const response = await api.post(`/projects/${projectId}/dbt-selectors`, body);
+    return response.data as any;
+  },
+
+  addDbtExposure: async (
+    projectId: string,
+    body: {
+      dbt_relative_path: string;
+      name: string;
+      type?: string;
+      label?: string | null;
+      description?: string | null;
+      owner_name?: string | null;
+      owner_email?: string | null;
+      url?: string | null;
+      maturity?: string | null;
+      depends_on?: string[];
+    },
+  ): Promise<{
+    dbt_project_relative_path: string;
+    exposures: any[];
+  }> => {
+    const response = await api.post(`/projects/${projectId}/dbt-exposures`, body);
+    return response.data as any;
+  },
+
+  addDbtSource: async (
+    projectId: string,
+    body: {
+      dbt_relative_path: string;
+      source_name: string;
+      schema?: string | null;
+      database?: string | null;
+      table_name: string;
+      description?: string | null;
+      loaded_at_field?: string | null;
+      warn_after?: { count: number; period: 'minute' | 'hour' | 'day' } | null;
+      error_after?: { count: number; period: 'minute' | 'hour' | 'day' } | null;
+      columns?: Array<{ name: string; description?: string | null; tests?: string[] }>;
+    },
+  ): Promise<{ success: boolean; relative_path: string }> => {
+    const response = await api.post(`/projects/${projectId}/dbt-sources`, body);
+    return response.data as any;
+  },
+
   getDbtExposures: async (
     projectId: string,
     dbtRelativePath?: string,

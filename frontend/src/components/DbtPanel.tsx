@@ -11,6 +11,9 @@ import { SqlDiffDialog } from './SqlDiffDialog';
 import { DbtLineageView } from './DbtLineageView';
 import { DbtColumnLineageOverlay } from './DbtColumnLineageOverlay';
 import { AddDbtProjectDialog } from './AddDbtProjectDialog';
+import { AddDbtSelectorDialog } from './AddDbtSelectorDialog';
+import { AddDbtExposureDialog } from './AddDbtExposureDialog';
+import { AddDbtSourceDialog } from './AddDbtSourceDialog';
 
 interface DbtPanelProps {
   onOpenFile?: (path: string) => void;
@@ -55,6 +58,9 @@ export function DbtPanel({ onOpenFile }: DbtPanelProps) {
   const [scaffoldingDocs, setScaffoldingDocs] = useState(false);
   const [generatingDocs, setGeneratingDocs] = useState(false);
   const [showAddDbtProject, setShowAddDbtProject] = useState(false);
+  const [showAddSelector, setShowAddSelector] = useState(false);
+  const [showAddExposure, setShowAddExposure] = useState(false);
+  const [showAddSource, setShowAddSource] = useState(false);
   // Column-lineage modal — opened from the drawer's action row. Holds
   // the focal model so the modal is standalone and can outlive the
   // drawer (users often want to keep the modal open while switching
@@ -756,12 +762,28 @@ export function DbtPanel({ onOpenFile }: DbtPanelProps) {
                   Selectors defined in <code className="bg-gray-100 px-1 rounded">selectors.yml</code> — click to run.
                 </p>
               </div>
-              <span className="text-xs text-gray-500">{selectors?.selectors.length ?? 0}</span>
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-gray-500">{selectors?.selectors.length ?? 0}</span>
+                <button
+                  onClick={() => setShowAddSelector(true)}
+                  className="inline-flex items-center gap-1 px-2 py-1 text-xs font-medium bg-primary text-primary-foreground rounded"
+                >
+                  <Plus className="w-3 h-3" /> Add selector
+                </button>
+              </div>
             </div>
             {!selectors || selectors.selectors.length === 0 ? (
-              <div className="p-8 text-center text-xs text-gray-500">
-                No selectors defined. Create <code className="bg-gray-100 px-1 rounded">selectors.yml</code> at the
-                dbt project root to save reusable <code>--select</code> recipes.
+              <div className="p-8 text-center text-xs text-gray-500 space-y-3">
+                <p>
+                  No selectors defined yet. Selectors are named <code className="bg-gray-100 px-1 rounded">--select</code> recipes
+                  stored in <code className="bg-gray-100 px-1 rounded">selectors.yml</code>.
+                </p>
+                <button
+                  onClick={() => setShowAddSelector(true)}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium bg-primary text-primary-foreground rounded"
+                >
+                  <Plus className="w-4 h-4" /> Create your first selector
+                </button>
               </div>
             ) : (
               <ul className="divide-y divide-gray-100">
@@ -811,12 +833,28 @@ export function DbtPanel({ onOpenFile }: DbtPanelProps) {
                   Downstream consumers of this dbt project — dashboards, ML models, notebooks.
                 </p>
               </div>
-              <span className="text-xs text-gray-500">{exposures?.exposures.length ?? 0}</span>
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-gray-500">{exposures?.exposures.length ?? 0}</span>
+                <button
+                  onClick={() => setShowAddExposure(true)}
+                  className="inline-flex items-center gap-1 px-2 py-1 text-xs font-medium bg-primary text-primary-foreground rounded"
+                >
+                  <Plus className="w-3 h-3" /> Add exposure
+                </button>
+              </div>
             </div>
             {!exposures || exposures.exposures.length === 0 ? (
-              <div className="p-8 text-center text-xs text-gray-500">
-                No exposures declared. Add <code className="bg-gray-100 px-1 rounded">exposures:</code> blocks to
-                your schema.yml to document downstream consumers.
+              <div className="p-8 text-center text-xs text-gray-500 space-y-3">
+                <p>
+                  No exposures declared yet. Exposures document downstream consumers of your dbt project — dashboards,
+                  ML models, notebooks — so lineage extends past the warehouse.
+                </p>
+                <button
+                  onClick={() => setShowAddExposure(true)}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium bg-primary text-primary-foreground rounded"
+                >
+                  <Plus className="w-4 h-4" /> Declare your first exposure
+                </button>
               </div>
             ) : (
               <ul className="divide-y divide-gray-100">
@@ -883,16 +921,30 @@ export function DbtPanel({ onOpenFile }: DbtPanelProps) {
           <div className="bg-white border border-gray-200 rounded-lg overflow-hidden">
             <div className="px-4 py-3 border-b border-gray-100 flex items-center justify-between">
               <h2 className="text-sm font-semibold text-gray-900">Source freshness</h2>
-              <span className="text-xs text-gray-500">{freshness?.sources.length ?? 0} sources</span>
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-gray-500">{freshness?.sources.length ?? 0} sources</span>
+                <button
+                  onClick={() => setShowAddSource(true)}
+                  className="inline-flex items-center gap-1 px-2 py-1 text-xs font-medium bg-primary text-primary-foreground rounded"
+                >
+                  <Plus className="w-3 h-3" /> Add source
+                </button>
+              </div>
             </div>
             {!freshness || freshness.sources.length === 0 ? (
-              <div className="p-8 text-center">
-                <Clock className="w-8 h-8 text-gray-300 mx-auto mb-3" />
-                <p className="text-sm text-gray-600 mb-2">No sources declared in this dbt project.</p>
+              <div className="p-8 text-center space-y-3">
+                <Clock className="w-8 h-8 text-gray-300 mx-auto mb-1" />
+                <p className="text-sm text-gray-600">No sources declared in this dbt project.</p>
                 <p className="text-xs text-gray-500">
-                  Add <code className="bg-gray-100 px-1 rounded">sources:</code> blocks to your <code>schema.yml</code> and run{' '}
+                  Add a source to <code className="bg-gray-100 px-1 rounded">models/sources.yml</code> and run{' '}
                   <code className="bg-gray-100 px-1 rounded">dbt source freshness</code> to populate this view.
                 </p>
+                <button
+                  onClick={() => setShowAddSource(true)}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium bg-primary text-primary-foreground rounded"
+                >
+                  <Plus className="w-4 h-4" /> Declare your first source
+                </button>
               </div>
             ) : (
               <table className="w-full text-sm">
@@ -1059,6 +1111,52 @@ export function DbtPanel({ onOpenFile }: DbtPanelProps) {
           } catch {}
         }}
       />
+
+      {/* Add selector / exposure / source — writes to selectors.yml,
+          models/exposures.yml, models/sources.yml respectively.
+          Refresh the relevant lists on save so the UI updates. */}
+      {data?.dbt_project_relative_path && (
+        <>
+          <AddDbtSelectorDialog
+            open={showAddSelector}
+            onOpenChange={setShowAddSelector}
+            projectId={currentProject.id}
+            dbtRelativePath={data.dbt_project_relative_path}
+            onSaved={async () => {
+              try {
+                const r = await projectsApi.getDbtSelectors(currentProject.id, data.dbt_project_relative_path);
+                setSelectors(r);
+              } catch {}
+            }}
+          />
+          <AddDbtExposureDialog
+            open={showAddExposure}
+            onOpenChange={setShowAddExposure}
+            projectId={currentProject.id}
+            dbtRelativePath={data.dbt_project_relative_path}
+            onSaved={async () => {
+              try {
+                const r = await projectsApi.getDbtExposures(currentProject.id, data.dbt_project_relative_path);
+                setExposures(r);
+              } catch {}
+            }}
+          />
+          <AddDbtSourceDialog
+            open={showAddSource}
+            onOpenChange={setShowAddSource}
+            projectId={currentProject.id}
+            dbtRelativePath={data.dbt_project_relative_path}
+            onSaved={async () => {
+              // Sources don't have a direct list refresh — the freshness
+              // endpoint is what drives the view. Refetch it.
+              try {
+                const r = await projectsApi.getDbtSourceFreshness(currentProject.id, data.dbt_project_relative_path);
+                setFreshness(r);
+              } catch {}
+            }}
+          />
+        </>
+      )}
     </div>
   );
 }
