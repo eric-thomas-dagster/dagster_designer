@@ -118,6 +118,12 @@ class InstallComponentRequest(BaseModel):
     # component_id is being installed multiple times (each instance needs its
     # own defs/<name>/ directory).
     instance_name: Optional[str] = None
+    # Explicit "template-only" flag from callers like the Add Data dialog and
+    # the Library palette that want to install the component TEMPLATE without
+    # dropping a demo instance on the graph. The existing no-attributes
+    # heuristic covers this too, but the flag is unambiguous and future-proof
+    # against callers that pass attributes={} for other reasons.
+    template_only: bool = False
 
 
 def validate_component_config(component_dir: Path, attributes: dict) -> tuple[dict, list[str]]:
@@ -1068,13 +1074,14 @@ async def install_component_via_cli(
     # is installed but no bogus instance runs. Instances get created
     # explicitly via the graph builder / AI apply path (which DO supply
     # attributes and would land here with a merged, valid config).
-    if not request.attributes:
+    if request.template_only or not request.attributes:
         try:
             import shutil as _sh
             _sh.rmtree(defs_yaml_path.parent)
             print(
                 f"[CLI Install] Removed demo defs at {defs_yaml_path.parent} — "
-                f"template installed but no instance created (no attributes supplied)."
+                f"template installed but no instance created "
+                f"(template_only={request.template_only}, attributes empty)."
             )
         except Exception as e:
             print(f"[CLI Install] Warning: couldn't remove demo defs: {e}")

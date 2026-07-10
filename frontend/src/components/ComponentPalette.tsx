@@ -77,7 +77,10 @@ export function ComponentPalette({ onComponentClick }: ComponentPaletteProps) {
       const res = await fetch(`/api/v1/templates/install-via-cli/${componentId}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ project_id: currentProject.id, config: {} }),
+        // template_only=true: install the template but don't create a
+        // demo instance on the graph. The config modal opens right
+        // after; if the user cancels, the graph stays clean.
+        body: JSON.stringify({ project_id: currentProject.id, config: {}, template_only: true }),
       });
       const body = await res.json().catch(() => ({} as any));
       if (!res.ok) throw new Error(body.detail || 'Install failed');

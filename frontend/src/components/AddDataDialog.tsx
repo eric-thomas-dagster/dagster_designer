@@ -94,7 +94,11 @@ export function AddDataDialog({ open, onOpenChange, onSourcePicked }: AddDataDia
       const res = await fetch(`/api/v1/templates/install-via-cli/${componentId}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ project_id: currentProject.id, config: {} }),
+        // template_only: install the component but DO NOT drop a demo
+        // defs.yaml on the graph. The config modal opens next so the
+        // user picks whether to instantiate it — if they cancel,
+        // nothing lands. See install-via-cli's early-return branch.
+        body: JSON.stringify({ project_id: currentProject.id, config: {}, template_only: true }),
       });
       const body = await res.json().catch(() => ({} as any));
       if (!res.ok) throw new Error(body.detail || 'Install failed');
