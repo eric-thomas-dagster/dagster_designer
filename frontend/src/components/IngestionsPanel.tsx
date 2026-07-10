@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Download, Cloud, Database, FileText, Globe, Sparkles, Boxes, CheckCircle2, AlertTriangle, Play, Settings, Activity, TrendingUp, Loader2, XCircle, Layers, CalendarClock, Clock, X } from 'lucide-react';
 import { useProjectStore } from '@/hooks/useProject';
-import { assetsApi, projectsApi, type IngestionEvent } from '@/services/api';
+import { assetsApi, projectsApi, partitionsApi, type IngestionEvent, type BackfillRequest } from '@/services/api';
 import { notify } from './Notifications';
 import { AddDataDialog } from './AddDataDialog';
+import { PartitionBackfill } from './PartitionBackfill';
 import type { ComponentInstance } from '@/types';
 
 interface IngestionsPanelProps {
@@ -94,6 +95,10 @@ export function IngestionsPanel({ onAddDataSource, onEditComponent }: Ingestions
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [drawerFor, setDrawerFor] = useState<string | null>(null);
   const [runningBulk, setRunningBulk] = useState(false);
+  // When set, opens the PartitionBackfill modal targeting the asset
+  // key for a partitioned ingestion. The modal handles per-partition
+  // pickers, date ranges, config, and shells out via partitionsApi.
+  const [backfillAssetKey, setBackfillAssetKey] = useState<string | null>(null);
 
   useEffect(() => {
     if (!currentProject) return;
@@ -378,6 +383,30 @@ export function IngestionsPanel({ onAddDataSource, onEditComponent }: Ingestions
       notify.error(`Run failed: ${e?.message ?? e}`);
     } finally {
       setRunningId(null);
+    }
+  };
+
+  // Backfill launcher for partitioned ingestions. The modal owns the
+  // partition-picker UX; we just take the request Dagster expects and
+  // shell out to the existing partitions API, then refresh history so
+  // sparklines pick up the new runs.
+  const handleBackfillLaunch = async (request: BackfillRequest) => {
+    if (!currentProject) return;
+    try {
+      const r = await partitionsApi.launchBackfill(currentProject.id, request);
+      const targetKey = (request.asset_keys && request.asset_keys[0]) || 'asset';
+      if (r.success) {
+        notify.success(`Backfill launched for ${targetKey}.`);
+      } else {
+        notify.error(`Backfill failed: ${r.message}`);
+      }
+      // Refresh the event log so the newly-launched runs show up in
+      // sparklines and freshness columns.
+      const fresh = await assetsApi.ingestionHistory(currentProject.id, 5000);
+      setEvents(fresh.events || []);
+    } catch (e: any) {
+      notify.error(`Backfill failed: ${e?.message ?? e}`);
+      throw e;
     }
   };
 
@@ -741,11 +770,22 @@ export function IngestionsPanel({ onAddDataSource, onEditComponent }: Ingestions
                             onClick={() => handleRun(assetKey, component.id)}
                             disabled={!configured || runningId === component.id}
                             className="inline-flex items-center gap-1 px-2 py-1 text-xs bg-primary text-primary-foreground rounded hover:bg-accent disabled:opacity-40 disabled:cursor-not-allowed"
-                            title={configured ? 'Materialize this ingestion now' : 'Configure required fields first'}
+                            title={configured ? 'Materialize the latest partition (or full) now' : 'Configure required fields first'}
                           >
                             <Play className="w-3 h-3" />
                             {runningId === component.id ? 'Running…' : 'Run'}
                           </button>
+                          {partition && (
+                            <button
+                              onClick={() => setBackfillAssetKey(assetKey)}
+                              disabled={!configured}
+                              className="inline-flex items-center gap-1 px-2 py-1 text-xs text-indigo-700 border border-indigo-200 bg-indigo-50 rounded hover:bg-indigo-100 disabled:opacity-40 disabled:cursor-not-allowed"
+                              title="Backfill specific partitions — e.g. re-run just 2026-07-04, or every partition after a schema change"
+                            >
+                              <Layers className="w-3 h-3" />
+                              Backfill
+                            </button>
+                          )}
                           <button
                             onClick={() => onEditComponent(component)}
                             className="inline-flex items-center gap-1 px-2 py-1 text-xs text-gray-700 hover:bg-gray-100 rounded"
@@ -778,10 +818,23 @@ export function IngestionsPanel({ onAddDataSource, onEditComponent }: Ingestions
               setDrawerFor(null);
             }}
             onRun={() => handleRun(target.assetKey, target.component.id)}
+            onBackfill={target.partition ? () => setBackfillAssetKey(target.assetKey) : undefined}
             running={runningId === target.component.id}
           />
         );
       })()}
+
+      {/* Partition backfill modal — opened from row action or drawer.
+          Owns partition-picker UX, launches via partitionsApi. */}
+      {backfillAssetKey && currentProject && (
+        <PartitionBackfill
+          open={!!backfillAssetKey}
+          onOpenChange={(open) => !open && setBackfillAssetKey(null)}
+          projectId={currentProject.id}
+          assetKey={backfillAssetKey}
+          onLaunch={handleBackfillLaunch}
+        />
+      )}
 
       <AddDataDialog
         open={addDataOpen}
@@ -990,12 +1043,14 @@ function RowDetailDrawer({
   onClose,
   onEdit,
   onRun,
+  onBackfill,
   running,
 }: {
   target: any;
   onClose: () => void;
   onEdit: () => void;
   onRun: () => void;
+  onBackfill?: () => void;
   running: boolean;
 }) {
   const runs = (target.materializes as IngestionEvent[]).slice(-20).reverse();
@@ -1051,7 +1106,7 @@ function RowDetailDrawer({
               value={target.lastRun ? formatRelative(target.lastRun.ts) : 'never'}
             />
           </div>
-          <div className="flex items-center gap-2 pt-2">
+          <div className="flex items-center gap-2 pt-2 flex-wrap">
             <button
               onClick={onRun}
               disabled={!target.configured || running}
@@ -1060,6 +1115,17 @@ function RowDetailDrawer({
               {running ? <Loader2 className="w-3 h-3 animate-spin" /> : <Play className="w-3 h-3" />}
               {running ? 'Running…' : 'Run now'}
             </button>
+            {onBackfill && (
+              <button
+                onClick={onBackfill}
+                disabled={!target.configured}
+                className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-indigo-700 border border-indigo-200 bg-indigo-50 rounded hover:bg-indigo-100 disabled:opacity-40"
+                title="Re-run specific partitions (e.g. 2026-07-04) or the whole history after a schema change"
+              >
+                <Layers className="w-3 h-3" />
+                Backfill…
+              </button>
+            )}
             <button
               onClick={onEdit}
               className="inline-flex items-center gap-1 px-2.5 py-1 text-xs text-gray-700 hover:bg-gray-100 rounded"
