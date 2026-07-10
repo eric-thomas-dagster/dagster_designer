@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useState } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
 import Editor from '@monaco-editor/react';
-import { X, FileCode, Loader2 } from 'lucide-react';
+import { X, FileCode, Loader2, Wand2, Code2 } from 'lucide-react';
 import { projectsApi } from '@/services/api';
 import { notify } from './Notifications';
+import { DbtVisualComposer } from './DbtVisualComposer';
 
 interface AddDbtModelDialogProps {
   open: boolean;
@@ -44,6 +45,10 @@ export function AddDbtModelDialog({ open, onOpenChange, projectId, onCreated }: 
   const [createTest, setCreateTest] = useState(true);
   const [testColumn, setTestColumn] = useState('id');
   const [saving, setSaving] = useState(false);
+  // Compose mode — visual composer generates SQL live and streams it
+  // into the same `sql` state, so switching to the SQL tab shows the
+  // compiled result ready to fine-tune.
+  const [composeMode, setComposeMode] = useState<'visual' | 'sql'>('sql');
 
   useEffect(() => {
     if (!open) return;
@@ -202,31 +207,63 @@ export function AddDbtModelDialog({ open, onOpenChange, projectId, onCreated }: 
               </div>
             </div>
 
-            {/* SQL editor */}
-            <div>
-              <label className="text-xs font-semibold text-gray-700 uppercase tracking-wider mb-1 block">SQL</label>
-              <div className="border border-gray-200 rounded overflow-hidden">
-                <Editor
-                  height="260px"
-                  defaultLanguage="sql"
-                  value={sql}
-                  onChange={(v) => setSql(v ?? '')}
-                  theme="vs-light"
-                  options={{
-                    minimap: { enabled: false },
-                    lineNumbers: 'on',
-                    fontSize: 12,
-                    scrollBeyondLastLine: false,
-                    wordWrap: 'on',
-                    padding: { top: 6, bottom: 6 },
-                  }}
-                />
-              </div>
-              <p className="text-[11px] text-gray-500 mt-1">
-                Prepend a <code className="bg-gray-100 px-1 rounded">{'{{ config(...) }}'}</code> header will be added
-                automatically based on the materialization above.
-              </p>
+            {/* Compose mode tab bar — Visual or SQL. Visual composer
+                writes into the same `sql` state, so users can flip to
+                SQL and fine-tune the generated result. */}
+            <div className="border-b border-gray-200 flex items-center gap-1">
+              {([
+                { v: 'visual', label: 'Visual composer', icon: Wand2, hint: 'Form-driven — pick a source, columns, filters, joins.' },
+                { v: 'sql',    label: 'SQL editor',      icon: Code2, hint: 'Write raw SQL directly with dbt jinja.' },
+              ] as const).map(({ v, label, icon: Icon, hint }) => (
+                <button
+                  key={v}
+                  onClick={() => setComposeMode(v)}
+                  className={`inline-flex items-center gap-1.5 px-3 py-2 text-sm font-medium border-b-2 -mb-px ${
+                    composeMode === v
+                      ? 'text-blue-600 border-blue-600'
+                      : 'text-gray-600 border-transparent hover:text-gray-900'
+                  }`}
+                  title={hint}
+                >
+                  <Icon className="w-4 h-4" />
+                  {label}
+                </button>
+              ))}
             </div>
+
+            {composeMode === 'visual' && dbtProjectPath && (
+              <DbtVisualComposer
+                projectId={projectId}
+                dbtRelativePath={dbtProjectPath}
+                onSqlChange={setSql}
+              />
+            )}
+
+            {composeMode === 'sql' && (
+              <div>
+                <div className="border border-gray-200 rounded overflow-hidden">
+                  <Editor
+                    height="260px"
+                    defaultLanguage="sql"
+                    value={sql}
+                    onChange={(v) => setSql(v ?? '')}
+                    theme="vs-light"
+                    options={{
+                      minimap: { enabled: false },
+                      lineNumbers: 'on',
+                      fontSize: 12,
+                      scrollBeyondLastLine: false,
+                      wordWrap: 'on',
+                      padding: { top: 6, bottom: 6 },
+                    }}
+                  />
+                </div>
+                <p className="text-[11px] text-gray-500 mt-1">
+                  A <code className="bg-gray-100 px-1 rounded">{'{{ config(...) }}'}</code> header will be added
+                  automatically based on the materialization above.
+                </p>
+              </div>
+            )}
 
             {/* Description + optional test */}
             <div>
