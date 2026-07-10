@@ -193,6 +193,42 @@ export const projectsApi = {
     return response.data as any;
   },
 
+  getDbtModelDiff: async (
+    projectId: string,
+    dbtRelativePath: string,
+    relativeSqlPath: string,
+  ): Promise<{ current: string; committed: string; committed_sha: string | null; is_dirty: boolean }> => {
+    const response = await api.get(`/projects/${projectId}/dbt-model-diff`, {
+      params: { dbt_relative_path: dbtRelativePath, relative_sql_path: relativeSqlPath },
+    });
+    return response.data as any;
+  },
+
+  getDbtSourceFreshness: async (
+    projectId: string,
+    dbtRelativePath?: string,
+  ): Promise<{
+    dbt_project_relative_path: string;
+    project_name: string | null;
+    sources: Array<{
+      unique_id: string;
+      source_name: string;
+      table_name: string;
+      schema: string | null;
+      loaded_at_field: string | null;
+      max_loaded_at_field_pass: { count: number; period: string } | null;
+      max_loaded_at_field_error: { count: number; period: string } | null;
+      last_run_status: string | null;
+      last_loaded_at: string | null;
+      max_age_seconds: number | null;
+    }>;
+  }> => {
+    const response = await api.get(`/projects/${projectId}/dbt-source-freshness`, {
+      params: dbtRelativePath ? { dbt_relative_path: dbtRelativePath } : {},
+    });
+    return response.data as any;
+  },
+
   getDbtColumnLineage: async (
     projectId: string,
     dbtRelativePath?: string,

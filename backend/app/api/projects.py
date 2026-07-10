@@ -2092,6 +2092,139 @@ async def list_dbt_models(project_id: str, dbt_relative_path: str | None = None)
     )
 
 
+class DbtModelSqlDiffResponse(BaseModel):
+    """Current on-disk SQL for a dbt model vs the version committed at
+    HEAD. Both are raw strings; the frontend does the diff rendering
+    via Monaco's diff editor."""
+    current: str
+    committed: str
+    committed_sha: str | None = None
+    is_dirty: bool = False
+
+
+@router.get('/{project_id}/dbt-model-diff', response_model=DbtModelSqlDiffResponse)
+async def dbt_model_diff(project_id: str, dbt_relative_path: str, relative_sql_path: str):
+    """Return the working copy vs the HEAD-committed SQL for one dbt
+    model file. Used by the SQL diff view. `relative_sql_path` is the
+    path from the dbt project root (from DbtModelSummary.relative_sql_path)."""
+    from git import Repo, InvalidGitRepositoryError
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    root = project_service._get_project_dir(project)
+    dbt_root = (root / dbt_relative_path).resolve()
+    sql_file = (dbt_root / relative_sql_path).resolve()
+    if not sql_file.exists():
+        raise HTTPException(status_code=404, detail=f"SQL file not found: {relative_sql_path}")
+    current = sql_file.read_text()
+    committed = ''
+    committed_sha: str | None = None
+    is_dirty = True
+    try:
+        repo = Repo(dbt_root, search_parent_directories=True)
+        repo_root = Path(repo.working_tree_dir)
+        try:
+            rel_from_repo = sql_file.relative_to(repo_root).as_posix()
+        except ValueError:
+            rel_from_repo = None
+        if rel_from_repo:
+            try:
+                committed = repo.git.show(f"HEAD:{rel_from_repo}")
+                committed_sha = repo.head.commit.hexsha[:12]
+            except Exception:
+                # No committed version yet — file is new; leave committed blank.
+                committed = ''
+                committed_sha = repo.head.commit.hexsha[:12] if repo.head.is_valid() else None
+            is_dirty = current.strip() != committed.strip()
+    except InvalidGitRepositoryError:
+        pass
+    return DbtModelSqlDiffResponse(
+        current=current,
+        committed=committed,
+        committed_sha=committed_sha,
+        is_dirty=is_dirty,
+    )
+
+
+class DbtSourceFreshness(BaseModel):
+    """One source's declared freshness config + last-run status (from
+    freshness runs recorded in dbt's sources.json artifact)."""
+    unique_id: str            # source.<project>.<source_name>.<table_name>
+    source_name: str
+    table_name: str
+    schema: str | None = None
+    loaded_at_field: str | None = None
+    max_loaded_at_field_pass: dict | None = None   # {count, period} — warn threshold
+    max_loaded_at_field_error: dict | None = None  # {count, period} — error threshold
+    last_run_status: str | None = None  # pass | warn | error | None
+    last_loaded_at: str | None = None
+    max_age_seconds: int | None = None
+
+
+class DbtSourceFreshnessResponse(BaseModel):
+    dbt_project_relative_path: str
+    project_name: str | None = None
+    sources: list[DbtSourceFreshness]
+
+
+@router.get('/{project_id}/dbt-source-freshness', response_model=DbtSourceFreshnessResponse)
+async def dbt_source_freshness(project_id: str, dbt_relative_path: str | None = None):
+    """Read every source declaration in manifest.json + latest freshness
+    results in sources.json (if `dbt source freshness` has run). Powers
+    the freshness dashboard."""
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    root = project_service._get_project_dir(project)
+    dbt_projects = _find_dbt_projects(root)
+    if not dbt_projects:
+        return DbtSourceFreshnessResponse(dbt_project_relative_path='', sources=[])
+    chosen = dbt_projects[0]
+    if dbt_relative_path:
+        for p in dbt_projects:
+            if p.relative_path == dbt_relative_path:
+                chosen = p
+                break
+    dbt_root = (root / chosen.relative_path).resolve()
+    manifest = _load_dbt_artifact(dbt_root / 'target' / 'manifest.json')
+    sources_artifact = _load_dbt_artifact(dbt_root / 'target' / 'sources.json')
+
+    # Index freshness results by unique_id.
+    fresh_by_id: dict[str, dict] = {}
+    for r in sources_artifact.get('results', []):
+        uid = r.get('unique_id')
+        if uid:
+            fresh_by_id[uid] = r
+
+    out: list[DbtSourceFreshness] = []
+    for uid, node in (manifest.get('sources') or {}).items():
+        freshness = node.get('freshness') or {}
+        loaded_at = node.get('loaded_at_field')
+        fresh = fresh_by_id.get(uid)
+        max_age = None
+        if fresh:
+            crit = fresh.get('criteria') or {}
+            max_age = int(fresh.get('max_loaded_at_time_ago_in_s', 0) or 0) or None
+            _ = crit  # keep for future use if we want to surface thresholds
+        out.append(DbtSourceFreshness(
+            unique_id=uid,
+            source_name=node.get('source_name', ''),
+            table_name=node.get('name', ''),
+            schema=node.get('schema'),
+            loaded_at_field=loaded_at,
+            max_loaded_at_field_pass=(freshness.get('warn_after') if isinstance(freshness.get('warn_after'), dict) else None),
+            max_loaded_at_field_error=(freshness.get('error_after') if isinstance(freshness.get('error_after'), dict) else None),
+            last_run_status=(fresh or {}).get('status'),
+            last_loaded_at=(fresh or {}).get('max_loaded_at'),
+            max_age_seconds=max_age,
+        ))
+    return DbtSourceFreshnessResponse(
+        dbt_project_relative_path=chosen.relative_path,
+        project_name=chosen.name,
+        sources=out,
+    )
+
+
 class ColumnLineageEdge(BaseModel):
     """One column-to-column dependency: the `to` model's `to_column`
     reads from the `from` model's `from_column`. Heuristic — sourced

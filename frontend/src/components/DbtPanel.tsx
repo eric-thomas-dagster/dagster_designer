@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useState } from 'react';
-import { FileCode, Play, Loader2, CheckCircle2, XCircle, AlertTriangle, TestTube2, Book, FileText, Search, Layers, GitCommit } from 'lucide-react';
+import { FileCode, Play, Loader2, CheckCircle2, XCircle, AlertTriangle, TestTube2, Book, FileText, Search, Layers, GitCommit, GitCompare, Clock } from 'lucide-react';
 import { projectsApi } from '@/services/api';
 import { useProjectStore } from '@/hooks/useProject';
 import { notify } from './Notifications';
 import { AddDbtModelDialog } from './AddDbtModelDialog';
 import { GitCommitDialog } from './GitCommitDialog';
+import { SqlDiffDialog } from './SqlDiffDialog';
 
 interface DbtPanelProps {
   onOpenFile?: (path: string) => void;
@@ -37,14 +38,26 @@ export function DbtPanel({ onOpenFile }: DbtPanelProps) {
   const [showAddModel, setShowAddModel] = useState(false);
   const [showGitCommit, setShowGitCommit] = useState(false);
   const [lineage, setLineage] = useState<Awaited<ReturnType<typeof projectsApi.getDbtColumnLineage>> | null>(null);
+  const [diffFor, setDiffFor] = useState<{ path: string; name: string } | null>(null);
+  const [view, setView] = useState<'models' | 'freshness'>('models');
+  const [freshness, setFreshness] = useState<Awaited<ReturnType<typeof projectsApi.getDbtSourceFreshness>> | null>(null);
+  const [runningModified, setRunningModified] = useState(false);
+  // A Dagster project can orchestrate multiple dbt projects (e.g. a
+  // shared warehouse repo + a domain-specific one). We fetch them all
+  // up front so the header can offer a picker.
+  const [dbtProjects, setDbtProjects] = useState<Awaited<ReturnType<typeof projectsApi.listDbtProjects>>['projects']>([]);
+  const [selectedDbtPath, setSelectedDbtPath] = useState<string>('');
 
-  const refresh = async () => {
+  const refresh = async (path?: string) => {
     if (!currentProject) return;
     setLoading(true);
     setError(null);
     try {
-      const r = await projectsApi.listDbtModels(currentProject.id);
+      const r = await projectsApi.listDbtModels(currentProject.id, (path ?? selectedDbtPath) || undefined);
       setData(r);
+      if (r.dbt_project_relative_path && !selectedDbtPath) {
+        setSelectedDbtPath(r.dbt_project_relative_path);
+      }
     } catch (e: any) {
       const msg = e?.response?.data?.detail || e?.message || String(e);
       setError(msg);
@@ -53,7 +66,25 @@ export function DbtPanel({ onOpenFile }: DbtPanelProps) {
     }
   };
 
-  useEffect(() => { refresh(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [currentProject?.id]);
+  // Enumerate dbt projects up-front so the header picker knows all
+  // options (even if only one, we still show it as a chip so users
+  // understand the surface handles multiple).
+  useEffect(() => {
+    if (!currentProject) return;
+    let cancelled = false;
+    projectsApi.listDbtProjects(currentProject.id).then((r) => {
+      if (cancelled) return;
+      setDbtProjects(r.projects);
+      if (r.projects.length > 0 && !selectedDbtPath) {
+        setSelectedDbtPath(r.projects[0].relative_path);
+      }
+    }).catch(() => {});
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentProject?.id]);
+
+  // Refresh the model list whenever the selected dbt project changes.
+  useEffect(() => { refresh(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [currentProject?.id, selectedDbtPath]);
 
   // Fetch column-level lineage lazily — it's only needed when the
   // drawer is open. Reuses one fetch across every model the user
@@ -64,8 +95,51 @@ export function DbtPanel({ onOpenFile }: DbtPanelProps) {
     projectsApi.getDbtColumnLineage(currentProject.id, data.dbt_project_relative_path).then((r) => {
       if (!cancelled) setLineage(r);
     }).catch(() => {});
+    projectsApi.getDbtSourceFreshness(currentProject.id, data.dbt_project_relative_path).then((r) => {
+      if (!cancelled) setFreshness(r);
+    }).catch(() => {});
     return () => { cancelled = true; };
   }, [currentProject?.id, data?.dbt_project_relative_path]);
+
+  // "Run modified" — CI-mode-lite. Instead of relying on dbt --state,
+  // read git status for the dbt project, extract .sql files changed
+  // under models/, derive the model names, and dbt-build them.
+  const runModified = async () => {
+    if (!currentProject || !data?.dbt_project_relative_path) return;
+    setRunningModified(true);
+    try {
+      const st = await projectsApi.projectGitStatus(currentProject.id, data.dbt_project_relative_path);
+      if (!st.is_git_repo) {
+        notify.warning('This dbt project isn\'t a git repo — no modified state to detect.');
+        return;
+      }
+      const changed = [...st.modified, ...st.untracked, ...st.staged];
+      const modelNames = new Set<string>();
+      for (const f of changed) {
+        // Only .sql under any models/ path counts. Extract the file
+        // stem — dbt --select accepts bare model names.
+        const m = f.match(/(?:^|\/)models\/(?:.*\/)?([^\/]+)\.sql$/i);
+        if (m) modelNames.add(m[1]);
+      }
+      if (modelNames.size === 0) {
+        notify.info('No modified dbt models — commit some changes to trigger a modified run.');
+        return;
+      }
+      const select = Array.from(modelNames).join(' ');
+      notify.info(`Building ${modelNames.size} modified model${modelNames.size === 1 ? '' : 's'}: ${select}`);
+      const r = await projectsApi.runDbtModel(currentProject.id, {
+        dbt_relative_path: data.dbt_project_relative_path,
+        select,
+      });
+      if (r.success) notify.success(`Modified models built in ${(r.duration_ms / 1000).toFixed(1)}s`);
+      else notify.error('Modified-model build failed. See dbt output in the model drawer.');
+      refresh();
+    } catch (e: any) {
+      notify.error(`Modified run failed: ${e?.message ?? e}`);
+    } finally {
+      setRunningModified(false);
+    }
+  };
 
   const filtered = useMemo(() => {
     if (!data) return [] as Model[];
@@ -113,17 +187,64 @@ export function DbtPanel({ onOpenFile }: DbtPanelProps) {
   return (
     <div className="h-full overflow-y-auto bg-gray-50">
       {/* Header */}
-      <div className="bg-white border-b border-gray-200 px-8 py-6 flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-semibold text-gray-900 flex items-center gap-2">
+      <div className="bg-white border-b border-gray-200 px-8 py-6 flex items-center justify-between gap-4">
+        <div className="min-w-0">
+          <h1 className="text-2xl font-semibold text-gray-900 flex items-center gap-2 flex-wrap">
             <FileCode className="w-6 h-6 text-orange-500" />
-            dbt Models
+            dbt
+            {/* Picker — only when the Dagster project orchestrates
+                more than one dbt project. Single-project stays as a
+                simple label. */}
+            {dbtProjects.length > 1 ? (
+              <select
+                value={selectedDbtPath}
+                onChange={(e) => setSelectedDbtPath(e.target.value)}
+                className="text-base font-mono border border-gray-300 rounded px-2 py-1 focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
+                title="Multiple dbt projects orchestrated by this Dagster project — pick one to view"
+              >
+                {dbtProjects.map((p) => (
+                  <option key={p.relative_path} value={p.relative_path}>
+                    {p.name}{p.is_git_repo ? ' · git' : ''}
+                  </option>
+                ))}
+              </select>
+            ) : (
+              data?.project_name && (
+                <span className="text-lg font-mono text-gray-600">· {data.project_name}</span>
+              )
+            )}
           </h1>
           <p className="text-sm text-gray-500 mt-1">
-            Every model in {data?.project_name ? <><strong>{data.project_name}</strong></> : 'this project'}, with docs, tests, and one-click runs.
+            {dbtProjects.length > 1
+              ? `${dbtProjects.length} dbt projects orchestrated by this Dagster project`
+              : 'Every model in this dbt project, with docs, tests, and one-click runs.'}
           </p>
         </div>
         <div className="flex items-center gap-2">
+          {/* view toggle — models vs source freshness */}
+          <div className="flex items-center gap-0.5 bg-gray-100 rounded p-0.5 mr-2">
+            {(['models', 'freshness'] as const).map((v) => (
+              <button
+                key={v}
+                onClick={() => setView(v)}
+                className={`inline-flex items-center gap-1 px-2.5 py-1 text-xs rounded ${
+                  view === v ? 'bg-white text-gray-900 shadow-sm font-medium' : 'text-gray-600'
+                }`}
+              >
+                {v === 'models' ? <Layers className="w-3 h-3" /> : <Clock className="w-3 h-3" />}
+                {v === 'models' ? 'Models' : 'Freshness'}
+              </button>
+            ))}
+          </div>
+          <button
+            onClick={runModified}
+            disabled={runningModified}
+            className="flex items-center gap-1.5 px-3 py-2 text-sm font-medium text-gray-700 border border-gray-300 rounded-md hover:bg-gray-50 disabled:opacity-50"
+            title="Detects changed .sql files vs the git working tree and dbt-builds only those"
+          >
+            {runningModified ? <Loader2 className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4" />}
+            Run modified
+          </button>
           <button
             onClick={() => setShowGitCommit(true)}
             className="flex items-center gap-1.5 px-3 py-2 text-sm font-medium text-gray-700 border border-gray-300 rounded-md hover:bg-gray-50"
@@ -165,7 +286,7 @@ export function DbtPanel({ onOpenFile }: DbtPanelProps) {
           </button>
         </div>
       )}
-      {data && (
+      {data && view === 'models' && (
         <>
           {/* KPI cards */}
           <div className="px-8 py-6 grid grid-cols-2 md:grid-cols-4 gap-4">
@@ -313,11 +434,88 @@ export function DbtPanel({ onOpenFile }: DbtPanelProps) {
                 onOpenFile={onOpenFile}
                 onClose={() => setSelectedUniqueId(null)}
                 onRun={() => runOne(selected)}
+                onDiff={
+                  selected.relative_sql_path
+                    ? () => setDiffFor({ path: selected.relative_sql_path!, name: selected.name })
+                    : undefined
+                }
                 running={runningModel === selected.unique_id}
               />
             )}
           </div>
         </>
+      )}
+
+      {/* Freshness view — flat table of every source with declared
+          freshness config + last-run status. Empty when the user
+          hasn't run `dbt source freshness` yet. */}
+      {data && view === 'freshness' && (
+        <div className="px-8 py-6">
+          <div className="bg-white border border-gray-200 rounded-lg overflow-hidden">
+            <div className="px-4 py-3 border-b border-gray-100 flex items-center justify-between">
+              <h2 className="text-sm font-semibold text-gray-900">Source freshness</h2>
+              <span className="text-xs text-gray-500">{freshness?.sources.length ?? 0} sources</span>
+            </div>
+            {!freshness || freshness.sources.length === 0 ? (
+              <div className="p-8 text-center">
+                <Clock className="w-8 h-8 text-gray-300 mx-auto mb-3" />
+                <p className="text-sm text-gray-600 mb-2">No sources declared in this dbt project.</p>
+                <p className="text-xs text-gray-500">
+                  Add <code className="bg-gray-100 px-1 rounded">sources:</code> blocks to your <code>schema.yml</code> and run{' '}
+                  <code className="bg-gray-100 px-1 rounded">dbt source freshness</code> to populate this view.
+                </p>
+              </div>
+            ) : (
+              <table className="w-full text-sm">
+                <thead className="bg-gray-50 border-b border-gray-100">
+                  <tr>
+                    <th className="text-left px-4 py-2 text-xs font-medium text-gray-700 uppercase tracking-wider">Source</th>
+                    <th className="text-left px-4 py-2 text-xs font-medium text-gray-700 uppercase tracking-wider">Schema</th>
+                    <th className="text-left px-4 py-2 text-xs font-medium text-gray-700 uppercase tracking-wider">Timestamp column</th>
+                    <th className="text-left px-4 py-2 text-xs font-medium text-gray-700 uppercase tracking-wider">Warn / Error after</th>
+                    <th className="text-left px-4 py-2 text-xs font-medium text-gray-700 uppercase tracking-wider">Last loaded</th>
+                    <th className="text-left px-4 py-2 text-xs font-medium text-gray-700 uppercase tracking-wider">Status</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {freshness.sources.map((s) => (
+                    <tr key={s.unique_id} className="border-b border-gray-50 last:border-0 hover:bg-gray-50/50">
+                      <td className="px-4 py-2.5 font-mono text-gray-900">{s.source_name}.{s.table_name}</td>
+                      <td className="px-4 py-2.5 text-xs font-mono text-gray-700">{s.schema ?? '—'}</td>
+                      <td className="px-4 py-2.5 text-xs font-mono text-gray-700">{s.loaded_at_field ?? <span className="italic text-gray-400">not declared</span>}</td>
+                      <td className="px-4 py-2.5 text-xs">
+                        {s.max_loaded_at_field_pass ? (
+                          <div className="text-amber-700">warn: {s.max_loaded_at_field_pass.count} {s.max_loaded_at_field_pass.period}</div>
+                        ) : null}
+                        {s.max_loaded_at_field_error ? (
+                          <div className="text-rose-700">err: {s.max_loaded_at_field_error.count} {s.max_loaded_at_field_error.period}</div>
+                        ) : null}
+                        {!s.max_loaded_at_field_pass && !s.max_loaded_at_field_error && (
+                          <span className="italic text-gray-400">no thresholds</span>
+                        )}
+                      </td>
+                      <td className="px-4 py-2.5 text-xs text-gray-700">
+                        {s.last_loaded_at ? (
+                          <>
+                            <div>{new Date(s.last_loaded_at).toLocaleString()}</div>
+                            {s.max_age_seconds != null && (
+                              <div className="text-[10px] text-gray-500">{formatDuration(s.max_age_seconds)} ago</div>
+                            )}
+                          </>
+                        ) : (
+                          <span className="italic text-gray-400">never</span>
+                        )}
+                      </td>
+                      <td className="px-4 py-2.5">
+                        <FreshnessPill status={s.last_run_status} />
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+        </div>
       )}
 
       <AddDbtModelDialog
@@ -329,6 +527,16 @@ export function DbtPanel({ onOpenFile }: DbtPanelProps) {
           await refresh();
         }}
       />
+      {diffFor && data?.dbt_project_relative_path && (
+        <SqlDiffDialog
+          open={!!diffFor}
+          onOpenChange={(o) => !o && setDiffFor(null)}
+          projectId={currentProject.id}
+          dbtRelativePath={data.dbt_project_relative_path}
+          relativeSqlPath={diffFor.path}
+          title={diffFor.name}
+        />
+      )}
       <GitCommitDialog
         open={showGitCommit}
         onOpenChange={setShowGitCommit}
@@ -370,6 +578,7 @@ function ModelDetail({
   onOpenFile,
   onClose,
   onRun,
+  onDiff,
   running,
 }: {
   model: Model;
@@ -379,6 +588,7 @@ function ModelDetail({
   onOpenFile?: (path: string) => void;
   onClose: () => void;
   onRun: () => void;
+  onDiff?: () => void;
   running: boolean;
 }) {
   const cols = Object.entries(model.columns);
@@ -438,6 +648,15 @@ function ModelDetail({
               className="inline-flex items-center gap-1 px-2.5 py-1 text-xs text-gray-700 border border-gray-200 rounded hover:bg-gray-50"
             >
               <FileText className="w-3 h-3" /> Open SQL
+            </button>
+          )}
+          {onDiff && (
+            <button
+              onClick={onDiff}
+              className="inline-flex items-center gap-1 px-2.5 py-1 text-xs text-gray-700 border border-gray-200 rounded hover:bg-gray-50"
+              title="Diff working copy vs HEAD"
+            >
+              <GitCompare className="w-3 h-3" /> Diff
             </button>
           )}
         </div>
@@ -653,4 +872,32 @@ function formatBytes(n: number): string {
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
   if (n < 1024 * 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)} MB`;
   return `${(n / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+}
+
+function formatDuration(seconds: number): string {
+  if (seconds < 60) return `${seconds}s`;
+  if (seconds < 3600) return `${Math.round(seconds / 60)}m`;
+  if (seconds < 86400) return `${Math.round(seconds / 3600)}h`;
+  return `${Math.round(seconds / 86400)}d`;
+}
+
+function FreshnessPill({ status }: { status: string | null }) {
+  if (!status) {
+    return <span className="text-[11px] text-gray-400 italic">not checked</span>;
+  }
+  const n = status.toLowerCase();
+  const ok = n === 'pass';
+  const warn = n === 'warn';
+  const err = n === 'error' || n === 'fail' || n === 'runtime error';
+  const Icon = ok ? CheckCircle2 : err ? XCircle : AlertTriangle;
+  const tone = ok ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+    : warn ? 'bg-amber-50 text-amber-700 border-amber-200'
+    : err ? 'bg-rose-50 text-rose-700 border-rose-200'
+    : 'bg-gray-100 text-gray-700 border-gray-200';
+  return (
+    <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 text-[11px] rounded border ${tone}`}>
+      <Icon className="w-3 h-3" />
+      {status}
+    </span>
+  );
 }
