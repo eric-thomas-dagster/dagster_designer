@@ -100,34 +100,65 @@ query DagsterPlusPing {
 }
 """
 
-# NOTE on the shape: the deployment schema does NOT expose `isSource`
-# on AssetNode (confirmed via error response). `partitionDefinition`
-# with nested field selection also isn't safe across versions, so we
-# only pull `isPartitioned` here and skip the sub-shape. Assets whose
-# `definition` comes back null are keys referenced by other assets
-# but not defined in this deployment -- we still render them as
-# graph nodes (with placeholder metadata) so lineage stays intact.
+# Consolidated per-asset shape — one query gets us the asset key,
+# its full lineage (both edges in and out), definition metadata,
+# every attached check with latest execution, and any schedules /
+# sensors targeting it. Cuts the hydrate call count from 3+ to 2
+# (this + the per-repository schedule/sensor listings for the
+# Automation tab). Uses assetNodes rather than assetsOrError because
+# the latter's definition sub-object is missing `dependencyKeys`
+# fields in some deployments -- assetNodes surfaces them cleanly.
 ASSETS_QUERY = """
 query DagsterPlusAssets {
-  assetsOrError {
-    __typename
-    ... on AssetConnection {
-      nodes {
-        id
-        key { path }
-        definition {
-          groupName
+  assetNodes {
+    id
+    assetKey { path }
+    groupName
+    description
+    computeKind
+    isPartitioned
+    jobNames
+    hasAssetChecks
+    dependencyKeys { path }
+    dependedByKeys { path }
+    assetChecksOrError(limit: 1000) {
+      __typename
+      ... on AssetChecks {
+        checks {
+          name
           description
-          computeKind
-          isPartitioned
-          dependencyKeys { path }
-          dependedByKeys { path }
+          jobNames
+          blocking
+          canExecuteIndividually
+          executionForLatestMaterialization {
+            id
+            runId
+            status
+            timestamp
+            evaluation {
+              timestamp
+              severity
+              description
+              success
+            }
+          }
         }
       }
+      ... on PythonError { message }
     }
-    ... on PythonError {
-      message
-      stack
+    targetingInstigators {
+      __typename
+      ... on Schedule {
+        id
+        name
+        cronSchedule
+        pipelineName
+      }
+      ... on Sensor {
+        id
+        name
+        sensorType
+      }
     }
   }
 }

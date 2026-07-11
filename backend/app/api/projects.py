@@ -512,7 +512,7 @@ async def _hydrate_cloud_graph(project: Project) -> None:
         we also merge those into per-asset attribution.
     """
     from ..services.dagster_plus_client import (
-        query, ASSETS_QUERY, ASSET_NODES_WITH_CHECKS_QUERY,
+        query, ASSETS_QUERY,
         REPOSITORIES_QUERY, SCHEDULES_QUERY, SENSORS_QUERY,
     )
     from ..models.graph import GraphNode, GraphEdge, PipelineGraph
@@ -523,54 +523,47 @@ async def _hydrate_cloud_graph(project: Project) -> None:
     if not org or not tok:
         return
 
+    # Single query returns lineage + checks + schedule/sensor
+    # attribution per asset. Cheap enough to run every load.
     assets_data = await query(org, dep, tok, ASSETS_QUERY)
-    a_node = (assets_data.get("assetsOrError") or {})
-    raw_assets = a_node.get("nodes") or []
+    raw_assets = assets_data.get("assetNodes") or []
 
-    # assetNodes gives us checks + schedules/sensors attached to each
-    # asset in one shot — cheaper than one call per asset.
     checks_by_asset: dict[str, list[dict]] = {}
     per_asset_schedules: dict[str, list[dict]] = {}
     per_asset_sensors: dict[str, list[dict]] = {}
-    try:
-        an_data = await query(org, dep, tok, ASSET_NODES_WITH_CHECKS_QUERY, variables={"checkLimit": 1000})
-        for node in (an_data.get("assetNodes") or []):
-            key = "/".join(((node.get("assetKey") or {}).get("path") or []))
-            if not key:
-                continue
-            # Attach checks with normalized shape.
-            chk_or = (node.get("assetChecksOrError") or {})
-            if chk_or.get("__typename") == "AssetChecks":
-                for c in (chk_or.get("checks") or []):
-                    last = c.get("executionForLatestMaterialization") or {}
-                    evl = last.get("evaluation") if last else None
-                    checks_by_asset.setdefault(key, []).append({
-                        "name": c.get("name"),
-                        "key": f"{key}::{c.get('name')}",
-                        "description": c.get("description"),
-                        "source": None,
-                        "blocking": bool(c.get("blocking")),
-                        "job_names": list(c.get("jobNames") or []),
-                        "last_status": (last.get("status") if last else None),
-                        "last_run_at": (last.get("timestamp") if last else None),
-                        "last_severity": (evl.get("severity") if evl else None),
-                        "last_success": (evl.get("success") if evl else None),
-                    })
-            # Attribute schedules/sensors via targetingInstigators.
-            for ins in (node.get("targetingInstigators") or []):
-                if ins.get("__typename") == "Schedule":
-                    per_asset_schedules.setdefault(key, []).append({
-                        "name": ins.get("name"),
-                        "cron": ins.get("cronSchedule"),
-                        "pipeline_name": ins.get("pipelineName"),
-                    })
-                elif ins.get("__typename") == "Sensor":
-                    per_asset_sensors.setdefault(key, []).append({
-                        "name": ins.get("name"),
-                        "sensor_type": ins.get("sensorType"),
-                    })
-    except Exception as e:
-        print(f"[dagster+] hydrate: assetNodes failed: {e}", flush=True)
+    for node in raw_assets:
+        key = "/".join(((node.get("assetKey") or {}).get("path") or []))
+        if not key:
+            continue
+        chk_or = (node.get("assetChecksOrError") or {})
+        if chk_or.get("__typename") == "AssetChecks":
+            for c in (chk_or.get("checks") or []):
+                last = c.get("executionForLatestMaterialization") or {}
+                evl = last.get("evaluation") if last else None
+                checks_by_asset.setdefault(key, []).append({
+                    "name": c.get("name"),
+                    "key": f"{key}::{c.get('name')}",
+                    "description": c.get("description"),
+                    "source": None,
+                    "blocking": bool(c.get("blocking")),
+                    "job_names": list(c.get("jobNames") or []),
+                    "last_status": (last.get("status") if last else None),
+                    "last_run_at": (last.get("timestamp") if last else None),
+                    "last_severity": (evl.get("severity") if evl else None),
+                    "last_success": (evl.get("success") if evl else None),
+                })
+        for ins in (node.get("targetingInstigators") or []):
+            if ins.get("__typename") == "Schedule":
+                per_asset_schedules.setdefault(key, []).append({
+                    "name": ins.get("name"),
+                    "cron": ins.get("cronSchedule"),
+                    "pipeline_name": ins.get("pipelineName"),
+                })
+            elif ins.get("__typename") == "Sensor":
+                per_asset_sensors.setdefault(key, []).append({
+                    "name": ins.get("name"),
+                    "sensor_type": ins.get("sensorType"),
+                })
 
     # Project-level schedule + sensor lists — enumerate repositories
     # first (both queries require a RepositorySelector) then run once
@@ -624,16 +617,14 @@ async def _hydrate_cloud_graph(project: Project) -> None:
     key_to_id: dict[str, str] = {}
     upstream: dict[str, list[str]] = {}
     for a in raw_assets:
-        key = "/".join(((a.get("key") or {}).get("path") or []))
+        # Under assetNodes: assetKey + dependencyKeys live at the top
+        # level of each node (no `definition` sub-object like
+        # assetsOrError uses).
+        key = "/".join(((a.get("assetKey") or {}).get("path") or []))
         if not key:
             continue
         key_to_id[key] = a.get("id") or key
-        # Assets can come back with `definition: null` when they're
-        # referenced (as a dep) but not defined in this deployment.
-        # We still register them as nodes so lineage lines don't
-        # dead-end; upstream lookup just yields an empty list.
-        d = a.get("definition") or {}
-        upstream[key] = ["/".join(k.get("path") or []) for k in (d.get("dependencyKeys") or [])]
+        upstream[key] = ["/".join(k.get("path") or []) for k in (a.get("dependencyKeys") or [])]
 
     depth: dict[str, int] = {}
     visiting: set[str] = set()
@@ -683,10 +674,15 @@ async def _hydrate_cloud_graph(project: Project) -> None:
             return f"dagster_plus.{kind}_ingest"
         return "dagster_plus.CloudAsset"
 
+    # Fast key → assetNode index so the layered layout loop doesn't
+    # do a linear scan per position.
+    assets_by_key = {"/".join(((a.get("assetKey") or {}).get("path") or [])): a for a in raw_assets}
+
     for layer in sorted(by_layer.keys()):
         for i, key in enumerate(by_layer[layer]):
-            a = next((x for x in raw_assets if "/".join(((x.get("key") or {}).get("path") or [])) == key), None)
-            defn = (a.get("definition") or {}) if a else {}
+            a = assets_by_key.get(key) or {}
+            # assetNodes flattens definition fields to the top level.
+            defn = a
             nodes.append(GraphNode(
                 id=key_to_id[key],
                 type="asset",

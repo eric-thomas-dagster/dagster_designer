@@ -799,7 +799,11 @@ function App() {
               Editing controls (delete, +Add data) hide on cloud since
               cloud is read-only for now. */}
           <Tabs.Content value="assets" className="flex-1 flex overflow-hidden">
-            {/* Left Sidebar - Component Palette + Project Components */}
+            {/* Left Sidebar - Component Palette + Project Components.
+                Hidden entirely for Dagster+ projects since cloud is
+                read-only and "add a component" / "list local
+                components" don't apply to a live deployment. */}
+            {!(currentProject && (currentProject as any).is_dagster_plus) && (
             <aside
               data-sidebar
               className="w-64 flex-shrink-0 bg-white border-r border-gray-200 flex flex-col overflow-hidden"
@@ -844,6 +848,7 @@ function App() {
                 </div>
               </div>
             </aside>
+            )}
 
             {/* Graph Editor */}
             <main className="flex-1 min-w-0 relative">
