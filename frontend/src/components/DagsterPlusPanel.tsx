@@ -54,7 +54,12 @@ export function DagsterPlusPanel({ projectId, org, deployment }: DagsterPlusPane
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab]);
 
-  const cloudUrl = org ? `https://${org.replace('.dagster.plus', '').split('/')[0]}.dagster.plus/${deployment || 'prod'}` : null;
+  // Build the deep-link base for "Open in Dagster+" links. Empty
+  // deployment → top-level host so Dagster+ redirects to whichever
+  // deployment is the org's default.
+  const cloudUrl = org
+    ? `https://${org.replace('.dagster.cloud', '').replace('.dagster.plus', '').split('/')[0]}.dagster.cloud${deployment ? '/' + deployment : ''}`
+    : null;
 
   const filteredAssets = useMemo(() => {
     if (!assets) return [];

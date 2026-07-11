@@ -29,7 +29,7 @@ export function ConnectDagsterPlusDialog({ open, onOpenChange, onConnected }: Co
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
   const [org, setOrg] = useState('');
-  const [deployment, setDeployment] = useState('prod');
+  const [deployment, setDeployment] = useState('');
   const [token, setToken] = useState('');
   const [location, setLocation] = useState('');
   const [testing, setTesting] = useState(false);
@@ -131,11 +131,12 @@ export function ConnectDagsterPlusDialog({ open, onOpenChange, onConnected }: Co
                   className="w-full px-3 py-2 text-sm font-mono border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500" />
               </div>
               <div>
-                <label className="text-[10px] uppercase tracking-wider text-gray-500 mb-1 block">Deployment</label>
+                <label className="text-[10px] uppercase tracking-wider text-gray-500 mb-1 block">Deployment (optional)</label>
                 <input
                   value={deployment} onChange={(e) => setDeployment(e.target.value)}
-                  placeholder="prod"
+                  placeholder="leave blank for default"
                   className="w-full px-3 py-2 text-sm font-mono border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                <p className="text-[10px] text-gray-500 mt-0.5">Empty → uses the org's default deployment.</p>
               </div>
               <div className="col-span-2">
                 <label className="text-[10px] uppercase tracking-wider text-gray-500 mb-1 block">User token</label>
@@ -148,7 +149,7 @@ export function ConnectDagsterPlusDialog({ open, onOpenChange, onConnected }: Co
                   <Info className="w-3 h-3" />
                   Create one at&nbsp;
                   <a
-                    href={`https://${(org || 'ORG').replace('.dagster.plus', '').split('/')[0]}.dagster.plus/${deployment || 'prod'}/settings/tokens`}
+                    href={`https://${(org || 'ORG').replace('.dagster.cloud', '').replace('.dagster.plus', '').split('/')[0]}.dagster.cloud/settings/tokens`}
                     target="_blank"
                     rel="noopener noreferrer"
                     className="text-blue-600 hover:underline inline-flex items-center gap-0.5"
@@ -156,7 +157,7 @@ export function ConnectDagsterPlusDialog({ open, onOpenChange, onConnected }: Co
                     Settings → Tokens
                     <ExternalLink className="w-2.5 h-2.5" />
                   </a>
-                  &nbsp;— read scope is enough. Stored server-side only.
+                  &nbsp;— tokens look like <code className="bg-gray-100 px-1 rounded">user:hex</code>. Read scope is enough. Stored server-side only.
                 </p>
               </div>
               <div className="col-span-2">

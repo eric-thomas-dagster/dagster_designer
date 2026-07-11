@@ -1,11 +1,13 @@
 """Thin GraphQL client for Dagster+ deployments.
 
-Every Dagster+ deployment has a GraphQL endpoint at
-`https://<org>.dagster.plus/<deployment>/graphql`. Authenticated with
-a user token via the `Dagster-Cloud-Api-Token` header. This module
-gives us a single place to build the URL, attach the header, and
-issue queries — all of the read-only surfaces (assets, checks, runs,
-lineage) call into it.
+Every Dagster+ org has a GraphQL endpoint at either:
+  • `https://<org>.dagster.cloud/graphql` (top-level; multi-deployment orgs)
+  • `https://<org>.dagster.cloud/<deployment>/graphql` (per-deployment)
+
+Authenticated with a user token via the `Dagster-Cloud-Api-Token`
+header. This module gives us a single place to build the URL, attach
+the header, and issue queries — all of the read-only surfaces
+(assets, checks, runs, lineage) call into it.
 
 We keep it minimal on purpose: no schema-derived typing, no caching
 layer yet. A follow-up can add cache + retries once we know which
@@ -25,17 +27,20 @@ class DagsterPlusError(RuntimeError):
 
 
 def _graphql_url(org: str, deployment: str) -> str:
-    """Build the deployment's GraphQL endpoint. Trims accidental
-    whitespace + protocol so users can paste the URL or the bare org."""
+    """Build the org's GraphQL endpoint. Trims accidental whitespace +
+    protocol so users can paste the URL or the bare org. When the
+    deployment is empty (or 'none'), we hit the top-level org
+    endpoint — some orgs (esp. Hybrid setups) expose GraphQL there
+    rather than at the per-deployment path."""
     o = (org or "").strip().replace("https://", "").replace("http://", "").split("/", 1)[0]
-    d = (deployment or "prod").strip()
-    if o.endswith(".dagster.plus"):
-        # Users sometimes paste the full host — strip the suffix so we
-        # end up with the bare org name.
-        o = o.rsplit(".dagster.plus", 1)[0]
-    if o.endswith(".dagster.cloud"):
-        o = o.rsplit(".dagster.cloud", 1)[0]
-    return f"https://{o}.dagster.plus/{d}/graphql"
+    d = (deployment or "").strip()
+    # Users sometimes paste the full host — strip common suffixes.
+    for suffix in (".dagster.cloud", ".dagster.plus"):
+        if o.endswith(suffix):
+            o = o.rsplit(suffix, 1)[0]
+    if not d or d.lower() in ("none", "-"):
+        return f"https://{o}.dagster.cloud/graphql"
+    return f"https://{o}.dagster.cloud/{d}/graphql"
 
 
 async def query(
@@ -51,7 +56,12 @@ async def query(
     if not org or not token:
         raise DagsterPlusError("Dagster+ connection needs both org and token.")
     url = _graphql_url(org, deployment)
-    async with httpx.AsyncClient(timeout=timeout) as client:
+    # follow_redirects handles the top-level `<org>.dagster.cloud/graphql`
+    # → `/<default_deployment>/graphql` redirect that Dagster+ issues
+    # when the caller doesn't specify a deployment. Some hybrid orgs
+    # POST-redirect POST cleanly; we need this to work whichever path
+    # users configured.
+    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
         try:
             r = await client.post(
                 url,
