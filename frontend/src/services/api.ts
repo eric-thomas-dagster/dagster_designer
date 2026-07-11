@@ -536,6 +536,21 @@ export const projectsApi = {
     return response.data as any;
   },
 
+  listDagsterPlusDeployments: async (
+    projectId: string,
+  ): Promise<{ current: string | null; deployments: Array<{ deployment_name: string; deployment_id: string | null; deployment_type: string | null; deployment_status: string | null }> }> => {
+    const response = await api.get(`/projects/${projectId}/dagster-plus/deployments`);
+    return response.data as any;
+  },
+
+  switchDagsterPlusDeployment: async (
+    projectId: string,
+    deployment: string,
+  ): Promise<any> => {
+    const response = await api.post(`/projects/${projectId}/dagster-plus/switch-deployment`, { deployment });
+    return response.data as any;
+  },
+
   getDagsterPlusRuns: async (
     projectId: string,
     limit = 25,

@@ -174,6 +174,46 @@ query DagsterPlusDeployments {
 """
 
 
+SCHEDULES_QUERY = """
+query DagsterPlusSchedules {
+  schedulesOrError {
+    __typename
+    ... on Schedules {
+      results {
+        id
+        name
+        cronSchedule
+        pipelineName
+        description
+        scheduleState { status }
+      }
+    }
+    ... on PythonError { message }
+  }
+}
+"""
+
+
+SENSORS_QUERY = """
+query DagsterPlusSensors {
+  sensorsOrError {
+    __typename
+    ... on Sensors {
+      results {
+        id
+        name
+        description
+        sensorType
+        pipelineName
+        sensorState { status }
+      }
+    }
+    ... on PythonError { message }
+  }
+}
+"""
+
+
 RUNS_QUERY = """
 query DagsterPlusRuns($limit: Int!) {
   runsOrError(limit: $limit) {

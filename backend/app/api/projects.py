@@ -248,6 +248,70 @@ class DagsterPlusRunsResponse(BaseModel):
     total: int
 
 
+class DagsterPlusDeployment(BaseModel):
+    deployment_name: str
+    deployment_id: str | None = None
+    deployment_type: str | None = None
+    deployment_status: str | None = None
+
+
+class DagsterPlusDeploymentsResponse(BaseModel):
+    current: str | None
+    deployments: list[DagsterPlusDeployment]
+
+
+@router.get("/{project_id}/dagster-plus/deployments", response_model=DagsterPlusDeploymentsResponse)
+async def list_dagster_plus_deployments(project_id: str):
+    """List every deployment in the org so the ribbon picker can offer
+    a switch. Reads at the org level (no deployment path in the URL)."""
+    from ..services.dagster_plus_client import query, DagsterPlusError, DEPLOYMENTS_QUERY
+    project = project_service.get_project(project_id)
+    if not project or not project.is_dagster_plus:
+        raise HTTPException(status_code=404, detail="Not a Dagster+ project.")
+    try:
+        data = await query(
+            project.dagster_plus_org or "",
+            "",  # org-level endpoint
+            project.dagster_plus_token or "",
+            DEPLOYMENTS_QUERY,
+        )
+    except DagsterPlusError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    deps = [
+        DagsterPlusDeployment(
+            deployment_name=d.get("deploymentName") or "",
+            deployment_id=d.get("deploymentId"),
+            deployment_type=d.get("deploymentType"),
+            deployment_status=d.get("deploymentStatus"),
+        )
+        for d in (data.get("fullDeployments") or [])
+    ]
+    return DagsterPlusDeploymentsResponse(
+        current=project.dagster_plus_deployment,
+        deployments=deps,
+    )
+
+
+class SwitchDeploymentRequest(BaseModel):
+    deployment: str
+
+
+@router.post("/{project_id}/dagster-plus/switch-deployment", response_model=Project)
+async def switch_dagster_plus_deployment(project_id: str, request: SwitchDeploymentRequest):
+    """Switch which Dagster+ deployment this project is pointed at.
+    Refreshes project.graph from the new deployment before returning."""
+    project = project_service.get_project(project_id)
+    if not project or not project.is_dagster_plus:
+        raise HTTPException(status_code=404, detail="Not a Dagster+ project.")
+    project.dagster_plus_deployment = (request.deployment or "").strip() or None
+    project_service._save_project(project)
+    try:
+        await _hydrate_cloud_graph(project)
+    except Exception as e:
+        print(f"[dagster+] hydrate after deployment switch failed: {e}", flush=True)
+    return _strip_token(project)
+
+
 @router.get("/{project_id}/dagster-plus/runs", response_model=DagsterPlusRunsResponse)
 async def get_dagster_plus_runs(project_id: str, limit: int = 25):
     """Latest run history from the deployment."""
@@ -405,6 +469,36 @@ async def _hydrate_cloud_graph(project: Project) -> None:
     except Exception as e:
         print(f"[dagster+] hydrate: asset_checks failed: {e}", flush=True)
 
+    # Schedules + sensors from GraphQL. These aren't tied to specific
+    # assets in the response shape we get, but we still hang them on
+    # every asset that belongs to a pipeline the schedule/sensor
+    # targets. Coarse but matches what the Automation tab needs to
+    # render + counts feed the AI Assistant + insights endpoint.
+    schedules_by_pipeline: dict[str, list[dict]] = {}
+    sensors_by_pipeline: dict[str, list[dict]] = {}
+    try:
+        from ..services.dagster_plus_client import SCHEDULES_QUERY as _SCH_Q, SENSORS_QUERY as _SEN_Q
+        s_data = await query(org, dep, tok, _SCH_Q)
+        for s in (((s_data.get("schedulesOrError") or {}).get("results") or [])):
+            pn = s.get("pipelineName") or ""
+            schedules_by_pipeline.setdefault(pn, []).append({
+                "name": s.get("name"),
+                "cron": s.get("cronSchedule"),
+                "description": s.get("description"),
+                "status": (s.get("scheduleState") or {}).get("status"),
+            })
+        sen_data = await query(org, dep, tok, _SEN_Q)
+        for s in (((sen_data.get("sensorsOrError") or {}).get("results") or [])):
+            pn = s.get("pipelineName") or ""
+            sensors_by_pipeline.setdefault(pn, []).append({
+                "name": s.get("name"),
+                "description": s.get("description"),
+                "sensor_type": s.get("sensorType"),
+                "status": (s.get("sensorState") or {}).get("status"),
+            })
+    except Exception as e:
+        print(f"[dagster+] hydrate: schedules/sensors failed: {e}", flush=True)
+
     # Layout — longest-path layer assignment across the DAG so the
     # frontend has stable, readable coordinates.
     key_to_id: dict[str, str] = {}
@@ -440,8 +534,38 @@ async def _hydrate_cloud_graph(project: Project) -> None:
     for arr in by_layer.values():
         arr.sort()
 
+    # Flatten the pipeline-indexed schedule / sensor maps for two
+    # purposes: (1) attach them to every asset so PrimitivesManager
+    # sees SOMETHING for cloud projects, (2) populate
+    # project.discovered_primitives further below.
+    flat_schedules_list = [s for arr in schedules_by_pipeline.values() for s in arr]
+    flat_sensors_list = [s for arr in sensors_by_pipeline.values() for s in arr]
+
     X, Y = 260, 90
     nodes: list[GraphNode] = []
+    # Kinds that should surface on the Ingestions tab. The existing
+    # IngestionsPanel matches on component_type substrings, so we
+    # synthesize a matching type for cloud sources so those assets
+    # appear where users expect them.
+    _INGESTION_KINDS = {
+        'fivetran', 'airbyte', 'dlt', 'sling', 'stitch', 'meltano',
+        'stripe', 'salesforce', 'hubspot', 'shopify', 'zendesk', 'jira',
+        'slack', 'servicenow', 'workday', 'mailchimp', 'marketo',
+        's3', 'gcs', 'adls', 'sftp', 'http', 'rest',
+    }
+
+    def _component_type_for(defn: dict) -> str:
+        """Give cloud assets a component_type that lines up with the
+        heuristics existing frontend panels rely on. Ingestion-like
+        kinds → *_ingest so IngestionsPanel picks them up. Everything
+        else stays as the neutral cloud identifier."""
+        kind = (defn.get("computeKind") or "").lower()
+        is_source = bool(defn.get("isSource"))
+        if kind in _INGESTION_KINDS or is_source:
+            k = kind or 'cloud_source'
+            return f"dagster_plus.{k}_ingest"
+        return "dagster_plus.CloudAsset"
+
     for layer in sorted(by_layer.keys()):
         for i, key in enumerate(by_layer[layer]):
             a = next((x for x in raw_assets if "/".join(((x.get("key") or {}).get("path") or [])) == key), None)
@@ -464,11 +588,14 @@ async def _hydrate_cloud_graph(project: Project) -> None:
                     "deps": upstream.get(key, []),
                     "checks": checks_by_asset.get(key, []),
                     "jobs": [],
-                    "schedules": [],
-                    "sensors": [],
+                    # Attach ALL schedules/sensors to every asset for cloud —
+                    # coarser than we'd like but the GraphQL response
+                    # doesn't tell us which assets each schedule targets.
+                    "schedules": [{"name": s.get("name"), "cron": s.get("cron")} for s in flat_schedules_list],
+                    "sensors": [{"name": s.get("name")} for s in flat_sensors_list],
                     "component_icon": "cloud",
                     "component_attributes": {},
-                    "component_type": "dagster_plus.CloudAsset",
+                    "component_type": _component_type_for(defn),
                     "component_id": "cloud",
                     "io_input_type": None,
                     "io_output_type": None,
@@ -498,6 +625,15 @@ async def _hydrate_cloud_graph(project: Project) -> None:
             ))
 
     project.graph = PipelineGraph(nodes=nodes, edges=edges)
+
+    # Persist the schedules + sensors under discovered_primitives so
+    # the Automation tab (PrimitivesManager) has data to render. Keep
+    # the shape roughly parallel to what dg list defs returns locally.
+    project.discovered_primitives = {
+        "schedules": flat_schedules_list,
+        "sensors": flat_sensors_list,
+        "jobs": [],
+    }
 
 
 class DagsterCloudLocation(BaseModel):
@@ -2406,10 +2542,39 @@ async def list_dbt_projects(project_id: str):
     """Discover every dbt project inside this Dagster project's data
     directory. Used by the "Add dbt model" dialog to seed the target
     picker — a Dagster project can reference multiple dbt projects
-    (e.g. cloned repos + a local vendored copy)."""
+    (e.g. cloned repos + a local vendored copy).
+
+    For Dagster+ projects we synthesize a single virtual dbt project
+    covering all dbt-kinded assets so the dbt tab lights up. Actual
+    schema.yml / manifest.json aren't accessible from the cloud, so
+    write actions (add model, git commit) are hidden client-side.
+    """
     project = project_service.get_project(project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
+
+    if project.is_dagster_plus:
+        # Detect dbt-kinded assets in the (hydrated) project graph. If
+        # any exist, expose one virtual dbt project that groups them.
+        try:
+            await _hydrate_cloud_graph(project)
+        except Exception:
+            pass
+        has_dbt = any(
+            any(k for k in (n.data.get('kinds') or []) if k and 'dbt' in k.lower())
+            for n in project.graph.nodes if n.node_kind == 'asset'
+        )
+        if not has_dbt:
+            return DbtProjectListResponse(projects=[])
+        return DbtProjectListResponse(projects=[
+            DbtProjectSummary(
+                name=f"{project.dagster_plus_org} · {project.dagster_plus_deployment or 'default'}",
+                relative_path="__cloud__",  # sentinel so downstream endpoints can detect
+                model_paths=["models"],
+                is_git_repo=False,
+            )
+        ])
+
     root = project_service._get_project_dir(project)
     return DbtProjectListResponse(projects=_find_dbt_projects(root))
 
@@ -2482,6 +2647,70 @@ async def list_dbt_models(project_id: str, dbt_relative_path: str | None = None)
     project = project_service.get_project(project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
+
+    # Cloud path — build DbtModelSummary rows from dbt-kinded assets
+    # in the hydrated project graph. Test detail + docs + freshness
+    # aren't available (no manifest access from cloud), so the dbt tab
+    # renders in "read-only preview" mode.
+    if project.is_dagster_plus:
+        try:
+            await _hydrate_cloud_graph(project)
+        except Exception:
+            pass
+        cloud_models: list[DbtModelSummary] = []
+        for n in project.graph.nodes:
+            if n.node_kind != 'asset':
+                continue
+            kinds = n.data.get('kinds') or []
+            if not any(k and 'dbt' in k.lower() for k in kinds):
+                continue
+            asset_key = n.data.get('asset_key') or ''
+            name = asset_key.split('/')[-1] or asset_key
+            checks = n.data.get('checks') or []
+            # Any dbt test from cloud shows up in the checks list —
+            # cluster them under the model as test detail entries.
+            tests_detail: list[DbtTestDetail] = []
+            for c in checks:
+                tests_detail.append(DbtTestDetail(
+                    unique_id=str(c.get('key') or c.get('name') or ''),
+                    name=str(c.get('name') or 'check'),
+                    test_kind='cloud_check',
+                    target_column=None,
+                    last_run_status=(c.get('last_status') or None),
+                ))
+            cloud_models.append(DbtModelSummary(
+                unique_id=f"model.cloud.{name}",
+                name=name,
+                resource_type='model',
+                schema=None,
+                database=None,
+                description=n.data.get('description') or None,
+                materialization=None,
+                tags=list(n.data.get('tags') or []),
+                depends_on_nodes=list(n.data.get('deps') or []),
+                package_name=None,
+                relative_sql_path=None,
+                columns={},
+                tests=[t.unique_id for t in tests_detail],
+                tests_detail=tests_detail,
+                last_run_status=None,
+                last_run_duration_ms=None,
+                row_count=None,
+                bytes_bytes=None,
+            ))
+        return DbtModelListResponse(
+            dbt_project_relative_path="__cloud__" if cloud_models else '',
+            project_name=f"{project.dagster_plus_org} · {project.dagster_plus_deployment or 'default'}" if cloud_models else None,
+            models=cloud_models,
+            stats={
+                'total': len(cloud_models),
+                'with_docs': sum(1 for m in cloud_models if m.description),
+                'with_tests': sum(1 for m in cloud_models if m.tests),
+                'run_success': 0,
+                'run_failure': 0,
+            },
+        )
+
     root = project_service._get_project_dir(project)
     dbt_projects = _find_dbt_projects(root)
     if not dbt_projects:

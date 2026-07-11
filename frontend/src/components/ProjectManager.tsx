@@ -477,6 +477,18 @@ export function ProjectManager() {
           )}
         </div>
 
+        {/* Deployment picker — only for Dagster+ projects. Fetches the
+            org's full deployment list, lets user switch. The picker
+            triggers a project reload so the cloud graph re-hydrates
+            from the newly-selected deployment. */}
+        {currentProject && (currentProject as any).is_dagster_plus && (
+          <DeploymentPicker
+            projectId={currentProject.id}
+            currentDeployment={(currentProject as any).dagster_plus_deployment}
+            onSwitched={() => loadProject(currentProject.id)}
+          />
+        )}
+
         {/* Actions Menu (only shown when project is open) */}
         {currentProject && (
           <div className="relative">
@@ -1051,5 +1063,112 @@ export function ProjectManager() {
         />
       )}
     </>
+  );
+}
+
+/**
+ * Inline deployment picker for Dagster+ projects — sits in the top
+ * bar next to the Actions button. Fetches the org's deployment list
+ * on first click (lazy — avoids an extra request per page load) and
+ * writes the choice back through /switch-deployment. Server rehydrates
+ * project.graph after the switch so all tabs reflect the new
+ * deployment's data.
+ */
+function DeploymentPicker({ projectId, currentDeployment, onSwitched }: {
+  projectId: string;
+  currentDeployment: string | null;
+  onSwitched: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [switching, setSwitching] = useState(false);
+  const [deployments, setDeployments] = useState<Array<{ deployment_name: string; deployment_status: string | null }>>([]);
+  const [error, setError] = useState<string | null>(null);
+
+  const toggle = async () => {
+    if (open) { setOpen(false); return; }
+    setOpen(true);
+    if (deployments.length === 0) {
+      setLoading(true);
+      setError(null);
+      try {
+        const r = await projectsApi.listDagsterPlusDeployments(projectId);
+        setDeployments(r.deployments);
+      } catch (e: any) {
+        setError(e?.response?.data?.detail || e?.message || 'Failed to list deployments');
+      } finally {
+        setLoading(false);
+      }
+    }
+  };
+
+  const pick = async (deployment: string) => {
+    setSwitching(true);
+    try {
+      await projectsApi.switchDagsterPlusDeployment(projectId, deployment);
+      onSwitched();
+      notify.success(`Switched to ${deployment}`);
+    } catch (e: any) {
+      notify.error(e?.response?.data?.detail || e?.message || 'Switch failed');
+    } finally {
+      setSwitching(false);
+      setOpen(false);
+    }
+  };
+
+  return (
+    <div className="relative">
+      <button
+        onClick={toggle}
+        disabled={switching}
+        className="flex items-center gap-1.5 px-3 py-1.5 text-sm bg-white border border-blue-200 text-blue-700 rounded-md hover:bg-blue-50 disabled:opacity-50"
+        title="Switch Dagster+ deployment"
+      >
+        <Cloud className="w-3.5 h-3.5" />
+        <span className="font-mono truncate max-w-[140px]">{currentDeployment || 'default'}</span>
+        <ChevronDown className="w-3 h-3" />
+      </button>
+      {open && (
+        <>
+          <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} />
+          <div className="absolute right-0 mt-1 w-72 bg-white border border-gray-200 rounded-md shadow-lg z-20 max-h-96 overflow-y-auto">
+            <div className="px-3 py-2 border-b border-gray-100 text-[10px] uppercase tracking-wider text-gray-500 font-medium">
+              Deployments
+            </div>
+            {loading && (
+              <div className="px-3 py-2 text-xs text-gray-500 italic">Loading…</div>
+            )}
+            {error && (
+              <div className="px-3 py-2 text-xs text-rose-700">{error}</div>
+            )}
+            {!loading && !error && deployments.length === 0 && (
+              <div className="px-3 py-2 text-xs text-gray-500 italic">No deployments found.</div>
+            )}
+            {deployments.map((d) => {
+              const active = d.deployment_name === currentDeployment;
+              return (
+                <button
+                  key={d.deployment_name}
+                  onClick={() => pick(d.deployment_name)}
+                  disabled={active || switching}
+                  className={`w-full flex items-center justify-between gap-2 px-3 py-2 text-sm hover:bg-blue-50 ${active ? 'bg-blue-50/70' : ''} disabled:cursor-not-allowed`}
+                >
+                  <div className="flex items-center gap-2 min-w-0">
+                    <Cloud className={`w-3.5 h-3.5 flex-shrink-0 ${active ? 'text-blue-600' : 'text-gray-400'}`} />
+                    <div className="min-w-0">
+                      <div className={`font-mono truncate ${active ? 'text-blue-700 font-medium' : 'text-gray-900'}`}>{d.deployment_name}</div>
+                      {d.deployment_status && (
+                        <div className="text-[10px] text-gray-500">{d.deployment_status}</div>
+                      )}
+                    </div>
+                  </div>
+                  {active && <CheckCircle className="w-3.5 h-3.5 text-emerald-600 flex-shrink-0" />}
+                </button>
+              );
+            })}
+          </div>
+        </>
+      )}
+    </div>
   );
 }
