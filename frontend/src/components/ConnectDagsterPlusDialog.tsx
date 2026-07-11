@@ -38,7 +38,7 @@ export function ConnectDagsterPlusDialog({ open, onOpenChange, onConnected }: Co
   const [testResult, setTestResult] = useState<{ ok: boolean; version?: string | null; detail?: string | null } | null>(null);
 
   const reset = () => {
-    setName(''); setDescription(''); setOrg(''); setDeployment('prod'); setToken('');
+    setName(''); setDescription(''); setOrg(''); setDeployment(''); setToken('');
     setLocation(''); setTesting(false); setConnecting(false); setTestResult(null);
     setShowToken(false);
   };
@@ -55,7 +55,11 @@ export function ConnectDagsterPlusDialog({ open, onOpenChange, onConnected }: Co
         name: name.trim() || org.trim(),
         description: description.trim() || undefined,
         org: org.trim(),
-        deployment: deployment.trim() || 'prod',
+        // Pass empty string when user left this blank — the backend then
+// hits the org-level /graphql and follows Dagster+'s 307 redirect
+// to the org's default deployment (which varies per org — hooli's
+// is `data-eng-prod`, not `prod`).
+deployment: deployment.trim(),
         token: token.trim(),
         location: location.trim() || undefined,
       });
@@ -75,10 +79,14 @@ export function ConnectDagsterPlusDialog({ open, onOpenChange, onConnected }: Co
     setConnecting(true);
     try {
       const proj = await projectsApi.connectDagsterPlus({
-        name: name.trim() || `${org.trim()} (${deployment.trim() || 'prod'})`,
+        name: name.trim() || `${org.trim()}${deployment.trim() ? ' (' + deployment.trim() + ')' : ''}`,
         description: description.trim() || undefined,
         org: org.trim(),
-        deployment: deployment.trim() || 'prod',
+        // Pass empty string when user left this blank — the backend then
+// hits the org-level /graphql and follows Dagster+'s 307 redirect
+// to the org's default deployment (which varies per org — hooli's
+// is `data-eng-prod`, not `prod`).
+deployment: deployment.trim(),
         token: token.trim(),
         location: location.trim() || undefined,
       });

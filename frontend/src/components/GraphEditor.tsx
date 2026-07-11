@@ -383,6 +383,16 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource }: G
   // per group, edges aggregated. Auto-on for large cloud graphs
   // (>60 assets) so users see manageable structure by default.
   const [collapseToGroups, setCollapseToGroups] = useState(false);
+  // Lineage filters — apply to both graph + catalog views. Kept
+  // client-side so filtering is instant on large clouds without
+  // roundtripping the whole graph.
+  const [assetSearch, setAssetSearch] = useState('');
+  const [groupFilter, setGroupFilter] = useState<string>('all');
+  const [kindFilter, setKindFilter] = useState<string>('all');
+  // View toggle — the Assets tab flips between the graph editor and
+  // a searchable / filterable table (catalog). Catalog is a huge win
+  // for wide cloud orgs where the graph is hard to scan.
+  const [viewMode, setViewMode] = useState<'graph' | 'catalog'>('graph');
   const { currentProject, updateGraph, setCurrentProject } = useProjectStore();
   const [nodes, setNodes, onNodesChange] = useNodesState([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState([]);
@@ -1869,20 +1879,52 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource }: G
     );
   }
 
-  // Update nodes to show selection
-  const perAssetDisplay = nodes.map((node) => {
-    // Use node.selected if it's explicitly set (e.g., by group selection), otherwise check selectedAssets
-    const isSelected = node.selected !== undefined ? node.selected : selectedAssets.includes(node.id);
+  // Available group / kind options across ALL assets — power the
+  // dropdowns and stay stable as filters narrow the visible set.
+  const allGroups = React.useMemo(() => {
+    const s = new Set<string>();
+    for (const n of nodes) {
+      if (n.data?.node_kind === 'asset' && n.data?.group_name) s.add(n.data.group_name);
+    }
+    return Array.from(s).sort();
+  }, [nodes]);
+  const allKinds = React.useMemo(() => {
+    const s = new Set<string>();
+    for (const n of nodes) {
+      for (const k of (n.data?.kinds || [])) if (k) s.add(k);
+    }
+    return Array.from(s).sort();
+  }, [nodes]);
 
-    return {
-      ...node,
-      selected: isSelected, // ReactFlow uses this for visual highlighting
-      data: {
-        ...node.data,
-        isSelected: isSelected, // Also set in data for node component
-      },
-    };
-  });
+  const matchesFilters = (node: Node): boolean => {
+    if (node.data?.node_kind !== 'asset') return true;   // components always pass
+    if (groupFilter !== 'all' && (node.data?.group_name || '') !== groupFilter) return false;
+    if (kindFilter !== 'all' && !(node.data?.kinds || []).includes(kindFilter)) return false;
+    if (assetSearch.trim()) {
+      const q = assetSearch.trim().toLowerCase();
+      const hay = `${node.data?.asset_key || ''} ${node.data?.label || ''} ${node.data?.description || ''}`.toLowerCase();
+      if (!hay.includes(q)) return false;
+    }
+    return true;
+  };
+
+  const isFiltering = assetSearch.trim() !== '' || groupFilter !== 'all' || kindFilter !== 'all';
+
+  // Update nodes to show selection. When filtering, hide non-matching
+  // assets entirely so the layout compresses to what's relevant.
+  const perAssetDisplay = nodes
+    .filter(matchesFilters)
+    .map((node) => {
+      const isSelected = node.selected !== undefined ? node.selected : selectedAssets.includes(node.id);
+      return {
+        ...node,
+        selected: isSelected,
+        data: {
+          ...node.data,
+          isSelected,
+        },
+      };
+    });
 
   // Group-collapse mode: replace individual assets with one node per
   // group_name (default: "ungrouped"). Edges collapse to inter-group
@@ -1956,8 +1998,60 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource }: G
     <div className="w-full h-full flex flex-col">
       {/* Slim header row — actions on the right, matches Automation/Pipelines */}
       <div className="flex-shrink-0 bg-white border-b border-gray-200 px-4 py-2 flex items-center justify-between gap-2">
-        <div className="text-xs text-gray-400">
-          Tip: shift+drag to box-select, or ⌘+click to add assets
+        <div className="flex items-center gap-2 flex-1 min-w-0">
+          {/* Search + filters — apply to both graph + catalog view.
+              Kept in the ribbon so they persist across the toggle. */}
+          <div className="relative w-56 flex-shrink-0">
+            <svg className="w-3.5 h-3.5 text-gray-400 absolute left-2 top-1/2 -translate-y-1/2 pointer-events-none" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-4.35-4.35M17 11a6 6 0 11-12 0 6 6 0 0112 0z" />
+            </svg>
+            <input
+              value={assetSearch}
+              onChange={(e) => setAssetSearch(e.target.value)}
+              placeholder="Search assets..."
+              className="w-full pl-7 pr-2 py-1 text-xs border border-gray-300 rounded"
+            />
+          </div>
+          <select
+            value={groupFilter}
+            onChange={(e) => setGroupFilter(e.target.value)}
+            className="text-xs px-2 py-1 border border-gray-300 rounded bg-white"
+            title="Filter by asset group"
+          >
+            <option value="all">All groups</option>
+            {allGroups.map((g) => <option key={g} value={g}>{g}</option>)}
+          </select>
+          {allKinds.length > 0 && (
+            <select
+              value={kindFilter}
+              onChange={(e) => setKindFilter(e.target.value)}
+              className="text-xs px-2 py-1 border border-gray-300 rounded bg-white"
+              title="Filter by kind (dbt / sql / python / etc.)"
+            >
+              <option value="all">All kinds</option>
+              {allKinds.map((k) => <option key={k} value={k}>{k}</option>)}
+            </select>
+          )}
+          {isFiltering && (
+            <button
+              onClick={() => { setAssetSearch(''); setGroupFilter('all'); setKindFilter('all'); }}
+              className="text-[11px] text-gray-500 hover:text-gray-800 underline decoration-dotted"
+            >
+              Clear filters
+            </button>
+          )}
+          {/* View toggle: Graph ↔ Catalog */}
+          <div className="ml-2 flex items-center bg-gray-100 rounded p-0.5">
+            {(['graph', 'catalog'] as const).map((v) => (
+              <button
+                key={v}
+                onClick={() => setViewMode(v)}
+                className={`px-2 py-1 text-xs rounded ${viewMode === v ? 'bg-white text-gray-900 shadow-sm font-medium' : 'text-gray-600'}`}
+              >
+                {v === 'graph' ? 'Graph' : 'Catalog'}
+              </button>
+            ))}
+          </div>
         </div>
         <div className="flex items-center gap-2">
         {selectedAssets.length > 0 && (
@@ -2007,6 +2101,72 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource }: G
         </button>
         </div>
       </div>
+      {/* Catalog view — searchable/filterable table of the same
+          filtered asset set. Uses the filters + search from the
+          ribbon so state is shared with the graph view. */}
+      {viewMode === 'catalog' && (
+        <div className="flex-1 min-h-0 overflow-y-auto bg-gray-50 p-6">
+          <div className="bg-white border border-gray-200 rounded-lg overflow-hidden">
+            <div className="px-4 py-3 border-b border-gray-100 flex items-center justify-between">
+              <h2 className="text-sm font-semibold text-gray-900">Asset catalog</h2>
+              <span className="text-xs text-gray-500">
+                {perAssetDisplay.filter((n) => n.data?.node_kind === 'asset').length} assets
+              </span>
+            </div>
+            <table className="w-full text-sm">
+              <thead className="bg-gray-50 border-b border-gray-100">
+                <tr>
+                  <th className="text-left px-4 py-2 text-xs font-medium text-gray-700 uppercase tracking-wider">Asset key</th>
+                  <th className="text-left px-4 py-2 text-xs font-medium text-gray-700 uppercase tracking-wider">Group</th>
+                  <th className="text-left px-4 py-2 text-xs font-medium text-gray-700 uppercase tracking-wider">Kinds</th>
+                  <th className="text-left px-4 py-2 text-xs font-medium text-gray-700 uppercase tracking-wider">Deps</th>
+                  <th className="text-left px-4 py-2 text-xs font-medium text-gray-700 uppercase tracking-wider">Downstream</th>
+                  <th className="text-left px-4 py-2 text-xs font-medium text-gray-700 uppercase tracking-wider">Checks</th>
+                  <th className="text-left px-4 py-2 text-xs font-medium text-gray-700 uppercase tracking-wider">Description</th>
+                </tr>
+              </thead>
+              <tbody>
+                {perAssetDisplay.filter((n) => n.data?.node_kind === 'asset').map((n) => {
+                  const key = n.data?.asset_key || '';
+                  const upstreamEdges = displayEdges.filter((e) => e.target === n.id);
+                  const downstreamEdges = displayEdges.filter((e) => e.source === n.id);
+                  const checks = (n.data?.checks || []).length;
+                  return (
+                    <tr
+                      key={n.id}
+                      className="border-b border-gray-50 last:border-0 hover:bg-gray-50/50 cursor-pointer"
+                      onClick={() => {
+                        onNodeSelect(n.id);
+                        setViewMode('graph');
+                      }}
+                    >
+                      <td className="px-4 py-2 font-mono text-xs text-gray-900">{key}</td>
+                      <td className="px-4 py-2 text-xs text-gray-700">{n.data?.group_name || '—'}</td>
+                      <td className="px-4 py-2 text-xs">
+                        <div className="flex flex-wrap gap-1">
+                          {(n.data?.kinds || []).map((k: string) => (
+                            <span key={k} className="px-1.5 py-0.5 rounded bg-indigo-50 border border-indigo-200 text-indigo-700 text-[10px] font-mono">{k}</span>
+                          ))}
+                        </div>
+                      </td>
+                      <td className="px-4 py-2 text-xs text-gray-600 tabular-nums">{upstreamEdges.length}</td>
+                      <td className="px-4 py-2 text-xs text-gray-600 tabular-nums">{downstreamEdges.length}</td>
+                      <td className="px-4 py-2 text-xs text-gray-600 tabular-nums">
+                        {checks > 0 ? <span className="text-emerald-700 font-medium">{checks}</span> : '—'}
+                      </td>
+                      <td className="px-4 py-2 text-[11px] text-gray-600 truncate max-w-[380px]" title={n.data?.description || ''}>
+                        {n.data?.description || <span className="text-gray-400 italic">—</span>}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {viewMode === 'graph' && (
       <div className="flex-1 min-h-0 relative">
       <ReactFlow
         nodes={displayNodes}
@@ -2050,6 +2210,7 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource }: G
           it's open) so the AI bar never covers input/output previews. */}
       <DagsterAIBar />
       </div>
+      )}
 
       {/* Docked I/O preview panel — appears when the user selects an asset
           node and shows compact input/output tables. Buttons in its header
