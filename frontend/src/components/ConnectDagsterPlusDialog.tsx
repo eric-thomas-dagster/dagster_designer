@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
-import { X, Cloud, Loader2, CheckCircle2, XCircle, ExternalLink, Info } from 'lucide-react';
+import { X, Cloud, Loader2, CheckCircle2, XCircle, ExternalLink, Info, Eye, EyeOff } from 'lucide-react';
 import { projectsApi } from '@/services/api';
 import { notify } from './Notifications';
 
@@ -32,6 +32,7 @@ export function ConnectDagsterPlusDialog({ open, onOpenChange, onConnected }: Co
   const [deployment, setDeployment] = useState('');
   const [token, setToken] = useState('');
   const [location, setLocation] = useState('');
+  const [showToken, setShowToken] = useState(false);
   const [testing, setTesting] = useState(false);
   const [connecting, setConnecting] = useState(false);
   const [testResult, setTestResult] = useState<{ ok: boolean; version?: string | null; detail?: string | null } | null>(null);
@@ -39,6 +40,7 @@ export function ConnectDagsterPlusDialog({ open, onOpenChange, onConnected }: Co
   const reset = () => {
     setName(''); setDescription(''); setOrg(''); setDeployment('prod'); setToken('');
     setLocation(''); setTesting(false); setConnecting(false); setTestResult(null);
+    setShowToken(false);
   };
 
   const testConn = async () => {
@@ -139,12 +141,29 @@ export function ConnectDagsterPlusDialog({ open, onOpenChange, onConnected }: Co
                 <p className="text-[10px] text-gray-500 mt-0.5">Empty → uses the org's default deployment.</p>
               </div>
               <div className="col-span-2">
-                <label className="text-[10px] uppercase tracking-wider text-gray-500 mb-1 block">User token</label>
-                <input
-                  type="password"
-                  value={token} onChange={(e) => setToken(e.target.value)}
-                  placeholder="dp_prod_..."
-                  className="w-full px-3 py-2 text-sm font-mono border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                <label className="text-[10px] uppercase tracking-wider text-gray-500 mb-1 block">
+                  User token{token && (
+                    <span className="ml-1 normal-case tracking-normal text-gray-400">· {token.length} chars</span>
+                  )}
+                </label>
+                <div className="relative">
+                  <input
+                    type={showToken ? 'text' : 'password'}
+                    value={token} onChange={(e) => setToken(e.target.value)}
+                    placeholder="user:hexstring..."
+                    autoComplete="off"
+                    spellCheck={false}
+                    className="w-full pl-3 pr-10 py-2 text-sm font-mono border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                  <button
+                    type="button"
+                    onClick={() => setShowToken(!showToken)}
+                    className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-gray-400 hover:text-gray-700"
+                    title={showToken ? 'Hide token' : 'Show token'}
+                    aria-label={showToken ? 'Hide token' : 'Show token'}
+                  >
+                    {showToken ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  </button>
+                </div>
                 <p className="text-[10px] text-gray-500 mt-0.5 inline-flex items-center gap-1">
                   <Info className="w-3 h-3" />
                   Create one at&nbsp;

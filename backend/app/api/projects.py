@@ -110,9 +110,30 @@ async def test_dagster_plus_connection(request: ConnectDagsterPlusRequest):
         data = await query(request.org, request.deployment, request.token, PING_QUERY)
         return TestDagsterPlusResponse(ok=True, version=str(data.get("version") or "unknown"))
     except DagsterPlusError as e:
-        return TestDagsterPlusResponse(ok=False, detail=str(e))
+        # str(e) can contain non-ASCII characters that fail to encode
+        # when the HTTP layer (or some downstream serializer) picks
+        # ASCII. Sanitize eagerly so the dialog always shows readable
+        # text instead of a coder-visible unicode escape crash.
+        return TestDagsterPlusResponse(ok=False, detail=_safe(str(e)))
     except Exception as e:
-        return TestDagsterPlusResponse(ok=False, detail=f"Unexpected error: {e}")
+        return TestDagsterPlusResponse(ok=False, detail=_safe(f"Unexpected error: {e}"))
+
+
+def _safe(s: str) -> str:
+    """Best-effort ASCII sanitization for messages that flow through
+    HTTP headers or ASCII-only encoders. Preserves human-readable
+    punctuation by mapping curly quotes + em/en dashes to their ASCII
+    equivalents, then drops anything else."""
+    if not s:
+        return s
+    return (
+        s.replace('—', '--')
+         .replace('–', '-')
+         .replace('‘', "'").replace('’', "'")
+         .replace('“', '"').replace('”', '"')
+         .replace('…', '...')
+         .encode('ascii', 'ignore').decode('ascii')
+    )
 
 
 @router.post("/dagster-plus/connect", response_model=Project, status_code=201)

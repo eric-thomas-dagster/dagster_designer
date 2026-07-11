@@ -6,7 +6,7 @@ Every Dagster+ org has a GraphQL endpoint at either:
 
 Authenticated with a user token via the `Dagster-Cloud-Api-Token`
 header. This module gives us a single place to build the URL, attach
-the header, and issue queries — all of the read-only surfaces
+the header, and issue queries -- all of the read-only surfaces
 (assets, checks, runs, lineage) call into it.
 
 We keep it minimal on purpose: no schema-derived typing, no caching
@@ -30,11 +30,11 @@ def _graphql_url(org: str, deployment: str) -> str:
     """Build the org's GraphQL endpoint. Trims accidental whitespace +
     protocol so users can paste the URL or the bare org. When the
     deployment is empty (or 'none'), we hit the top-level org
-    endpoint — some orgs (esp. Hybrid setups) expose GraphQL there
+    endpoint -- some orgs (esp. Hybrid setups) expose GraphQL there
     rather than at the per-deployment path."""
     o = (org or "").strip().replace("https://", "").replace("http://", "").split("/", 1)[0]
     d = (deployment or "").strip()
-    # Users sometimes paste the full host — strip common suffixes.
+    # Users sometimes paste the full host -- strip common suffixes.
     for suffix in (".dagster.cloud", ".dagster.plus"):
         if o.endswith(suffix):
             o = o.rsplit(suffix, 1)[0]
@@ -76,7 +76,7 @@ async def query(
                 f"Couldn't reach Dagster+ at {url}: {e}. Check your org name, deployment, and network."
             ) from e
     if r.status_code == 401 or r.status_code == 403:
-        raise DagsterPlusError("Dagster+ rejected the token — verify it's a valid user token with read access.")
+        raise DagsterPlusError("Dagster+ rejected the token -- verify it's a valid user token with read access.")
     if r.status_code >= 400:
         raise DagsterPlusError(f"Dagster+ returned HTTP {r.status_code}: {r.text[:400]}")
     body = r.json()
@@ -218,7 +218,7 @@ query DagsterPlusSchedules($repositorySelector: RepositorySelector!) {
 
 # metadata.assetKeys is where sensor-to-asset association lives when
 # the sensor targets specific assets. Missing when the sensor only
-# targets jobs, which is fine — we degrade to "no linked asset".
+# targets jobs, which is fine -- we degrade to "no linked asset".
 SENSORS_QUERY = """
 query DagsterPlusSensors($repositorySelector: RepositorySelector!) {
   sensorsOrError(repositorySelector: $repositorySelector) {
