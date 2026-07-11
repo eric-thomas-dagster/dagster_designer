@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { useProjectStore } from '@/hooks/useProject';
 import { codegenApi, projectsApi, filesApi, pipelinesApi } from '@/services/api';
 import { DbtCloudImportModal } from './DbtCloudImportModal';
+import { ConnectDagsterPlusDialog } from './ConnectDagsterPlusDialog';
 import { Launchpad } from './Launchpad';
 import { notify, confirmDialog } from './Notifications';
 import {
@@ -37,6 +38,7 @@ export function ProjectManager() {
   const [showNewDialog, setShowNewDialog] = useState(false);
   const [showImportDialog, setShowImportDialog] = useState(false);
   const [showDbtCloudImportDialog, setShowDbtCloudImportDialog] = useState(false);
+  const [showDagsterPlusDialog, setShowDagsterPlusDialog] = useState(false);
   const [showProjectsDialog, setShowProjectsDialog] = useState(false);
   const [showCodePreview, setShowCodePreview] = useState(false);
   const [newProjectName, setNewProjectName] = useState('');
@@ -432,6 +434,18 @@ export function ProjectManager() {
                 >
                   <Cloud className="w-4 h-4" />
                   <span>Import from dbt Cloud</span>
+                </button>
+                <button
+                  onClick={() => {
+                    setShowDagsterPlusDialog(true);
+                    setShowProjectMenu(false);
+                  }}
+                  className="w-full flex items-center space-x-2 px-4 py-2 text-sm hover:bg-blue-50 group"
+                >
+                  <div className="w-4 h-4 rounded bg-gradient-to-br from-blue-500 to-cyan-500 flex items-center justify-center flex-shrink-0">
+                    <Cloud className="w-2.5 h-2.5 text-white" />
+                  </div>
+                  <span className="text-blue-700 group-hover:text-blue-900 font-medium">Open a Dagster+ environment</span>
                 </button>
                 <button
                   onClick={() => {
@@ -1004,6 +1018,17 @@ export function ProjectManager() {
           // Load the newly created project
           loadProject(projectId);
           setShowDbtCloudImportDialog(false);
+        }}
+      />
+
+      {/* Dagster+ (cloud) connect dialog */}
+      <ConnectDagsterPlusDialog
+        open={showDagsterPlusDialog}
+        onOpenChange={setShowDagsterPlusDialog}
+        onConnected={(proj) => {
+          // Reload project list + open the new cloud connection.
+          loadProjects();
+          loadProject(proj.id);
         }}
       />
 

@@ -28,6 +28,15 @@ class Project(BaseModel):
     git_branch: str = Field("main", description="Git branch")
     is_imported: bool = Field(False, description="Whether this project was imported from an existing codebase")
     dagster_package_subdir: str | None = Field(None, description="Subdirectory containing the Dagster package (pyproject.toml) for imported projects")
+    # Dagster+ (cloud) connection — set when the project is a live
+    # connection to a Dagster+ deployment rather than a local Dagster
+    # codebase. When is_dagster_plus is True, the tabs pull data via
+    # the GraphQL API instead of scanning local files.
+    is_dagster_plus: bool = Field(False, description="Whether this project is a Dagster+ cloud connection")
+    dagster_plus_org: str | None = Field(None, description="Dagster+ organization name (subdomain)")
+    dagster_plus_deployment: str | None = Field("prod", description="Dagster+ deployment name — usually 'prod'")
+    dagster_plus_token: str | None = Field(None, description="Dagster+ user token; NEVER returned to the frontend, only used server-side")
+    dagster_plus_location: str | None = Field(None, description="Optional Dagster+ code location filter")
 
 
 class ProjectCreate(BaseModel):
@@ -62,6 +71,9 @@ class ProjectSummary(BaseModel):
     updated_at: datetime
     git_repo: str | None = None
     is_imported: bool = False
+    is_dagster_plus: bool = False
+    dagster_plus_org: str | None = None
+    dagster_plus_deployment: str | None = None
 
 
 class ProjectListResponse(BaseModel):

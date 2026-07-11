@@ -481,6 +481,81 @@ export const projectsApi = {
   // Generic per-page AI Assistant endpoints. Same response shape
   // across dbt / ingestions / automation / pipelines so the shared
   // AiAssistantPanel component doesn't care which page it's on.
+  // ------------ Dagster+ (cloud) integration ---------------------------
+  testDagsterPlusConnection: async (
+    body: { name: string; description?: string; org: string; deployment: string; token: string; location?: string },
+  ): Promise<{ ok: boolean; version: string | null; detail: string | null }> => {
+    const response = await api.post(`/projects/dagster-plus/test`, body);
+    return response.data as any;
+  },
+
+  connectDagsterPlus: async (
+    body: { name: string; description?: string; org: string; deployment: string; token: string; location?: string },
+  ): Promise<{ id: string; name: string; is_dagster_plus: boolean; dagster_plus_org: string | null; dagster_plus_deployment: string | null }> => {
+    const response = await api.post(`/projects/dagster-plus/connect`, body);
+    return response.data as any;
+  },
+
+  getDagsterPlusAssets: async (
+    projectId: string,
+  ): Promise<{
+    assets: Array<{
+      id: string;
+      asset_key: string;
+      group_name: string | null;
+      description: string | null;
+      compute_kind: string | null;
+      is_source: boolean;
+      is_partitioned: boolean;
+      partition_definition: any;
+      upstream: string[];
+      downstream: string[];
+    }>;
+    total: number;
+  }> => {
+    const response = await api.get(`/projects/${projectId}/dagster-plus/assets`);
+    return response.data as any;
+  },
+
+  getDagsterPlusAssetChecks: async (
+    projectId: string,
+  ): Promise<{
+    checks: Array<{
+      name: string;
+      description: string | null;
+      asset_key: string;
+      can_execute: boolean;
+      last_status: string | null;
+      last_run_id: string | null;
+      last_timestamp: number | null;
+      last_severity: string | null;
+    }>;
+    total: number;
+  }> => {
+    const response = await api.get(`/projects/${projectId}/dagster-plus/asset-checks`);
+    return response.data as any;
+  },
+
+  getDagsterPlusRuns: async (
+    projectId: string,
+    limit = 25,
+  ): Promise<{
+    runs: Array<{
+      run_id: string;
+      status: string;
+      pipeline_name: string | null;
+      start_time: number | null;
+      end_time: number | null;
+      steps_succeeded: number | null;
+      steps_failed: number | null;
+      materializations: number | null;
+    }>;
+    total: number;
+  }> => {
+    const response = await api.get(`/projects/${projectId}/dagster-plus/runs`, { params: { limit } });
+    return response.data as any;
+  },
+
   pageInsights: async (
     projectId: string,
     surface: 'dbt' | 'ingestions' | 'automation' | 'pipelines',

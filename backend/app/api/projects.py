@@ -78,6 +78,212 @@ async def create_project(project_create: ProjectCreate, background_tasks: Backgr
     return project
 
 
+# ---------------------------------------------------------------------------
+# Dagster+ (cloud) connections. A "Dagster+ project" is a project
+# record with is_dagster_plus=True and a stored user token — no local
+# codebase, no venv, no manifest. The tabs read from the deployment's
+# GraphQL API instead of local files.
+# ---------------------------------------------------------------------------
+
+class ConnectDagsterPlusRequest(BaseModel):
+    name: str                          # display name for the project card
+    description: str | None = None
+    org: str                           # subdomain (e.g. 'acme' or 'acme.dagster.plus')
+    deployment: str = "prod"           # deployment name — usually 'prod'
+    token: str                         # Dagster+ user token (read scope is enough)
+    location: str | None = None        # optional code-location filter
+
+
+class TestDagsterPlusResponse(BaseModel):
+    ok: bool
+    version: str | None = None
+    detail: str | None = None
+
+
+@router.post("/dagster-plus/test", response_model=TestDagsterPlusResponse)
+async def test_dagster_plus_connection(request: ConnectDagsterPlusRequest):
+    """Validate a Dagster+ connection without creating a project. Called
+    by the connect dialog's "Test connection" button so users get an
+    early ping/pong before we commit anything."""
+    from ..services.dagster_plus_client import query, DagsterPlusError, PING_QUERY
+    try:
+        data = await query(request.org, request.deployment, request.token, PING_QUERY)
+        return TestDagsterPlusResponse(ok=True, version=str(data.get("version") or "unknown"))
+    except DagsterPlusError as e:
+        return TestDagsterPlusResponse(ok=False, detail=str(e))
+    except Exception as e:
+        return TestDagsterPlusResponse(ok=False, detail=f"Unexpected error: {e}")
+
+
+@router.post("/dagster-plus/connect", response_model=Project, status_code=201)
+async def connect_dagster_plus(request: ConnectDagsterPlusRequest):
+    """Create a new project record backed by a live Dagster+ deployment.
+    Validates the token first via a ping query; on success stores the
+    connection metadata and returns the new project."""
+    from ..services.dagster_plus_client import query, DagsterPlusError, PING_QUERY
+
+    # Verify the token round-trips before we persist anything.
+    try:
+        await query(request.org, request.deployment, request.token, PING_QUERY)
+    except DagsterPlusError as e:
+        raise HTTPException(status_code=400, detail=f"Couldn't connect to Dagster+: {e}")
+
+    # Create a project record but flag it as a cloud connection.
+    proj_create = ProjectCreate(
+        name=request.name.strip() or f"{request.org} ({request.deployment})",
+        description=request.description,
+    )
+    project = project_service.create_project(proj_create)
+    # Patch the extra Dagster+ fields directly on the stored project
+    # since ProjectCreate doesn't carry them.
+    project.is_dagster_plus = True
+    project.dagster_plus_org = request.org.strip()
+    project.dagster_plus_deployment = (request.deployment or "prod").strip()
+    project.dagster_plus_token = request.token
+    project.dagster_plus_location = (request.location or "").strip() or None
+    project_service._save_project(project)
+    return _strip_token(project)
+
+
+def _strip_token(project: Project) -> Project:
+    """Return a copy of the project with the Dagster+ token nulled out
+    so it's never sent to the frontend. Modifying the instance in-place
+    would leak into the on-disk copy on next save."""
+    copy = project.model_copy(deep=True)
+    copy.dagster_plus_token = None
+    return copy
+
+
+class DagsterPlusAssetsResponse(BaseModel):
+    """Normalized shape so the frontend can render local + cloud assets
+    with the same components. Only the fields we actually use up front."""
+    assets: list[dict]
+    total: int
+
+
+@router.get("/{project_id}/dagster-plus/assets", response_model=DagsterPlusAssetsResponse)
+async def get_dagster_plus_assets(project_id: str):
+    """List all assets in the Dagster+ deployment via GraphQL."""
+    from ..services.dagster_plus_client import query, DagsterPlusError, ASSETS_QUERY
+    project = project_service.get_project(project_id)
+    if not project or not project.is_dagster_plus:
+        raise HTTPException(status_code=404, detail="Not a Dagster+ project.")
+    try:
+        data = await query(
+            project.dagster_plus_org or "",
+            project.dagster_plus_deployment or "prod",
+            project.dagster_plus_token or "",
+            ASSETS_QUERY,
+        )
+    except DagsterPlusError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+    node = (data.get("assetsOrError") or {})
+    if node.get("__typename") == "PythonError":
+        raise HTTPException(status_code=502, detail=f"Dagster+ error: {node.get('message')}")
+    raw_nodes = node.get("nodes") or []
+    assets = []
+    for a in raw_nodes:
+        key_path = ((a.get("key") or {}).get("path") or [])
+        d = a.get("definition") or {}
+        assets.append({
+            "id": a.get("id"),
+            "asset_key": "/".join(key_path),
+            "group_name": d.get("groupName"),
+            "description": d.get("description"),
+            "compute_kind": d.get("computeKind"),
+            "is_source": d.get("isSource"),
+            "is_partitioned": d.get("isPartitioned"),
+            "partition_definition": d.get("partitionDefinition"),
+            "upstream": ["/".join(k.get("path") or []) for k in (d.get("dependencyKeys") or [])],
+            "downstream": ["/".join(k.get("path") or []) for k in (d.get("dependedByKeys") or [])],
+        })
+    return DagsterPlusAssetsResponse(assets=assets, total=len(assets))
+
+
+class DagsterPlusChecksResponse(BaseModel):
+    checks: list[dict]
+    total: int
+
+
+@router.get("/{project_id}/dagster-plus/asset-checks", response_model=DagsterPlusChecksResponse)
+async def get_dagster_plus_asset_checks(project_id: str):
+    """List asset checks + their latest execution status."""
+    from ..services.dagster_plus_client import query, DagsterPlusError, ASSET_CHECKS_QUERY
+    project = project_service.get_project(project_id)
+    if not project or not project.is_dagster_plus:
+        raise HTTPException(status_code=404, detail="Not a Dagster+ project.")
+    try:
+        data = await query(
+            project.dagster_plus_org or "",
+            project.dagster_plus_deployment or "prod",
+            project.dagster_plus_token or "",
+            ASSET_CHECKS_QUERY,
+        )
+    except DagsterPlusError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    node = data.get("assetChecksOrError") or {}
+    if node.get("__typename") == "PythonError":
+        raise HTTPException(status_code=502, detail=f"Dagster+ error: {node.get('message')}")
+    raw = node.get("checks") or []
+    checks = []
+    for c in raw:
+        key_path = ((c.get("assetKey") or {}).get("path") or [])
+        last = c.get("executionForLatestMaterialization") or {}
+        checks.append({
+            "name": c.get("name"),
+            "description": c.get("description"),
+            "asset_key": "/".join(key_path),
+            "can_execute": c.get("canExecuteIndividually"),
+            "last_status": (last.get("status") if last else None),
+            "last_run_id": (last.get("id") if last else None),
+            "last_timestamp": ((last.get("evaluation") or {}).get("timestamp") if last else None),
+            "last_severity": ((last.get("evaluation") or {}).get("severity") if last else None),
+        })
+    return DagsterPlusChecksResponse(checks=checks, total=len(checks))
+
+
+class DagsterPlusRunsResponse(BaseModel):
+    runs: list[dict]
+    total: int
+
+
+@router.get("/{project_id}/dagster-plus/runs", response_model=DagsterPlusRunsResponse)
+async def get_dagster_plus_runs(project_id: str, limit: int = 25):
+    """Latest run history from the deployment."""
+    from ..services.dagster_plus_client import query, DagsterPlusError, RUNS_QUERY
+    project = project_service.get_project(project_id)
+    if not project or not project.is_dagster_plus:
+        raise HTTPException(status_code=404, detail="Not a Dagster+ project.")
+    try:
+        data = await query(
+            project.dagster_plus_org or "",
+            project.dagster_plus_deployment or "prod",
+            project.dagster_plus_token or "",
+            RUNS_QUERY,
+            variables={"limit": max(1, min(limit, 100))},
+        )
+    except DagsterPlusError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    node = data.get("runsOrError") or {}
+    if node.get("__typename") == "PythonError":
+        raise HTTPException(status_code=502, detail=f"Dagster+ error: {node.get('message')}")
+    runs = []
+    for r in (node.get("results") or []):
+        stats = r.get("stats") or {}
+        runs.append({
+            "run_id": r.get("runId"),
+            "status": r.get("status"),
+            "pipeline_name": r.get("pipelineName"),
+            "start_time": r.get("startTime"),
+            "end_time": r.get("endTime"),
+            "steps_succeeded": stats.get("stepsSucceeded"),
+            "steps_failed": stats.get("stepsFailed"),
+            "materializations": stats.get("materializations"),
+        })
+    return DagsterPlusRunsResponse(runs=runs, total=len(runs))
+
+
 @router.get("/{project_id}/dependency-status")
 async def get_dependency_status(project_id: str):
     """Get the dependency installation status for a project.
@@ -143,7 +349,8 @@ async def get_project(project_id: str):
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
 
-    return project
+    # Never leak the Dagster+ token to the frontend — server-side only.
+    return _strip_token(project) if project.is_dagster_plus else project
 
 
 class DagsterCloudLocation(BaseModel):

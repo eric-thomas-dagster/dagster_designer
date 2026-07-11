@@ -608,6 +608,9 @@ class ProjectService:
                         updated_at=data.get("updated_at"),
                         git_repo=data.get("git_repo"),
                         is_imported=data.get("is_imported", False),
+                        is_dagster_plus=data.get("is_dagster_plus", False),
+                        dagster_plus_org=data.get("dagster_plus_org"),
+                        dagster_plus_deployment=data.get("dagster_plus_deployment"),
                     )
                     projects.append(summary)
             except Exception as e:
