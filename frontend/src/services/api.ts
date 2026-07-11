@@ -446,6 +446,38 @@ export const projectsApi = {
     return response.data as any;
   },
 
+  deleteDbtSelector: async (
+    projectId: string,
+    body: { dbt_relative_path: string; name: string },
+  ): Promise<{ dbt_project_relative_path: string; selectors: any[] }> => {
+    const response = await api.post(`/projects/${projectId}/dbt-selectors/delete`, body);
+    return response.data as any;
+  },
+
+  deleteDbtExposure: async (
+    projectId: string,
+    body: { dbt_relative_path: string; name: string },
+  ): Promise<{ dbt_project_relative_path: string; exposures: any[] }> => {
+    const response = await api.post(`/projects/${projectId}/dbt-exposures/delete`, body);
+    return response.data as any;
+  },
+
+  deleteDbtSource: async (
+    projectId: string,
+    body: { dbt_relative_path: string; source_name: string; table_name: string },
+  ): Promise<{ success: boolean; relative_path: string }> => {
+    const response = await api.post(`/projects/${projectId}/dbt-sources/delete`, body);
+    return response.data as any;
+  },
+
+  deleteDbtModel: async (
+    projectId: string,
+    body: { dbt_relative_path: string; model_unique_id: string; delete_schema_entry?: boolean },
+  ): Promise<{ success: boolean; deleted_sql: string | null; schema_yml_updated: string | null; detail: string | null }> => {
+    const response = await api.post(`/projects/${projectId}/dbt-model/delete`, body);
+    return response.data as any;
+  },
+
   addDbtSource: async (
     projectId: string,
     body: {

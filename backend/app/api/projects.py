@@ -2925,6 +2925,174 @@ async def add_dbt_source(project_id: str, request: AddDbtSourceRequest):
 
 
 # ---------------------------------------------------------------------------
+# Delete endpoints for the yaml-backed writables. All non-destructive
+# except the thing they explicitly remove; return the updated list so
+# the UI refreshes without a second fetch.
+# ---------------------------------------------------------------------------
+
+class DeleteByNameRequest(BaseModel):
+    dbt_relative_path: str
+    name: str
+
+
+@router.post('/{project_id}/dbt-selectors/delete', response_model=DbtSelectorsResponse)
+async def delete_dbt_selector(project_id: str, request: DeleteByNameRequest):
+    """Remove a selector from selectors.yml by name."""
+    import yaml as _yaml
+    project = project_service.get_project(project_id)
+    dbt_root = _resolve_dbt_root_for_write(project, request.dbt_relative_path)
+    sel_path = dbt_root / 'selectors.yml'
+    if not sel_path.exists():
+        raise HTTPException(status_code=404, detail="No selectors.yml — nothing to remove.")
+    try:
+        existing = _yaml.safe_load(sel_path.read_text()) or {}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to parse selectors.yml: {e}")
+    selectors = list(existing.get('selectors') or [])
+    filtered = [s for s in selectors if s.get('name') != request.name]
+    if len(filtered) == len(selectors):
+        raise HTTPException(status_code=404, detail=f"Selector '{request.name}' not found.")
+    existing['selectors'] = filtered
+    sel_path.write_text(_yaml.dump(existing, sort_keys=False))
+    return await get_dbt_selectors(project_id, dbt_relative_path=request.dbt_relative_path)
+
+
+@router.post('/{project_id}/dbt-exposures/delete', response_model=DbtExposuresResponse)
+async def delete_dbt_exposure(project_id: str, request: DeleteByNameRequest):
+    """Remove an exposure from models/exposures.yml by name."""
+    import yaml as _yaml
+    project = project_service.get_project(project_id)
+    dbt_root = _resolve_dbt_root_for_write(project, request.dbt_relative_path)
+    exp_path = dbt_root / 'models' / 'exposures.yml'
+    if not exp_path.exists():
+        raise HTTPException(status_code=404, detail="No models/exposures.yml — nothing to remove.")
+    try:
+        existing = _yaml.safe_load(exp_path.read_text()) or {}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to parse exposures.yml: {e}")
+    exposures = list(existing.get('exposures') or [])
+    filtered = [e for e in exposures if e.get('name') != request.name]
+    if len(filtered) == len(exposures):
+        raise HTTPException(status_code=404, detail=f"Exposure '{request.name}' not found.")
+    existing['exposures'] = filtered
+    exp_path.write_text(_yaml.dump(existing, sort_keys=False))
+    return await get_dbt_exposures(project_id, dbt_relative_path=request.dbt_relative_path)
+
+
+class DeleteDbtSourceRequest(BaseModel):
+    dbt_relative_path: str
+    source_name: str
+    table_name: str
+
+
+@router.post('/{project_id}/dbt-sources/delete')
+async def delete_dbt_source(project_id: str, request: DeleteDbtSourceRequest):
+    """Remove one table from a source block in models/sources.yml. If
+    the source block ends up empty, remove it entirely so we don't
+    leave a dangling `- name:` with no tables."""
+    import yaml as _yaml
+    project = project_service.get_project(project_id)
+    dbt_root = _resolve_dbt_root_for_write(project, request.dbt_relative_path)
+    src_path = dbt_root / 'models' / 'sources.yml'
+    if not src_path.exists():
+        raise HTTPException(status_code=404, detail="No models/sources.yml — nothing to remove.")
+    try:
+        existing = _yaml.safe_load(src_path.read_text()) or {}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to parse sources.yml: {e}")
+    sources = list(existing.get('sources') or [])
+    changed = False
+    new_sources = []
+    for s in sources:
+        if s.get('name') != request.source_name:
+            new_sources.append(s)
+            continue
+        tables = [t for t in (s.get('tables') or []) if t.get('name') != request.table_name]
+        if len(tables) != len(s.get('tables') or []):
+            changed = True
+        if tables:
+            s['tables'] = tables
+            new_sources.append(s)
+        # else drop the source block entirely
+    if not changed:
+        raise HTTPException(status_code=404, detail=f"Source '{request.source_name}.{request.table_name}' not found.")
+    existing['sources'] = new_sources
+    src_path.write_text(_yaml.dump(existing, sort_keys=False))
+    return {'success': True, 'relative_path': str(src_path.relative_to(dbt_root))}
+
+
+class DeleteDbtModelRequest(BaseModel):
+    dbt_relative_path: str
+    model_unique_id: str
+    delete_schema_entry: bool = True   # also strip the model's block from schema.yml
+
+
+class DeleteDbtModelResponse(BaseModel):
+    success: bool
+    deleted_sql: str | None = None      # relative path of the sql that was removed
+    schema_yml_updated: str | None = None
+    detail: str | None = None
+
+
+@router.post('/{project_id}/dbt-model/delete', response_model=DeleteDbtModelResponse)
+async def delete_dbt_model(project_id: str, request: DeleteDbtModelRequest):
+    """Remove a dbt model — deletes the .sql file and (by default)
+    strips its block from the associated schema.yml. Non-destructive
+    to other models in the same schema.yml."""
+    import yaml as _yaml
+    project = project_service.get_project(project_id)
+    dbt_root = _resolve_dbt_root_for_write(project, request.dbt_relative_path)
+    manifest = _load_dbt_artifact(dbt_root / 'target' / 'manifest.json')
+    node = (manifest.get('nodes') or {}).get(request.model_unique_id)
+    if not node:
+        raise HTTPException(status_code=404, detail=f"Model '{request.model_unique_id}' not found in manifest.")
+    rt = node.get('resource_type')
+    if rt not in ('model', 'seed', 'snapshot'):
+        raise HTTPException(status_code=400, detail=f"Cannot delete resource_type={rt} — only models/seeds/snapshots.")
+
+    sql_rel = node.get('original_file_path')
+    deleted_sql: str | None = None
+    if sql_rel:
+        sql_file = dbt_root / sql_rel
+        if sql_file.exists() and sql_file.is_file():
+            sql_file.unlink()
+            deleted_sql = sql_rel
+
+    schema_updated: str | None = None
+    if request.delete_schema_entry:
+        patch_path = node.get('patch_path')
+        if patch_path:
+            rel = patch_path.split('://', 1)[-1]
+            yml_path = dbt_root / rel
+            if yml_path.exists():
+                try:
+                    yml_data = _yaml.safe_load(yml_path.read_text()) or {}
+                except Exception:
+                    yml_data = {}
+                name = node.get('name')
+                for key in ('models', 'seeds', 'snapshots'):
+                    entries = yml_data.get(key)
+                    if not entries:
+                        continue
+                    filtered = [e for e in entries if e.get('name') != name]
+                    if len(filtered) != len(entries):
+                        yml_data[key] = filtered
+                        schema_updated = rel
+                if schema_updated:
+                    yml_path.write_text(_yaml.dump(yml_data, sort_keys=False))
+
+    if not deleted_sql and not schema_updated:
+        raise HTTPException(status_code=404, detail="Neither the SQL file nor a schema.yml entry was found for this model.")
+
+    return DeleteDbtModelResponse(
+        success=True,
+        deleted_sql=deleted_sql,
+        schema_yml_updated=schema_updated,
+        detail=f"Removed {node.get('name')}",
+    )
+
+
+# ---------------------------------------------------------------------------
 # dbt test authoring — add/remove tests from schema.yml (generic tests)
 # or tests/ directory (singular / custom SQL tests). The frontend
 # drawer's Tests section calls these to add/remove without users

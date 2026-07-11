@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { FileCode, Play, Loader2, CheckCircle2, XCircle, AlertTriangle, TestTube2, Book, FileText, Search, Layers, GitCommit, GitCompare, Clock, Eye, DollarSign, X, Network, Filter, Share2, ExternalLink, Sparkles, Plus } from 'lucide-react';
+import { FileCode, Play, Loader2, CheckCircle2, XCircle, AlertTriangle, TestTube2, Book, FileText, Search, Layers, GitCommit, GitCompare, Clock, Eye, DollarSign, X, Network, Filter, Share2, ExternalLink, Sparkles, Plus, Trash2 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { projectsApi } from '@/services/api';
@@ -209,6 +209,75 @@ export function DbtPanel({ onOpenFile }: DbtPanelProps) {
     } finally {
       setGeneratingDocs(false);
     }
+  };
+
+  // Common delete helper — surfaces a confirm + refreshes on success.
+  // Small wrapper so per-kind handlers stay readable.
+  const guardedDelete = async (
+    what: string,
+    doIt: () => Promise<void>,
+    onSuccess?: () => void,
+  ) => {
+    if (!window.confirm(`Remove ${what}? This edits the yaml on disk.`)) return;
+    try {
+      await doIt();
+      notify.success(`Removed ${what}`);
+      onSuccess?.();
+    } catch (e: any) {
+      const detail = e?.response?.data?.detail;
+      if (e?.response?.status === 404) {
+        notify.error('Endpoint not found — restart the backend so the new dbt endpoints load.');
+      } else {
+        notify.error(detail || e?.message || `Failed to remove ${what}.`);
+      }
+    }
+  };
+
+  const handleDeleteSelector = (name: string) => {
+    if (!currentProject || !data?.dbt_project_relative_path) return;
+    guardedDelete(`selector "${name}"`, async () => {
+      const r = await projectsApi.deleteDbtSelector(currentProject.id, {
+        dbt_relative_path: data.dbt_project_relative_path, name,
+      });
+      setSelectors(r as any);
+    });
+  };
+
+  const handleDeleteExposure = (name: string) => {
+    if (!currentProject || !data?.dbt_project_relative_path) return;
+    guardedDelete(`exposure "${name}"`, async () => {
+      const r = await projectsApi.deleteDbtExposure(currentProject.id, {
+        dbt_relative_path: data.dbt_project_relative_path, name,
+      });
+      setExposures(r as any);
+    });
+  };
+
+  const handleDeleteSource = (sourceName: string, tableName: string) => {
+    if (!currentProject || !data?.dbt_project_relative_path) return;
+    guardedDelete(`source ${sourceName}.${tableName}`, async () => {
+      await projectsApi.deleteDbtSource(currentProject.id, {
+        dbt_relative_path: data.dbt_project_relative_path,
+        source_name: sourceName, table_name: tableName,
+      });
+      // Refresh freshness so the table row disappears.
+      const r = await projectsApi.getDbtSourceFreshness(currentProject.id, data.dbt_project_relative_path);
+      setFreshness(r);
+    });
+  };
+
+  const handleDeleteModel = (m: Model) => {
+    if (!currentProject || !data?.dbt_project_relative_path) return;
+    const msg = `model ${m.name} (removes ${m.relative_sql_path ?? 'the sql file'} and strips the schema.yml block)`;
+    guardedDelete(msg, async () => {
+      await projectsApi.deleteDbtModel(currentProject.id, {
+        dbt_relative_path: data.dbt_project_relative_path,
+        model_unique_id: m.unique_id,
+      });
+      // Clear drawer if it was pointing at this model.
+      if (selectedUniqueId === m.unique_id) setSelectedUniqueId(null);
+      refresh();
+    });
   };
 
   // Delete a test by unique_id — backend removes it from schema.yml
@@ -637,6 +706,13 @@ export function DbtPanel({ onOpenFile }: DbtPanelProps) {
                                 <FileText className="w-3 h-3" />
                               </button>
                             )}
+                            <button
+                              onClick={() => handleDeleteModel(m)}
+                              className="p-1 text-gray-400 hover:text-rose-600 hover:bg-rose-50 rounded"
+                              title="Delete this model (removes .sql + schema.yml block)"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
                           </div>
                         </td>
                       </tr>
@@ -849,14 +925,23 @@ export function DbtPanel({ onOpenFile }: DbtPanelProps) {
                         {JSON.stringify(s.definition, null, 2)}
                       </pre>
                     </div>
-                    <button
-                      onClick={() => runSelector(s.name)}
-                      disabled={runningSelector === s.name}
-                      className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium bg-primary text-primary-foreground rounded disabled:opacity-40 flex-shrink-0"
-                    >
-                      {runningSelector === s.name ? <Loader2 className="w-3 h-3 animate-spin" /> : <Play className="w-3 h-3" />}
-                      {runningSelector === s.name ? 'Running…' : 'Run'}
-                    </button>
+                    <div className="flex items-center gap-1 flex-shrink-0">
+                      <button
+                        onClick={() => runSelector(s.name)}
+                        disabled={runningSelector === s.name}
+                        className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium bg-primary text-primary-foreground rounded disabled:opacity-40"
+                      >
+                        {runningSelector === s.name ? <Loader2 className="w-3 h-3 animate-spin" /> : <Play className="w-3 h-3" />}
+                        {runningSelector === s.name ? 'Running…' : 'Run'}
+                      </button>
+                      <button
+                        onClick={() => handleDeleteSelector(s.name)}
+                        className="p-1.5 text-gray-400 hover:text-rose-600 hover:bg-rose-50 rounded"
+                        title="Remove this selector from selectors.yml"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
                   </li>
                 ))}
               </ul>
@@ -940,16 +1025,25 @@ export function DbtPanel({ onOpenFile }: DbtPanelProps) {
                           </div>
                         )}
                       </div>
-                      {e.url && (
-                        <a
-                          href={e.url}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="inline-flex items-center gap-1 px-2.5 py-1 text-xs text-gray-700 border border-gray-200 rounded hover:bg-gray-50 flex-shrink-0"
+                      <div className="flex items-center gap-1 flex-shrink-0">
+                        {e.url && (
+                          <a
+                            href={e.url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="inline-flex items-center gap-1 px-2.5 py-1 text-xs text-gray-700 border border-gray-200 rounded hover:bg-gray-50"
+                          >
+                            <ExternalLink className="w-3 h-3" /> Open
+                          </a>
+                        )}
+                        <button
+                          onClick={() => handleDeleteExposure(e.name)}
+                          className="p-1.5 text-gray-400 hover:text-rose-600 hover:bg-rose-50 rounded"
+                          title="Remove this exposure from exposures.yml"
                         >
-                          <ExternalLink className="w-3 h-3" /> Open
-                        </a>
-                      )}
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
                     </div>
                   </li>
                 ))}
@@ -1002,6 +1096,7 @@ export function DbtPanel({ onOpenFile }: DbtPanelProps) {
                     <th className="text-left px-4 py-2 text-xs font-medium text-gray-700 uppercase tracking-wider">Warn / Error after</th>
                     <th className="text-left px-4 py-2 text-xs font-medium text-gray-700 uppercase tracking-wider">Last loaded</th>
                     <th className="text-left px-4 py-2 text-xs font-medium text-gray-700 uppercase tracking-wider">Status</th>
+                    <th className="w-8" />
                   </tr>
                 </thead>
                 <tbody>
@@ -1035,6 +1130,15 @@ export function DbtPanel({ onOpenFile }: DbtPanelProps) {
                       </td>
                       <td className="px-4 py-2.5">
                         <FreshnessPill status={s.last_run_status} />
+                      </td>
+                      <td className="px-2 py-2.5">
+                        <button
+                          onClick={() => handleDeleteSource(s.source_name, s.table_name)}
+                          className="p-1.5 text-gray-400 hover:text-rose-600 hover:bg-rose-50 rounded"
+                          title="Remove this source from sources.yml"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
                       </td>
                     </tr>
                   ))}
