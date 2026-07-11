@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import {
   ArrowLeft, ChevronRight, Play, Bell, MoreVertical, Loader2, ExternalLink,
   ShieldCheck, TestTube2, Sparkles, CheckCircle2, XCircle, AlertTriangle, Clock,
-  Trash2, FileText, Zap, Radar, Layers,
+  Trash2, FileText, Zap, Radar, Layers, Send,
 } from 'lucide-react';
 import { projectsApi } from '@/services/api';
 
@@ -15,6 +15,9 @@ interface MonitorDetailPageProps {
   onBack: () => void;
   onOpenFile?: (path: string) => void;
   onOpenAsset?: (assetKey: string) => void;
+  /** Called after a successful delete so the parent (index) can refresh
+   *  its list and hide this page. */
+  onDeleted?: () => void;
 }
 
 const KIND_META: Record<Monitor['kind'], { label: string; icon: any; accent: string; iconBg: string }> = {
@@ -41,12 +44,35 @@ const bucket = (m: Monitor | { last_status: string | null }): Status => {
  *   • Blast-radius panel — downstream assets + exposures + affected
  *     monitors, so failures translate to real "who cares" impact
  */
-export function MonitorDetailPage({ monitor, projectId, onBack, onOpenFile, onOpenAsset }: MonitorDetailPageProps) {
+export function MonitorDetailPage({ monitor, projectId, onBack, onOpenFile, onOpenAsset, onDeleted }: MonitorDetailPageProps) {
   const [tab, setTab] = useState<'overview' | 'runs' | 'settings'>('overview');
   const [history, setHistory] = useState<Awaited<ReturnType<typeof projectsApi.getMonitorHistory>> | null>(null);
   const [impact, setImpact] = useState<Awaited<ReturnType<typeof projectsApi.getMonitorImpact>> | null>(null);
   const [historyLoading, setHistoryLoading] = useState(true);
   const [impactLoading, setImpactLoading] = useState(true);
+  const [deleting, setDeleting] = useState(false);
+
+  const handleDelete = async () => {
+    if (!window.confirm(
+      monitor.kind === 'asset_check'
+        ? 'Native asset checks live in Python code — this button cannot remove them. Open the source file and delete manually.'
+        : `Remove monitor "${monitor.label}"? This edits the yaml on disk.`
+    )) return;
+    if (monitor.kind === 'asset_check') return;
+    setDeleting(true);
+    try {
+      await projectsApi.deleteMonitor(projectId, {
+        kind: monitor.kind,
+        monitor_id: monitor.id,
+        dbt_relative_path: monitor.source_project ? (monitor.source_location?.split('/')[0] ?? null) : null,
+      });
+      onDeleted?.();
+      onBack();
+    } catch (e: any) {
+      const detail = e?.response?.data?.detail;
+      alert(detail || e?.message || 'Failed to delete monitor.');
+    } finally { setDeleting(false); }
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -208,6 +234,9 @@ export function MonitorDetailPage({ monitor, projectId, onBack, onOpenFile, onOp
             <DatapointSummary events={history.events} />
           )}
 
+          {/* AI Ask — Sifflet-style "ask about this monitor" chat panel */}
+          <AskMonitorPanel monitor={monitor} projectId={projectId} />
+
           {/* Blast radius */}
           <div className="bg-white border border-gray-200 rounded-lg">
             <div className="px-4 py-3 border-b border-gray-100 flex items-center justify-between">
@@ -365,14 +394,20 @@ export function MonitorDetailPage({ monitor, projectId, onBack, onOpenFile, onOp
             </div>
             <div className="p-4">
               <button
-                disabled
+                onClick={handleDelete}
+                disabled={deleting || monitor.kind === 'asset_check'}
                 className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-rose-700 border border-rose-200 rounded hover:bg-rose-50 disabled:opacity-40"
-                title="Delete plumbing coming next — for now use the file editor or the drawer × on tests/selectors/exposures"
+                title={monitor.kind === 'asset_check' ? 'Native asset checks live in Python code — open the source to remove' : 'Remove this monitor'}
               >
-                <Trash2 className="w-4 h-4" /> Delete monitor
+                {deleting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Trash2 className="w-4 h-4" />}
+                {deleting ? 'Removing…' : 'Delete monitor'}
               </button>
               <p className="text-[10px] text-gray-500 mt-2">
-                Delete plumbing for native + enhanced checks lands next. dbt tests can be removed from the Tests tab today.
+                {monitor.kind === 'asset_check'
+                  ? 'Native @asset_check code lives in your Python source — remove by editing the file directly.'
+                  : monitor.kind === 'dbt_test'
+                    ? 'Removes the test from the model\'s schema.yml (or deletes the tests/*.sql file for singular tests).'
+                    : 'Removes the entire defs/monitors/<name>/ directory — safe, non-destructive to other monitors.'}
               </p>
             </div>
           </div>
@@ -549,6 +584,131 @@ function BigPassFailStrip({ events }: { events: Array<{ status: string; ts: stri
           : 'bg-gray-300';
         return <div key={i} className={`${tone} rounded-sm flex-1 min-w-[3px]`} title={`${s} · ${new Date(e.ts).toLocaleString()}`} />;
       })}
+    </div>
+  );
+}
+
+/**
+ * Ask AI about this monitor — Sifflet's chat pattern. Sends the
+ * question + monitor context to Claude via /monitors/{id}/ask. Keeps
+ * the conversation client-side so follow-ups are cheap.
+ */
+function AskMonitorPanel({ monitor, projectId }: { monitor: Monitor; projectId: string }) {
+  const [open, setOpen] = useState(false);
+  const [turns, setTurns] = useState<Array<{ role: 'user' | 'assistant'; content: string }>>([]);
+  const [input, setInput] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const suggestions = [
+    'Why is this failing?',
+    "What's a healthy baseline for this?",
+    "What's changed in the last week?",
+    'What should I do next?',
+  ];
+
+  const ask = async (q: string) => {
+    if (!q.trim() || loading) return;
+    setError(null);
+    const nextTurns: Array<{ role: 'user' | 'assistant'; content: string }> = [...turns, { role: 'user', content: q.trim() }];
+    setTurns(nextTurns);
+    setInput('');
+    setLoading(true);
+    try {
+      const r = await projectsApi.askMonitor(projectId, monitor.id, { question: q.trim(), history: turns });
+      setTurns([...nextTurns, { role: 'assistant', content: r.answer }]);
+    } catch (e: any) {
+      setError(e?.response?.data?.detail || e?.message || 'Ask failed');
+      setTurns(nextTurns); // Roll back the assistant turn
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="bg-white border border-gray-200 rounded-lg">
+      <div
+        className="px-4 py-3 border-b border-gray-100 flex items-center justify-between cursor-pointer hover:bg-gray-50/50"
+        onClick={() => setOpen(!open)}
+      >
+        <div className="flex items-center gap-2">
+          <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-indigo-500 to-violet-500 flex items-center justify-center">
+            <Sparkles className="w-4 h-4 text-white" />
+          </div>
+          <div>
+            <h3 className="text-sm font-semibold text-gray-900">Ask AI about this monitor</h3>
+            <p className="text-[11px] text-gray-500">
+              Claude gets the monitor's config, recent runs, and blast radius — ask "why is this failing?" and get a concrete answer.
+            </p>
+          </div>
+        </div>
+        <ChevronRight className={`w-4 h-4 text-gray-400 transition-transform ${open ? 'rotate-90' : ''}`} />
+      </div>
+      {open && (
+        <div className="p-4 space-y-3">
+          {turns.length === 0 && (
+            <div className="flex flex-wrap gap-1.5">
+              {suggestions.map((s) => (
+                <button
+                  key={s}
+                  onClick={() => ask(s)}
+                  disabled={loading}
+                  className="px-2 py-1 text-[11px] rounded-full border border-indigo-200 bg-indigo-50 text-indigo-700 hover:bg-indigo-100 disabled:opacity-50"
+                >
+                  {s}
+                </button>
+              ))}
+            </div>
+          )}
+          {turns.length > 0 && (
+            <div className="space-y-2 max-h-80 overflow-y-auto">
+              {turns.map((t, i) => (
+                <div key={i} className={`text-xs ${t.role === 'user' ? 'text-right' : ''}`}>
+                  <div className={`inline-block max-w-[90%] px-3 py-2 rounded-lg whitespace-pre-wrap leading-relaxed ${
+                    t.role === 'user'
+                      ? 'bg-indigo-600 text-white'
+                      : 'bg-gray-100 text-gray-800'
+                  }`}>
+                    {t.content}
+                  </div>
+                </div>
+              ))}
+              {loading && (
+                <div className="text-xs">
+                  <div className="inline-flex items-center gap-2 px-3 py-2 rounded-lg bg-gray-100 text-gray-600">
+                    <Loader2 className="w-3 h-3 animate-spin" /> thinking…
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+          {error && (
+            <div className="p-2 bg-rose-50 border border-rose-200 rounded text-[11px] text-rose-800">{error}</div>
+          )}
+          <div className="flex items-center gap-2">
+            <input
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); ask(input); } }}
+              placeholder="Ask about this monitor…"
+              disabled={loading}
+              className="flex-1 px-3 py-2 text-sm border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-indigo-500 disabled:opacity-50"
+            />
+            <button
+              onClick={() => ask(input)}
+              disabled={loading || !input.trim()}
+              className="inline-flex items-center gap-1 px-3 py-2 text-sm font-medium bg-indigo-600 text-white rounded hover:bg-indigo-700 disabled:opacity-50"
+            >
+              <Send className="w-3.5 h-3.5" />
+              Ask
+            </button>
+          </div>
+          <p className="text-[10px] text-gray-500 italic">
+            Uses whichever key you have set — ANTHROPIC_API_KEY (Claude, preferred) or OPENAI_API_KEY (GPT-4o mini).
+            No conversation is stored server-side.
+          </p>
+        </div>
+      )}
     </div>
   );
 }

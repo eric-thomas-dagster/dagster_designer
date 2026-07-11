@@ -470,6 +470,45 @@ export const projectsApi = {
     return response.data as any;
   },
 
+  deleteMonitor: async (
+    projectId: string,
+    body: { kind: 'dbt_test' | 'enhanced_check' | 'asset_check'; monitor_id: string; dbt_relative_path?: string | null },
+  ): Promise<{ success: boolean; detail: string | null }> => {
+    const response = await api.post(`/projects/${projectId}/monitors/delete`, body);
+    return response.data as any;
+  },
+
+  askMonitor: async (
+    projectId: string,
+    monitorId: string,
+    body: { question: string; history?: Array<{ role: 'user' | 'assistant'; content: string }> },
+  ): Promise<{ answer: string; used_context: Record<string, any> }> => {
+    const response = await api.post(`/projects/${projectId}/monitors/${encodeURIComponent(monitorId)}/ask`, body);
+    return response.data as any;
+  },
+
+  generateMonitors: async (
+    projectId: string,
+    body: { asset_key: string; max_proposals?: number; focus?: string | null },
+  ): Promise<{
+    asset_key: string;
+    proposals: Array<{
+      name: string;
+      check_kind: string;
+      implementation: string;
+      column: string | null;
+      severity: string;
+      description: string;
+      reasoning: string;
+      params: Record<string, any>;
+      schedule_cron: string | null;
+      run_on_materialization: boolean;
+    }>;
+  }> => {
+    const response = await api.post(`/projects/${projectId}/monitors/generate`, body);
+    return response.data as any;
+  },
+
   getMonitorImpact: async (
     projectId: string,
     monitorId: string,

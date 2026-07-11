@@ -7,6 +7,7 @@ import { projectsApi } from '@/services/api';
 import { useProjectStore } from '@/hooks/useProject';
 import { AddMonitorDialog } from './AddMonitorDialog';
 import { MonitorDetailPage } from './MonitorDetailPage';
+import { GenerateMonitorsDialog } from './GenerateMonitorsDialog';
 
 type Monitor = Awaited<ReturnType<typeof projectsApi.listMonitors>>['monitors'][number];
 type Status = 'passing' | 'failing' | 'warn' | 'never_run';
@@ -53,6 +54,7 @@ export function MonitorsPanel({ onOpenFile }: MonitorsPanelProps) {
   const [assetFilter, setAssetFilter] = useState<string>('all');
   const [selected, setSelected] = useState<Monitor | null>(null);
   const [showAddMonitor, setShowAddMonitor] = useState(false);
+  const [showGenerate, setShowGenerate] = useState(false);
 
   const refresh = async () => {
     if (!currentProject) return;
@@ -105,6 +107,7 @@ export function MonitorsPanel({ onOpenFile }: MonitorsPanelProps) {
         projectId={currentProject.id}
         onBack={() => setSelected(null)}
         onOpenFile={onOpenFile}
+        onDeleted={() => { setSelected(null); refresh(); }}
       />
     );
   }
@@ -124,6 +127,13 @@ export function MonitorsPanel({ onOpenFile }: MonitorsPanelProps) {
           >
             {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Zap className="w-4 h-4" />}
             Refresh
+          </button>
+          <button
+            onClick={() => setShowGenerate(true)}
+            className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-white rounded-md bg-gradient-to-br from-indigo-500 to-violet-500 hover:from-indigo-600 hover:to-violet-600"
+            title="Ask Claude to propose monitors for an asset"
+          >
+            <Sparkles className="w-4 h-4" /> Generate with AI
           </button>
           <button
             onClick={() => setShowAddMonitor(true)}
@@ -311,6 +321,14 @@ export function MonitorsPanel({ onOpenFile }: MonitorsPanelProps) {
         onOpenChange={setShowAddMonitor}
         projectId={currentProject.id}
         onSaved={refresh}
+      />
+
+      {/* Generate with AI */}
+      <GenerateMonitorsDialog
+        open={showGenerate}
+        onOpenChange={setShowGenerate}
+        projectId={currentProject.id}
+        onGenerated={refresh}
       />
     </div>
   );

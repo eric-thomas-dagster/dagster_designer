@@ -3814,6 +3814,426 @@ async def add_monitor(project_id: str, request: AddMonitorRequest):
 # Monitors drawer.
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# AI features — Claude-backed "Ask this monitor" + "Generate monitors
+# for an asset". Both endpoints call the Anthropic Messages API when
+# ANTHROPIC_API_KEY is set. Non-blocking degradation: if the key is
+# missing we surface a clear "configure ANTHROPIC_API_KEY" error, not
+# a stack trace.
+# ---------------------------------------------------------------------------
+
+class MonitorAskRequest(BaseModel):
+    question: str
+    # Optional chat history so users can ask follow-ups. Each turn is
+    # {role: 'user' | 'assistant', content: str}.
+    history: list[dict] = []
+
+
+class MonitorAskResponse(BaseModel):
+    answer: str
+    used_context: dict  # what we passed to the model — helps debugging
+
+
+ANTHROPIC_MODEL = "claude-sonnet-4-6"
+OPENAI_MODEL = "gpt-4o-mini"
+
+
+async def _call_llm(system_prompt: str, user_prompt: str, prior_turns: list[dict] | None = None) -> str:
+    """LLM wrapper that transparently uses whichever provider key is
+    configured. Prefers Anthropic when both are set (Claude is the
+    tighter fit for structured reasoning we do here). Returns the
+    model's text reply. Falls back to a clear error when neither key
+    is present."""
+    import os as _os
+    import httpx as _httpx
+
+    anthropic_key = _os.getenv("ANTHROPIC_API_KEY")
+    openai_key = _os.getenv("OPENAI_API_KEY")
+
+    if not anthropic_key and not openai_key:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "No LLM API key configured. Set ANTHROPIC_API_KEY (preferred) or "
+                "OPENAI_API_KEY in your .env / shell env and restart the backend."
+            ),
+        )
+
+    # Normalize chat history to a shape both providers accept.
+    normalized: list[dict] = []
+    for turn in (prior_turns or []):
+        role = turn.get("role")
+        content = turn.get("content")
+        if role in ("user", "assistant") and content:
+            normalized.append({"role": role, "content": content})
+
+    if anthropic_key:
+        messages = normalized + [{"role": "user", "content": user_prompt}]
+        async with _httpx.AsyncClient(timeout=60.0) as client:
+            r = await client.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={
+                    "x-api-key": anthropic_key,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json",
+                },
+                json={
+                    "model": ANTHROPIC_MODEL,
+                    "max_tokens": 2048,
+                    "system": system_prompt,
+                    "messages": messages,
+                    "temperature": 0.3,
+                },
+            )
+        if r.status_code != 200:
+            raise HTTPException(status_code=502, detail=f"Anthropic error {r.status_code}: {r.text[:400]}")
+        data = r.json()
+        blocks = data.get("content") or []
+        text = next((b.get("text", "") for b in blocks if b.get("type") == "text"), "")
+        return text.strip()
+
+    # OpenAI path — system prompt goes as the first message.
+    messages = [{"role": "system", "content": system_prompt}] + normalized + [{"role": "user", "content": user_prompt}]
+    async with _httpx.AsyncClient(timeout=60.0) as client:
+        r = await client.post(
+            "https://api.openai.com/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {openai_key}",
+                "content-type": "application/json",
+            },
+            json={
+                "model": OPENAI_MODEL,
+                "messages": messages,
+                "temperature": 0.3,
+                "max_tokens": 2048,
+            },
+        )
+    if r.status_code != 200:
+        raise HTTPException(status_code=502, detail=f"OpenAI error {r.status_code}: {r.text[:400]}")
+    data = r.json()
+    choices = data.get("choices") or []
+    if not choices:
+        raise HTTPException(status_code=502, detail="OpenAI returned no choices.")
+    return (choices[0].get("message") or {}).get("content", "").strip()
+
+
+# Keep the old name as an alias for any earlier code that references it.
+_call_claude = _call_llm
+
+
+@router.post('/{project_id}/monitors/{monitor_id:path}/ask', response_model=MonitorAskResponse)
+async def ask_monitor(project_id: str, monitor_id: str, request: MonitorAskRequest):
+    """Ask Claude about a specific monitor. We package up:
+      • The monitor's config (kind, target, severity, description)
+      • Recent run history (last 30 events)
+      • Blast radius (downstream assets + exposures + other monitors)
+    …then let the model answer the user's question in plain English.
+    """
+    from ..services.monitor_history import read_events
+
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    root = project_service._get_project_dir(project)
+
+    all_monitors = await list_monitors(project_id)
+    target = next((m for m in all_monitors.monitors if m.id == monitor_id), None)
+    if not target:
+        raise HTTPException(status_code=404, detail="Monitor not found")
+
+    # History — last 30 events, chronological
+    events = read_events(root, monitor_id=monitor_id, limit=30)
+    # Blast radius (may be empty for leaf assets)
+    try:
+        impact = await monitor_impact(project_id, monitor_id)
+    except Exception:
+        impact = None
+
+    # Compose context for Claude. Keep it structured so it can reference
+    # facts cleanly in its answer.
+    context_lines = [
+        f"MONITOR: {target.label}",
+        f"kind: {target.kind}",
+        f"check_kind: {target.check_kind}",
+        f"target_asset_keys: {target.target_asset_keys}",
+        f"severity: {target.severity}",
+        f"last_status: {target.last_status}",
+        f"description: {target.description}",
+        "",
+        "RECENT_RUNS (last 30, chronological):",
+    ]
+    for e in events[-30:]:
+        line = f"  • {e.get('ts')} · {e.get('status')}"
+        if e.get('value') is not None:
+            line += f" · value={e.get('value')}"
+        if e.get('expected_min') is not None or e.get('expected_max') is not None:
+            line += f" · expected=[{e.get('expected_min')}, {e.get('expected_max')}]"
+        if e.get('failures'):
+            line += f" · {e.get('failures')} failed"
+        if e.get('message'):
+            line += f" · {e.get('message')[:120]}"
+        context_lines.append(line)
+    if impact:
+        context_lines.append("")
+        context_lines.append("BLAST_RADIUS (if this fails, these are affected):")
+        context_lines.append(f"  downstream_assets: {impact.affected_assets[:20]}")
+        if impact.affected_exposures:
+            context_lines.append(f"  exposures: {[e.get('name') for e in impact.affected_exposures]}")
+        if impact.affected_monitors:
+            context_lines.append(f"  other_monitors_in_reach: {impact.affected_monitors[:10]}")
+
+    system_prompt = (
+        "You are a senior data reliability engineer helping a colleague understand "
+        "a data-quality monitor inside Dagster. You have access to the monitor's "
+        "config, recent run history, and blast radius. Answer their question in "
+        "plain English, concisely (usually 3-6 sentences unless they ask for detail). "
+        "Reference concrete facts from the context — status, values, timestamps, "
+        "affected downstream assets — rather than being vague. If they ask 'why is "
+        "this failing?' walk through the last failing run's evidence. If they ask "
+        "'what's a healthy baseline?' cite the historical values you see. If you "
+        "don't have enough data to answer, say so and suggest what to gather."
+    )
+    user_prompt = (
+        f"CONTEXT:\n{chr(10).join(context_lines)}\n\n"
+        f"QUESTION: {request.question}"
+    )
+
+    answer = await _call_claude(system_prompt, user_prompt, prior_turns=request.history)
+    return MonitorAskResponse(
+        answer=answer,
+        used_context={
+            "monitor_kind": target.kind,
+            "run_count": len(events),
+            "has_impact": bool(impact and impact.affected_assets),
+        },
+    )
+
+
+class GenerateMonitorsRequest(BaseModel):
+    asset_key: str
+    # Optional hints: number of proposals + focus area
+    max_proposals: int = 5
+    focus: str | None = None  # e.g. "freshness", "volume", "value quality"
+
+
+class GeneratedMonitor(BaseModel):
+    """A Claude-proposed monitor that can be fed straight into
+    POST /monitors after review. Users see these in a modal and pick
+    which ones to create."""
+    name: str
+    check_kind: str
+    implementation: str = "enhanced_check"
+    column: str | None = None
+    severity: str = "error"
+    description: str
+    reasoning: str                # why Claude proposed this
+    params: dict = {}
+    schedule_cron: str | None = None
+    run_on_materialization: bool = True
+
+
+class GenerateMonitorsResponse(BaseModel):
+    asset_key: str
+    proposals: list[GeneratedMonitor]
+
+
+@router.post('/{project_id}/monitors/generate', response_model=GenerateMonitorsResponse)
+async def generate_monitors(project_id: str, request: GenerateMonitorsRequest):
+    """Ask Claude to propose a starter pack of enhanced-check monitors
+    for the given asset. We send the asset's inferred metadata (schema
+    hints from the graph, column list from dbt catalog when
+    available) so Claude can suggest column-specific checks.
+
+    Returns strict JSON that maps 1:1 onto AddMonitorRequest shapes so
+    the frontend can hand each accepted proposal to POST /monitors."""
+    import json as _json
+
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    root = project_service._get_project_dir(project)
+
+    # Find the asset in the graph — pull its description + columns.
+    asset_node = None
+    for n in project.graph.nodes:
+        if n.node_kind == 'asset' and n.data.get('asset_key') == request.asset_key:
+            asset_node = n
+            break
+    columns: list[str] = []
+    description = ''
+    if asset_node:
+        description = asset_node.data.get('description') or ''
+        columns = list(asset_node.data.get('io_output_columns') or [])
+
+    # For dbt-backed assets, pull columns from the dbt catalog too.
+    for dbt_proj in _find_dbt_projects(root):
+        dbt_root = (root / dbt_proj.relative_path).resolve()
+        manifest = _load_dbt_artifact(dbt_root / 'target' / 'manifest.json')
+        catalog = _load_dbt_artifact(dbt_root / 'target' / 'catalog.json')
+        # Try to match by name suffix
+        target_name = request.asset_key.rsplit('/', 1)[-1]
+        for uid, node in (manifest.get('nodes') or {}).items():
+            if node.get('name') != target_name:
+                continue
+            cols = list((node.get('columns') or {}).keys())
+            cat_cols = list(((catalog.get('nodes') or {}).get(uid) or {}).get('columns') or {}).__iter__()
+            cols = list({*cols, *cat_cols})
+            if cols:
+                columns = cols
+            if not description:
+                description = node.get('description') or ''
+            break
+
+    system_prompt = (
+        "You are a senior data reliability engineer configuring monitors on an "
+        "asset in Dagster. You propose a starter pack of data-quality checks "
+        "using the community EnhancedAssetCheck component. Available check "
+        "kinds include: freshness, row_count, null_ratio, uniqueness, not_null, "
+        "accepted_values, accepted_range, distribution_drift, anomaly_detection, "
+        "mean_shift, quantile_check, regex_match, schema_change, "
+        "referential_integrity, duplicate_count, zero_count, sum_check, "
+        "min_max_check.\n\n"
+        "Return STRICT JSON with this shape (no prose, no code fences):\n"
+        '{"proposals": [{"name": "<snake_case>", "check_kind": "<kind>", '
+        '"column": "<col or null>", "severity": "error"|"warn", '
+        '"description": "<short>", "reasoning": "<why>", "params": {...}, '
+        '"schedule_cron": "<cron or null>"}]}\n\n'
+        "Rules:\n"
+        "- Propose 3-6 monitors, prioritized by likely impact.\n"
+        "- Use conservative defaults (freshness: 24h if unclear).\n"
+        "- Prefer specific columns over generic ones when column list is provided.\n"
+        "- Prefer freshness / row_count / null_ratio for early-stage projects.\n"
+        "- Anomaly-detection kinds should pick a reasonable window (14–30 runs).\n"
+        "- Populate `params` with the shape each kind expects — see hints below.\n"
+        "- reasoning must be one sentence explaining why this check for THIS asset.\n"
+        "- name should describe the check (e.g. `no_null_customer_ids`).\n"
+    )
+    param_hints = (
+        "Param shapes by kind:\n"
+        "- freshness: {max_age_seconds: int}\n"
+        "- row_count: {min_row_count?: int, max_row_count?: int, z_score_threshold?: float}\n"
+        "- null_ratio: {column: str, max_null_ratio: float}\n"
+        "- uniqueness: {column: str}\n"
+        "- not_null: {column: str}\n"
+        "- accepted_values: {column: str, values: [str]}\n"
+        "- accepted_range: {column: str, min_value?: number, max_value?: number}\n"
+        "- distribution_drift: {column: str, method: 'ks'|'psi', p_threshold: float, baseline_window: int}\n"
+        "- anomaly_detection: {metric: str, method: 'zscore'|'iqr', threshold: float, window: int}\n"
+        "- referential_integrity: {column: str, to_asset: str, to_column: str}\n"
+        "- schema_change: {fail_on: [str]}\n"
+        "- duplicate_count: {columns: [str], max_duplicates: int}\n"
+        "- zero_count: {column: str, max_zeros: int}\n"
+        "- min_max_check: {column: str, min_of_min?: number, max_of_max?: number}\n"
+    )
+
+    user_prompt = (
+        f"ASSET: {request.asset_key}\n"
+        f"DESCRIPTION: {description or 'None'}\n"
+        f"COLUMNS ({len(columns)}): {', '.join(columns) if columns else 'unknown — dbt docs generate would populate this'}\n"
+        f"{('FOCUS: ' + request.focus) if request.focus else ''}\n\n"
+        f"{param_hints}\n\n"
+        f"Propose up to {request.max_proposals} monitors. STRICT JSON only."
+    )
+
+    text = await _call_claude(system_prompt, user_prompt)
+
+    # Strip markdown fences if Claude wraps despite instructions.
+    stripped = text.strip()
+    if stripped.startswith("```"):
+        stripped = stripped.split("```", 2)[1]
+        if stripped.startswith("json"):
+            stripped = stripped[len("json"):]
+        stripped = stripped.strip("` \n")
+    try:
+        parsed = _json.loads(stripped)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Claude returned non-JSON: {e}. Raw: {text[:400]}")
+
+    proposals_raw = parsed.get("proposals") or []
+    proposals: list[GeneratedMonitor] = []
+    for r in proposals_raw[: request.max_proposals]:
+        try:
+            proposals.append(GeneratedMonitor(
+                name=str(r.get("name") or "unnamed_check"),
+                check_kind=str(r.get("check_kind") or "custom"),
+                column=r.get("column"),
+                severity=str(r.get("severity") or "error").lower(),
+                description=str(r.get("description") or ""),
+                reasoning=str(r.get("reasoning") or ""),
+                params=dict(r.get("params") or {}),
+                schedule_cron=r.get("schedule_cron"),
+            ))
+        except Exception:
+            continue
+
+    return GenerateMonitorsResponse(asset_key=request.asset_key, proposals=proposals)
+
+
+class DeleteMonitorRequest(BaseModel):
+    """Delete a monitor. Behavior depends on the monitor's kind:
+      • enhanced_check → deletes the src/<project>/defs/monitors/<name>/
+        directory (the component instance we created)
+      • dbt_test → delegates to delete_dbt_test
+      • asset_check → not supported in v1 (native @asset_check code
+        would need to be edited/deleted from user's Python; we punt)
+    """
+    kind: str                              # 'enhanced_check' | 'dbt_test' | 'asset_check'
+    monitor_id: str                        # for dbt_test → the test unique_id; for enhanced → the name
+    dbt_relative_path: str | None = None   # for dbt_test only
+
+
+class DeleteMonitorResponse(BaseModel):
+    success: bool
+    detail: str | None = None
+
+
+@router.post('/{project_id}/monitors/delete', response_model=DeleteMonitorResponse)
+async def delete_monitor(project_id: str, request: DeleteMonitorRequest):
+    """Remove a monitor. Routes to the right file writer based on kind."""
+    import shutil as _shutil
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    root = project_service._get_project_dir(project)
+
+    if request.kind == 'dbt_test':
+        if not request.dbt_relative_path:
+            raise HTTPException(status_code=400, detail="dbt_relative_path required for dbt_test delete.")
+        r = await delete_dbt_test(project_id, DeleteDbtTestRequest(
+            dbt_relative_path=request.dbt_relative_path,
+            test_unique_id=request.monitor_id,
+        ))
+        return DeleteMonitorResponse(success=r.success, detail=r.detail)
+
+    if request.kind == 'enhanced_check':
+        # The monitor_id shape for enhanced checks we wrote is the
+        # check's `name` (that we set on creation). The defs dir is
+        # src/<project>/defs/monitors/<name>/. Users can also delete
+        # via the file editor.
+        if not project.directory_name:
+            raise HTTPException(status_code=500, detail="Project has no directory_name.")
+        # monitor_id can be a full check key like "asset_key::check_name" — take the last segment
+        candidate_name = request.monitor_id.rsplit('::', 1)[-1]
+        # Sanitize — no path traversal.
+        if not candidate_name.replace('_', '').replace('-', '').isalnum():
+            raise HTTPException(status_code=400, detail=f"Cannot infer safe monitor directory name from '{request.monitor_id}'.")
+        target = (root / 'src' / project.directory_name / 'defs' / 'monitors' / candidate_name).resolve()
+        if not str(target).startswith(str((root / 'src').resolve())):
+            raise HTTPException(status_code=400, detail="Invalid target path.")
+        if not target.exists():
+            raise HTTPException(status_code=404, detail=f"No monitor found at defs/monitors/{candidate_name}.")
+        _shutil.rmtree(target, ignore_errors=False)
+        return DeleteMonitorResponse(success=True, detail=f"Removed defs/monitors/{candidate_name}")
+
+    if request.kind == 'asset_check':
+        raise HTTPException(status_code=400, detail=(
+            "Native @asset_check monitors are defined in Python code — remove them by editing "
+            "the source file. Only enhanced_check + dbt_test monitors can be deleted from the UI."
+        ))
+
+    raise HTTPException(status_code=400, detail=f"Unknown monitor kind: {request.kind}")
+
+
 class BlastRadiusResponse(BaseModel):
     affected_assets: list[str] = []          # downstream asset keys
     affected_exposures: list[dict] = []      # dbt exposures reachable from target
