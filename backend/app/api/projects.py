@@ -3463,10 +3463,22 @@ async def list_monitors(project_id: str):
 
     # --- dbt tests across every dbt project inside this Dagster project ---
     root = project_service._get_project_dir(project)
+    # Snapshot the current run_results.json into monitor history so
+    # first-time visits populate a data point without waiting for a
+    # subsequent dbt run. Idempotent via de-dupe on (monitor_id, ts).
+    try:
+        from ..services.monitor_history import snapshot_dbt_run_results
+    except Exception:
+        snapshot_dbt_run_results = None  # type: ignore
     for dbt_proj in _find_dbt_projects(root):
         dbt_root = (root / dbt_proj.relative_path).resolve()
         manifest = _load_dbt_artifact(dbt_root / 'target' / 'manifest.json')
         run_results = _load_dbt_artifact(dbt_root / 'target' / 'run_results.json')
+        if snapshot_dbt_run_results and run_results:
+            try:
+                snapshot_dbt_run_results(root, run_results)
+            except Exception:
+                pass
         run_by_id: dict[str, dict] = {}
         for r in run_results.get('results', []) or []:
             uid = r.get('unique_id')
@@ -3529,6 +3541,48 @@ async def list_monitors(project_id: str):
     order = {'failing': 0, 'warn': 1, 'passing': 2, 'never_run': 3}
     monitors.sort(key=lambda m: (order.get(_bucket(m.last_status), 4), m.label.lower()))
     return MonitorsResponse(monitors=monitors, stats=stats)
+
+
+class MonitorHistoryPoint(BaseModel):
+    ts: str
+    status: str
+    duration_ms: int | None = None
+    failures: int | None = None
+    message: str | None = None
+    value: float | None = None
+    value_label: str | None = None
+
+
+class MonitorHistoryResponse(BaseModel):
+    monitor_id: str
+    events: list[MonitorHistoryPoint]
+    numeric_series: list[dict]      # [{ts, value}] pruned for chart-readiness
+    numeric_label: str | None       # y-axis label if the monitor emits a numeric value
+
+
+@router.get('/{project_id}/monitors/history', response_model=MonitorHistoryResponse)
+async def get_monitor_history(project_id: str, monitor_id: str, limit: int = 200):
+    """Return the recorded event log for one monitor. dbt tests are
+    snapshotted every time /monitors is fetched (or dbt is run), so
+    first-time visits do get at least one data point. Asset checks
+    populate as they run — Dagster's event log integration lands in
+    step 3."""
+    from ..services.monitor_history import read_events
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    root = project_service._get_project_dir(project)
+    events = read_events(root, monitor_id=monitor_id, limit=limit)
+    points = [MonitorHistoryPoint(**{k: v for k, v in e.items() if k in MonitorHistoryPoint.model_fields}) for e in events]
+    # Filter to numeric points for the chart (drop nulls, keep ts).
+    numeric_series = [{"ts": e.get("ts"), "value": e.get("value")} for e in events if isinstance(e.get("value"), (int, float))]
+    numeric_label = next((e.get("value_label") for e in events if e.get("value_label")), None)
+    return MonitorHistoryResponse(
+        monitor_id=monitor_id,
+        events=points,
+        numeric_series=numeric_series,
+        numeric_label=numeric_label,
+    )
 
 
 class DbtModelSqlDiffResponse(BaseModel):
@@ -4135,6 +4189,17 @@ async def run_dbt_model(project_id: str, request: RunDbtModelRequest):
     except _sp.TimeoutExpired:
         raise HTTPException(status_code=504, detail="dbt run timed out after 10 minutes")
     duration_ms = int((_time.time() - started) * 1000)
+
+    # Snapshot dbt test results into the monitor history log so the
+    # Monitors drawer can chart history. Non-fatal — the run response
+    # never fails on a snapshot error.
+    try:
+        from ..services.monitor_history import snapshot_dbt_run_results
+        rr = _load_dbt_artifact(dbt_root / 'target' / 'run_results.json')
+        snapshot_dbt_run_results(root, rr)
+    except Exception as e:
+        print(f"[monitors] snapshot after dbt run failed: {e}", flush=True)
+
     return RunDbtModelResponse(
         success=r.returncode == 0,
         duration_ms=duration_ms,

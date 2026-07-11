@@ -353,8 +353,21 @@ function FilterPill<T extends string>({ label, value, onChange, options }: {
 }
 
 function MonitorDrawer({ monitor, onClose, onOpenFile }: { monitor: Monitor; onClose: () => void; onOpenFile?: (path: string) => void }) {
+  const { currentProject } = useProjectStore();
   const b = bucket(monitor);
   const Kind = KIND_META[monitor.kind];
+  const [history, setHistory] = useState<Awaited<ReturnType<typeof projectsApi.getMonitorHistory>> | null>(null);
+  const [historyLoading, setHistoryLoading] = useState(true);
+
+  useEffect(() => {
+    if (!currentProject) return;
+    let cancelled = false;
+    setHistoryLoading(true);
+    projectsApi.getMonitorHistory(currentProject.id, monitor.id, 200)
+      .then((r) => { if (!cancelled) { setHistory(r); setHistoryLoading(false); } })
+      .catch(() => { if (!cancelled) setHistoryLoading(false); });
+    return () => { cancelled = true; };
+  }, [currentProject?.id, monitor.id]);
   return (
     <div className="fixed inset-0 z-50 flex" onClick={onClose}>
       <div className="flex-1 bg-black/30" />
@@ -381,6 +394,51 @@ function MonitorDrawer({ monitor, onClose, onOpenFile }: { monitor: Monitor; onC
             <Fact label="Severity" value={monitor.severity} />
             <Fact label="Source" value={monitor.source_project ?? '—'} mono />
           </div>
+
+          {/* History + numeric metric chart */}
+          <section>
+            <h4 className="text-[10px] uppercase tracking-wider text-gray-500 mb-1 flex items-center justify-between">
+              <span>History{history && history.events.length > 0 ? ` (${history.events.length})` : ''}</span>
+              {historyLoading && <Loader2 className="w-3 h-3 animate-spin text-gray-400" />}
+            </h4>
+            {!historyLoading && history && history.events.length === 0 && (
+              <p className="text-[11px] text-gray-500 italic">
+                No history yet. dbt tests snapshot on each run + on every visit to this page.
+                Native asset check history lands in the next step (Dagster event-log integration).
+              </p>
+            )}
+            {history && history.numeric_series.length > 1 && (
+              <div className="mt-2 mb-3 p-2 border border-gray-200 rounded bg-white">
+                <div className="text-[10px] text-gray-500 mb-1">
+                  {history.numeric_label ?? 'value'} · last {history.numeric_series.length} runs
+                </div>
+                <TimeSeriesChart points={history.numeric_series} />
+              </div>
+            )}
+            {history && history.events.length > 0 && (
+              <div className="mt-2 border border-gray-100 rounded overflow-hidden">
+                <PassFailStrip events={history.events} />
+                <ul className="divide-y divide-gray-50 max-h-72 overflow-y-auto">
+                  {history.events.slice().reverse().slice(0, 40).map((e, i) => (
+                    <li key={i} className="px-2 py-1.5 flex items-center gap-2 text-[11px]">
+                      <HistoryRowIcon status={e.status} />
+                      <span className="text-gray-800 font-mono">{e.status}</span>
+                      {e.failures != null && e.failures > 0 && (
+                        <span className="text-rose-700 font-medium">{e.failures} failed</span>
+                      )}
+                      {e.value != null && (
+                        <span className="text-gray-600 font-mono">{formatValue(e.value)} {e.value_label ?? ''}</span>
+                      )}
+                      <span className="ml-auto text-gray-400 tabular-nums">
+                        {new Date(e.ts).toLocaleString()}
+                        {e.duration_ms != null && ` · ${(e.duration_ms / 1000).toFixed(1)}s`}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+          </section>
 
           <section>
             <h4 className="text-[10px] uppercase tracking-wider text-gray-500 mb-1">Last run</h4>
@@ -479,6 +537,95 @@ function MonitorDrawer({ monitor, onClose, onOpenFile }: { monitor: Monitor; onC
       </div>
     </div>
   );
+}
+
+/**
+ * Bare SVG line chart for numeric monitor metrics. No dep on
+ * recharts / d3 — small enough to hand-roll cleanly, and matches
+ * the aesthetic of the sparklines we use elsewhere.
+ */
+function TimeSeriesChart({ points }: { points: Array<{ ts: string; value: number }> }) {
+  const width = 380;
+  const height = 90;
+  const paddingX = 6;
+  const paddingY = 8;
+  const values = points.map((p) => p.value);
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const range = max - min || 1;
+  const stepX = (width - 2 * paddingX) / Math.max(1, points.length - 1);
+  const y = (v: number) => paddingY + (1 - (v - min) / range) * (height - 2 * paddingY);
+  const x = (i: number) => paddingX + i * stepX;
+  const pathD = points.map((p, i) => `${i === 0 ? 'M' : 'L'} ${x(i)} ${y(p.value)}`).join(' ');
+  const areaD = `${pathD} L ${x(points.length - 1)} ${height - paddingY} L ${x(0)} ${height - paddingY} Z`;
+  const last = points[points.length - 1];
+  return (
+    <div>
+      <svg viewBox={`0 0 ${width} ${height}`} className="w-full h-auto">
+        <defs>
+          <linearGradient id="mon-chart-fill" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor="rgb(99, 102, 241)" stopOpacity="0.25" />
+            <stop offset="100%" stopColor="rgb(99, 102, 241)" stopOpacity="0" />
+          </linearGradient>
+        </defs>
+        <path d={areaD} fill="url(#mon-chart-fill)" />
+        <path d={pathD} fill="none" stroke="rgb(99, 102, 241)" strokeWidth="1.5" strokeLinejoin="round" strokeLinecap="round" />
+        {points.map((p, i) => (
+          <circle key={i} cx={x(i)} cy={y(p.value)} r={1.5} fill="rgb(99, 102, 241)" />
+        ))}
+      </svg>
+      <div className="flex items-baseline justify-between text-[10px] text-gray-500 mt-1">
+        <span>min {formatValue(min)}</span>
+        <span className="text-gray-900 font-medium">latest {formatValue(last.value)}</span>
+        <span>max {formatValue(max)}</span>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Compact pass/fail history strip — one tiny colored square per run,
+ * left-to-right in chronological order. Gives users the "did this
+ * check ever fail" answer at a glance.
+ */
+function PassFailStrip({ events }: { events: Array<{ status: string }> }) {
+  const slots = events.slice(-60); // cap so it fits
+  return (
+    <div className="flex items-center gap-0.5 px-2 py-1.5 bg-gray-50 border-b border-gray-100">
+      {slots.map((e, i) => {
+        const s = (e.status || '').toLowerCase();
+        const tone = s === 'pass' || s === 'success' ? 'bg-emerald-500'
+          : s === 'fail' || s === 'error' || s === 'runtime error' ? 'bg-rose-500'
+          : s === 'warn' ? 'bg-amber-500'
+          : 'bg-gray-300';
+        return (
+          <span
+            key={i}
+            className={`inline-block ${tone} rounded-sm`}
+            style={{ width: 6, height: 12 }}
+            title={s}
+          />
+        );
+      })}
+      {slots.length === 0 && (
+        <span className="text-[10px] text-gray-400 italic">no runs yet</span>
+      )}
+    </div>
+  );
+}
+
+function HistoryRowIcon({ status }: { status: string }) {
+  const s = (status || '').toLowerCase();
+  if (s === 'pass' || s === 'success') return <CheckCircle2 className="w-3 h-3 text-emerald-500 flex-shrink-0" />;
+  if (s === 'fail' || s === 'error' || s === 'runtime error') return <XCircle className="w-3 h-3 text-rose-500 flex-shrink-0" />;
+  if (s === 'warn') return <AlertTriangle className="w-3 h-3 text-amber-500 flex-shrink-0" />;
+  return <Clock className="w-3 h-3 text-gray-300 flex-shrink-0" />;
+}
+
+function formatValue(v: number): string {
+  if (Number.isInteger(v)) return v.toLocaleString();
+  if (Math.abs(v) < 0.01) return v.toExponential(2);
+  return v.toLocaleString(undefined, { maximumFractionDigits: 4 });
 }
 
 function Fact({ label, value, mono }: { label: string; value: string; mono?: boolean }) {

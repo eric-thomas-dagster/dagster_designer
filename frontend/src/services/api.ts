@@ -470,6 +470,30 @@ export const projectsApi = {
     return response.data as any;
   },
 
+  getMonitorHistory: async (
+    projectId: string,
+    monitorId: string,
+    limit = 200,
+  ): Promise<{
+    monitor_id: string;
+    events: Array<{
+      ts: string;
+      status: string;
+      duration_ms: number | null;
+      failures: number | null;
+      message: string | null;
+      value: number | null;
+      value_label: string | null;
+    }>;
+    numeric_series: Array<{ ts: string; value: number }>;
+    numeric_label: string | null;
+  }> => {
+    const response = await api.get(`/projects/${projectId}/monitors/history`, {
+      params: { monitor_id: monitorId, limit },
+    });
+    return response.data as any;
+  },
+
   listMonitors: async (
     projectId: string,
   ): Promise<{
