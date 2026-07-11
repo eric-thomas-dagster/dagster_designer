@@ -56,21 +56,26 @@ async def query(
     if not org or not token:
         raise DagsterPlusError("Dagster+ connection needs both org and token.")
     url = _graphql_url(org, deployment)
-    # follow_redirects handles the top-level `<org>.dagster.cloud/graphql`
-    # → `/<default_deployment>/graphql` redirect that Dagster+ issues
-    # when the caller doesn't specify a deployment. Some hybrid orgs
-    # POST-redirect POST cleanly; we need this to work whichever path
-    # users configured.
-    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+    # Handle POST redirects ourselves. httpx's follow_redirects=True
+    # sometimes returns HTML from the redirect target when the POST
+    # body isn't re-issued cleanly. Manually chase up to 3 3xx hops.
+    headers = {"Dagster-Cloud-Api-Token": token, "content-type": "application/json"}
+    body = {"query": gql, "variables": variables or {}}
+    async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
         try:
-            r = await client.post(
-                url,
-                headers={
-                    "Dagster-Cloud-Api-Token": token,
-                    "content-type": "application/json",
-                },
-                json={"query": gql, "variables": variables or {}},
-            )
+            r = await client.post(url, headers=headers, json=body)
+            hops = 0
+            while r.status_code in (301, 302, 303, 307, 308) and hops < 3:
+                loc = r.headers.get("location") or r.headers.get("Location")
+                if not loc:
+                    break
+                if loc.startswith("/"):
+                    from urllib.parse import urlsplit
+                    base = urlsplit(url)
+                    loc = f"{base.scheme}://{base.netloc}{loc}"
+                url = loc
+                r = await client.post(url, headers=headers, json=body)
+                hops += 1
         except httpx.HTTPError as e:
             raise DagsterPlusError(
                 f"Couldn't reach Dagster+ at {url}: {e}. Check your org name, deployment, and network."

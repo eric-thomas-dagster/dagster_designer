@@ -37,6 +37,10 @@ type Model = Awaited<ReturnType<typeof projectsApi.listDbtModels>>['models'][num
  */
 export function DbtPanel({ onOpenFile }: DbtPanelProps) {
   const { currentProject } = useProjectStore();
+  // Dagster+ projects are read-only from the Dagster Designer side —
+  // hide the "New model" / "Commit" / "Scaffold" affordances that
+  // would otherwise 500 with a .venv-not-found error.
+  const isCloudProject = !!(currentProject && (currentProject as any).is_dagster_plus);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [data, setData] = useState<Awaited<ReturnType<typeof projectsApi.listDbtModels>> | null>(null);
@@ -474,27 +478,39 @@ export function DbtPanel({ onOpenFile }: DbtPanelProps) {
           </button>
         </div>
         <div className="flex items-center gap-2">
-          <button
-            onClick={runModified}
-            disabled={runningModified}
-            className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-gray-700 border border-gray-300 rounded-md hover:bg-gray-50 disabled:opacity-50"
-            title="Detects changed .sql files vs the git working tree and dbt-builds only those"
-          >
-            {runningModified ? <Loader2 className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4" />}
-            Run modified
-          </button>
-          <button
-            onClick={() => setShowGitCommit(true)}
-            className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-gray-700 border border-gray-300 rounded-md hover:bg-gray-50"
-          >
-            <GitCommit className="w-4 h-4" /> Commit
-          </button>
-          <button
-            onClick={() => setShowAddModel(true)}
-            className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium bg-orange-500 text-white rounded-md hover:bg-orange-600"
-          >
-            <FileCode className="w-4 h-4" /> New model
-          </button>
+          {/* Local-only write actions -- hidden for cloud projects
+              since Dagster+ is read-only from Dagster Designer and
+              hitting these would trigger .venv-not-found errors. */}
+          {!isCloudProject && (
+            <>
+              <button
+                onClick={runModified}
+                disabled={runningModified}
+                className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-gray-700 border border-gray-300 rounded-md hover:bg-gray-50 disabled:opacity-50"
+                title="Detects changed .sql files vs the git working tree and dbt-builds only those"
+              >
+                {runningModified ? <Loader2 className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4" />}
+                Run modified
+              </button>
+              <button
+                onClick={() => setShowGitCommit(true)}
+                className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-gray-700 border border-gray-300 rounded-md hover:bg-gray-50"
+              >
+                <GitCommit className="w-4 h-4" /> Commit
+              </button>
+              <button
+                onClick={() => setShowAddModel(true)}
+                className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium bg-orange-500 text-white rounded-md hover:bg-orange-600"
+              >
+                <FileCode className="w-4 h-4" /> New model
+              </button>
+            </>
+          )}
+          {isCloudProject && (
+            <span className="text-[11px] text-blue-700 bg-blue-50 border border-blue-200 rounded px-2 py-1 font-medium">
+              Dagster+ · read-only
+            </span>
+          )}
         </div>
       </div>
 
@@ -538,8 +554,22 @@ export function DbtPanel({ onOpenFile }: DbtPanelProps) {
           {error}
         </div>
       )}
-      {/* No dbt projects at all — friendlier than an empty table. */}
-      {data && !data.dbt_project_relative_path && (
+      {/* No dbt projects at all — friendlier than an empty table.
+          Cloud projects that have no dbt-kinded assets get a
+          different, less-scary message since "scaffold a model"
+          doesn't apply to a read-only remote deployment. */}
+      {data && !data.dbt_project_relative_path && isCloudProject && (
+        <div className="mx-8 mt-6 p-8 bg-white border border-dashed border-gray-300 rounded-lg text-center">
+          <FileCode className="w-8 h-8 text-gray-300 mx-auto mb-3" />
+          <p className="text-sm text-gray-700 font-medium">No dbt-kinded assets found in this deployment</p>
+          <p className="text-xs text-gray-500 mt-1">
+            Dagster+ surfaces dbt models via the asset graph's <code className="bg-gray-100 px-1 rounded">computeKind</code>
+            + description. If you know this deployment has dbt models, the classifier didn't catch them --
+            they'll still appear on the Assets tab.
+          </p>
+        </div>
+      )}
+      {data && !data.dbt_project_relative_path && !isCloudProject && (
         <div className="mx-8 mt-6 p-8 bg-white border border-dashed border-gray-300 rounded-lg text-center">
           <FileCode className="w-8 h-8 text-gray-300 mx-auto mb-3" />
           <p className="text-sm text-gray-700 font-medium">No dbt project detected in this Dagster project</p>

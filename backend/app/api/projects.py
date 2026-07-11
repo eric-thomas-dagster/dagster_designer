@@ -2689,10 +2689,17 @@ async def list_dbt_projects(project_id: str):
             await _hydrate_cloud_graph(project)
         except Exception:
             pass
-        has_dbt = any(
-            any(k for k in (n.data.get('kinds') or []) if k and 'dbt' in k.lower())
-            for n in project.graph.nodes if n.node_kind == 'asset'
-        )
+        # Cloud detection: computeKind isn't consistently populated on
+        # Dagster+ dbt assets, so we also sniff the description (which
+        # typically starts with "dbt model for:" for dbt-derived
+        # assets) as a fallback.
+        def _looks_dbt(n):
+            kinds = n.data.get('kinds') or []
+            if any(k for k in kinds if k and 'dbt' in k.lower()):
+                return True
+            desc = (n.data.get('description') or '').lower()
+            return 'dbt model' in desc or 'dbt seed' in desc or 'dbt snapshot' in desc
+        has_dbt = any(_looks_dbt(n) for n in project.graph.nodes if n.node_kind == 'asset')
         if not has_dbt:
             return DbtProjectListResponse(projects=[])
         return DbtProjectListResponse(projects=[
@@ -2791,7 +2798,11 @@ async def list_dbt_models(project_id: str, dbt_relative_path: str | None = None)
             if n.node_kind != 'asset':
                 continue
             kinds = n.data.get('kinds') or []
-            if not any(k and 'dbt' in k.lower() for k in kinds):
+            desc = (n.data.get('description') or '').lower()
+            is_dbt = any(k and 'dbt' in k.lower() for k in kinds) or (
+                'dbt model' in desc or 'dbt seed' in desc or 'dbt snapshot' in desc
+            )
+            if not is_dbt:
                 continue
             asset_key = n.data.get('asset_key') or ''
             name = asset_key.split('/')[-1] or asset_key
@@ -4153,14 +4164,11 @@ async def list_monitors(project_id: str):
 
     monitors: list[Monitor] = []
 
-    # For Dagster+ projects: hydrate the graph from GraphQL first so
-    # asset-check monitors below reflect live cloud state, not a
-    # stale local snapshot.
-    if project.is_dagster_plus:
-        try:
-            await _hydrate_cloud_graph(project)
-        except Exception as e:
-            print(f"[monitors] cloud hydrate failed: {e}", flush=True)
+    # Dagster+ projects: skip re-hydrating here. The project graph is
+    # already refreshed on GET /projects/{id}, which happens before
+    # /monitors on tab switch. Re-hydrating a second time doubled the
+    # response time (5-10s for large orgs) and was tripping the
+    # frontend 500 timeout without any new information gained.
 
     # --- Native + enhanced asset checks (from the stored project graph) ---
     for node in project.graph.nodes:
