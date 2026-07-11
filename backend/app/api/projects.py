@@ -3568,6 +3568,59 @@ async def list_monitors(project_id: str):
     return MonitorsResponse(monitors=monitors, stats=stats)
 
 
+def _params_from_first_class_form(request) -> dict:
+    """Compose the enhanced-check params dict from the flat request
+    fields we have first-class forms for. Anything not covered here
+    should go through the params_json escape hatch."""
+    ck = request.check_kind
+    p: dict = {}
+    if ck == 'freshness':
+        if request.max_age_seconds is None:
+            raise HTTPException(status_code=400, detail="freshness requires max_age_seconds.")
+        p['max_age_seconds'] = request.max_age_seconds
+    elif ck == 'row_count':
+        if request.min_row_count is not None: p['min_row_count'] = request.min_row_count
+        if request.max_row_count is not None: p['max_row_count'] = request.max_row_count
+        if request.row_count_z_score is not None: p['z_score_threshold'] = request.row_count_z_score
+        if not p:
+            raise HTTPException(status_code=400, detail="row_count needs at least one of: min_row_count, max_row_count, row_count_z_score.")
+    elif ck == 'null_ratio':
+        if not request.column or request.max_null_ratio is None:
+            raise HTTPException(status_code=400, detail="null_ratio needs column + max_null_ratio.")
+        p['column'] = request.column; p['max_null_ratio'] = request.max_null_ratio
+    elif ck == 'uniqueness':
+        if not request.column:
+            raise HTTPException(status_code=400, detail="uniqueness needs column.")
+        p['column'] = request.column
+    elif ck == 'accepted_values':
+        if not request.column or not request.accepted_values:
+            raise HTTPException(status_code=400, detail="accepted_values needs column + at least one value.")
+        p['column'] = request.column; p['values'] = list(request.accepted_values)
+    elif ck == 'accepted_range':
+        if not request.column or (request.min_value is None and request.max_value is None):
+            raise HTTPException(status_code=400, detail="accepted_range needs column + min_value and/or max_value.")
+        p['column'] = request.column
+        if request.min_value is not None: p['min_value'] = request.min_value
+        if request.max_value is not None: p['max_value'] = request.max_value
+    elif ck == 'not_null':
+        if not request.column:
+            raise HTTPException(status_code=400, detail="not_null needs column.")
+        p['column'] = request.column
+    elif ck == 'custom':
+        if not request.custom_sql and not request.custom_python:
+            raise HTTPException(status_code=400, detail="custom needs either custom_sql or custom_python.")
+        if request.custom_sql: p['sql'] = request.custom_sql
+        if request.custom_python: p['python'] = request.custom_python
+    elif ck == 'any':
+        # No first-class fields — user must send params_json.
+        raise HTTPException(status_code=400, detail="'any' kind requires params_json.")
+    else:
+        # Unknown kind but no params_json — surface a helpful error
+        # rather than writing an empty params block.
+        raise HTTPException(status_code=400, detail=f"check_kind '{ck}' has no first-class form — send params_json.")
+    return p
+
+
 class AddMonitorRequest(BaseModel):
     """Create a new monitor via the wizard. `implementation` decides
     where the check gets written:
@@ -3593,6 +3646,13 @@ class AddMonitorRequest(BaseModel):
     max_value: float | None = None           # accepted_range
     custom_sql: str | None = None            # kind=custom
     custom_python: str | None = None         # kind=custom
+    # Advanced escape hatches for enhanced-check kinds beyond our
+    # first-class presets. When the frontend picks a kind we don't
+    # have a dedicated form for (drift, quantile, regex, etc.) it
+    # sends the config as a raw JSON dict here. Also used by the
+    # "any" kind where users type the kind name themselves.
+    params_json: dict | None = None
+    check_kind_override: str | None = None   # only used when check_kind=='any'
     # Scheduling — attaches to the resulting monitor. cron takes
     # precedence over interval_minutes.
     schedule_cron: str | None = None
@@ -3683,46 +3743,18 @@ async def add_monitor(project_id: str, request: AddMonitorRequest):
         raise HTTPException(status_code=409, detail=f"Monitor '{name}' already exists at defs/monitors/{name}. Pick a different name.")
     defs_root.mkdir(parents=True, exist_ok=True)
 
-    # Build kind-specific params block. We omit Nones so the yaml
-    # stays readable.
-    params: dict[str, Any] = {}
-    if request.check_kind == 'freshness':
-        if request.max_age_seconds is None:
-            raise HTTPException(status_code=400, detail="freshness requires max_age_seconds.")
-        params['max_age_seconds'] = request.max_age_seconds
-    elif request.check_kind == 'row_count':
-        if request.min_row_count is not None: params['min_row_count'] = request.min_row_count
-        if request.max_row_count is not None: params['max_row_count'] = request.max_row_count
-        if request.row_count_z_score is not None: params['z_score_threshold'] = request.row_count_z_score
-        if not params:
-            raise HTTPException(status_code=400, detail="row_count needs at least one of: min_row_count, max_row_count, row_count_z_score.")
-    elif request.check_kind == 'null_ratio':
-        if not request.column or request.max_null_ratio is None:
-            raise HTTPException(status_code=400, detail="null_ratio needs column + max_null_ratio.")
-        params['column'] = request.column
-        params['max_null_ratio'] = request.max_null_ratio
-    elif request.check_kind == 'uniqueness':
-        if not request.column:
-            raise HTTPException(status_code=400, detail="uniqueness needs column.")
-        params['column'] = request.column
-    elif request.check_kind == 'accepted_values':
-        if not request.column or not request.accepted_values:
-            raise HTTPException(status_code=400, detail="accepted_values needs column + at least one value.")
-        params['column'] = request.column
-        params['values'] = list(request.accepted_values)
-    elif request.check_kind == 'accepted_range':
-        if not request.column or (request.min_value is None and request.max_value is None):
-            raise HTTPException(status_code=400, detail="accepted_range needs column + min_value and/or max_value.")
-        params['column'] = request.column
-        if request.min_value is not None: params['min_value'] = request.min_value
-        if request.max_value is not None: params['max_value'] = request.max_value
-    elif request.check_kind == 'custom':
-        if not request.custom_sql and not request.custom_python:
-            raise HTTPException(status_code=400, detail="custom needs either custom_sql or custom_python.")
-        if request.custom_sql: params['sql'] = request.custom_sql
-        if request.custom_python: params['python'] = request.custom_python
+    # Resolve the effective kind + params. If the frontend sent a
+    # params_json blob (advanced / any kind path), use it verbatim so
+    # we don't gatekeep what kinds the enhanced-check component
+    # supports. Otherwise fall back to our first-class forms below.
+    effective_kind = request.check_kind_override.strip() if (request.check_kind == 'any' and request.check_kind_override) else request.check_kind
+    if request.params_json is not None:
+        params: dict[str, Any] = dict(request.params_json)
+        # Nothing further to validate — the community component owns
+        # the schema and users see errors the next time Dagster loads.
+        pass
     else:
-        raise HTTPException(status_code=400, detail=f"Unknown check_kind: {request.check_kind}")
+        params = _params_from_first_class_form(request)
 
     schedule_block: dict[str, Any] = {}
     if request.schedule_cron:
@@ -3741,7 +3773,7 @@ async def add_monitor(project_id: str, request: AddMonitorRequest):
     attributes: dict[str, Any] = {
         'name': name,
         'asset': request.target_asset_key,
-        'kind': request.check_kind,
+        'kind': effective_kind,
         'severity': request.severity,
         'params': params,
     }

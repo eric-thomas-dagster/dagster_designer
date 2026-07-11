@@ -17,26 +17,63 @@ interface AddMonitorDialogProps {
 
 type CheckKind =
   | 'freshness' | 'row_count' | 'null_ratio' | 'uniqueness'
-  | 'accepted_values' | 'accepted_range' | 'not_null' | 'custom';
+  | 'accepted_values' | 'accepted_range' | 'not_null' | 'custom'
+  // Broader enhanced-check kinds — free-form params via JSON at
+  // config step. The wizard doesn't gatekeep, we just pass through.
+  | 'distribution_drift' | 'regex_match' | 'schema_change'
+  | 'referential_integrity' | 'duplicate_count' | 'stddev_check'
+  | 'mean_shift' | 'quantile_check' | 'zero_count' | 'sum_check'
+  | 'min_max_check' | 'anomaly_detection' | 'any';
 type Implementation = 'enhanced_check' | 'dbt_test';
 
-const CHECK_KINDS: Array<{
+interface CheckKindDef {
   id: CheckKind;
   label: string;
   hint: string;
   icon: any;
-  implementations: Implementation[];  // which impls can express this kind
+  implementations: Implementation[];
   requires_column: boolean;
-  crushes: string;                    // marketing punch
-}> = [
-  { id: 'freshness',       label: 'Freshness',       hint: 'Fail when the asset hasn\'t been updated for N seconds.',   icon: Clock,       implementations: ['enhanced_check'],               requires_column: false, crushes: 'Monte Carlo Field Health / Volume' },
-  { id: 'row_count',       label: 'Row count',       hint: 'Fail on volume drop / spike (min, max, or Z-score anomaly).', icon: Layers,      implementations: ['enhanced_check'],               requires_column: false, crushes: 'Monte Carlo Volume monitors' },
-  { id: 'null_ratio',      label: 'Null ratio',      hint: 'Fail when a column has more than X% nulls.',                icon: Sparkles,    implementations: ['enhanced_check'],               requires_column: true,  crushes: 'Monte Carlo Null Rate' },
-  { id: 'uniqueness',      label: 'Uniqueness',      hint: 'Every value in the column must be unique.',                 icon: ShieldCheck, implementations: ['enhanced_check', 'dbt_test'],   requires_column: true,  crushes: 'dbt unique test + Monte Carlo Uniqueness' },
-  { id: 'not_null',        label: 'Not null',        hint: 'No null values in this column.',                            icon: ShieldCheck, implementations: ['dbt_test', 'enhanced_check'],   requires_column: true,  crushes: 'dbt not_null test' },
-  { id: 'accepted_values', label: 'Accepted values', hint: 'Column value must be in a fixed set (statuses, etc.).',      icon: ShieldCheck, implementations: ['dbt_test', 'enhanced_check'],   requires_column: true,  crushes: 'dbt accepted_values' },
-  { id: 'accepted_range',  label: 'Accepted range',  hint: 'Numeric column must fall in [min, max].',                    icon: ShieldCheck, implementations: ['enhanced_check', 'dbt_test'],   requires_column: true,  crushes: 'dbt_utils.accepted_range' },
-  { id: 'custom',          label: 'Custom SQL / Python', hint: 'Full escape hatch — write your own logic.',            icon: Code2,       implementations: ['enhanced_check', 'dbt_test'],   requires_column: false, crushes: 'MC custom monitors' },
+  crushes: string;                    // parity punch
+  group: 'core' | 'volume' | 'schema' | 'value' | 'anomaly' | 'custom';
+  /** Default JSON params for the "advanced" branch. Empty for
+   *  kinds that have first-class forms. */
+  default_params?: Record<string, any>;
+}
+
+const CHECK_KINDS: CheckKindDef[] = [
+  // Core presets — dedicated forms
+  { id: 'freshness',            label: 'Freshness',            hint: 'Fail when the asset hasn\'t been updated for N seconds.',                     icon: Clock,       implementations: ['enhanced_check'],             requires_column: false, crushes: 'Monte Carlo Freshness',      group: 'core' },
+  { id: 'row_count',            label: 'Row count',            hint: 'Volume drop / spike (min, max, Z-score anomaly).',                            icon: Layers,      implementations: ['enhanced_check'],             requires_column: false, crushes: 'Monte Carlo Volume',         group: 'volume' },
+  { id: 'null_ratio',           label: 'Null ratio',           hint: 'Fail when a column has more than X% nulls.',                                  icon: Sparkles,    implementations: ['enhanced_check'],             requires_column: true,  crushes: 'Monte Carlo Null Rate',      group: 'value' },
+  { id: 'uniqueness',           label: 'Uniqueness',           hint: 'Every value in the column must be unique.',                                   icon: ShieldCheck, implementations: ['enhanced_check', 'dbt_test'], requires_column: true,  crushes: 'dbt unique / MC Uniqueness', group: 'value' },
+  { id: 'not_null',             label: 'Not null',             hint: 'No null values in this column.',                                              icon: ShieldCheck, implementations: ['dbt_test', 'enhanced_check'], requires_column: true,  crushes: 'dbt not_null',               group: 'value' },
+  { id: 'accepted_values',      label: 'Accepted values',      hint: 'Column value must be in a fixed set.',                                        icon: ShieldCheck, implementations: ['dbt_test', 'enhanced_check'], requires_column: true,  crushes: 'dbt accepted_values',        group: 'value' },
+  { id: 'accepted_range',       label: 'Accepted range',       hint: 'Numeric column must fall in [min, max].',                                     icon: ShieldCheck, implementations: ['enhanced_check', 'dbt_test'], requires_column: true,  crushes: 'dbt_utils.accepted_range',   group: 'value' },
+  // Advanced presets — JSON params
+  { id: 'distribution_drift',   label: 'Distribution drift',   hint: 'KS test / PSI against a historical baseline.',                                icon: Sparkles,    implementations: ['enhanced_check'],             requires_column: true,  crushes: 'MC Field Health drift',      group: 'anomaly',  default_params: { column: '<col>', method: 'ks', p_threshold: 0.05, baseline_window: 30 } },
+  { id: 'anomaly_detection',    label: 'Anomaly detection',    hint: 'Z-score / IQR against rolling history for any numeric metric.',                icon: Sparkles,    implementations: ['enhanced_check'],             requires_column: false, crushes: 'MC anomaly monitors',        group: 'anomaly',  default_params: { metric: 'row_count', method: 'zscore', threshold: 3.0, window: 30 } },
+  { id: 'mean_shift',           label: 'Mean shift',           hint: 'Column mean drift vs historical baseline.',                                    icon: Sparkles,    implementations: ['enhanced_check'],             requires_column: true,  crushes: 'MC Field Health',            group: 'anomaly',  default_params: { column: '<col>', max_delta_pct: 20, baseline_window: 14 } },
+  { id: 'stddev_check',         label: 'Stddev check',         hint: 'Column stddev inside an allowed band.',                                        icon: Sparkles,    implementations: ['enhanced_check'],             requires_column: true,  crushes: 'MC Field Health',            group: 'anomaly',  default_params: { column: '<col>', max_stddev: 10 } },
+  { id: 'quantile_check',       label: 'Quantile check',       hint: 'P95 / P99 / any quantile against a threshold.',                                icon: Sparkles,    implementations: ['enhanced_check'],             requires_column: true,  crushes: 'MC latency-style monitors',  group: 'anomaly',  default_params: { column: '<col>', quantile: 0.95, max_value: 1000 } },
+  { id: 'regex_match',          label: 'Regex match',          hint: 'All values in a column match a regex pattern.',                                icon: Code2,       implementations: ['enhanced_check'],             requires_column: true,  crushes: 'MC pattern checks',          group: 'value',    default_params: { column: '<col>', pattern: '^.+$' } },
+  { id: 'schema_change',        label: 'Schema change',        hint: 'Fail if columns / types change vs a snapshot.',                                icon: ShieldCheck, implementations: ['enhanced_check'],             requires_column: false, crushes: 'MC Schema monitors',         group: 'schema',   default_params: { fail_on: ['column_added', 'column_removed', 'type_changed'] } },
+  { id: 'referential_integrity',label: 'Referential integrity',hint: 'Every value in col X must exist in ref(other).col Y.',                         icon: ShieldCheck, implementations: ['enhanced_check', 'dbt_test'], requires_column: true,  crushes: 'dbt relationships / MC RI',  group: 'schema',   default_params: { column: '<col>', to_asset: '<other_asset>', to_column: '<col>' } },
+  { id: 'duplicate_count',      label: 'Duplicate count',      hint: 'Count of duplicated key(s) below threshold.',                                  icon: ShieldCheck, implementations: ['enhanced_check'],             requires_column: true,  crushes: 'MC dupe monitors',           group: 'value',    default_params: { columns: ['<col>'], max_duplicates: 0 } },
+  { id: 'zero_count',           label: 'Zero count',           hint: 'Fail if number of rows with 0 / null / missing key exceeds a threshold.',      icon: ShieldCheck, implementations: ['enhanced_check'],             requires_column: true,  crushes: 'MC zero monitors',           group: 'volume',   default_params: { column: '<col>', max_zeros: 0 } },
+  { id: 'sum_check',            label: 'Sum check',            hint: 'Column sum inside an allowed range.',                                          icon: ShieldCheck, implementations: ['enhanced_check'],             requires_column: true,  crushes: 'MC volume + revenue',        group: 'volume',   default_params: { column: '<col>', min_sum: 0 } },
+  { id: 'min_max_check',        label: 'Min / max',            hint: 'Column min or max above / below a threshold.',                                 icon: ShieldCheck, implementations: ['enhanced_check'],             requires_column: true,  crushes: 'MC bounds monitors',         group: 'value',    default_params: { column: '<col>', min_of_min: null, max_of_max: null } },
+  // Full escape hatches
+  { id: 'custom',               label: 'Custom SQL / Python',  hint: 'Write your own logic — SQL for dbt tests, Python for enhanced checks.',        icon: Code2,       implementations: ['enhanced_check', 'dbt_test'], requires_column: false, crushes: 'MC custom monitors',         group: 'custom' },
+  { id: 'any',                  label: 'Any kind (advanced)',  hint: 'Type any kind supported by your enhanced-check component. Params as JSON.',    icon: Wand2,       implementations: ['enhanced_check'],             requires_column: false, crushes: 'Anything MC / Sifflet do',   group: 'custom',   default_params: {} },
+];
+
+const GROUP_ORDER: Array<{ id: CheckKindDef['group']; label: string }> = [
+  { id: 'core',    label: 'Freshness & volume' },
+  { id: 'volume',  label: 'Volume + counts' },
+  { id: 'value',   label: 'Value integrity' },
+  { id: 'schema',  label: 'Schema & referential' },
+  { id: 'anomaly', label: 'Anomaly detection' },
+  { id: 'custom',  label: 'Custom / escape hatches' },
 ];
 
 const STARTER_CUSTOM_SQL = `-- Returns rows *when the check should fail*.
@@ -86,6 +123,11 @@ export function AddMonitorDialog({ open, onOpenChange, projectId, onSaved }: Add
   const [customSql, setCustomSql] = useState<string>(STARTER_CUSTOM_SQL);
   const [customPython, setCustomPython] = useState<string>(STARTER_CUSTOM_PYTHON);
   const [customLang, setCustomLang] = useState<'sql' | 'python'>('sql');
+  // Advanced JSON params — used by any kind with `default_params`
+  // that doesn't have a dedicated form. Also used by the "any" kind
+  // where the user types the kind name themselves.
+  const [advancedKindName, setAdvancedKindName] = useState<string>('');
+  const [advancedParamsJson, setAdvancedParamsJson] = useState<string>('{}');
 
   // Schedule + routing
   const [scheduleMode, setScheduleMode] = useState<'none' | 'cron' | 'interval'>('none');
@@ -162,6 +204,28 @@ export function AddMonitorDialog({ open, onOpenChange, projectId, onSaved }: Add
     if (implementation === 'dbt_test' && (!dbtProjectPath || !dbtModelUid)) { notify.error('Pick a dbt model.'); setStep('target'); return; }
     if (kindDef.requires_column && !column.trim() && implementation === 'enhanced_check') { notify.error('Pick a column.'); setStep('config'); return; }
     if (kindDef.requires_column && !column.trim() && implementation === 'dbt_test') { notify.error('Pick a column.'); setStep('config'); return; }
+    // For advanced kinds (anything with default_params), send the
+    // JSON blob rather than the flat form fields — that way the
+    // wizard doesn't have to know every possible params schema.
+    let paramsJson: Record<string, any> | null = null;
+    let checkKindOverride: string | null = null;
+    if (kindDef.default_params !== undefined) {
+      try {
+        paramsJson = advancedParamsJson.trim() ? JSON.parse(advancedParamsJson) : {};
+      } catch (e) {
+        notify.error('Params JSON is invalid — fix syntax and try again.');
+        setStep('config');
+        return;
+      }
+      if (checkKind === 'any') {
+        if (!advancedKindName.trim()) {
+          notify.error("Enter the kind name your enhanced-check component expects.");
+          setStep('config');
+          return;
+        }
+        checkKindOverride = advancedKindName.trim();
+      }
+    }
     setSaving(true);
     try {
       await projectsApi.addMonitor(projectId, {
@@ -169,6 +233,8 @@ export function AddMonitorDialog({ open, onOpenChange, projectId, onSaved }: Add
         name: name.trim(),
         target_asset_key: implementation === 'dbt_test' ? (selectedDbtModel?.name ?? targetAsset) : targetAsset.trim(),
         check_kind: checkKind,
+        params_json: paramsJson ?? undefined,
+        check_kind_override: checkKindOverride ?? undefined,
         description: description.trim() || undefined,
         severity,
         max_age_seconds: checkKind === 'freshness' ? Number(maxAgeSeconds) : undefined,
@@ -241,29 +307,52 @@ export function AddMonitorDialog({ open, onOpenChange, projectId, onSaved }: Add
 
           <div className="p-5 overflow-y-auto flex-1 space-y-5">
             {step === 'kind' && (
-              <div className="space-y-3">
+              <div className="space-y-4">
                 <h3 className="text-sm font-semibold text-gray-900">What are we checking for?</h3>
-                <div className="grid grid-cols-2 gap-2">
-                  {CHECK_KINDS.map((k) => (
-                    <button
-                      key={k.id}
-                      type="button"
-                      onClick={() => setCheckKind(k.id)}
-                      className={`text-left p-3 border rounded-lg transition ${
-                        checkKind === k.id
-                          ? 'border-primary bg-primary/5 ring-1 ring-primary/20'
-                          : 'border-gray-200 bg-white hover:border-gray-300'
-                      }`}
-                    >
-                      <div className={`text-sm font-semibold flex items-center gap-1.5 ${checkKind === k.id ? 'text-primary' : 'text-gray-900'}`}>
-                        <k.icon className="w-4 h-4" />
-                        {k.label}
+                <p className="text-[11px] text-gray-500 -mt-2">
+                  Enhanced Asset Checks support many more kinds than we can fit on one screen — the picker below is a
+                  curated jumping-off point. Use <span className="font-mono">Any kind (advanced)</span> at the bottom to
+                  configure any kind name + params your component supports.
+                </p>
+                {GROUP_ORDER.map((g) => {
+                  const kinds = CHECK_KINDS.filter((k) => k.group === g.id);
+                  if (kinds.length === 0) return null;
+                  return (
+                    <div key={g.id}>
+                      <div className="text-[10px] uppercase tracking-wider text-gray-500 mb-1 font-medium">{g.label}</div>
+                      <div className="grid grid-cols-3 gap-2">
+                        {kinds.map((k) => (
+                          <button
+                            key={k.id}
+                            type="button"
+                            onClick={() => {
+                              setCheckKind(k.id);
+                              if (k.default_params) {
+                                setAdvancedParamsJson(JSON.stringify(k.default_params, null, 2));
+                              }
+                              if (k.id === 'any') {
+                                setAdvancedKindName('');
+                                setAdvancedParamsJson('{}');
+                              }
+                            }}
+                            className={`text-left p-2.5 border rounded transition ${
+                              checkKind === k.id
+                                ? 'border-primary bg-primary/5 ring-1 ring-primary/20'
+                                : 'border-gray-200 bg-white hover:border-gray-300'
+                            }`}
+                          >
+                            <div className={`text-xs font-semibold flex items-center gap-1 ${checkKind === k.id ? 'text-primary' : 'text-gray-900'}`}>
+                              <k.icon className="w-3.5 h-3.5" />
+                              {k.label}
+                            </div>
+                            <div className="text-[10px] text-gray-500 mt-0.5 leading-snug">{k.hint}</div>
+                            <div className="text-[9px] text-emerald-700 mt-1 font-medium">→ {k.crushes}</div>
+                          </button>
+                        ))}
                       </div>
-                      <div className="text-[11px] text-gray-500 mt-1">{k.hint}</div>
-                      <div className="text-[10px] text-emerald-700 mt-1.5 font-medium">→ crushes {k.crushes}</div>
-                    </button>
-                  ))}
-                </div>
+                    </div>
+                  );
+                })}
               </div>
             )}
 
@@ -350,7 +439,44 @@ export function AddMonitorDialog({ open, onOpenChange, projectId, onSaved }: Add
               <div className="space-y-4">
                 <h3 className="text-sm font-semibold text-gray-900">How does it fail?</h3>
 
-                {kindDef.requires_column && (
+                {/* Advanced JSON params — for kinds without a dedicated
+                    form (or the "any" kind with a free-text kind name).
+                    The community EnhancedAssetCheckComponent owns the
+                    schema; we're just a text editor with sensible defaults. */}
+                {kindDef.default_params !== undefined && (
+                  <div className="space-y-3">
+                    {checkKind === 'any' && (
+                      <div>
+                        <label className="text-[10px] uppercase tracking-wider text-gray-500 mb-1 block">Kind name</label>
+                        <input value={advancedKindName} onChange={(e) => setAdvancedKindName(e.target.value)}
+                          placeholder="e.g. distribution_drift"
+                          className="w-full px-3 py-2 text-sm font-mono border border-gray-300 rounded" />
+                        <p className="text-[10px] text-gray-500 mt-0.5">Exact kind name your enhanced-check component expects.</p>
+                      </div>
+                    )}
+                    <div>
+                      <label className="text-[10px] uppercase tracking-wider text-gray-500 mb-1 block">
+                        Params (JSON)
+                      </label>
+                      <div className="border border-gray-200 rounded overflow-hidden">
+                        <Editor
+                          height="220px"
+                          defaultLanguage="json"
+                          value={advancedParamsJson}
+                          onChange={(v) => setAdvancedParamsJson(v ?? '')}
+                          theme="vs-light"
+                          options={{ minimap: { enabled: false }, fontSize: 12, scrollBeyondLastLine: false, wordWrap: 'on' }}
+                        />
+                      </div>
+                      <p className="text-[10px] text-gray-500 mt-0.5">
+                        Written verbatim to <code className="bg-gray-100 px-1 rounded">attributes.params</code> in the yaml.
+                        Placeholder values (<code>&lt;col&gt;</code>) are for guidance — replace them.
+                      </p>
+                    </div>
+                  </div>
+                )}
+
+                {kindDef.default_params === undefined && kindDef.requires_column && (
                   <div>
                     <label className="text-[10px] uppercase tracking-wider text-gray-500 mb-1 block">Column</label>
                     {implementation === 'dbt_test' && columnCandidates.length > 0 ? (

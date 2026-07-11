@@ -500,7 +500,7 @@ export const projectsApi = {
       implementation: 'dbt_test' | 'enhanced_check';
       name: string;
       target_asset_key: string;
-      check_kind: 'freshness' | 'row_count' | 'null_ratio' | 'uniqueness' | 'accepted_values' | 'accepted_range' | 'not_null' | 'custom';
+      check_kind: string;
       description?: string | null;
       severity?: 'error' | 'warn' | 'info';
       max_age_seconds?: number | null;
@@ -521,6 +521,8 @@ export const projectsApi = {
       email?: string | null;
       dbt_relative_path?: string | null;
       dbt_model_unique_id?: string | null;
+      params_json?: Record<string, any> | null;
+      check_kind_override?: string | null;
     },
   ): Promise<{ success: boolean; kind: string; relative_path: string; detail: string | null }> => {
     const response = await api.post(`/projects/${projectId}/monitors`, body);
