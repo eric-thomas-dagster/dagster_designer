@@ -514,6 +514,7 @@ export const projectsApi = {
       schedule: string | null;
       tags: string[];
       description: string | null;
+      recent_statuses: string[];
     }>;
     stats: Record<string, number>;
   }> => {

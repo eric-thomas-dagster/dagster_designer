@@ -208,6 +208,7 @@ export function MonitorsPanel({ onOpenFile }: MonitorsPanelProps) {
                     <th className="text-left px-4 py-2 text-xs font-medium text-gray-700 uppercase tracking-wider">Target</th>
                     <th className="text-left px-4 py-2 text-xs font-medium text-gray-700 uppercase tracking-wider">Kind</th>
                     <th className="text-left px-4 py-2 text-xs font-medium text-gray-700 uppercase tracking-wider">Status</th>
+                    <th className="text-left px-4 py-2 text-xs font-medium text-gray-700 uppercase tracking-wider">Trend</th>
                     <th className="text-left px-4 py-2 text-xs font-medium text-gray-700 uppercase tracking-wider">Source</th>
                   </tr>
                 </thead>
@@ -256,6 +257,9 @@ export function MonitorsPanel({ onOpenFile }: MonitorsPanelProps) {
                         </td>
                         <td className="px-4 py-2.5">
                           <StatusPill monitor={m} />
+                        </td>
+                        <td className="px-4 py-2.5">
+                          <RowSparkline statuses={m.recent_statuses ?? []} />
                         </td>
                         <td className="px-4 py-2.5 text-xs text-gray-600 truncate max-w-[200px]" title={m.source_project ?? ''}>
                           {m.source_project ?? <span className="italic text-gray-400">—</span>}
@@ -610,6 +614,30 @@ function PassFailStrip({ events }: { events: Array<{ status: string }> }) {
       {slots.length === 0 && (
         <span className="text-[10px] text-gray-400 italic">no runs yet</span>
       )}
+    </div>
+  );
+}
+
+/**
+ * Tiny per-row sparkline — 20 squares of pass/fail from the recent
+ * history. Right-most is the newest. Empty state renders muted dashes
+ * so the column doesn't collapse.
+ */
+function RowSparkline({ statuses }: { statuses: string[] }) {
+  const slots = statuses.slice(-20);
+  if (slots.length === 0) {
+    return <span className="text-[10px] text-gray-300 italic">no runs</span>;
+  }
+  return (
+    <div className="flex items-center gap-[1.5px]" title={`Last ${slots.length} run${slots.length === 1 ? '' : 's'} (oldest → newest)`}>
+      {slots.map((s, i) => {
+        const l = (s || '').toLowerCase();
+        const tone = l === 'pass' || l === 'success' ? 'bg-emerald-500'
+          : l === 'fail' || l === 'error' || l === 'runtime error' ? 'bg-rose-500'
+          : l === 'warn' ? 'bg-amber-500'
+          : 'bg-gray-300';
+        return <span key={i} className={`inline-block ${tone} rounded-sm`} style={{ width: 3, height: 12 }} />;
+      })}
     </div>
   );
 }

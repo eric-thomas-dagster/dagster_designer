@@ -3408,6 +3408,10 @@ class Monitor(BaseModel):
     schedule: str | None = None         # cron or 'on_materialization' if attached
     tags: list[str] = []
     description: str | None = None
+    # Populated by the /monitors index — last-N pass/fail markers so
+    # the frontend can render a per-row sparkline without a second
+    # round-trip.
+    recent_statuses: list[str] = []
 
 
 class MonitorsResponse(BaseModel):
@@ -3540,6 +3544,27 @@ async def list_monitors(project_id: str):
     # Sort: failing first (attention!), then warn, then passing, then never-run.
     order = {'failing': 0, 'warn': 1, 'passing': 2, 'never_run': 3}
     monitors.sort(key=lambda m: (order.get(_bucket(m.last_status), 4), m.label.lower()))
+
+    # Sparkline data — pull the last 20 statuses per monitor from the
+    # history log so the frontend can render an inline strip per row
+    # without a follow-up request per monitor.
+    try:
+        from ..services.monitor_history import read_events
+        raw = read_events(root, limit=5000)
+        by_id: dict[str, list[str]] = {}
+        for evt in raw:
+            mid = evt.get('monitor_id')
+            st = evt.get('status')
+            if not mid or not st:
+                continue
+            by_id.setdefault(mid, []).append(st)
+        for m in monitors:
+            statuses = by_id.get(m.id) or []
+            # Keep only the tail (already chronological — newest last).
+            m.recent_statuses = statuses[-20:]
+    except Exception as e:
+        print(f"[monitors] sparkline enrichment failed: {e}", flush=True)
+
     return MonitorsResponse(monitors=monitors, stats=stats)
 
 
