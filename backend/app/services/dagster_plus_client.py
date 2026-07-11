@@ -144,7 +144,12 @@ query DagsterPlusAssets {
           }
         }
       }
-      ... on PythonError { message }
+      # AssetChecksOrError union in the Dagster+ schema does NOT
+      # include PythonError -- adding it fails query-wide with
+      # "Fragment cannot be spread here". Migration / user-code /
+      # agent-upgrade error types would go here if we cared to
+      # surface them separately; for now we treat non-AssetChecks
+      # responses as "no checks available."
     }
     targetingInstigators {
       __typename

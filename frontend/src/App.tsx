@@ -19,7 +19,7 @@ import { DataPreviewModal } from './components/DataPreviewModal';
 import { DagsterCloudChip } from './components/DagsterCloudChip';
 import { NotificationHost, notify, confirmDialog } from './components/Notifications';
 import { useProjectStore } from './hooks/useProject';
-import { Network, FileCode, Zap, Package, ExternalLink, Settings, Workflow, ChevronDown, Skull, AlertTriangle, X, Loader2, CheckCircle, XCircle, PanelLeftClose, PanelLeft, Clock, Play, Radar, Timer, Download, Database, ShieldCheck } from 'lucide-react';
+import { Network, FileCode, Zap, Package, ExternalLink, Settings, Workflow, ChevronDown, Skull, AlertTriangle, X, Loader2, CheckCircle, XCircle, PanelLeftClose, PanelLeft, Clock, Play, Radar, Timer, Download, Database, ShieldCheck, Cloud } from 'lucide-react';
 import { IngestionsPanel } from './components/IngestionsPanel';
 import { DbtPanel } from './components/DbtPanel';
 import { MonitorsPanel } from './components/MonitorsPanel';
@@ -265,8 +265,17 @@ function App() {
     dependencyInstallStatus,
     dependencyInstallError,
     dependencyInstallOutput,
-    dismissDependencyInstallStatus
+    dismissDependencyInstallStatus,
+    isLoading: isProjectLoading,
   } = useProjectStore();
+  // Loading target — tracks which project id is currently in flight
+  // so the cloud-specific "connecting to <org>…" copy can appear.
+  // Reads the last isLoading toggle target; may be null on cold load.
+  const loadingCloudLabel = isProjectLoading && currentProject && (currentProject as any).is_dagster_plus
+    ? `Fetching lineage + checks from ${(currentProject as any).dagster_plus_org}${(currentProject as any).dagster_plus_deployment ? '/' + (currentProject as any).dagster_plus_deployment : ''}…`
+    : isProjectLoading
+      ? 'Loading project…'
+      : null;
   const queryClient = useQueryClient();
 
   // Clear the selection whenever the currently-selected node vanishes from
@@ -677,6 +686,36 @@ function App() {
 
   return (
     <div className="h-screen flex bg-background text-foreground">
+      {/* Global project-load overlay — surfaces mostly for Dagster+
+          projects since cloud hydration (assets + checks + schedules +
+          sensors) takes 2-6s on typical orgs. Local projects blip
+          through it. Non-blocking backdrop so users can still hit
+          menus if they need to. */}
+      {loadingCloudLabel && (
+        <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/20 backdrop-blur-sm pointer-events-none">
+          <div className="bg-white border border-gray-200 rounded-xl shadow-2xl px-6 py-5 flex items-center gap-4 pointer-events-auto">
+            <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-blue-500 to-cyan-500 flex items-center justify-center flex-shrink-0 relative">
+              <Cloud className="w-5 h-5 text-white" />
+              <span className="absolute -inset-1 rounded-lg border-2 border-blue-400/40 animate-ping" />
+            </div>
+            <div className="min-w-0">
+              <div className="text-sm font-semibold text-gray-900">Loading project</div>
+              <div className="text-xs text-gray-500 mt-0.5">{loadingCloudLabel}</div>
+              <div className="mt-2 h-1 w-64 bg-gray-100 rounded overflow-hidden">
+                <div className="h-full w-1/3 bg-gradient-to-r from-blue-500 to-cyan-500 rounded animate-pulse" style={{ animation: 'progressSlide 1.4s ease-in-out infinite' }} />
+              </div>
+            </div>
+          </div>
+          <style>{`
+            @keyframes progressSlide {
+              0%   { transform: translateX(-100%); }
+              50%  { transform: translateX(50%); }
+              100% { transform: translateX(220%); }
+            }
+          `}</style>
+        </div>
+      )}
+
       {/* Left vertical nav rail */}
       <nav
         className={`${navCollapsed ? 'w-14' : 'w-56'} transition-[width] duration-150 flex flex-col bg-[hsl(var(--dagster-black))] text-white/80 border-r border-[hsl(var(--dagster-black))]`}
