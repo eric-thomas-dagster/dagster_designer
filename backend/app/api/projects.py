@@ -614,6 +614,15 @@ async def _hydrate_cloud_graph(project: Project) -> None:
 
     # Layout — longest-path layer assignment across the DAG so the
     # frontend has stable, readable coordinates.
+    # Node IDs must be safe for the frontend, which normalizes edge
+    # source/target by replacing '/' with '_'. If our node IDs contain
+    # slashes, the normalization mismatches and edges get dropped
+    # silently (React Flow can't find the target). Pre-sanitize here
+    # so node.id and edge.source/target line up after the frontend's
+    # own normalization pass.
+    def _safe_id(raw: str) -> str:
+        return raw.replace('/', '_').replace('.', '_')
+
     key_to_id: dict[str, str] = {}
     upstream: dict[str, list[str]] = {}
     for a in raw_assets:
@@ -623,7 +632,7 @@ async def _hydrate_cloud_graph(project: Project) -> None:
         key = "/".join(((a.get("assetKey") or {}).get("path") or []))
         if not key:
             continue
-        key_to_id[key] = a.get("id") or key
+        key_to_id[key] = _safe_id(a.get("id") or key)
         upstream[key] = ["/".join(k.get("path") or []) for k in (a.get("dependencyKeys") or [])]
 
     depth: dict[str, int] = {}
