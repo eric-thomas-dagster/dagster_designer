@@ -3568,6 +3568,213 @@ async def list_monitors(project_id: str):
     return MonitorsResponse(monitors=monitors, stats=stats)
 
 
+class AddMonitorRequest(BaseModel):
+    """Create a new monitor via the wizard. `implementation` decides
+    where the check gets written:
+      • 'dbt_test'       → falls through to add_dbt_test (schema.yml)
+      • 'enhanced_check' → writes a new EnhancedAssetCheck instance
+                           under src/<project>/defs/monitors/<name>/defs.yaml
+    """
+    implementation: str                      # 'dbt_test' | 'enhanced_check'
+    name: str                                # snake_case identifier
+    target_asset_key: str                    # asset this monitor watches
+    check_kind: str                          # freshness | row_count | null_ratio | uniqueness | accepted_values | accepted_range | not_null | custom
+    description: str | None = None
+    severity: str = 'error'                  # 'error' | 'warn' | 'info'
+    # Kind-specific params (only the fields relevant to check_kind matter):
+    max_age_seconds: int | None = None       # freshness
+    min_row_count: int | None = None         # row_count lower bound
+    max_row_count: int | None = None         # row_count upper bound
+    row_count_z_score: float | None = None   # row_count anomaly detection threshold
+    column: str | None = None                # null_ratio / uniqueness / accepted_* target column
+    max_null_ratio: float | None = None      # null_ratio (0.0..1.0)
+    accepted_values: list[str] | None = None
+    min_value: float | None = None           # accepted_range
+    max_value: float | None = None           # accepted_range
+    custom_sql: str | None = None            # kind=custom
+    custom_python: str | None = None         # kind=custom
+    # Scheduling — attaches to the resulting monitor. cron takes
+    # precedence over interval_minutes.
+    schedule_cron: str | None = None
+    schedule_interval_minutes: int | None = None
+    run_on_materialization: bool = True
+    # Routing — kept generic; users refine channel per team.
+    slack_channel: str | None = None
+    email: str | None = None
+    # For dbt_test implementation, which dbt project to write into
+    dbt_relative_path: str | None = None
+    # For dbt_test implementation, which dbt model this test attaches to
+    dbt_model_unique_id: str | None = None
+
+
+class AddMonitorResponse(BaseModel):
+    success: bool
+    kind: str                                # implementation kind that was used
+    relative_path: str                       # where the config was written
+    detail: str | None = None
+
+
+@router.post('/{project_id}/monitors', response_model=AddMonitorResponse)
+async def add_monitor(project_id: str, request: AddMonitorRequest):
+    """Create a monitor. Routes to either the dbt test writer (existing
+    endpoint's logic) or the enhanced-check yaml writer depending on
+    `implementation`. Non-destructive to any existing defs."""
+    import yaml as _yaml
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    name = (request.name or '').strip()
+    if not name or not name.replace('_', '').isalnum() or name[0].isdigit():
+        raise HTTPException(status_code=400, detail="Monitor name must be snake_case and start with a letter.")
+
+    # -----------------------------------------------------------------
+    # Path A: dbt test — delegate to add_dbt_test with a mapped kind.
+    # -----------------------------------------------------------------
+    if request.implementation == 'dbt_test':
+        if not request.dbt_relative_path or not request.dbt_model_unique_id:
+            raise HTTPException(status_code=400, detail="dbt_relative_path + dbt_model_unique_id required for dbt implementation.")
+        # Map wizard's check_kind → dbt test kind
+        dbt_kind_map = {
+            'not_null': 'not_null',
+            'uniqueness': 'unique',
+            'accepted_values': 'accepted_values',
+            'accepted_range': 'dbt_utils',
+            'custom': 'singular',
+        }
+        dbt_kind = dbt_kind_map.get(request.check_kind)
+        if not dbt_kind:
+            raise HTTPException(status_code=400, detail=f"check_kind '{request.check_kind}' cannot be expressed as a dbt test — try 'enhanced_check'.")
+        add_req = AddDbtTestRequest(
+            dbt_relative_path=request.dbt_relative_path,
+            model_unique_id=request.dbt_model_unique_id,
+            kind=dbt_kind,
+            column=request.column,
+            values=request.accepted_values,
+            package_test_name='dbt_utils.accepted_range' if dbt_kind == 'dbt_utils' else None,
+            package_test_config={'min_value': request.min_value, 'max_value': request.max_value} if dbt_kind == 'dbt_utils' else None,
+            test_name=name if dbt_kind == 'singular' else None,
+            sql=request.custom_sql if dbt_kind == 'singular' else None,
+            description=request.description,
+        )
+        result = await add_dbt_test(project_id, add_req)
+        return AddMonitorResponse(
+            success=result.success,
+            kind='dbt_test',
+            relative_path=result.relative_path,
+            detail=result.detail,
+        )
+
+    # -----------------------------------------------------------------
+    # Path B: enhanced_check — write a new component instance yaml.
+    # We aim for a canonical shape that community EnhancedAssetCheck
+    # components can consume. If the user's component expects a
+    # slightly different schema, they edit the yaml — the wizard just
+    # gives them a good starting point.
+    # -----------------------------------------------------------------
+    if request.implementation != 'enhanced_check':
+        raise HTTPException(status_code=400, detail=f"Unknown implementation: {request.implementation}")
+
+    root = project_service._get_project_dir(project)
+    if not project.directory_name:
+        raise HTTPException(status_code=500, detail="Project has no directory_name — cannot locate defs dir.")
+    defs_root = root / 'src' / project.directory_name / 'defs' / 'monitors' / name
+    if defs_root.exists():
+        raise HTTPException(status_code=409, detail=f"Monitor '{name}' already exists at defs/monitors/{name}. Pick a different name.")
+    defs_root.mkdir(parents=True, exist_ok=True)
+
+    # Build kind-specific params block. We omit Nones so the yaml
+    # stays readable.
+    params: dict[str, Any] = {}
+    if request.check_kind == 'freshness':
+        if request.max_age_seconds is None:
+            raise HTTPException(status_code=400, detail="freshness requires max_age_seconds.")
+        params['max_age_seconds'] = request.max_age_seconds
+    elif request.check_kind == 'row_count':
+        if request.min_row_count is not None: params['min_row_count'] = request.min_row_count
+        if request.max_row_count is not None: params['max_row_count'] = request.max_row_count
+        if request.row_count_z_score is not None: params['z_score_threshold'] = request.row_count_z_score
+        if not params:
+            raise HTTPException(status_code=400, detail="row_count needs at least one of: min_row_count, max_row_count, row_count_z_score.")
+    elif request.check_kind == 'null_ratio':
+        if not request.column or request.max_null_ratio is None:
+            raise HTTPException(status_code=400, detail="null_ratio needs column + max_null_ratio.")
+        params['column'] = request.column
+        params['max_null_ratio'] = request.max_null_ratio
+    elif request.check_kind == 'uniqueness':
+        if not request.column:
+            raise HTTPException(status_code=400, detail="uniqueness needs column.")
+        params['column'] = request.column
+    elif request.check_kind == 'accepted_values':
+        if not request.column or not request.accepted_values:
+            raise HTTPException(status_code=400, detail="accepted_values needs column + at least one value.")
+        params['column'] = request.column
+        params['values'] = list(request.accepted_values)
+    elif request.check_kind == 'accepted_range':
+        if not request.column or (request.min_value is None and request.max_value is None):
+            raise HTTPException(status_code=400, detail="accepted_range needs column + min_value and/or max_value.")
+        params['column'] = request.column
+        if request.min_value is not None: params['min_value'] = request.min_value
+        if request.max_value is not None: params['max_value'] = request.max_value
+    elif request.check_kind == 'custom':
+        if not request.custom_sql and not request.custom_python:
+            raise HTTPException(status_code=400, detail="custom needs either custom_sql or custom_python.")
+        if request.custom_sql: params['sql'] = request.custom_sql
+        if request.custom_python: params['python'] = request.custom_python
+    else:
+        raise HTTPException(status_code=400, detail=f"Unknown check_kind: {request.check_kind}")
+
+    schedule_block: dict[str, Any] = {}
+    if request.schedule_cron:
+        schedule_block['cron'] = request.schedule_cron
+    elif request.schedule_interval_minutes:
+        schedule_block['interval_minutes'] = request.schedule_interval_minutes
+    if request.run_on_materialization:
+        schedule_block['on_materialization'] = True
+
+    alerts_block: dict[str, Any] = {}
+    if request.slack_channel:
+        alerts_block['slack_channel'] = request.slack_channel
+    if request.email:
+        alerts_block['email'] = request.email
+
+    attributes: dict[str, Any] = {
+        'name': name,
+        'asset': request.target_asset_key,
+        'kind': request.check_kind,
+        'severity': request.severity,
+        'params': params,
+    }
+    if request.description:
+        attributes['description'] = request.description
+    if schedule_block:
+        attributes['schedule'] = schedule_block
+    if alerts_block:
+        attributes['alerts'] = alerts_block
+
+    # Canonical component type — the community EnhancedAssetCheck
+    # component looks for this string. Users can rewire to their own
+    # component by editing the yaml if their setup uses a different type.
+    doc: dict[str, Any] = {
+        'type': 'dagster_designer_components.EnhancedAssetCheckComponent',
+        'attributes': attributes,
+    }
+
+    defs_yaml_path = defs_root / 'defs.yaml'
+    header = (
+        f"# Monitor written by Dagster Designer's Add-monitor wizard.\n"
+        f"# Rename `type:` to match your project's enhanced-check component if different.\n"
+        f"# See docs: https://dagster.io/community-components/enhanced-asset-check\n"
+    )
+    defs_yaml_path.write_text(header + _yaml.dump(doc, sort_keys=False))
+    return AddMonitorResponse(
+        success=True,
+        kind='enhanced_check',
+        relative_path=str(defs_yaml_path.relative_to(root)),
+        detail=f"Wrote {defs_yaml_path.name} — re-run Dagster to pick up the new check.",
+    )
+
+
 class MonitorHistoryPoint(BaseModel):
     ts: str
     status: str

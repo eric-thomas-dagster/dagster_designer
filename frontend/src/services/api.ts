@@ -494,6 +494,39 @@ export const projectsApi = {
     return response.data as any;
   },
 
+  addMonitor: async (
+    projectId: string,
+    body: {
+      implementation: 'dbt_test' | 'enhanced_check';
+      name: string;
+      target_asset_key: string;
+      check_kind: 'freshness' | 'row_count' | 'null_ratio' | 'uniqueness' | 'accepted_values' | 'accepted_range' | 'not_null' | 'custom';
+      description?: string | null;
+      severity?: 'error' | 'warn' | 'info';
+      max_age_seconds?: number | null;
+      min_row_count?: number | null;
+      max_row_count?: number | null;
+      row_count_z_score?: number | null;
+      column?: string | null;
+      max_null_ratio?: number | null;
+      accepted_values?: string[] | null;
+      min_value?: number | null;
+      max_value?: number | null;
+      custom_sql?: string | null;
+      custom_python?: string | null;
+      schedule_cron?: string | null;
+      schedule_interval_minutes?: number | null;
+      run_on_materialization?: boolean;
+      slack_channel?: string | null;
+      email?: string | null;
+      dbt_relative_path?: string | null;
+      dbt_model_unique_id?: string | null;
+    },
+  ): Promise<{ success: boolean; kind: string; relative_path: string; detail: string | null }> => {
+    const response = await api.post(`/projects/${projectId}/monitors`, body);
+    return response.data as any;
+  },
+
   listMonitors: async (
     projectId: string,
   ): Promise<{

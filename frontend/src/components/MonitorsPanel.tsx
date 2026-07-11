@@ -5,6 +5,7 @@ import {
 } from 'lucide-react';
 import { projectsApi } from '@/services/api';
 import { useProjectStore } from '@/hooks/useProject';
+import { AddMonitorDialog } from './AddMonitorDialog';
 
 type Monitor = Awaited<ReturnType<typeof projectsApi.listMonitors>>['monitors'][number];
 type Status = 'passing' | 'failing' | 'warn' | 'never_run';
@@ -50,6 +51,7 @@ export function MonitorsPanel({ onOpenFile }: MonitorsPanelProps) {
   const [kindFilter, setKindFilter] = useState<'all' | Monitor['kind']>('all');
   const [assetFilter, setAssetFilter] = useState<string>('all');
   const [selected, setSelected] = useState<Monitor | null>(null);
+  const [showAddMonitor, setShowAddMonitor] = useState(false);
 
   const refresh = async () => {
     if (!currentProject) return;
@@ -99,14 +101,22 @@ export function MonitorsPanel({ onOpenFile }: MonitorsPanelProps) {
         <div className="text-xs text-gray-400">
           One place for every data-quality check in the project — dbt tests, native asset checks, enhanced checks.
         </div>
-        <button
-          onClick={refresh}
-          disabled={loading}
-          className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-gray-700 border border-gray-300 rounded-md hover:bg-gray-50 disabled:opacity-50"
-        >
-          {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Zap className="w-4 h-4" />}
-          Refresh
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={refresh}
+            disabled={loading}
+            className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-gray-700 border border-gray-300 rounded-md hover:bg-gray-50 disabled:opacity-50"
+          >
+            {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Zap className="w-4 h-4" />}
+            Refresh
+          </button>
+          <button
+            onClick={() => setShowAddMonitor(true)}
+            className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium bg-primary text-primary-foreground rounded-md"
+          >
+            <ShieldCheck className="w-4 h-4" /> New monitor
+          </button>
+        </div>
       </div>
 
       {loading && !data && (
@@ -281,6 +291,14 @@ export function MonitorsPanel({ onOpenFile }: MonitorsPanelProps) {
       {selected && (
         <MonitorDrawer monitor={selected} onClose={() => setSelected(null)} onOpenFile={onOpenFile} />
       )}
+
+      {/* Add-monitor wizard */}
+      <AddMonitorDialog
+        open={showAddMonitor}
+        onOpenChange={setShowAddMonitor}
+        projectId={currentProject.id}
+        onSaved={refresh}
+      />
     </div>
   );
 }
