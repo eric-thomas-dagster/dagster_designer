@@ -478,6 +478,29 @@ export const projectsApi = {
     return response.data as any;
   },
 
+  // Generic per-page AI Assistant endpoints. Same response shape
+  // across dbt / ingestions / automation / pipelines so the shared
+  // AiAssistantPanel component doesn't care which page it's on.
+  pageInsights: async (
+    projectId: string,
+    surface: 'dbt' | 'ingestions' | 'automation' | 'pipelines',
+  ): Promise<{
+    summary: string;
+    insights: Array<{ kind: string; title: string; detail: string; action: string | null; refs: string[] }>;
+  }> => {
+    const response = await api.get(`/projects/${projectId}/${surface}/insights`);
+    return response.data as any;
+  },
+
+  pageAsk: async (
+    projectId: string,
+    surface: 'dbt' | 'ingestions' | 'automation' | 'pipelines',
+    body: { question: string; history?: Array<{ role: 'user' | 'assistant'; content: string }> },
+  ): Promise<{ answer: string }> => {
+    const response = await api.post(`/projects/${projectId}/${surface}/ask`, body);
+    return response.data as any;
+  },
+
   monitorFleetInsights: async (
     projectId: string,
   ): Promise<{

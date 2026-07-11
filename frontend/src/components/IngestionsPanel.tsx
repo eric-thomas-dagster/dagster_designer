@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { Download, Cloud, Database, FileText, Globe, Sparkles, Boxes, CheckCircle2, AlertTriangle, Play, Settings, Activity, TrendingUp, Loader2, XCircle, Layers, CalendarClock, Clock, X } from 'lucide-react';
 import { useProjectStore } from '@/hooks/useProject';
 import { assetsApi, projectsApi, partitionsApi, type IngestionEvent, type BackfillRequest } from '@/services/api';
+import { AiAssistantPanel } from './AiAssistantPanel';
 import { notify } from './Notifications';
 import { AddDataDialog } from './AddDataDialog';
 import { PartitionBackfill } from './PartitionBackfill';
@@ -433,6 +434,24 @@ export function IngestionsPanel({ onAddDataSource, onEditComponent }: Ingestions
           <Download className="w-4 h-4" /> Add data
         </button>
       </div>
+
+      {/* AI Assistant — fleet-level insights + chat */}
+      {currentProject && (
+        <div className="px-8 pt-4">
+          <AiAssistantPanel
+            title="AI Assistant · Ingestions"
+            subtitle="Failure diagnosis, stale sources, and coverage across your ingestion fleet."
+            suggestions={[
+              'What ingestions are failing?',
+              "Which sources look stale?",
+              'What should I materialize next?',
+              'Where are we spending the most time?',
+            ]}
+            fetchInsights={() => projectsApi.pageInsights(currentProject.id, 'ingestions') as any}
+            ask={(q, h) => projectsApi.pageAsk(currentProject.id, 'ingestions', { question: q, history: h }).then(r => r.answer)}
+          />
+        </div>
+      )}
 
       {/* Alerts strip — surfaced first because "which ingestions need my
           attention right now" is the whole reason to visit this page. */}

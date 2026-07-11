@@ -4187,6 +4187,372 @@ async def ask_monitor_fleet(project_id: str, request: FleetAskRequest):
     return MonitorAskResponse(answer=answer, used_context={"monitor_count": len(all_monitors.monitors)})
 
 
+# ---------------------------------------------------------------------------
+# Cross-page AI Assistants — reuses the shared insights response shape
+# so the frontend can render every page's assistant with one component.
+# Each endpoint gathers surface-specific context and hands it to the
+# same _call_llm helper. Graceful degradation (empty response) when
+# no LLM key is configured so the UI hides the panel.
+# ---------------------------------------------------------------------------
+
+class PageInsight(BaseModel):
+    kind: str                 # 'concern' | 'suggestion' | 'observation'
+    title: str
+    detail: str
+    action: str | None = None
+    refs: list[str] = []      # entity references — model names, asset keys, etc.
+
+
+class PageInsightsResponse(BaseModel):
+    summary: str
+    insights: list[PageInsight]
+
+
+class PageAskRequest(BaseModel):
+    question: str
+    history: list[dict] = []
+
+
+class PageAskResponse(BaseModel):
+    answer: str
+
+
+async def _run_insights(system_prompt: str, context_lines: list[str], intro: str) -> PageInsightsResponse:
+    """Shared insights runner — sends context + a JSON contract prompt
+    to the LLM and parses the result. Returns an empty response when
+    no LLM key is configured so the UI hides the panel."""
+    import json as _json
+    prompt = (
+        f"{intro}\n\n"
+        f"CONTEXT:\n{chr(10).join(context_lines)}\n\n"
+        "Return STRICT JSON (no prose, no code fences):\n"
+        '{"summary": "<one-paragraph>", "insights": [{"kind": "concern|suggestion|observation", '
+        '"title": "<short>", "detail": "<1-2 sentences>", "action": "<next step or null>", '
+        '"refs": [<entity refs>]}]}\n'
+        "Cap at 6 insights."
+    )
+    try:
+        text = await _call_llm(system_prompt, prompt)
+    except HTTPException as e:
+        if e.status_code == 400 and 'API key' in str(e.detail):
+            return PageInsightsResponse(insights=[], summary='')
+        raise
+
+    stripped = text.strip()
+    if stripped.startswith("```"):
+        stripped = stripped.split("```", 2)[1]
+        if stripped.startswith("json"):
+            stripped = stripped[len("json"):]
+        stripped = stripped.strip("` \n")
+    try:
+        parsed = _json.loads(stripped)
+    except Exception:
+        parsed = {"summary": text[:280], "insights": []}
+    ins: list[PageInsight] = []
+    for r in (parsed.get("insights") or [])[:6]:
+        try:
+            ins.append(PageInsight(
+                kind=str(r.get("kind") or "observation"),
+                title=str(r.get("title") or ""),
+                detail=str(r.get("detail") or ""),
+                action=r.get("action"),
+                refs=list(r.get("refs") or []),
+            ))
+        except Exception:
+            continue
+    return PageInsightsResponse(summary=str(parsed.get("summary") or ''), insights=ins)
+
+
+# ---- dbt page ---------------------------------------------------------
+
+@router.get('/{project_id}/dbt/insights', response_model=PageInsightsResponse)
+async def dbt_page_insights(project_id: str):
+    """AI-generated insights for the dbt project — coverage gaps
+    (models without tests / docs), failing tests, expensive models."""
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    r = await list_dbt_models(project_id, dbt_relative_path=None)
+    if not r.dbt_project_relative_path:
+        return PageInsightsResponse(insights=[], summary='No dbt project detected.')
+    stats = r.stats
+    undocumented = [m.name for m in r.models if not m.description]
+    untested = [m.name for m in r.models if not m.tests]
+    failing = [m.name for m in r.models if (m.last_run_status or '').lower() in ('error', 'fail', 'runtime error')]
+
+    lines = [
+        f"DBT_PROJECT: {r.project_name}",
+        f"STATS: total={stats.get('total', 0)} documented={stats.get('with_docs', 0)} "
+        f"with_tests={stats.get('with_tests', 0)} run_success={stats.get('run_success', 0)} "
+        f"run_failure={stats.get('run_failure', 0)}",
+        "",
+        f"UNTESTED_MODELS ({len(untested)}):",
+        *[f"  • {n}" for n in untested[:20]],
+        "",
+        f"UNDOCUMENTED_MODELS ({len(undocumented)}):",
+        *[f"  • {n}" for n in undocumented[:20]],
+        "",
+        f"FAILING_LAST_RUN ({len(failing)}):",
+        *[f"  • {n}" for n in failing[:20]],
+        "",
+        "MODEL_SAMPLE:",
+        *[
+            f"  • {m.name} · {m.materialization} · {len(m.columns)} cols · {len(m.tests)} tests · last_run={m.last_run_status}"
+            for m in r.models[:15]
+        ],
+    ]
+    return await _run_insights(
+        system_prompt=(
+            "You are a senior data engineer reviewing a dbt project. Surface "
+            "actionable concerns: untested critical models, missing docs, "
+            "failing tests, expensive models. Reference specific model names. "
+            "Prioritize impact — a staging model with no tests matters less than "
+            "a marts model with no tests."
+        ),
+        context_lines=lines,
+        intro="Analyze this dbt project.",
+    )
+
+
+@router.post('/{project_id}/dbt/ask', response_model=PageAskResponse)
+async def dbt_page_ask(project_id: str, request: PageAskRequest):
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    r = await list_dbt_models(project_id, dbt_relative_path=None)
+    lines = [
+        f"DBT_PROJECT: {r.project_name}",
+        f"MODELS ({len(r.models)}):",
+    ]
+    for m in r.models[:60]:
+        lines.append(f"  • {m.name} · {m.materialization} · {len(m.columns)}col · {len(m.tests)}tests · last_run={m.last_run_status}")
+    if len(r.models) > 60:
+        lines.append(f"  … +{len(r.models) - 60} more")
+
+    sys = (
+        "You are a senior data engineer answering questions about a dbt project. "
+        "Reference specific model names + counts from the context. Concise "
+        "answers (3-8 sentences)."
+    )
+    answer = await _call_llm(sys, f"CONTEXT:\n{chr(10).join(lines)}\n\nQUESTION: {request.question}", prior_turns=request.history)
+    return PageAskResponse(answer=answer)
+
+
+# ---- Ingestions page --------------------------------------------------
+
+@router.get('/{project_id}/ingestions/insights', response_model=PageInsightsResponse)
+async def ingestions_page_insights(project_id: str):
+    """AI insights on the ingestion fleet — reads the ingestion event
+    log to spot failures, stale sources, missing schedules."""
+    from ..services.ingestion_history import read_events
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    root = project_service._get_project_dir(project)
+    events = read_events(root, limit=500)
+
+    # Aggregate: per-asset success/failure counts + most recent status
+    per_asset: dict[str, dict] = {}
+    for e in events:
+        ak = e.get('asset_key') or ''
+        if not ak: continue
+        entry = per_asset.setdefault(ak, {'successes': 0, 'failures': 0, 'last_ts': None, 'last_status': None})
+        s = (e.get('status') or '').lower()
+        if s == 'success': entry['successes'] += 1
+        elif s == 'failure': entry['failures'] += 1
+        ts = e.get('ts')
+        if ts and (entry['last_ts'] is None or ts > entry['last_ts']):
+            entry['last_ts'] = ts
+            entry['last_status'] = s
+
+    lines = [
+        f"INGESTIONS_EVENT_LOG: {len(events)} recorded events across {len(per_asset)} assets",
+        "",
+        "PER_ASSET_HEALTH:",
+    ]
+    for ak, e in list(per_asset.items())[:30]:
+        rate = e['failures'] / (e['successes'] + e['failures']) if (e['successes'] + e['failures']) else 0
+        lines.append(f"  • {ak} · {e['successes']} succ / {e['failures']} fail (rate {rate:.0%}) · last={e['last_status']} @ {e['last_ts']}")
+
+    return await _run_insights(
+        system_prompt=(
+            "You are a data platform SRE reviewing an ingestion fleet. Surface "
+            "concerns: assets with high failure rates, ingestions that haven't "
+            "run recently, missing schedules. Prioritize actionable, specific "
+            "insights over generic advice. Reference asset keys."
+        ),
+        context_lines=lines,
+        intro="Analyze this ingestion event log.",
+    )
+
+
+@router.post('/{project_id}/ingestions/ask', response_model=PageAskResponse)
+async def ingestions_page_ask(project_id: str, request: PageAskRequest):
+    from ..services.ingestion_history import read_events
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    root = project_service._get_project_dir(project)
+    events = read_events(root, limit=500)
+    lines = [f"INGESTIONS_EVENTS ({len(events)}):"]
+    for e in events[-60:]:
+        lines.append(f"  • {e.get('ts')} · {e.get('type')} · {e.get('asset_key')} · {e.get('status')}"
+                     f"{' · ' + str(e.get('rows')) + ' rows' if e.get('rows') else ''}"
+                     f"{' · ' + str(e.get('duration_ms')) + 'ms' if e.get('duration_ms') else ''}")
+    sys = (
+        "You are a data platform SRE answering questions about ingestion health. "
+        "Reference specific asset keys + timestamps. Concise answers."
+    )
+    answer = await _call_llm(sys, f"CONTEXT:\n{chr(10).join(lines)}\n\nQUESTION: {request.question}", prior_turns=request.history)
+    return PageAskResponse(answer=answer)
+
+
+# ---- Automation page --------------------------------------------------
+
+@router.get('/{project_id}/automation/insights', response_model=PageInsightsResponse)
+async def automation_page_insights(project_id: str):
+    """AI insights on automation coverage — schedules + sensors +
+    automation conditions in the project graph."""
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    schedules: list[dict] = []
+    sensors: list[dict] = []
+    unautomated_assets: list[str] = []
+    for n in project.graph.nodes:
+        if n.node_kind != 'asset':
+            continue
+        ak = n.data.get('asset_key') or ''
+        scheds = n.data.get('schedules') or []
+        senses = n.data.get('sensors') or []
+        auto_cond = n.data.get('automation_condition')
+        if not scheds and not senses and not auto_cond:
+            unautomated_assets.append(ak)
+        for s in scheds:
+            schedules.append({'asset': ak, 'name': s.get('name') if isinstance(s, dict) else str(s)})
+        for s in senses:
+            sensors.append({'asset': ak, 'name': s.get('name') if isinstance(s, dict) else str(s)})
+
+    lines = [
+        f"SCHEDULES ({len(schedules)}):",
+        *[f"  • {s['asset']} ← {s['name']}" for s in schedules[:20]],
+        "",
+        f"SENSORS ({len(sensors)}):",
+        *[f"  • {s['asset']} ← {s['name']}" for s in sensors[:20]],
+        "",
+        f"UNAUTOMATED_ASSETS ({len(unautomated_assets)}):",
+        *[f"  • {a}" for a in unautomated_assets[:20]],
+    ]
+
+    return await _run_insights(
+        system_prompt=(
+            "You are a Dagster automation expert reviewing schedules, sensors, "
+            "and automation conditions across a project. Surface concerns: "
+            "critical assets without automation, redundant schedules, gaps "
+            "in coverage. Reference asset keys."
+        ),
+        context_lines=lines,
+        intro="Analyze automation coverage.",
+    )
+
+
+@router.post('/{project_id}/automation/ask', response_model=PageAskResponse)
+async def automation_page_ask(project_id: str, request: PageAskRequest):
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    lines = ["AUTOMATION_STATE:"]
+    for n in project.graph.nodes:
+        if n.node_kind != 'asset':
+            continue
+        ak = n.data.get('asset_key') or ''
+        scheds = n.data.get('schedules') or []
+        senses = n.data.get('sensors') or []
+        auto = n.data.get('automation_condition')
+        parts = []
+        if scheds: parts.append(f"schedules={len(scheds)}")
+        if senses: parts.append(f"sensors={len(senses)}")
+        if auto: parts.append(f"auto_cond=yes")
+        if parts:
+            lines.append(f"  • {ak}: {', '.join(parts)}")
+    sys = (
+        "You are a Dagster automation expert answering questions about a "
+        "project's schedules / sensors / automation conditions. Reference "
+        "asset keys. Concise answers."
+    )
+    answer = await _call_llm(sys, f"CONTEXT:\n{chr(10).join(lines[:120])}\n\nQUESTION: {request.question}", prior_turns=request.history)
+    return PageAskResponse(answer=answer)
+
+
+# ---- Pipelines page --------------------------------------------------
+
+@router.get('/{project_id}/pipelines/insights', response_model=PageInsightsResponse)
+async def pipelines_page_insights(project_id: str):
+    """AI insights on the pipeline graph — component composition,
+    orphaned components, missing dependencies."""
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    kind_counts: dict[str, int] = {}
+    orphans: list[str] = []
+    for n in project.graph.nodes:
+        ct = n.data.get('component_type', '') or ''
+        short = ct.rsplit('.', 1)[-1] if ct else 'unknown'
+        kind_counts[short] = kind_counts.get(short, 0) + 1
+        if n.node_kind == 'asset':
+            # Orphan = no incoming edges, and not a source/seed by convention
+            has_in = any(e.target == n.id for e in project.graph.edges)
+            has_out = any(e.source == n.id for e in project.graph.edges)
+            if not has_in and not has_out:
+                orphans.append(n.data.get('asset_key') or n.id)
+
+    lines = [
+        f"PIPELINE_SHAPE: {len(project.graph.nodes)} nodes, {len(project.graph.edges)} edges",
+        "",
+        "COMPONENT_MIX:",
+        *[f"  • {k}: {v}" for k, v in sorted(kind_counts.items(), key=lambda x: -x[1])[:15]],
+        "",
+        f"ORPHAN_ASSETS ({len(orphans)}):",
+        *[f"  • {a}" for a in orphans[:20]],
+    ]
+    return await _run_insights(
+        system_prompt=(
+            "You are a Dagster pipeline architect reviewing the shape of a "
+            "project's asset graph. Surface concerns: unreferenced assets, "
+            "opportunities to consolidate, missing lineage. Reference "
+            "component names + asset keys."
+        ),
+        context_lines=lines,
+        intro="Analyze this pipeline graph.",
+    )
+
+
+@router.post('/{project_id}/pipelines/ask', response_model=PageAskResponse)
+async def pipelines_page_ask(project_id: str, request: PageAskRequest):
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    lines = [
+        f"NODES: {len(project.graph.nodes)}",
+        f"EDGES: {len(project.graph.edges)}",
+        "",
+        "SAMPLE:",
+    ]
+    for n in project.graph.nodes[:60]:
+        ak = n.data.get('asset_key') or n.id
+        ct = (n.data.get('component_type', '') or '').rsplit('.', 1)[-1]
+        lines.append(f"  • {ak} ({ct})")
+    sys = (
+        "You are a Dagster pipeline architect answering questions about a "
+        "project's asset graph. Reference component types + asset keys. "
+        "Concise answers."
+    )
+    answer = await _call_llm(sys, f"CONTEXT:\n{chr(10).join(lines)}\n\nQUESTION: {request.question}", prior_turns=request.history)
+    return PageAskResponse(answer=answer)
+
+
 class GenerateMonitorsRequest(BaseModel):
     asset_key: str
     # Optional hints: number of proposals + focus area

@@ -23,6 +23,8 @@ import { Network, FileCode, Zap, Package, ExternalLink, Settings, Workflow, Chev
 import { IngestionsPanel } from './components/IngestionsPanel';
 import { DbtPanel } from './components/DbtPanel';
 import { MonitorsPanel } from './components/MonitorsPanel';
+import { AiAssistantPanel } from './components/AiAssistantPanel';
+import { projectsApi as _projectsApi } from './services/api';
 import { dagsterUIApi, projectsApi, filesApi, primitivesApi } from './services/api';
 import type { ComponentInstance } from './types';
 
@@ -908,8 +910,25 @@ function App() {
 
           {/* Pipelines Tab Content */}
           <Tabs.Content value="pipelines" className="flex-1 overflow-hidden">
-            <div className="h-full">
-              <PipelineBuilder />
+            <div className="h-full flex flex-col">
+              {/* AI Assistant strip — orphans, missing lineage, cost hints */}
+              {currentProject && (
+                <div className="px-4 pt-3">
+                  <AiAssistantPanel
+                    title="AI Assistant · Pipelines"
+                    subtitle="Graph shape, orphan assets, and lineage suggestions."
+                    suggestions={[
+                      'Are any assets orphaned?',
+                      "What's the shape of my pipeline?",
+                      'Where should I add automation?',
+                      'Any redundant components?',
+                    ]}
+                    fetchInsights={() => _projectsApi.pageInsights(currentProject.id, 'pipelines') as any}
+                    ask={(q, h) => _projectsApi.pageAsk(currentProject.id, 'pipelines', { question: q, history: h }).then(r => r.answer)}
+                  />
+                </div>
+              )}
+              <div className="flex-1 min-h-0"><PipelineBuilder /></div>
             </div>
           </Tabs.Content>
 
@@ -926,7 +945,24 @@ function App() {
 
           {/* Automation (Primitives) Tab Content */}
           <Tabs.Content value="primitives" className="flex-1 overflow-hidden">
-            <div className="h-full">
+            <div className="h-full flex flex-col overflow-y-auto">
+              {/* AI Assistant strip — schedule + sensor + automation-condition coverage */}
+              {currentProject && (
+                <div className="px-4 pt-3">
+                  <AiAssistantPanel
+                    title="AI Assistant · Automation"
+                    subtitle="Schedule, sensor, and automation-condition coverage across your assets."
+                    suggestions={[
+                      'Which assets have no automation?',
+                      'Any redundant schedules?',
+                      'What should I schedule next?',
+                      'Are my sensors covering the right assets?',
+                    ]}
+                    fetchInsights={() => _projectsApi.pageInsights(currentProject.id, 'automation') as any}
+                    ask={(q, h) => _projectsApi.pageAsk(currentProject.id, 'automation', { question: q, history: h }).then(r => r.answer)}
+                  />
+                </div>
+              )}
               <PrimitivesManager
                 onNewPrimitive={(category) => setTemplateBuilderTab(category)}
                 onOpenFile={handleOpenFile}

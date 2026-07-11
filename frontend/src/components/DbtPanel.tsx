@@ -15,6 +15,7 @@ import { AddDbtSelectorDialog } from './AddDbtSelectorDialog';
 import { AddDbtExposureDialog } from './AddDbtExposureDialog';
 import { AddDbtSourceDialog } from './AddDbtSourceDialog';
 import { AddDbtTestDialog } from './AddDbtTestDialog';
+import { AiAssistantPanel } from './AiAssistantPanel';
 
 interface DbtPanelProps {
   onOpenFile?: (path: string) => void;
@@ -554,6 +555,27 @@ export function DbtPanel({ onOpenFile }: DbtPanelProps) {
           >
             <FileCode className="w-4 h-4" /> Scaffold a model
           </button>
+        </div>
+      )}
+      {data && view === 'models' && data.dbt_project_relative_path && (
+        <div className="px-8 pt-6">
+          <AiAssistantPanel
+            title="AI Assistant · dbt"
+            subtitle="Coverage gaps, failing tests, and doc suggestions across your dbt models."
+            suggestions={[
+              'Which models have no tests?',
+              "What's undocumented?",
+              'Any expensive models to worry about?',
+              'What should I add tests for next?',
+            ]}
+            fetchInsights={() => projectsApi.pageInsights(currentProject.id, 'dbt') as any}
+            ask={(q, h) => projectsApi.pageAsk(currentProject.id, 'dbt', { question: q, history: h }).then(r => r.answer)}
+            onOpenRef={(name) => {
+              const m = data.models.find((x) => x.name === name || x.unique_id.endsWith('.' + name));
+              if (m) setSelectedUniqueId(m.unique_id);
+            }}
+            refIcon={Layers}
+          />
         </div>
       )}
       {data && view === 'models' && (
