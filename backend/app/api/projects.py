@@ -343,14 +343,161 @@ async def list_projects():
 
 @router.get("/{project_id}", response_model=Project)
 async def get_project(project_id: str):
-    """Get a project by ID."""
+    """Get a project by ID.
+
+    For Dagster+ (cloud) projects we hydrate `project.graph` from the
+    live GraphQL API before returning — so every existing frontend
+    panel that reads project.graph (Assets tab, lineage, etc.) works
+    against cloud data without needing a cloud-specific UI."""
     project = project_service.get_project(project_id)
 
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
 
+    if project.is_dagster_plus:
+        try:
+            await _hydrate_cloud_graph(project)
+        except Exception as e:
+            # Non-fatal — return the last known graph if the cloud call fails.
+            print(f"[dagster+] hydrate failed for {project.id}: {e}", flush=True)
+
     # Never leak the Dagster+ token to the frontend — server-side only.
     return _strip_token(project) if project.is_dagster_plus else project
+
+
+async def _hydrate_cloud_graph(project: Project) -> None:
+    """Fetch assets + checks from Dagster+ and translate into the same
+    PipelineGraph shape the local project uses. Existing frontend
+    panels (Assets, Lineage, Monitors) already read from project.graph
+    — this lets them work against cloud data with zero UI changes."""
+    from ..services.dagster_plus_client import query, ASSETS_QUERY, ASSET_CHECKS_QUERY
+    from ..models.graph import GraphNode, GraphEdge, PipelineGraph
+
+    org = project.dagster_plus_org or ""
+    dep = project.dagster_plus_deployment or ""
+    tok = project.dagster_plus_token or ""
+    if not org or not tok:
+        return
+
+    assets_data = await query(org, dep, tok, ASSETS_QUERY)
+    a_node = (assets_data.get("assetsOrError") or {})
+    raw_assets = a_node.get("nodes") or []
+
+    # Also pull asset checks so nodes can carry their check list — the
+    # local project graph does this and Monitors + drawer both rely on
+    # it, so mirroring the shape keeps the existing UIs happy.
+    checks_by_asset: dict[str, list[dict]] = {}
+    try:
+        checks_data = await query(org, dep, tok, ASSET_CHECKS_QUERY)
+        for c in ((checks_data.get("assetChecksOrError") or {}).get("checks") or []):
+            key = "/".join(((c.get("assetKey") or {}).get("path") or []))
+            if not key:
+                continue
+            last = c.get("executionForLatestMaterialization") or {}
+            checks_by_asset.setdefault(key, []).append({
+                "name": c.get("name"),
+                "key": f"{key}::{c.get('name')}",
+                "description": c.get("description"),
+                "source": None,
+                "last_status": (last.get("status") if last else None),
+                "last_run_at": ((last.get("evaluation") or {}).get("timestamp") if last else None),
+            })
+    except Exception as e:
+        print(f"[dagster+] hydrate: asset_checks failed: {e}", flush=True)
+
+    # Layout — longest-path layer assignment across the DAG so the
+    # frontend has stable, readable coordinates.
+    key_to_id: dict[str, str] = {}
+    upstream: dict[str, list[str]] = {}
+    for a in raw_assets:
+        key = "/".join(((a.get("key") or {}).get("path") or []))
+        if not key:
+            continue
+        key_to_id[key] = a.get("id") or key
+        d = a.get("definition") or {}
+        upstream[key] = ["/".join(k.get("path") or []) for k in (d.get("dependencyKeys") or [])]
+
+    depth: dict[str, int] = {}
+    visiting: set[str] = set()
+
+    def compute(k: str) -> int:
+        if k in depth: return depth[k]
+        if k in visiting: return 0
+        visiting.add(k)
+        ups = [u for u in upstream.get(k, []) if u in key_to_id]
+        d = 0 if not ups else max(compute(u) for u in ups) + 1
+        visiting.discard(k)
+        depth[k] = d
+        return d
+
+    for k in key_to_id:
+        compute(k)
+
+    # Group keys by layer + sort so positions are deterministic.
+    by_layer: dict[int, list[str]] = {}
+    for k, d in depth.items():
+        by_layer.setdefault(d, []).append(k)
+    for arr in by_layer.values():
+        arr.sort()
+
+    X, Y = 260, 90
+    nodes: list[GraphNode] = []
+    for layer in sorted(by_layer.keys()):
+        for i, key in enumerate(by_layer[layer]):
+            a = next((x for x in raw_assets if "/".join(((x.get("key") or {}).get("path") or [])) == key), None)
+            defn = (a.get("definition") or {}) if a else {}
+            nodes.append(GraphNode(
+                id=key_to_id[key],
+                type="asset",
+                node_kind="asset",
+                data={
+                    "label": key.split("/")[-1] or key,
+                    "asset_key": key,
+                    "name": key,
+                    "description": defn.get("description") or "",
+                    "group_name": defn.get("groupName"),
+                    "owners": [],
+                    "kinds": [defn.get("computeKind")] if defn.get("computeKind") else [],
+                    "tags": [],
+                    "is_executable": not defn.get("isSource"),
+                    "automation_condition": None,
+                    "deps": upstream.get(key, []),
+                    "checks": checks_by_asset.get(key, []),
+                    "jobs": [],
+                    "schedules": [],
+                    "sensors": [],
+                    "component_icon": "cloud",
+                    "component_attributes": {},
+                    "component_type": "dagster_plus.CloudAsset",
+                    "component_id": "cloud",
+                    "io_input_type": None,
+                    "io_output_type": None,
+                    "io_input_required": False,
+                    "io_expected_columns": None,
+                    "io_output_columns": None,
+                    "io_compatible_upstream": None,
+                    "source": None,
+                    "is_partitioned": defn.get("isPartitioned", False),
+                    "partition_config": defn.get("partitionDefinition"),
+                },
+                position={"x": float(layer * X), "y": float(i * Y)},
+                source_component="dagster_plus",
+            ))
+
+    edges: list[GraphEdge] = []
+    for key, ups in upstream.items():
+        for u in ups:
+            if u not in key_to_id: continue
+            edges.append(GraphEdge(
+                id=f"{key_to_id[u]}__{key_to_id[key]}",
+                source=key_to_id[u],
+                target=key_to_id[key],
+                source_handle=None,
+                target_handle=None,
+                is_custom=False,
+            ))
+
+    project.graph = PipelineGraph(nodes=nodes, edges=edges)
 
 
 class DagsterCloudLocation(BaseModel):
@@ -3647,6 +3794,15 @@ async def list_monitors(project_id: str):
         raise HTTPException(status_code=404, detail="Project not found")
 
     monitors: list[Monitor] = []
+
+    # For Dagster+ projects: hydrate the graph from GraphQL first so
+    # asset-check monitors below reflect live cloud state, not a
+    # stale local snapshot.
+    if project.is_dagster_plus:
+        try:
+            await _hydrate_cloud_graph(project)
+        except Exception as e:
+            print(f"[monitors] cloud hydrate failed: {e}", flush=True)
 
     # --- Native + enhanced asset checks (from the stored project graph) ---
     for node in project.graph.nodes:

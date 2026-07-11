@@ -162,6 +162,18 @@ query DagsterPlusAssetChecks {
 """
 
 
+DEPLOYMENTS_QUERY = """
+query DagsterPlusDeployments {
+  fullDeployments {
+    deploymentName
+    deploymentId
+    deploymentType
+    deploymentStatus
+  }
+}
+"""
+
+
 RUNS_QUERY = """
 query DagsterPlusRuns($limit: Int!) {
   runsOrError(limit: $limit) {

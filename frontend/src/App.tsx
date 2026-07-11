@@ -24,7 +24,6 @@ import { IngestionsPanel } from './components/IngestionsPanel';
 import { DbtPanel } from './components/DbtPanel';
 import { MonitorsPanel } from './components/MonitorsPanel';
 import { AiAssistantPanel } from './components/AiAssistantPanel';
-import { DagsterPlusPanel } from './components/DagsterPlusPanel';
 import { projectsApi as _projectsApi } from './services/api';
 import { dagsterUIApi, projectsApi, filesApi, primitivesApi } from './services/api';
 import type { ComponentInstance } from './types';
@@ -789,18 +788,12 @@ function App() {
             ))}
           </Tabs.List>
 
-          {/* Assets Tab Content — for Dagster+ (cloud) projects we
-              swap in the read-only cloud panel that pulls from
-              GraphQL. Local projects keep the full editor. */}
-          {currentProject && (currentProject as any).is_dagster_plus ? (
-            <Tabs.Content value="assets" className="flex-1 overflow-hidden">
-              <DagsterPlusPanel
-                projectId={currentProject.id}
-                org={(currentProject as any).dagster_plus_org}
-                deployment={(currentProject as any).dagster_plus_deployment}
-              />
-            </Tabs.Content>
-          ) : (
+          {/* Assets Tab Content — the same editor works for both local
+              and Dagster+ projects: for cloud projects the backend
+              hydrates project.graph from the GraphQL API before
+              returning, so this UI reads the same shape either way.
+              Editing controls (delete, +Add data) hide on cloud since
+              cloud is read-only for now. */}
           <Tabs.Content value="assets" className="flex-1 flex overflow-hidden">
             {/* Left Sidebar - Component Palette + Project Components */}
             <aside
@@ -898,7 +891,6 @@ function App() {
               </aside>
             )}
           </Tabs.Content>
-          )}
 
           {/* Ingestions Tab Content — Fivetran/Airbyte-style monitoring
               surface over the ingestion-shaped components already in the
