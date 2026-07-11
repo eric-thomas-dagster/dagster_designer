@@ -470,6 +470,21 @@ export const projectsApi = {
     return response.data as any;
   },
 
+  getMonitorImpact: async (
+    projectId: string,
+    monitorId: string,
+  ): Promise<{
+    affected_assets: string[];
+    affected_exposures: Array<{ unique_id: string; name: string; type: string | null; label: string | null; url: string | null; owner: string | null }>;
+    affected_monitors: string[];
+    hop_counts: Record<string, number>;
+  }> => {
+    // The monitor id can contain slashes (test.jaffle_shop.foo/bar) so
+    // encode carefully.
+    const response = await api.get(`/projects/${projectId}/monitors/${encodeURIComponent(monitorId)}/impact`);
+    return response.data as any;
+  },
+
   getMonitorHistory: async (
     projectId: string,
     monitorId: string,

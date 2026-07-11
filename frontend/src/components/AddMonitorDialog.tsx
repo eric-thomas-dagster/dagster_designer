@@ -439,6 +439,42 @@ export function AddMonitorDialog({ open, onOpenChange, projectId, onSaved }: Add
               <div className="space-y-4">
                 <h3 className="text-sm font-semibold text-gray-900">How does it fail?</h3>
 
+                {/* Persistent target reminder — makes the "what table
+                    am I configuring against" question un-ambiguous. */}
+                <div className="p-2.5 bg-blue-50 border border-blue-200 rounded flex items-center gap-2 text-xs">
+                  <Layers className="w-4 h-4 text-blue-700 flex-shrink-0" />
+                  <div className="min-w-0 flex-1">
+                    <div className="text-gray-600 text-[10px] uppercase tracking-wider">Targeting</div>
+                    {implementation === 'dbt_test' ? (
+                      selectedDbtModel ? (
+                        <div className="font-mono text-gray-900 truncate">
+                          <span className="text-gray-500">{dbtProjects.find(p => p.relative_path === dbtProjectPath)?.name ?? dbtProjectPath}.</span>
+                          {selectedDbtModel.name}
+                          <span className="text-[10px] text-gray-500 ml-1">({selectedDbtModel.columns.length} columns)</span>
+                        </div>
+                      ) : (
+                        <div className="text-rose-700 font-medium">
+                          No dbt model picked — go back to the previous step to select one.
+                        </div>
+                      )
+                    ) : (
+                      targetAsset ? (
+                        <div className="font-mono text-gray-900 truncate">{targetAsset}</div>
+                      ) : (
+                        <div className="text-rose-700 font-medium">
+                          No asset picked — go back to the previous step to select one.
+                        </div>
+                      )
+                    )}
+                  </div>
+                  <button
+                    onClick={() => setStep('target')}
+                    className="text-[11px] text-blue-700 hover:text-blue-900 underline decoration-dotted flex-shrink-0"
+                  >
+                    change
+                  </button>
+                </div>
+
                 {/* Advanced JSON params — for kinds without a dedicated
                     form (or the "any" kind with a free-text kind name).
                     The community EnhancedAssetCheckComponent owns the

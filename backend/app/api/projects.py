@@ -3807,6 +3807,123 @@ async def add_monitor(project_id: str, request: AddMonitorRequest):
     )
 
 
+# ---------------------------------------------------------------------------
+# Blast radius — given a failing monitor, walk downstream from its
+# target asset(s) so users see what's actually at risk. Returns both
+# affected assets and exposures. Powers the "Impact" section in the
+# Monitors drawer.
+# ---------------------------------------------------------------------------
+
+class BlastRadiusResponse(BaseModel):
+    affected_assets: list[str] = []          # downstream asset keys
+    affected_exposures: list[dict] = []      # dbt exposures reachable from target
+    affected_monitors: list[str] = []        # other monitors on downstream assets
+    hop_counts: dict[str, int] = {}          # asset_key → hops from source
+
+
+@router.get('/{project_id}/monitors/{monitor_id:path}/impact', response_model=BlastRadiusResponse)
+async def monitor_impact(project_id: str, monitor_id: str):
+    """Walk downstream from the monitor's target assets. Uses the
+    stored project graph edges for asset-to-asset lineage + the dbt
+    manifest for exposure downstream nodes. BFS with hop tracking so
+    the UI can rank impact by proximity."""
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    # First, resolve the monitor → target asset keys via list_monitors.
+    all_monitors = await list_monitors(project_id)
+    target = next((m for m in all_monitors.monitors if m.id == monitor_id), None)
+    if not target:
+        raise HTTPException(status_code=404, detail=f"Monitor '{monitor_id}' not found.")
+    seeds = list(target.target_asset_keys or [])
+    if not seeds:
+        return BlastRadiusResponse()
+
+    # Adjacency: asset_key → downstream asset_keys. Nodes carry
+    # asset_key in data; edges reference node IDs (not asset keys),
+    # so we build a node_id → asset_key map + walk from node IDs.
+    key_to_node_id: dict[str, str] = {}
+    node_id_to_key: dict[str, str] = {}
+    for n in project.graph.nodes:
+        if n.node_kind == 'asset':
+            ak = n.data.get('asset_key') or ''
+            if ak:
+                key_to_node_id[ak] = n.id
+                node_id_to_key[n.id] = ak
+    downstream: dict[str, list[str]] = {}
+    for e in project.graph.edges:
+        downstream.setdefault(e.source, []).append(e.target)
+
+    # BFS from every seed asset. Track hops so the UI ranks close-in
+    # blast first.
+    hops: dict[str, int] = {}
+    visited_ids: set[str] = set()
+    queue: list[tuple[str, int]] = []
+    for seed in seeds:
+        node_id = key_to_node_id.get(seed)
+        if node_id:
+            queue.append((node_id, 0))
+            visited_ids.add(node_id)
+    while queue:
+        nid, d = queue.pop(0)
+        # Record the asset (skip the seed itself in hop count 0)
+        ak = node_id_to_key.get(nid)
+        if ak and ak not in seeds:
+            if ak not in hops or d < hops[ak]:
+                hops[ak] = d
+        for child in downstream.get(nid, []):
+            if child in visited_ids:
+                continue
+            visited_ids.add(child)
+            queue.append((child, d + 1))
+
+    affected_assets = sorted(hops.keys(), key=lambda k: (hops[k], k))
+
+    # Exposures — pull from every dbt project and include those whose
+    # depends_on nodes intersect the affected set (or the seeds).
+    root = project_service._get_project_dir(project)
+    affected_exposures: list[dict] = []
+    all_affected_set = set(seeds) | set(affected_assets)
+    # dbt exposures use the "model.<pkg>.<name>" form for their deps;
+    # we compare against a dot→slash version to line up with our asset_keys.
+    for dbt_proj in _find_dbt_projects(root):
+        dbt_root = (root / dbt_proj.relative_path).resolve()
+        manifest = _load_dbt_artifact(dbt_root / 'target' / 'manifest.json')
+        for uid, node in (manifest.get('exposures') or {}).items():
+            deps = list((node.get('depends_on') or {}).get('nodes') or [])
+            dep_as_keys = {d.replace('.', '/') for d in deps}
+            if not (dep_as_keys & all_affected_set):
+                # Also consider matching by base model name suffix
+                deps_names = {d.rsplit('.', 1)[-1] for d in deps}
+                seed_names = {s.rsplit('/', 1)[-1] for s in all_affected_set}
+                if not (deps_names & seed_names):
+                    continue
+            affected_exposures.append({
+                'unique_id': uid,
+                'name': node.get('name'),
+                'type': node.get('type'),
+                'label': node.get('label'),
+                'url': node.get('url'),
+                'owner': (node.get('owner') or {}).get('name'),
+            })
+
+    # Other monitors that touch the affected set.
+    affected_monitors: list[str] = []
+    for m in all_monitors.monitors:
+        if m.id == monitor_id:
+            continue
+        if any(t in all_affected_set for t in m.target_asset_keys):
+            affected_monitors.append(m.id)
+
+    return BlastRadiusResponse(
+        affected_assets=affected_assets,
+        affected_exposures=affected_exposures,
+        affected_monitors=affected_monitors,
+        hop_counts=hops,
+    )
+
+
 class MonitorHistoryPoint(BaseModel):
     ts: str
     status: str

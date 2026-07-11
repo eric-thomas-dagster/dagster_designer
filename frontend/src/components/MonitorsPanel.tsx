@@ -6,6 +6,7 @@ import {
 import { projectsApi } from '@/services/api';
 import { useProjectStore } from '@/hooks/useProject';
 import { AddMonitorDialog } from './AddMonitorDialog';
+import { MonitorDetailPage } from './MonitorDetailPage';
 
 type Monitor = Awaited<ReturnType<typeof projectsApi.listMonitors>>['monitors'][number];
 type Status = 'passing' | 'failing' | 'warn' | 'never_run';
@@ -92,6 +93,20 @@ export function MonitorsPanel({ onOpenFile }: MonitorsPanelProps) {
 
   if (!currentProject) {
     return <div className="p-8 text-center text-sm text-gray-500">Open a project first.</div>;
+  }
+
+  // Full-page detail — swallows the list when a monitor is selected.
+  // Sifflet-style: click a row → dedicated page with tabs, chart,
+  // blast radius. Back button returns to the index.
+  if (selected) {
+    return (
+      <MonitorDetailPage
+        monitor={selected}
+        projectId={currentProject.id}
+        onBack={() => setSelected(null)}
+        onOpenFile={onOpenFile}
+      />
+    );
   }
 
   return (
@@ -229,9 +244,7 @@ export function MonitorsPanel({ onOpenFile }: MonitorsPanelProps) {
                     return (
                       <tr
                         key={m.id}
-                        className={`border-b border-gray-50 last:border-0 hover:bg-gray-50/50 cursor-pointer ${
-                          selected?.id === m.id ? 'bg-blue-50/40' : ''
-                        }`}
+                        className="border-b border-gray-50 last:border-0 hover:bg-gray-50/50 cursor-pointer"
                         onClick={() => setSelected(m)}
                       >
                         <td className="px-4 py-2.5">
