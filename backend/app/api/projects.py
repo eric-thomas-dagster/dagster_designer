@@ -3932,6 +3932,8 @@ class MonitorHistoryPoint(BaseModel):
     message: str | None = None
     value: float | None = None
     value_label: str | None = None
+    expected_min: float | None = None
+    expected_max: float | None = None
 
 
 class MonitorHistoryResponse(BaseModel):
@@ -3956,7 +3958,17 @@ async def get_monitor_history(project_id: str, monitor_id: str, limit: int = 200
     events = read_events(root, monitor_id=monitor_id, limit=limit)
     points = [MonitorHistoryPoint(**{k: v for k, v in e.items() if k in MonitorHistoryPoint.model_fields}) for e in events]
     # Filter to numeric points for the chart (drop nulls, keep ts).
-    numeric_series = [{"ts": e.get("ts"), "value": e.get("value")} for e in events if isinstance(e.get("value"), (int, float))]
+    # Include expected_min/max when present so the chart can render
+    # per-point Sifflet-style bounds instead of a rolling window.
+    numeric_series = [
+        {
+            "ts": e.get("ts"),
+            "value": e.get("value"),
+            "expected_min": e.get("expected_min"),
+            "expected_max": e.get("expected_max"),
+        }
+        for e in events if isinstance(e.get("value"), (int, float))
+    ]
     numeric_label = next((e.get("value_label") for e in events if e.get("value_label")), None)
     return MonitorHistoryResponse(
         monitor_id=monitor_id,

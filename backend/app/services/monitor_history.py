@@ -52,10 +52,17 @@ def record_event(
     message: str | None = None,
     value: float | None = None,
     value_label: str | None = None,
+    expected_min: float | None = None,
+    expected_max: float | None = None,
     ts: str | None = None,
 ) -> None:
     """Append one monitor event. Non-fatal on any I/O error — logging
-    should never break the caller (dbt run, materialize, etc.)."""
+    should never break the caller (dbt run, materialize, etc.).
+
+    expected_min/expected_max let anomaly-detection enhanced checks
+    record the band their datapoint was compared against, which the
+    UI then renders as Sifflet-style per-point bounds on the chart.
+    """
     try:
         path = _log_path(project_dir)
         event: dict[str, Any] = {
@@ -69,6 +76,8 @@ def record_event(
         if message: event["message"] = message[:1000]
         if value is not None: event["value"] = value
         if value_label: event["value_label"] = value_label
+        if expected_min is not None: event["expected_min"] = expected_min
+        if expected_max is not None: event["expected_max"] = expected_max
         with open(path, "a") as f:
             f.write(json.dumps(event) + "\n")
     except Exception as e:

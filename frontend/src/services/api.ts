@@ -499,8 +499,10 @@ export const projectsApi = {
       message: string | null;
       value: number | null;
       value_label: string | null;
+      expected_min: number | null;
+      expected_max: number | null;
     }>;
-    numeric_series: Array<{ ts: string; value: number }>;
+    numeric_series: Array<{ ts: string; value: number; expected_min?: number | null; expected_max?: number | null }>;
     numeric_label: string | null;
   }> => {
     const response = await api.get(`/projects/${projectId}/monitors/history`, {

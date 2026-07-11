@@ -201,6 +201,13 @@ export function MonitorDetailPage({ monitor, projectId, onBack, onOpenFile, onOp
             </div>
           </div>
 
+          {/* Datapoint Summary — Sifflet-style tabbed list of all
+              datapoints with value + expected range. Filterable by
+              All / Anomalies / Passing. */}
+          {history && history.events.length > 0 && (
+            <DatapointSummary events={history.events} />
+          )}
+
           {/* Blast radius */}
           <div className="bg-white border border-gray-200 rounded-lg">
             <div className="px-4 py-3 border-b border-gray-100 flex items-center justify-between">
@@ -425,31 +432,50 @@ function formatValue(v: number): string {
  * band. Band is computed from a rolling 7-run mean ± 2σ so it looks
  * proper on unfamiliar metrics without any config.
  */
-function BigTimeSeriesChart({ points }: { points: Array<{ ts: string; value: number }> }) {
+interface NumericPoint { ts: string; value: number; expected_min?: number | null; expected_max?: number | null }
+
+function BigTimeSeriesChart({ points }: { points: NumericPoint[] }) {
   const [hover, setHover] = useState<number | null>(null);
   const width = 900;
   const height = 260;
   const padL = 40, padR = 20, padT = 20, padB = 30;
+
+  // If EVERY point has expected_min/expected_max, use them directly
+  // (Sifflet-style — the monitor emits its own band per datapoint).
+  // Otherwise fall back to a rolling ±2σ window so we still show a
+  // useful shape for pass/fail histories without per-run bounds.
+  const hasPerPointBounds = points.every((p) => p.expected_min != null && p.expected_max != null);
+
   const values = points.map((p) => p.value);
-  const min = Math.min(...values);
-  const max = Math.max(...values);
-  const range = max - min || 1;
+  const lows = hasPerPointBounds ? points.map((p) => p.expected_min as number) : [];
+  const highs = hasPerPointBounds ? points.map((p) => p.expected_max as number) : [];
+  const overallMin = Math.min(...values, ...lows);
+  const overallMax = Math.max(...values, ...highs);
+  const range = overallMax - overallMin || 1;
   const stepX = (width - padL - padR) / Math.max(1, points.length - 1);
-  const y = (v: number) => padT + (1 - (v - min) / range) * (height - padT - padB);
+  const y = (v: number) => padT + (1 - (v - overallMin) / range) * (height - padT - padB);
   const x = (i: number) => padL + i * stepX;
 
-  // Rolling window (7-run) mean + stddev for the "expected" band.
-  const win = 7;
-  const bandUpper: Array<{ x: number; y: number }> = [];
-  const bandLower: Array<{ x: number; y: number }> = [];
-  for (let i = 0; i < points.length; i++) {
-    const start = Math.max(0, i - win + 1);
-    const slice = values.slice(start, i + 1);
-    const mean = slice.reduce((s, v) => s + v, 0) / slice.length;
-    const variance = slice.reduce((s, v) => s + (v - mean) ** 2, 0) / slice.length;
-    const sd = Math.sqrt(variance);
-    bandUpper.push({ x: x(i), y: y(mean + 2 * sd) });
-    bandLower.push({ x: x(i), y: y(mean - 2 * sd) });
+  // Build band. Prefer per-point bounds; fall back to rolling window.
+  const bandUpper: Array<{ x: number; y: number; value: number }> = [];
+  const bandLower: Array<{ x: number; y: number; value: number }> = [];
+  if (hasPerPointBounds) {
+    for (let i = 0; i < points.length; i++) {
+      bandUpper.push({ x: x(i), y: y(points[i].expected_max as number), value: points[i].expected_max as number });
+      bandLower.push({ x: x(i), y: y(points[i].expected_min as number), value: points[i].expected_min as number });
+    }
+  } else {
+    const win = 7;
+    for (let i = 0; i < points.length; i++) {
+      const start = Math.max(0, i - win + 1);
+      const slice = values.slice(start, i + 1);
+      const mean = slice.reduce((s, v) => s + v, 0) / slice.length;
+      const variance = slice.reduce((s, v) => s + (v - mean) ** 2, 0) / slice.length;
+      const sd = Math.sqrt(variance);
+      const hi = mean + 2 * sd, lo = mean - 2 * sd;
+      bandUpper.push({ x: x(i), y: y(hi), value: hi });
+      bandLower.push({ x: x(i), y: y(lo), value: lo });
+    }
   }
   const bandPath = `M ${bandUpper.map((p) => `${p.x} ${p.y}`).join(' L ')} L ${bandLower.slice().reverse().map((p) => `${p.x} ${p.y}`).join(' L ')} Z`;
 
@@ -459,7 +485,7 @@ function BigTimeSeriesChart({ points }: { points: Array<{ ts: string; value: num
     <svg viewBox={`0 0 ${width} ${height}`} className="w-full h-auto">
       {/* Y grid */}
       {Array.from({ length: yTicks + 1 }).map((_, i) => {
-        const yv = min + (range * (1 - i / yTicks));
+        const yv = overallMin + (range * (1 - i / yTicks));
         const yy = padT + (i / yTicks) * (height - padT - padB);
         return (
           <g key={i}>
@@ -469,24 +495,31 @@ function BigTimeSeriesChart({ points }: { points: Array<{ ts: string; value: num
         );
       })}
       {/* Expected band */}
-      <path d={bandPath} fill="rgb(16, 185, 129)" fillOpacity="0.12" />
+      <path d={bandPath} fill="rgb(16, 185, 129)" fillOpacity="0.15" />
       {/* Series line */}
       <path d={pathD} fill="none" stroke="rgb(16, 185, 129)" strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" />
-      {/* Points */}
+      {/* Points — colored by anomaly (outside band) */}
       {points.map((p, i) => {
-        // Anomaly = point outside the ±2σ expected band.
         const bx = x(i), by = y(p.value);
         const outside = by < bandUpper[i].y || by > bandLower[i].y;
         return (
           <g key={i} onMouseEnter={() => setHover(i)} onMouseLeave={() => setHover(null)}>
-            <circle cx={bx} cy={by} r={outside ? 4 : 2} fill={outside ? 'rgb(244, 63, 94)' : 'rgb(16, 185, 129)'} stroke="white" strokeWidth="1" />
+            <circle cx={bx} cy={by} r={outside ? 4 : 3} fill={outside ? 'rgb(244, 63, 94)' : 'rgb(16, 185, 129)'} stroke="white" strokeWidth="1.5" />
             {hover === i && (
               <>
                 <line x1={bx} x2={bx} y1={padT} y2={height - padB} stroke="#9ca3af" strokeDasharray="2 3" />
-                <g transform={`translate(${bx + 8}, ${by - 8})`}>
-                  <rect x="0" y="-14" rx="3" width="140" height="30" fill="rgba(17, 24, 39, 0.9)" />
-                  <text x="6" y="-2" fill="white" fontSize="10">{formatValue(p.value)}</text>
-                  <text x="6" y="10" fill="#d1d5db" fontSize="9">{new Date(p.ts).toLocaleString()}</text>
+                <g transform={`translate(${bx + 8}, ${Math.max(padT + 40, by - 8)})`}>
+                  <rect x="0" y="-30" rx="4" width="180" height="52" fill="rgba(17, 24, 39, 0.94)" />
+                  <text x="8" y="-14" fill={outside ? '#f87171' : '#6ee7b7'} fontSize="10" fontWeight="600">
+                    {outside ? '⚠ Anomaly' : '✓ In range'}
+                  </text>
+                  <text x="8" y="0" fill="white" fontSize="11" fontWeight="600">{formatValue(p.value)}</text>
+                  {(p.expected_min != null && p.expected_max != null) && (
+                    <text x="8" y="12" fill="#d1d5db" fontSize="9">
+                      expected {formatValue(p.expected_min)} – {formatValue(p.expected_max)}
+                    </text>
+                  )}
+                  <text x="8" y="24" fill="#9ca3af" fontSize="9">{new Date(p.ts).toLocaleString()}</text>
                 </g>
               </>
             )}
@@ -516,6 +549,130 @@ function BigPassFailStrip({ events }: { events: Array<{ status: string; ts: stri
           : 'bg-gray-300';
         return <div key={i} className={`${tone} rounded-sm flex-1 min-w-[3px]`} title={`${s} · ${new Date(e.ts).toLocaleString()}`} />;
       })}
+    </div>
+  );
+}
+
+/**
+ * Datapoint Summary — mirrors Sifflet's "Datapoint Summary" section
+ * below the chart. Tabs filter to All / Anomalies / Passing / Failed.
+ * A datapoint is an "anomaly" when the numeric value falls outside
+ * its per-run expected range OR its status is a failure.
+ */
+type Event = NonNullable<Awaited<ReturnType<typeof projectsApi.getMonitorHistory>>>['events'][number];
+
+function isAnomaly(e: Event): boolean {
+  const s = (e.status || '').toLowerCase();
+  if (s === 'fail' || s === 'error' || s === 'runtime error' || s === 'warn') return true;
+  if (e.value != null && e.expected_min != null && e.expected_max != null) {
+    if (e.value < e.expected_min || e.value > e.expected_max) return true;
+  }
+  return false;
+}
+function isPassing(e: Event): boolean {
+  const s = (e.status || '').toLowerCase();
+  return (s === 'pass' || s === 'success') && !isAnomaly(e);
+}
+
+function DatapointSummary({ events }: { events: Event[] }) {
+  const [tab, setTab] = useState<'all' | 'anomalies' | 'passing'>('anomalies');
+  const anomalies = events.filter(isAnomaly);
+  const passing = events.filter(isPassing);
+
+  const shown = tab === 'all' ? events : tab === 'anomalies' ? anomalies : passing;
+  // Newest first — matches Sifflet's default sort
+  const rows = shown.slice().reverse();
+
+  return (
+    <div className="bg-white border border-gray-200 rounded-lg">
+      <div className="px-4 py-3 border-b border-gray-100 flex items-center justify-between">
+        <h3 className="text-sm font-semibold text-gray-900">
+          Datapoint Summary <span className="text-gray-500 font-normal">({events.length})</span>
+        </h3>
+      </div>
+      <div className="border-b border-gray-100 flex items-center gap-1 px-4">
+        {([
+          { id: 'all', label: 'All', count: events.length },
+          { id: 'anomalies', label: 'Anomalies', count: anomalies.length, tone: anomalies.length > 0 ? 'text-rose-700' : '' },
+          { id: 'passing', label: 'Passing', count: passing.length, tone: 'text-emerald-700' },
+        ] as const).map((t) => (
+          <button
+            key={t.id}
+            onClick={() => setTab(t.id)}
+            className={`px-3 py-2 text-xs font-medium border-b-2 -mb-px ${
+              tab === t.id ? 'text-blue-600 border-blue-600' : 'text-gray-600 border-transparent hover:text-gray-900'
+            }`}
+          >
+            {t.label} <span className={`ml-0.5 ${(t as any).tone ?? ''}`}>({t.count})</span>
+          </button>
+        ))}
+      </div>
+      {rows.length === 0 ? (
+        <div className="p-6 text-xs text-gray-500 italic text-center">
+          {tab === 'anomalies' ? 'No anomalies — this monitor is behaving.' : 'No datapoints in this bucket.'}
+        </div>
+      ) : (
+        <table className="w-full text-sm">
+          <thead className="bg-gray-50 border-b border-gray-100">
+            <tr>
+              <th className="text-left px-4 py-2 text-xs font-medium text-gray-700 uppercase tracking-wider w-8"></th>
+              <th className="text-left px-4 py-2 text-xs font-medium text-gray-700 uppercase tracking-wider">Date</th>
+              <th className="text-left px-4 py-2 text-xs font-medium text-gray-700 uppercase tracking-wider">Status</th>
+              <th className="text-left px-4 py-2 text-xs font-medium text-gray-700 uppercase tracking-wider">Value</th>
+              <th className="text-left px-4 py-2 text-xs font-medium text-gray-700 uppercase tracking-wider">Expected range</th>
+              <th className="text-left px-4 py-2 text-xs font-medium text-gray-700 uppercase tracking-wider">Notes</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.slice(0, 200).map((e, i) => {
+              const anomaly = isAnomaly(e);
+              const arrow = e.value != null && e.expected_min != null && e.expected_max != null
+                ? (e.value < e.expected_min ? '↓' : e.value > e.expected_max ? '↑' : '')
+                : '';
+              return (
+                <tr key={i} className={`border-b border-gray-50 last:border-0 hover:bg-gray-50/50 ${anomaly ? 'bg-rose-50/30' : ''}`}>
+                  <td className="px-4 py-2"><StatusDot status={e.status} /></td>
+                  <td className="px-4 py-2 text-xs text-gray-700 tabular-nums whitespace-nowrap">
+                    {new Date(e.ts).toLocaleString()}
+                  </td>
+                  <td className="px-4 py-2">
+                    {anomaly ? (
+                      <span className="inline-flex items-center gap-1 text-xs text-rose-700 font-medium">
+                        <XCircle className="w-3 h-3" /> Anomaly
+                      </span>
+                    ) : (
+                      <span className="inline-flex items-center gap-1 text-xs text-emerald-700 font-medium">
+                        <CheckCircle2 className="w-3 h-3" /> Passing
+                      </span>
+                    )}
+                  </td>
+                  <td className={`px-4 py-2 text-xs font-mono ${anomaly ? 'text-rose-700 font-semibold' : 'text-gray-800'}`}>
+                    {arrow && <span className="mr-1">{arrow}</span>}
+                    {e.value != null ? formatValue(e.value) : <span className="text-gray-400">—</span>}
+                    {e.value_label && <span className="text-gray-500 ml-1 font-normal">{e.value_label}</span>}
+                  </td>
+                  <td className="px-4 py-2 text-xs font-mono text-gray-600">
+                    {e.expected_min != null && e.expected_max != null
+                      ? `${formatValue(e.expected_min)} – ${formatValue(e.expected_max)}`
+                      : <span className="text-gray-400">—</span>}
+                  </td>
+                  <td className="px-4 py-2 text-[11px] text-gray-600 truncate max-w-[280px]" title={e.message || ''}>
+                    {e.message || <span className="text-gray-400 italic">—</span>}
+                    {e.failures != null && e.failures > 0 && !e.message && (
+                      <span className="text-rose-700 font-medium">{e.failures} rows failed</span>
+                    )}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      )}
+      {rows.length > 200 && (
+        <div className="px-4 py-2 border-t border-gray-100 text-[11px] text-gray-500 italic">
+          Showing first 200 of {rows.length} — refine filter to see more.
+        </div>
+      )}
     </div>
   );
 }
