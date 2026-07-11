@@ -300,7 +300,11 @@ function App() {
       console.log('[Validation] Project:', currentProject.name, 'using_fallback:', result.using_fallback, 'jobs:', result.jobs?.length, 'schedules:', result.schedules?.length);
       return result;
     },
-    enabled: !!currentProject && enableValidationCheck && !dismissedValidationError && dependencyInstallStatus !== 'installing',
+    // Skip validation entirely for Dagster+ projects — they don't
+    // have a local codebase to install deps for or `dg list defs` to
+    // run, so the fallback path always triggers and shows a false-
+    // positive validation banner.
+    enabled: !!currentProject && !(currentProject as any).is_dagster_plus && enableValidationCheck && !dismissedValidationError && dependencyInstallStatus !== 'installing',
     staleTime: 60000, // Consider fresh for 1 minute (matches backend cache)
     refetchInterval: 60000, // Recheck every minute to catch validation changes
     refetchOnWindowFocus: false, // Don't refetch on window focus

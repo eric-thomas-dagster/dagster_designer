@@ -628,6 +628,10 @@ async def _hydrate_cloud_graph(project: Project) -> None:
         if not key:
             continue
         key_to_id[key] = a.get("id") or key
+        # Assets can come back with `definition: null` when they're
+        # referenced (as a dep) but not defined in this deployment.
+        # We still register them as nodes so lineage lines don't
+        # dead-end; upstream lookup just yields an empty list.
         d = a.get("definition") or {}
         upstream[key] = ["/".join(k.get("path") or []) for k in (d.get("dependencyKeys") or [])]
 
@@ -671,12 +675,12 @@ async def _hydrate_cloud_graph(project: Project) -> None:
         """Give cloud assets a component_type that lines up with the
         heuristics existing frontend panels rely on. Ingestion-like
         kinds → *_ingest so IngestionsPanel picks them up. Everything
-        else stays as the neutral cloud identifier."""
+        else stays as the neutral cloud identifier. (Note: the
+        deployment schema doesn't expose an isSource flag, so we can
+        only classify by computeKind here.)"""
         kind = (defn.get("computeKind") or "").lower()
-        is_source = bool(defn.get("isSource"))
-        if kind in _INGESTION_KINDS or is_source:
-            k = kind or 'cloud_source'
-            return f"dagster_plus.{k}_ingest"
+        if kind in _INGESTION_KINDS:
+            return f"dagster_plus.{kind}_ingest"
         return "dagster_plus.CloudAsset"
 
     for layer in sorted(by_layer.keys()):
@@ -696,7 +700,10 @@ async def _hydrate_cloud_graph(project: Project) -> None:
                     "owners": [],
                     "kinds": [defn.get("computeKind")] if defn.get("computeKind") else [],
                     "tags": [],
-                    "is_executable": not defn.get("isSource"),
+                    # Definition-less assets are external references (not
+                    # defined in this deployment) so they aren't
+                    # executable from here.
+                    "is_executable": bool(defn),
                     "automation_condition": None,
                     "deps": upstream.get(key, []),
                     "checks": checks_by_asset.get(key, []),

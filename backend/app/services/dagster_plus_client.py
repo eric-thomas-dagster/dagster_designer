@@ -100,6 +100,13 @@ query DagsterPlusPing {
 }
 """
 
+# NOTE on the shape: the deployment schema does NOT expose `isSource`
+# on AssetNode (confirmed via error response). `partitionDefinition`
+# with nested field selection also isn't safe across versions, so we
+# only pull `isPartitioned` here and skip the sub-shape. Assets whose
+# `definition` comes back null are keys referenced by other assets
+# but not defined in this deployment -- we still render them as
+# graph nodes (with placeholder metadata) so lineage stays intact.
 ASSETS_QUERY = """
 query DagsterPlusAssets {
   assetsOrError {
@@ -107,17 +114,12 @@ query DagsterPlusAssets {
     ... on AssetConnection {
       nodes {
         id
-        key {
-          path
-        }
+        key { path }
         definition {
           groupName
           description
           computeKind
-          isSource
           isPartitioned
-          partitionDefinition { name description type }
-          assetKey { path }
           dependencyKeys { path }
           dependedByKeys { path }
         }
