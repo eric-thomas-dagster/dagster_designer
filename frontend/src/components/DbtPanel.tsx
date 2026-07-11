@@ -478,39 +478,34 @@ export function DbtPanel({ onOpenFile }: DbtPanelProps) {
           </button>
         </div>
         <div className="flex items-center gap-2">
-          {/* Local-only write actions -- hidden for cloud projects
-              since Dagster+ is read-only from Dagster Designer and
-              hitting these would trigger .venv-not-found errors. */}
-          {!isCloudProject && (
-            <>
-              <button
-                onClick={runModified}
-                disabled={runningModified}
-                className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-gray-700 border border-gray-300 rounded-md hover:bg-gray-50 disabled:opacity-50"
-                title="Detects changed .sql files vs the git working tree and dbt-builds only those"
-              >
-                {runningModified ? <Loader2 className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4" />}
-                Run modified
-              </button>
-              <button
-                onClick={() => setShowGitCommit(true)}
-                className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-gray-700 border border-gray-300 rounded-md hover:bg-gray-50"
-              >
-                <GitCommit className="w-4 h-4" /> Commit
-              </button>
-              <button
-                onClick={() => setShowAddModel(true)}
-                className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium bg-orange-500 text-white rounded-md hover:bg-orange-600"
-              >
-                <FileCode className="w-4 h-4" /> New model
-              </button>
-            </>
-          )}
-          {isCloudProject && (
-            <span className="text-[11px] text-blue-700 bg-blue-50 border border-blue-200 rounded px-2 py-1 font-medium">
-              Dagster+ · read-only
-            </span>
-          )}
+          {/* On cloud projects we leave the write buttons visible but
+              inert -- users still see the surface but can't fire
+              actions that would 500 on the local venv. */}
+          <button
+            onClick={runModified}
+            disabled={runningModified || isCloudProject}
+            className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-gray-700 border border-gray-300 rounded-md hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+            title={isCloudProject ? "Not available on Dagster+ (read-only)" : "Detects changed .sql files vs the git working tree and dbt-builds only those"}
+          >
+            {runningModified ? <Loader2 className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4" />}
+            Run modified
+          </button>
+          <button
+            onClick={() => setShowGitCommit(true)}
+            disabled={isCloudProject}
+            title={isCloudProject ? "Not available on Dagster+ (read-only)" : undefined}
+            className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-gray-700 border border-gray-300 rounded-md hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            <GitCommit className="w-4 h-4" /> Commit
+          </button>
+          <button
+            onClick={() => setShowAddModel(true)}
+            disabled={isCloudProject}
+            title={isCloudProject ? "Not available on Dagster+ (read-only)" : undefined}
+            className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium bg-orange-500 text-white rounded-md hover:bg-orange-600 disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            <FileCode className="w-4 h-4" /> New model
+          </button>
         </div>
       </div>
 

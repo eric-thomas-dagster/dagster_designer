@@ -671,16 +671,33 @@ async def _hydrate_cloud_graph(project: Project) -> None:
         's3', 'gcs', 'adls', 'sftp', 'http', 'rest',
     }
 
-    def _component_type_for(defn: dict) -> str:
+    def _component_type_for(defn: dict, key: str, has_upstream: bool) -> str:
         """Give cloud assets a component_type that lines up with the
-        heuristics existing frontend panels rely on. Ingestion-like
-        kinds → *_ingest so IngestionsPanel picks them up. Everything
-        else stays as the neutral cloud identifier. (Note: the
-        deployment schema doesn't expose an isSource flag, so we can
-        only classify by computeKind here.)"""
+        heuristics existing frontend panels rely on.
+
+        Cast a wider net for ingestion-like assets:
+          • computeKind matches a known ingestion tool (fivetran /
+            airbyte / dlt / s3 / stripe / ...)
+          • asset key looks like a raw / source stage (raw_*, stg_*,
+            source_*, sources/*, seeds/*)
+          • description mentions "ingest" / "source" / "raw"
+          • the asset has NO upstream in this deployment (leaf sources
+            like external API pulls or Snowflake raw tables)
+        """
         kind = (defn.get("computeKind") or "").lower()
-        if kind in _INGESTION_KINDS:
-            return f"dagster_plus.{kind}_ingest"
+        desc = (defn.get("description") or "").lower()
+        key_l = (key or "").lower()
+        key_last = key_l.rsplit('/', 1)[-1]
+        looks_source = (
+            kind in _INGESTION_KINDS
+            or key_l.startswith(("raw/", "source/", "sources/", "seeds/", "stg/", "staging/", "ingest/", "ingestion/"))
+            or key_last.startswith(("raw_", "stg_", "source_", "src_", "seed_"))
+            or "ingest" in desc or "raw source" in desc or "external source" in desc
+            or (not has_upstream and (defn or {}).get("groupName") and (defn or {}).get("groupName").lower() in ("raw", "source", "sources", "ingest", "ingestion", "staging", "stg"))
+        )
+        if looks_source:
+            k = kind or "cloud_source"
+            return f"dagster_plus.{k}_ingest"
         return "dagster_plus.CloudAsset"
 
     # Fast key → assetNode index so the layered layout loop doesn't
@@ -724,7 +741,7 @@ async def _hydrate_cloud_graph(project: Project) -> None:
                     "sensors": per_asset_sensors.get(key, []),
                     "component_icon": "cloud",
                     "component_attributes": {},
-                    "component_type": _component_type_for(defn),
+                    "component_type": _component_type_for(defn, key, bool(upstream.get(key))),
                     "component_id": "cloud",
                     "io_input_type": None,
                     "io_output_type": None,

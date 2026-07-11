@@ -782,7 +782,8 @@ export function PropertyPanel({ nodeId, onConfigureComponent, onOpenFile, onNewP
               <div className="relative">
                 <button
                   onClick={() => setShowMaterializeMenu(!showMaterializeMenu)}
-                  disabled={isMaterializing}
+                  disabled={isMaterializing || !!(currentProject as any)?.is_dagster_plus}
+                  title={(currentProject as any)?.is_dagster_plus ? "Not available on Dagster+ (read-only)" : undefined}
                   className="flex items-center space-x-1 px-3 py-1.5 text-sm bg-emerald-600 text-white rounded-md hover:bg-emerald-700 disabled:bg-gray-400 disabled:cursor-not-allowed"
                 >
                   <Play className="w-4 h-4" />

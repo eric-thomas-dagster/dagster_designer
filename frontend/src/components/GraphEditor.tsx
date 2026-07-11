@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import ReactFlow, {
   Node,
   Edge,
@@ -379,6 +379,10 @@ interface GraphEditorProps {
 
 function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource }: GraphEditorProps) {
   const [addDataOpen, setAddDataOpen] = useState(false);
+  // Group-collapse toggle -- folds assets by group_name into one node
+  // per group, edges aggregated. Auto-on for large cloud graphs
+  // (>60 assets) so users see manageable structure by default.
+  const [collapseToGroups, setCollapseToGroups] = useState(false);
   const { currentProject, updateGraph, setCurrentProject } = useProjectStore();
   const [nodes, setNodes, onNodesChange] = useNodesState([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState([]);
@@ -695,6 +699,22 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource }: G
         shouldAutoArrange.current = true;
       }
 
+      // Dagster+ (cloud) projects come in with a naive
+      // longest-path layout on the backend; that stacks large layers
+      // vertically and looks bad. Always schedule an auto-arrange on
+      // first render so users see a properly grouped graph without
+      // clicking Arrange manually.
+      if ((currentProject as any).is_dagster_plus) {
+        shouldAutoArrange.current = true;
+        // Wide cloud graphs default to collapsed-to-groups so the
+        // first paint isn't a hundred-node wall. Users can hit
+        // "Expand assets" in the ribbon to see individuals.
+        const assetCount = currentProject.graph.nodes.filter((n: GraphNode) => n.node_kind === 'asset').length;
+        if (assetCount > 60 && !collapseToGroups) {
+          setCollapseToGroups(true);
+        }
+      }
+
       const flowNodes: Node[] = currentProject.graph.nodes.map((node: GraphNode) => {
         // Use IO metadata from node.data if available (from backend), otherwise extract from schema cache
         const ioMetadata = (node.data.io_output_type || node.data.io_input_type)
@@ -718,13 +738,19 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource }: G
             node_kind: node.node_kind,
             source_component: node.source_component,
             ...ioMetadata,
-            // Add context menu handlers for asset nodes
-            ...(node.node_kind === 'asset' ? {
+            // Add context menu handlers for asset nodes. Skip for
+            // Dagster+ (cloud) projects — those actions all require
+            // a local .venv/dg CLI which cloud projects don't have,
+            // so clicking them 500s. AssetNode inspects data.onX
+            // presence to decide whether to render menu items;
+            // omitting the handlers hides the entries entirely.
+            ...(node.node_kind === 'asset' && !(currentProject as any).is_dagster_plus ? {
               onMaterialize: handleMaterializeAsset,
               onOpenLaunchpad: handleOpenLaunchpad,
               onPrimitiveClick,
               onRunToHere: handleRunToHere,
             } : {}),
+            is_dagster_plus: (currentProject as any).is_dagster_plus,
           },
         };
       });
@@ -1844,7 +1870,7 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource }: G
   }
 
   // Update nodes to show selection
-  const displayNodes = nodes.map((node) => {
+  const perAssetDisplay = nodes.map((node) => {
     // Use node.selected if it's explicitly set (e.g., by group selection), otherwise check selectedAssets
     const isSelected = node.selected !== undefined ? node.selected : selectedAssets.includes(node.id);
 
@@ -1857,6 +1883,74 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource }: G
       },
     };
   });
+
+  // Group-collapse mode: replace individual assets with one node per
+  // group_name (default: "ungrouped"). Edges collapse to inter-group
+  // links with counts. Great for wide cloud projects with hundreds of
+  // assets — users see the shape of the DAG first, then drill in.
+  const groupedView = React.useMemo(() => {
+    if (!collapseToGroups) return null;
+    const assets = perAssetDisplay.filter((n) => n.data?.node_kind === 'asset');
+    if (assets.length === 0) return null;
+    const groupOf = (n: Node): string => (n.data?.group_name || 'ungrouped');
+    const nodeToGroup = new Map<string, string>();
+    for (const n of assets) nodeToGroup.set(n.id, groupOf(n));
+
+    // Group summaries + aggregated positions (average of member positions)
+    const groupInfo: Record<string, { assets: Node[]; kinds: Set<string>; hasChecks: number; xSum: number; ySum: number; count: number }> = {};
+    for (const n of assets) {
+      const g = groupOf(n);
+      const info = groupInfo[g] ||= { assets: [], kinds: new Set(), hasChecks: 0, xSum: 0, ySum: 0, count: 0 };
+      info.assets.push(n);
+      for (const k of (n.data?.kinds || [])) info.kinds.add(k);
+      if ((n.data?.checks || []).length > 0) info.hasChecks += 1;
+      info.xSum += (n.position?.x || 0);
+      info.ySum += (n.position?.y || 0);
+      info.count += 1;
+    }
+
+    const groupNodes: Node[] = Object.entries(groupInfo).map(([g, info]) => ({
+      id: `__group__::${g}`,
+      type: 'group' as any,
+      position: { x: info.xSum / info.count, y: info.ySum / info.count },
+      data: {
+        label: g,
+        group_name: g,
+        assetCount: info.assets.length,
+        kinds: Array.from(info.kinds),
+        withChecks: info.hasChecks,
+        node_kind: 'asset',   // reuse existing renderer wiring
+        isGroup: true,
+        onExpand: () => setCollapseToGroups(false),
+      },
+      draggable: true,
+    }));
+
+    // Aggregate edges across groups. Skip self-loops (same group).
+    const seen = new Map<string, number>();
+    for (const e of edges) {
+      const s = nodeToGroup.get(e.source);
+      const t = nodeToGroup.get(e.target);
+      if (!s || !t || s === t) continue;
+      const k = `${s}→${t}`;
+      seen.set(k, (seen.get(k) || 0) + 1);
+    }
+    const groupEdges: Edge[] = Array.from(seen.entries()).map(([k, count]) => {
+      const [s, t] = k.split('→');
+      return {
+        id: `ge__${k}`,
+        source: `__group__::${s}`,
+        target: `__group__::${t}`,
+        label: count > 1 ? `${count} deps` : undefined,
+        style: { strokeWidth: Math.min(4, 1 + Math.log2(count + 1)), stroke: '#6366f1' },
+      } as Edge;
+    });
+
+    return { nodes: groupNodes, edges: groupEdges };
+  }, [collapseToGroups, perAssetDisplay, edges]);
+
+  const displayNodes = groupedView ? groupedView.nodes : perAssetDisplay;
+  const displayEdges = groupedView ? groupedView.edges : edges;
 
   return (
     <div className="w-full h-full flex flex-col">
@@ -1890,6 +1984,18 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource }: G
           <span>Add data</span>
         </button>
         <button
+          onClick={() => setCollapseToGroups(!collapseToGroups)}
+          className={`flex items-center gap-1.5 px-2.5 py-1.5 text-sm rounded ${
+            collapseToGroups ? 'bg-indigo-100 text-indigo-700 hover:bg-indigo-200' : 'text-gray-700 hover:bg-gray-100'
+          }`}
+          title={collapseToGroups ? 'Show individual assets' : 'Collapse to asset groups (better for wide graphs)'}
+        >
+          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" />
+          </svg>
+          <span>{collapseToGroups ? 'Expand assets' : 'Collapse to groups'}</span>
+        </button>
+        <button
           onClick={arrangeGroups}
           className="flex items-center gap-1.5 px-2.5 py-1.5 text-sm text-gray-700 hover:bg-gray-100 rounded"
           title="Arrange groups in a grid to prevent overlaps (preserves positions within groups)"
@@ -1904,7 +2010,7 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource }: G
       <div className="flex-1 min-h-0 relative">
       <ReactFlow
         nodes={displayNodes}
-        edges={edges}
+        edges={displayEdges}
         onNodesChange={onNodesChange}
         onEdgesChange={onEdgesChange}
         onConnect={onConnect}
