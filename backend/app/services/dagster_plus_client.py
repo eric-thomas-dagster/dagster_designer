@@ -174,9 +174,30 @@ query DagsterPlusDeployments {
 """
 
 
+REPOSITORIES_QUERY = """
+query DagsterPlusRepositories {
+  repositoriesOrError {
+    __typename
+    ... on RepositoryConnection {
+      nodes {
+        name
+        location { name }
+      }
+    }
+    ... on PythonError { message }
+  }
+}
+"""
+
+
+# schedulesOrError and sensorsOrError both REQUIRE a RepositorySelector
+# at the Dagster+ deployment layer, so callers enumerate repositories
+# first (via REPOSITORIES_QUERY) then run these once per repo. The
+# `repositorySelector` variable takes {repositoryLocationName,
+# repositoryName}.
 SCHEDULES_QUERY = """
-query DagsterPlusSchedules {
-  schedulesOrError {
+query DagsterPlusSchedules($repositorySelector: RepositorySelector!) {
+  schedulesOrError(repositorySelector: $repositorySelector) {
     __typename
     ... on Schedules {
       results {
@@ -188,15 +209,19 @@ query DagsterPlusSchedules {
         scheduleState { status }
       }
     }
+    ... on RepositoryNotFoundError { message }
     ... on PythonError { message }
   }
 }
 """
 
 
+# metadata.assetKeys is where sensor-to-asset association lives when
+# the sensor targets specific assets. Missing when the sensor only
+# targets jobs, which is fine — we degrade to "no linked asset".
 SENSORS_QUERY = """
-query DagsterPlusSensors {
-  sensorsOrError {
+query DagsterPlusSensors($repositorySelector: RepositorySelector!) {
+  sensorsOrError(repositorySelector: $repositorySelector) {
     __typename
     ... on Sensors {
       results {
@@ -204,11 +229,101 @@ query DagsterPlusSensors {
         name
         description
         sensorType
-        pipelineName
         sensorState { status }
+        targets { pipelineName }
+        metadata {
+          assetKeys { path }
+        }
       }
     }
+    ... on RepositoryNotFoundError { message }
     ... on PythonError { message }
+  }
+}
+"""
+
+
+# Asset checks are best fetched through assetNodes, which lets us
+# also pull hasAssetChecks + jobNames + a cursor-friendly limit.
+# The top-level assetChecksOrError we were using earlier isn't the
+# documented shape at the deployment layer.
+ASSET_NODES_WITH_CHECKS_QUERY = """
+query DagsterPlusAssetNodes($checkLimit: Int) {
+  assetNodes {
+    assetKey { path }
+    groupName
+    jobNames
+    hasAssetChecks
+    assetChecksOrError(limit: $checkLimit) {
+      __typename
+      ... on AssetChecks {
+        checks {
+          name
+          description
+          assetKey { path }
+          jobNames
+          blocking
+          canExecuteIndividually
+          executionForLatestMaterialization {
+            id
+            runId
+            status
+            timestamp
+            evaluation {
+              timestamp
+              severity
+              description
+              success
+            }
+          }
+        }
+      }
+      ... on PythonError { message }
+    }
+    targetingInstigators {
+      __typename
+      ... on Schedule {
+        id
+        name
+        cronSchedule
+        pipelineName
+      }
+      ... on Sensor {
+        id
+        name
+        sensorType
+        targets { pipelineName }
+      }
+    }
+  }
+}
+"""
+
+
+ASSET_CHECK_HISTORY_QUERY = """
+query DagsterPlusAssetCheckHistory(
+  $assetKey: AssetKeyInput!, $checkName: String!, $limit: Int!, $cursor: String
+) {
+  assetCheckExecutions(
+    assetKey: $assetKey, checkName: $checkName, limit: $limit, cursor: $cursor
+  ) {
+    id
+    runId
+    status
+    timestamp
+    stepKey
+    evaluation {
+      timestamp
+      checkName
+      success
+      severity
+      description
+      metadataEntries {
+        __typename
+        label
+        description
+      }
+    }
   }
 }
 """

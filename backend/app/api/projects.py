@@ -429,12 +429,71 @@ async def get_project(project_id: str):
     return _strip_token(project) if project.is_dagster_plus else project
 
 
+async def _cloud_monitor_history(project: Project, monitor_id: str, limit: int) -> list[dict]:
+    """Fetch monitor run history live from Dagster+. `monitor_id` is
+    the check key we set during hydration — "<asset_key>::<check_name>".
+    Returns events in the same shape as the local monitor_events.jsonl
+    reader so the endpoint's downstream code doesn't care."""
+    from ..services.dagster_plus_client import query, ASSET_CHECK_HISTORY_QUERY
+    if '::' not in monitor_id:
+        return []
+    asset_key_str, check_name = monitor_id.rsplit('::', 1)
+    asset_key = {"path": asset_key_str.split('/')}
+    try:
+        data = await query(
+            project.dagster_plus_org or "",
+            project.dagster_plus_deployment or "",
+            project.dagster_plus_token or "",
+            ASSET_CHECK_HISTORY_QUERY,
+            variables={"assetKey": asset_key, "checkName": check_name, "limit": max(1, min(limit, 500)), "cursor": None},
+        )
+    except Exception as e:
+        print(f"[dagster+] check history for {monitor_id} failed: {e}", flush=True)
+        return []
+
+    events: list[dict] = []
+    from datetime import datetime, timezone
+    for exec_ in (data.get("assetCheckExecutions") or []):
+        evl = exec_.get("evaluation") or {}
+        ts_epoch = exec_.get("timestamp") or evl.get("timestamp")
+        if ts_epoch is None:
+            ts_iso = ""
+        else:
+            try:
+                ts_iso = datetime.fromtimestamp(float(ts_epoch), tz=timezone.utc).isoformat()
+            except Exception:
+                ts_iso = str(ts_epoch)
+        events.append({
+            "ts": ts_iso,
+            "monitor_id": monitor_id,
+            "kind": "asset_check",
+            "status": (exec_.get("status") or "").lower() or "unknown",
+            "message": evl.get("description") if evl else None,
+        })
+    # Return chronological order to match local behavior.
+    events.reverse()
+    return events
+
+
 async def _hydrate_cloud_graph(project: Project) -> None:
-    """Fetch assets + checks from Dagster+ and translate into the same
-    PipelineGraph shape the local project uses. Existing frontend
-    panels (Assets, Lineage, Monitors) already read from project.graph
-    — this lets them work against cloud data with zero UI changes."""
-    from ..services.dagster_plus_client import query, ASSETS_QUERY, ASSET_CHECKS_QUERY
+    """Fetch assets + checks + schedules + sensors from Dagster+ and
+    translate into the PipelineGraph shape local projects use.
+
+    Query strategy (matches the actual Dagster+ GraphQL schema):
+      • assetsOrError → asset graph shape (upstream/downstream)
+      • assetNodes { assetChecksOrError, targetingInstigators } →
+        per-asset attached checks + schedules/sensors (this is how
+        Dagster surfaces the reverse mapping — schedules don't
+        expose asset keys on their own)
+      • schedulesOrError / sensorsOrError → PER REPOSITORY, needed
+        for the Automation tab's project-wide list. Sensors carry
+        `metadata.assetKeys` when they target specific assets, so
+        we also merge those into per-asset attribution.
+    """
+    from ..services.dagster_plus_client import (
+        query, ASSETS_QUERY, ASSET_NODES_WITH_CHECKS_QUERY,
+        REPOSITORIES_QUERY, SCHEDULES_QUERY, SENSORS_QUERY,
+    )
     from ..models.graph import GraphNode, GraphEdge, PipelineGraph
 
     org = project.dagster_plus_org or ""
@@ -447,57 +506,97 @@ async def _hydrate_cloud_graph(project: Project) -> None:
     a_node = (assets_data.get("assetsOrError") or {})
     raw_assets = a_node.get("nodes") or []
 
-    # Also pull asset checks so nodes can carry their check list — the
-    # local project graph does this and Monitors + drawer both rely on
-    # it, so mirroring the shape keeps the existing UIs happy.
+    # assetNodes gives us checks + schedules/sensors attached to each
+    # asset in one shot — cheaper than one call per asset.
     checks_by_asset: dict[str, list[dict]] = {}
+    per_asset_schedules: dict[str, list[dict]] = {}
+    per_asset_sensors: dict[str, list[dict]] = {}
     try:
-        checks_data = await query(org, dep, tok, ASSET_CHECKS_QUERY)
-        for c in ((checks_data.get("assetChecksOrError") or {}).get("checks") or []):
-            key = "/".join(((c.get("assetKey") or {}).get("path") or []))
+        an_data = await query(org, dep, tok, ASSET_NODES_WITH_CHECKS_QUERY, variables={"checkLimit": 1000})
+        for node in (an_data.get("assetNodes") or []):
+            key = "/".join(((node.get("assetKey") or {}).get("path") or []))
             if not key:
                 continue
-            last = c.get("executionForLatestMaterialization") or {}
-            checks_by_asset.setdefault(key, []).append({
-                "name": c.get("name"),
-                "key": f"{key}::{c.get('name')}",
-                "description": c.get("description"),
-                "source": None,
-                "last_status": (last.get("status") if last else None),
-                "last_run_at": ((last.get("evaluation") or {}).get("timestamp") if last else None),
-            })
+            # Attach checks with normalized shape.
+            chk_or = (node.get("assetChecksOrError") or {})
+            if chk_or.get("__typename") == "AssetChecks":
+                for c in (chk_or.get("checks") or []):
+                    last = c.get("executionForLatestMaterialization") or {}
+                    evl = last.get("evaluation") if last else None
+                    checks_by_asset.setdefault(key, []).append({
+                        "name": c.get("name"),
+                        "key": f"{key}::{c.get('name')}",
+                        "description": c.get("description"),
+                        "source": None,
+                        "blocking": bool(c.get("blocking")),
+                        "job_names": list(c.get("jobNames") or []),
+                        "last_status": (last.get("status") if last else None),
+                        "last_run_at": (last.get("timestamp") if last else None),
+                        "last_severity": (evl.get("severity") if evl else None),
+                        "last_success": (evl.get("success") if evl else None),
+                    })
+            # Attribute schedules/sensors via targetingInstigators.
+            for ins in (node.get("targetingInstigators") or []):
+                if ins.get("__typename") == "Schedule":
+                    per_asset_schedules.setdefault(key, []).append({
+                        "name": ins.get("name"),
+                        "cron": ins.get("cronSchedule"),
+                        "pipeline_name": ins.get("pipelineName"),
+                    })
+                elif ins.get("__typename") == "Sensor":
+                    per_asset_sensors.setdefault(key, []).append({
+                        "name": ins.get("name"),
+                        "sensor_type": ins.get("sensorType"),
+                    })
     except Exception as e:
-        print(f"[dagster+] hydrate: asset_checks failed: {e}", flush=True)
+        print(f"[dagster+] hydrate: assetNodes failed: {e}", flush=True)
 
-    # Schedules + sensors from GraphQL. These aren't tied to specific
-    # assets in the response shape we get, but we still hang them on
-    # every asset that belongs to a pipeline the schedule/sensor
-    # targets. Coarse but matches what the Automation tab needs to
-    # render + counts feed the AI Assistant + insights endpoint.
-    schedules_by_pipeline: dict[str, list[dict]] = {}
-    sensors_by_pipeline: dict[str, list[dict]] = {}
+    # Project-level schedule + sensor lists — enumerate repositories
+    # first (both queries require a RepositorySelector) then run once
+    # per repo. Feeds the Automation tab's PrimitivesManager.
+    all_schedules: list[dict] = []
+    all_sensors: list[dict] = []
     try:
-        from ..services.dagster_plus_client import SCHEDULES_QUERY as _SCH_Q, SENSORS_QUERY as _SEN_Q
-        s_data = await query(org, dep, tok, _SCH_Q)
-        for s in (((s_data.get("schedulesOrError") or {}).get("results") or [])):
-            pn = s.get("pipelineName") or ""
-            schedules_by_pipeline.setdefault(pn, []).append({
-                "name": s.get("name"),
-                "cron": s.get("cronSchedule"),
-                "description": s.get("description"),
-                "status": (s.get("scheduleState") or {}).get("status"),
-            })
-        sen_data = await query(org, dep, tok, _SEN_Q)
-        for s in (((sen_data.get("sensorsOrError") or {}).get("results") or [])):
-            pn = s.get("pipelineName") or ""
-            sensors_by_pipeline.setdefault(pn, []).append({
-                "name": s.get("name"),
-                "description": s.get("description"),
-                "sensor_type": s.get("sensorType"),
-                "status": (s.get("sensorState") or {}).get("status"),
-            })
+        repos_data = await query(org, dep, tok, REPOSITORIES_QUERY)
+        repos = ((repos_data.get("repositoriesOrError") or {}).get("nodes") or [])
+        for repo in repos:
+            selector = {
+                "repositoryLocationName": ((repo.get("location") or {}).get("name") or ""),
+                "repositoryName": (repo.get("name") or ""),
+            }
+            try:
+                s_data = await query(org, dep, tok, SCHEDULES_QUERY, variables={"repositorySelector": selector})
+                for s in (((s_data.get("schedulesOrError") or {}).get("results") or [])):
+                    all_schedules.append({
+                        "name": s.get("name"),
+                        "cron": s.get("cronSchedule"),
+                        "description": s.get("description"),
+                        "status": (s.get("scheduleState") or {}).get("status"),
+                        "pipeline_name": s.get("pipelineName"),
+                        "repository": f"{selector['repositoryLocationName']}::{selector['repositoryName']}",
+                    })
+            except Exception as e:
+                print(f"[dagster+] schedules for {selector} failed: {e}", flush=True)
+            try:
+                sen_data = await query(org, dep, tok, SENSORS_QUERY, variables={"repositorySelector": selector})
+                for s in (((sen_data.get("sensorsOrError") or {}).get("results") or [])):
+                    linked_keys = ["/".join(k.get("path") or []) for k in ((s.get("metadata") or {}).get("assetKeys") or [])]
+                    entry = {
+                        "name": s.get("name"),
+                        "description": s.get("description"),
+                        "sensor_type": s.get("sensorType"),
+                        "status": (s.get("sensorState") or {}).get("status"),
+                        "repository": f"{selector['repositoryLocationName']}::{selector['repositoryName']}",
+                        "linked_asset_keys": linked_keys,
+                    }
+                    all_sensors.append(entry)
+                    # If the sensor names specific assets, attach it.
+                    for k in linked_keys:
+                        per_asset_sensors.setdefault(k, []).append({"name": s.get("name"), "sensor_type": s.get("sensorType")})
+            except Exception as e:
+                print(f"[dagster+] sensors for {selector} failed: {e}", flush=True)
     except Exception as e:
-        print(f"[dagster+] hydrate: schedules/sensors failed: {e}", flush=True)
+        print(f"[dagster+] hydrate: repository enumeration failed: {e}", flush=True)
 
     # Layout — longest-path layer assignment across the DAG so the
     # frontend has stable, readable coordinates.
@@ -533,13 +632,6 @@ async def _hydrate_cloud_graph(project: Project) -> None:
         by_layer.setdefault(d, []).append(k)
     for arr in by_layer.values():
         arr.sort()
-
-    # Flatten the pipeline-indexed schedule / sensor maps for two
-    # purposes: (1) attach them to every asset so PrimitivesManager
-    # sees SOMETHING for cloud projects, (2) populate
-    # project.discovered_primitives further below.
-    flat_schedules_list = [s for arr in schedules_by_pipeline.values() for s in arr]
-    flat_sensors_list = [s for arr in sensors_by_pipeline.values() for s in arr]
 
     X, Y = 260, 90
     nodes: list[GraphNode] = []
@@ -591,8 +683,12 @@ async def _hydrate_cloud_graph(project: Project) -> None:
                     # Attach ALL schedules/sensors to every asset for cloud —
                     # coarser than we'd like but the GraphQL response
                     # doesn't tell us which assets each schedule targets.
-                    "schedules": [{"name": s.get("name"), "cron": s.get("cron")} for s in flat_schedules_list],
-                    "sensors": [{"name": s.get("name")} for s in flat_sensors_list],
+                    # Accurately-attributed schedules/sensors via
+                    # assetNodes.targetingInstigators + sensor
+                    # metadata.assetKeys (empty when the asset isn't
+                    # a direct target of any schedule/sensor).
+                    "schedules": per_asset_schedules.get(key, []),
+                    "sensors": per_asset_sensors.get(key, []),
                     "component_icon": "cloud",
                     "component_attributes": {},
                     "component_type": _component_type_for(defn),
@@ -630,8 +726,8 @@ async def _hydrate_cloud_graph(project: Project) -> None:
     # the Automation tab (PrimitivesManager) has data to render. Keep
     # the shape roughly parallel to what dg list defs returns locally.
     project.discovered_primitives = {
-        "schedules": flat_schedules_list,
-        "sensors": flat_sensors_list,
+        "schedules": all_schedules,
+        "sensors": all_sensors,
         "jobs": [],
     }
 
@@ -5501,17 +5597,27 @@ class MonitorHistoryResponse(BaseModel):
 
 @router.get('/{project_id}/monitors/history', response_model=MonitorHistoryResponse)
 async def get_monitor_history(project_id: str, monitor_id: str, limit: int = 200):
-    """Return the recorded event log for one monitor. dbt tests are
-    snapshotted every time /monitors is fetched (or dbt is run), so
-    first-time visits do get at least one data point. Asset checks
-    populate as they run — Dagster's event log integration lands in
-    step 3."""
+    """Return the recorded event log for one monitor.
+
+    For local projects: read from monitor_events.jsonl (dbt tests are
+    snapshotted on each /monitors call + each dbt run).
+
+    For Dagster+ projects: fetch history live from the GraphQL API's
+    assetCheckExecutions endpoint. Requires the monitor_id to encode
+    the asset_key + check name — we store them as
+    "<asset_key>::<check_name>" when hydrating cloud checks, which
+    matches the existing local shape.
+    """
     from ..services.monitor_history import read_events
     project = project_service.get_project(project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
-    root = project_service._get_project_dir(project)
-    events = read_events(root, monitor_id=monitor_id, limit=limit)
+
+    if project.is_dagster_plus:
+        events = await _cloud_monitor_history(project, monitor_id, limit)
+    else:
+        root = project_service._get_project_dir(project)
+        events = read_events(root, monitor_id=monitor_id, limit=limit)
     points = [MonitorHistoryPoint(**{k: v for k, v in e.items() if k in MonitorHistoryPoint.model_fields}) for e in events]
     # Filter to numeric points for the chart (drop nulls, keep ts).
     # Include expected_min/max when present so the chart can render
