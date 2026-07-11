@@ -404,7 +404,7 @@ export function ProjectManager() {
                 className="fixed inset-0 z-10"
                 onClick={() => setShowProjectMenu(false)}
               />
-              <div className="absolute right-0 mt-1 w-56 bg-white border border-gray-200 rounded-md shadow-lg z-20">
+              <div className="absolute right-0 mt-1 w-64 bg-white border border-gray-200 rounded-md shadow-lg z-20">
                 <button
                   onClick={() => {
                     setShowNewDialog(true);
@@ -440,12 +440,12 @@ export function ProjectManager() {
                     setShowDagsterPlusDialog(true);
                     setShowProjectMenu(false);
                   }}
-                  className="w-full flex items-center space-x-2 px-4 py-2 text-sm hover:bg-blue-50 group"
+                  className="w-full flex items-center space-x-2 px-4 py-2 text-sm hover:bg-blue-50 group whitespace-nowrap"
                 >
                   <div className="w-4 h-4 rounded bg-gradient-to-br from-blue-500 to-cyan-500 flex items-center justify-center flex-shrink-0">
                     <Cloud className="w-2.5 h-2.5 text-white" />
                   </div>
-                  <span className="text-blue-700 group-hover:text-blue-900 font-medium">Open a Dagster+ environment</span>
+                  <span className="text-blue-700 group-hover:text-blue-900 font-medium">Open Dagster+ Project</span>
                 </button>
                 <button
                   onClick={() => {
