@@ -709,6 +709,33 @@ async def _hydrate_cloud_graph(project: Project) -> None:
             a = assets_by_key.get(key) or {}
             # assetNodes flattens definition fields to the top level.
             defn = a
+            # Dagster+ marks connection/observed-only assets (e.g.
+            # information_schema, external BigQuery tables) with
+            # isExecutable=false + isMaterializable=false + empty
+            # jobNames. Real, project-defined assets are the opposite.
+            # Surfacing this as `is_external` lets the frontend hide
+            # them by default so users see real lineage first.
+            is_external = not (a.get("isExecutable") or a.get("isMaterializable")) and not (a.get("jobNames") or [])
+            # Normalize dagster tags into two arrays:
+            #  • kinds:  everything under dagster/kind/* (dbt, snowflake, bigquery, ...)
+            #  • tags:   flat "key" or "key=value" list for filter chips
+            raw_tags = a.get("tags") or []
+            kinds_from_tags: list[str] = []
+            flat_tags: list[str] = []
+            for t in raw_tags:
+                k = (t.get("key") or "")
+                v = (t.get("value") or "")
+                if k.startswith("dagster/kind/"):
+                    kinds_from_tags.append(k.rsplit("/", 1)[-1])
+                elif k.startswith("dagster/"):
+                    continue   # internal Dagster tags aren't user-actionable
+                else:
+                    flat_tags.append(f"{k}={v}" if v else k)
+            # Owners → list of email/team strings
+            owner_strs: list[str] = []
+            for o in (a.get("owners") or []):
+                if isinstance(o, dict):
+                    owner_strs.append(o.get("email") or o.get("team") or "")
             nodes.append(GraphNode(
                 id=key_to_id[key],
                 type="asset",
@@ -719,13 +746,13 @@ async def _hydrate_cloud_graph(project: Project) -> None:
                     "name": key,
                     "description": defn.get("description") or "",
                     "group_name": defn.get("groupName"),
-                    "owners": [],
-                    "kinds": [defn.get("computeKind")] if defn.get("computeKind") else [],
-                    "tags": [],
-                    # Definition-less assets are external references (not
-                    # defined in this deployment) so they aren't
-                    # executable from here.
-                    "is_executable": bool(defn),
+                    "owners": owner_strs,
+                    "kinds": kinds_from_tags or ([defn.get("computeKind")] if defn.get("computeKind") else []),
+                    "tags": flat_tags,
+                    "is_executable": bool(defn.get("isExecutable")) if defn else False,
+                    "is_materializable": bool(defn.get("isMaterializable")),
+                    "is_observable": bool(defn.get("isObservable")),
+                    "is_external": is_external,
                     "automation_condition": None,
                     "deps": upstream.get(key, []),
                     "checks": checks_by_asset.get(key, []),

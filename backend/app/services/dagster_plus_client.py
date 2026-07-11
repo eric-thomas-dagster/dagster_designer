@@ -122,8 +122,17 @@ query DagsterPlusAssets {
     description
     computeKind
     isPartitioned
+    isExecutable
+    isMaterializable
+    isObservable
     jobNames
     hasAssetChecks
+    tags { key value }
+    owners {
+      __typename
+      ... on UserAssetOwner { email }
+      ... on TeamAssetOwner { team }
+    }
     dependencyKeys { path }
     dependedByKeys { path }
     assetChecksOrError(limit: 1000) {

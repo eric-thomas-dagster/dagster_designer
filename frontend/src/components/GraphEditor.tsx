@@ -393,6 +393,11 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource }: G
   // a searchable / filterable table (catalog). Catalog is a huge win
   // for wide cloud orgs where the graph is hard to scan.
   const [viewMode, setViewMode] = useState<'graph' | 'catalog'>('graph');
+  // Hide "external" (connection-only) assets — the observed-only
+  // Iceberg / BigQuery / Databricks information_schema rows Dagster+
+  // brings in via connections. Default ON for cloud projects since
+  // they usually flood the graph.
+  const [hideExternal, setHideExternal] = useState(false);
   const { currentProject, updateGraph, setCurrentProject } = useProjectStore();
   const [nodes, setNodes, onNodesChange] = useNodesState([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState([]);
@@ -1898,17 +1903,30 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource }: G
 
   const matchesFilters = (node: Node): boolean => {
     if (node.data?.node_kind !== 'asset') return true;   // components always pass
+    if (hideExternal && node.data?.is_external) return false;
     if (groupFilter !== 'all' && (node.data?.group_name || '') !== groupFilter) return false;
     if (kindFilter !== 'all' && !(node.data?.kinds || []).includes(kindFilter)) return false;
     if (assetSearch.trim()) {
       const q = assetSearch.trim().toLowerCase();
-      const hay = `${node.data?.asset_key || ''} ${node.data?.label || ''} ${node.data?.description || ''}`.toLowerCase();
+      const hay = `${node.data?.asset_key || ''} ${node.data?.label || ''} ${node.data?.description || ''} ${(node.data?.tags || []).join(' ')} ${(node.data?.owners || []).join(' ')}`.toLowerCase();
       if (!hay.includes(q)) return false;
     }
     return true;
   };
 
-  const isFiltering = assetSearch.trim() !== '' || groupFilter !== 'all' || kindFilter !== 'all';
+  const isFiltering = hideExternal || assetSearch.trim() !== '' || groupFilter !== 'all' || kindFilter !== 'all';
+
+  // First-load defaults for Dagster+ projects: catalog view + hide
+  // externals + collapse-to-groups (already handled above). Fire
+  // once per project id so the user's toggles stick after that.
+  const didSetCloudDefaults = useRef<string | null>(null);
+  useEffect(() => {
+    if (!currentProject || !(currentProject as any).is_dagster_plus) return;
+    if (didSetCloudDefaults.current === currentProject.id) return;
+    didSetCloudDefaults.current = currentProject.id;
+    setViewMode('catalog');
+    setHideExternal(true);
+  }, [currentProject?.id]);
 
   // Update nodes to show selection. When filtering, hide non-matching
   // assets entirely so the layout compresses to what's relevant.
@@ -2032,9 +2050,18 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource }: G
               {allKinds.map((k) => <option key={k} value={k}>{k}</option>)}
             </select>
           )}
+          <label className="inline-flex items-center gap-1 text-[11px] text-gray-700 cursor-pointer" title="Hide 'external' assets — observed-only rows Dagster+ imports from connections (Databricks/BigQuery information_schema, etc). They're rarely useful in lineage.">
+            <input
+              type="checkbox"
+              checked={hideExternal}
+              onChange={(e) => setHideExternal(e.target.checked)}
+              className="w-3 h-3"
+            />
+            <span>Hide external</span>
+          </label>
           {isFiltering && (
             <button
-              onClick={() => { setAssetSearch(''); setGroupFilter('all'); setKindFilter('all'); }}
+              onClick={() => { setAssetSearch(''); setGroupFilter('all'); setKindFilter('all'); setHideExternal(false); }}
               className="text-[11px] text-gray-500 hover:text-gray-800 underline decoration-dotted"
             >
               Clear filters
@@ -2119,6 +2146,9 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource }: G
                   <th className="text-left px-4 py-2 text-xs font-medium text-gray-700 uppercase tracking-wider">Asset key</th>
                   <th className="text-left px-4 py-2 text-xs font-medium text-gray-700 uppercase tracking-wider">Group</th>
                   <th className="text-left px-4 py-2 text-xs font-medium text-gray-700 uppercase tracking-wider">Kinds</th>
+                  <th className="text-left px-4 py-2 text-xs font-medium text-gray-700 uppercase tracking-wider" title="Materializable ↔ external (observed-only) ↔ observable">Type</th>
+                  <th className="text-left px-4 py-2 text-xs font-medium text-gray-700 uppercase tracking-wider">Owners</th>
+                  <th className="text-left px-4 py-2 text-xs font-medium text-gray-700 uppercase tracking-wider">Tags</th>
                   <th className="text-left px-4 py-2 text-xs font-medium text-gray-700 uppercase tracking-wider">Deps</th>
                   <th className="text-left px-4 py-2 text-xs font-medium text-gray-700 uppercase tracking-wider">Downstream</th>
                   <th className="text-left px-4 py-2 text-xs font-medium text-gray-700 uppercase tracking-wider">Checks</th>
@@ -2131,16 +2161,26 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource }: G
                   const upstreamEdges = displayEdges.filter((e) => e.target === n.id);
                   const downstreamEdges = displayEdges.filter((e) => e.source === n.id);
                   const checks = (n.data?.checks || []).length;
+                  const isExternal = !!n.data?.is_external;
+                  const isPartitioned = !!n.data?.is_partitioned;
+                  const isObservable = !!n.data?.is_observable;
+                  const owners = (n.data?.owners || []) as string[];
+                  const tags = (n.data?.tags || []) as string[];
                   return (
                     <tr
                       key={n.id}
-                      className="border-b border-gray-50 last:border-0 hover:bg-gray-50/50 cursor-pointer"
+                      className={`border-b border-gray-50 last:border-0 hover:bg-gray-50/50 cursor-pointer ${isExternal ? 'opacity-60' : ''}`}
                       onClick={() => {
                         onNodeSelect(n.id);
                         setViewMode('graph');
                       }}
                     >
-                      <td className="px-4 py-2 font-mono text-xs text-gray-900">{key}</td>
+                      <td className="px-4 py-2 font-mono text-xs text-gray-900">
+                        {key}
+                        {isPartitioned && (
+                          <span className="ml-1.5 text-[9px] uppercase tracking-wider text-purple-600" title="Partitioned">·part</span>
+                        )}
+                      </td>
                       <td className="px-4 py-2 text-xs text-gray-700">{n.data?.group_name || '—'}</td>
                       <td className="px-4 py-2 text-xs">
                         <div className="flex flex-wrap gap-1">
@@ -2149,12 +2189,34 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource }: G
                           ))}
                         </div>
                       </td>
+                      <td className="px-4 py-2 text-[10px]">
+                        {isExternal ? (
+                          <span className="px-1.5 py-0.5 rounded bg-gray-100 border border-gray-200 text-gray-500 font-medium" title="Observed via a connection, not materialized here">external</span>
+                        ) : isObservable ? (
+                          <span className="px-1.5 py-0.5 rounded bg-blue-50 border border-blue-200 text-blue-700 font-medium">observable</span>
+                        ) : (
+                          <span className="px-1.5 py-0.5 rounded bg-emerald-50 border border-emerald-200 text-emerald-700 font-medium">materializable</span>
+                        )}
+                      </td>
+                      <td className="px-4 py-2 text-[11px] text-gray-700">
+                        {owners.length > 0 ? owners.slice(0, 2).join(', ') + (owners.length > 2 ? ` +${owners.length - 2}` : '') : <span className="text-gray-400 italic">—</span>}
+                      </td>
+                      <td className="px-4 py-2 text-[10px]">
+                        <div className="flex flex-wrap gap-1">
+                          {tags.slice(0, 3).map((t: string) => (
+                            <span key={t} className="px-1.5 py-0.5 rounded bg-gray-100 text-gray-700 font-mono">{t}</span>
+                          ))}
+                          {tags.length > 3 && (
+                            <span className="text-gray-500">+{tags.length - 3}</span>
+                          )}
+                        </div>
+                      </td>
                       <td className="px-4 py-2 text-xs text-gray-600 tabular-nums">{upstreamEdges.length}</td>
                       <td className="px-4 py-2 text-xs text-gray-600 tabular-nums">{downstreamEdges.length}</td>
                       <td className="px-4 py-2 text-xs text-gray-600 tabular-nums">
                         {checks > 0 ? <span className="text-emerald-700 font-medium">{checks}</span> : '—'}
                       </td>
-                      <td className="px-4 py-2 text-[11px] text-gray-600 truncate max-w-[380px]" title={n.data?.description || ''}>
+                      <td className="px-4 py-2 text-[11px] text-gray-600 truncate max-w-[300px]" title={n.data?.description || ''}>
                         {n.data?.description || <span className="text-gray-400 italic">—</span>}
                       </td>
                     </tr>

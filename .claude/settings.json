@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git -C /Users/ericthomas/dagster_designer_latest/dagster_designer commit -m ' *)"
+    ]
+  }
+}
