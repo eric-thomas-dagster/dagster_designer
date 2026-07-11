@@ -470,6 +470,33 @@ export const projectsApi = {
     return response.data as any;
   },
 
+  listMonitors: async (
+    projectId: string,
+  ): Promise<{
+    monitors: Array<{
+      id: string;
+      kind: 'dbt_test' | 'asset_check' | 'enhanced_check';
+      label: string;
+      check_kind: string | null;
+      target_asset_keys: string[];
+      severity: string;
+      last_status: string | null;
+      last_run_at: string | null;
+      last_run_message: string | null;
+      last_run_failures: number | null;
+      duration_ms: number | null;
+      source_location: string | null;
+      source_project: string | null;
+      schedule: string | null;
+      tags: string[];
+      description: string | null;
+    }>;
+    stats: Record<string, number>;
+  }> => {
+    const response = await api.get(`/projects/${projectId}/monitors`);
+    return response.data as any;
+  },
+
   deleteDbtModel: async (
     projectId: string,
     body: { dbt_relative_path: string; model_unique_id: string; delete_schema_entry?: boolean },

@@ -3382,6 +3382,155 @@ def _filter_out_test(tests: list, kind: str, kwargs: dict) -> list:
     return result
 
 
+# ---------------------------------------------------------------------------
+# Monitors index — one unified surface across Dagster asset checks
+# (native + community EnhancedAssetCheck), dbt tests. Read-only for
+# v1; the frontend "Monitors" tab renders whatever this returns.
+#
+# The goal: match Monte Carlo's "at a glance, what monitors do we have
+# and how are they doing" without leaving Dagster Designer.
+# ---------------------------------------------------------------------------
+
+class Monitor(BaseModel):
+    id: str                             # stable identifier — dbt unique_id or asset_check key
+    kind: str                           # 'dbt_test' | 'asset_check' | 'enhanced_check'
+    label: str                          # short human-readable name
+    check_kind: str | None = None       # not_null / unique / freshness / row_count / custom / ...
+    target_asset_keys: list[str] = []   # assets this monitor watches
+    severity: str = 'error'             # 'error' | 'warn' | 'info'
+    last_status: str | None = None      # 'pass' | 'fail' | 'warn' | 'error' | None (never run)
+    last_run_at: str | None = None      # ISO ts of the last run when known
+    last_run_message: str | None = None
+    last_run_failures: int | None = None
+    duration_ms: int | None = None
+    source_location: str | None = None  # file / defs.yaml where this monitor lives
+    source_project: str | None = None   # dbt project name or component instance id
+    schedule: str | None = None         # cron or 'on_materialization' if attached
+    tags: list[str] = []
+    description: str | None = None
+
+
+class MonitorsResponse(BaseModel):
+    monitors: list[Monitor]
+    stats: dict[str, int]               # total / passing / failing / warn / never_run
+
+
+@router.get('/{project_id}/monitors', response_model=MonitorsResponse)
+async def list_monitors(project_id: str):
+    """Aggregate every monitor in the project into one flat list. Sources:
+
+      • Dagster asset checks (native @asset_check or AssetCheckSpec)
+        — read from the project graph's per-asset `checks` list which
+        is populated on the last regenerate-assets run.
+      • Community EnhancedAssetCheckComponent instances — detected via
+        component_type string on the graph nodes.
+      • dbt tests — parsed from every dbt project's manifest.json +
+        run_results.json (last-run status).
+
+    Each source is normalised into a `Monitor` record so the frontend
+    doesn't care which flavour created it. Future write endpoints will
+    edit the right file kind based on `Monitor.kind`.
+    """
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    monitors: list[Monitor] = []
+
+    # --- Native + enhanced asset checks (from the stored project graph) ---
+    for node in project.graph.nodes:
+        if node.node_kind != 'asset':
+            continue
+        asset_key = node.data.get('asset_key', '')
+        component_type = node.data.get('component_type', '') or ''
+        is_enhanced = 'EnhancedAssetCheck' in component_type
+        checks = node.data.get('checks') or []
+        for check in checks:
+            name = check.get('name') or check.get('key') or 'check'
+            monitors.append(Monitor(
+                id=str(check.get('key') or f"{asset_key}::{name}"),
+                kind='enhanced_check' if is_enhanced else 'asset_check',
+                label=name,
+                check_kind=(check.get('check_kind') or check.get('kind') or None),
+                target_asset_keys=[asset_key] if asset_key else [],
+                severity=(check.get('severity') or 'error').lower(),
+                description=check.get('description'),
+                source_location=check.get('source') or node.data.get('source'),
+                source_project=node.data.get('component_id') or component_type.rsplit('.', 1)[-1] if component_type else None,
+                last_status=check.get('last_status'),
+                last_run_at=check.get('last_run_at'),
+            ))
+
+    # --- dbt tests across every dbt project inside this Dagster project ---
+    root = project_service._get_project_dir(project)
+    for dbt_proj in _find_dbt_projects(root):
+        dbt_root = (root / dbt_proj.relative_path).resolve()
+        manifest = _load_dbt_artifact(dbt_root / 'target' / 'manifest.json')
+        run_results = _load_dbt_artifact(dbt_root / 'target' / 'run_results.json')
+        run_by_id: dict[str, dict] = {}
+        for r in run_results.get('results', []) or []:
+            uid = r.get('unique_id')
+            if uid:
+                run_by_id[uid] = r
+
+        nodes = manifest.get('nodes') or {}
+        for uid, node in nodes.items():
+            if node.get('resource_type') != 'test':
+                continue
+            test_meta = node.get('test_metadata') or {}
+            kind = test_meta.get('name') or 'singular'
+            kwargs = test_meta.get('kwargs') or {}
+            target_col = kwargs.get('column_name') or node.get('column_name')
+            # Which asset(s) does this test target? Use depends_on nodes;
+            # convert dbt unique_ids into asset-key-like strings so the
+            # UI can join monitors ↔ assets when we display them.
+            deps = (node.get('depends_on') or {}).get('nodes') or []
+            targets = [d for d in deps if d.startswith(('model.', 'source.', 'seed.', 'snapshot.'))]
+            target_keys = [d.replace('.', '/') for d in targets]  # dot → slash so it matches Dagster asset_key shape
+
+            rr = run_by_id.get(uid) or {}
+            monitors.append(Monitor(
+                id=uid,
+                kind='dbt_test',
+                label=(f"{kind}.{target_col}" if target_col else (node.get('name') or kind)),
+                check_kind=kind,
+                target_asset_keys=target_keys,
+                severity=(node.get('config') or {}).get('severity', 'error').lower(),
+                description=None,
+                source_location=node.get('original_file_path'),
+                source_project=dbt_proj.name,
+                last_status=rr.get('status'),
+                last_run_at=rr.get('completed_at') if isinstance(rr.get('completed_at'), str) else None,
+                last_run_message=(rr.get('message') or None),
+                last_run_failures=rr.get('failures') if isinstance(rr.get('failures'), int) else None,
+                duration_ms=int(rr.get('execution_time', 0) * 1000) if rr.get('execution_time') is not None else None,
+                tags=list(node.get('tags') or []),
+            ))
+
+    def _bucket(status: str | None) -> str:
+        s = (status or '').lower()
+        if s in ('pass', 'success'): return 'passing'
+        if s in ('fail', 'error', 'runtime error'): return 'failing'
+        if s == 'warn': return 'warn'
+        return 'never_run'
+
+    stats = {
+        'total': len(monitors),
+        'passing': sum(1 for m in monitors if _bucket(m.last_status) == 'passing'),
+        'failing': sum(1 for m in monitors if _bucket(m.last_status) == 'failing'),
+        'warn':    sum(1 for m in monitors if _bucket(m.last_status) == 'warn'),
+        'never_run': sum(1 for m in monitors if _bucket(m.last_status) == 'never_run'),
+        'dbt_tests':      sum(1 for m in monitors if m.kind == 'dbt_test'),
+        'asset_checks':   sum(1 for m in monitors if m.kind == 'asset_check'),
+        'enhanced_checks': sum(1 for m in monitors if m.kind == 'enhanced_check'),
+    }
+
+    # Sort: failing first (attention!), then warn, then passing, then never-run.
+    order = {'failing': 0, 'warn': 1, 'passing': 2, 'never_run': 3}
+    monitors.sort(key=lambda m: (order.get(_bucket(m.last_status), 4), m.label.lower()))
+    return MonitorsResponse(monitors=monitors, stats=stats)
+
+
 class DbtModelSqlDiffResponse(BaseModel):
     """Current on-disk SQL for a dbt model vs the version committed at
     HEAD. Both are raw strings; the frontend does the diff rendering

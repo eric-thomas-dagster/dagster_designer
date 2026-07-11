@@ -19,9 +19,10 @@ import { DataPreviewModal } from './components/DataPreviewModal';
 import { DagsterCloudChip } from './components/DagsterCloudChip';
 import { NotificationHost, notify, confirmDialog } from './components/Notifications';
 import { useProjectStore } from './hooks/useProject';
-import { Network, FileCode, Zap, Package, ExternalLink, Settings, Workflow, ChevronDown, Skull, AlertTriangle, X, Loader2, CheckCircle, XCircle, PanelLeftClose, PanelLeft, Clock, Play, Radar, Timer, Download, Database } from 'lucide-react';
+import { Network, FileCode, Zap, Package, ExternalLink, Settings, Workflow, ChevronDown, Skull, AlertTriangle, X, Loader2, CheckCircle, XCircle, PanelLeftClose, PanelLeft, Clock, Play, Radar, Timer, Download, Database, ShieldCheck } from 'lucide-react';
 import { IngestionsPanel } from './components/IngestionsPanel';
 import { DbtPanel } from './components/DbtPanel';
+import { MonitorsPanel } from './components/MonitorsPanel';
 import { dagsterUIApi, projectsApi, filesApi, primitivesApi } from './services/api';
 import type { ComponentInstance } from './types';
 
@@ -660,6 +661,7 @@ function App() {
     { value: 'assets', label: 'Assets', icon: Network },
     { value: 'ingestions', label: 'Ingestions', icon: Download },
     { value: 'dbt', label: 'dbt', icon: Database },
+    { value: 'monitors', label: 'Monitors', icon: ShieldCheck },
     { value: 'pipelines', label: 'Pipelines', icon: Workflow },
     { value: 'primitives', label: 'Automation', icon: Zap },
     { value: 'library', label: 'Library', icon: Package },
@@ -894,6 +896,14 @@ function App() {
               over any dbt project (local or cloned) in this project. */}
           <Tabs.Content value="dbt" className="flex-1 overflow-hidden">
             <DbtPanel onOpenFile={handleOpenFile} />
+          </Tabs.Content>
+
+          {/* Monitors Tab Content — unified Monte-Carlo-style surface
+              across native asset checks, community enhanced checks,
+              and dbt tests. Read-only v1 — write flow (schedule / add /
+              history / charts) lands next. */}
+          <Tabs.Content value="monitors" className="flex-1 overflow-hidden">
+            <MonitorsPanel onOpenFile={handleOpenFile} />
           </Tabs.Content>
 
           {/* Pipelines Tab Content */}
