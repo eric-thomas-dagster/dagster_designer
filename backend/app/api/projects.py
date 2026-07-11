@@ -4009,6 +4009,184 @@ async def ask_monitor(project_id: str, monitor_id: str, request: MonitorAskReque
     )
 
 
+class FleetAskRequest(BaseModel):
+    """Ask Claude about the whole Monitors fleet. Powers the AI
+    Assistant panel on the Monitors index — "which monitors are
+    trending toward failure?", "what's underprotected?", etc."""
+    question: str
+    history: list[dict] = []
+
+
+class FleetInsight(BaseModel):
+    kind: str          # 'concern' | 'suggestion' | 'observation'
+    title: str
+    detail: str
+    action: str | None = None    # optional actionable follow-up
+    monitor_ids: list[str] = []  # related monitors, if any
+    asset_keys: list[str] = []   # related assets, if any
+
+
+class FleetInsightsResponse(BaseModel):
+    insights: list[FleetInsight]
+    summary: str  # one-paragraph fleet health summary
+
+
+@router.get('/{project_id}/monitors/insights', response_model=FleetInsightsResponse)
+async def monitor_fleet_insights(project_id: str):
+    """Fleet-level AI-generated insights. Claude looks at all monitors
+    + their statuses + assets without any monitors, and returns 3-6
+    actionable observations. Cheap to compute even for large projects
+    because we only send counts + samples, not full history per
+    monitor."""
+    import json as _json
+
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    all_monitors = await list_monitors(project_id)
+    m_list = all_monitors.monitors
+    stats = all_monitors.stats
+
+    # Which assets have NO monitors? Compare against every asset in graph.
+    watched: set[str] = set()
+    for m in m_list:
+        for t in m.target_asset_keys:
+            watched.add(t)
+    all_assets = [n.data.get('asset_key') for n in project.graph.nodes if n.node_kind == 'asset']
+    all_assets = [a for a in all_assets if a]
+    unwatched = [a for a in all_assets if a not in watched]
+
+    failing = [m for m in m_list if (m.last_status or '').lower() in ('fail', 'error', 'runtime error')]
+    never_run = [m for m in m_list if not m.last_status]
+
+    # Compose a concise fleet snapshot for Claude.
+    snapshot_lines = [
+        f"FLEET_SUMMARY:",
+        f"  total: {stats.get('total', 0)}",
+        f"  passing: {stats.get('passing', 0)}",
+        f"  failing: {stats.get('failing', 0)}",
+        f"  warn: {stats.get('warn', 0)}",
+        f"  never_run: {stats.get('never_run', 0)}",
+        f"  by_kind: dbt={stats.get('dbt_tests', 0)}, native={stats.get('asset_checks', 0)}, enhanced={stats.get('enhanced_checks', 0)}",
+        "",
+        f"FAILING_NOW ({len(failing)}):",
+    ]
+    for m in failing[:15]:
+        snapshot_lines.append(f"  • {m.label} on {m.target_asset_keys} — {m.last_status}")
+    if len(failing) > 15:
+        snapshot_lines.append(f"  … +{len(failing) - 15} more")
+    snapshot_lines.append("")
+    snapshot_lines.append(f"UNWATCHED_ASSETS ({len(unwatched)}):")
+    for a in unwatched[:20]:
+        snapshot_lines.append(f"  • {a}")
+    if len(unwatched) > 20:
+        snapshot_lines.append(f"  … +{len(unwatched) - 20} more")
+    snapshot_lines.append("")
+    snapshot_lines.append(f"NEVER_RUN_MONITORS ({len(never_run)}):")
+    for m in never_run[:10]:
+        snapshot_lines.append(f"  • {m.label} on {m.target_asset_keys}")
+
+    system_prompt = (
+        "You are a senior data reliability engineer reviewing a Dagster project's "
+        "monitor fleet. You look at aggregate health + specific failing checks + "
+        "assets with no coverage, and surface 3-6 concrete insights. Each insight "
+        "should be actionable — 'X is failing, likely because Y, try Z' rather "
+        "than 'consider improving reliability'.\n\n"
+        "Return STRICT JSON (no prose, no code fences):\n"
+        '{"summary": "<one-paragraph fleet health>", "insights": [{'
+        '"kind": "concern|suggestion|observation", '
+        '"title": "<short>", "detail": "<1-2 sentences>", '
+        '"action": "<concrete next step or null>", '
+        '"monitor_ids": [...], "asset_keys": [...]}]}\n\n'
+        "Rules:\n"
+        "- Prioritize actionable concerns over generic observations.\n"
+        "- Mention specific monitor / asset names in title + detail.\n"
+        "- Use monitor_ids and asset_keys to reference concrete items so the UI can link.\n"
+        "- Cap at 6 insights — pick the highest-signal ones.\n"
+    )
+    user_prompt = (
+        f"{chr(10).join(snapshot_lines)}\n\n"
+        f"Analyze this fleet and return STRICT JSON matching the schema. If everything looks healthy, say so briefly (still return valid JSON)."
+    )
+
+    try:
+        text = await _call_llm(system_prompt, user_prompt)
+    except HTTPException as e:
+        if e.status_code == 400 and 'API key' in str(e.detail):
+            # Return a graceful empty response when no key — UI hides the panel.
+            return FleetInsightsResponse(insights=[], summary='')
+        raise
+
+    stripped = text.strip()
+    if stripped.startswith("```"):
+        stripped = stripped.split("```", 2)[1]
+        if stripped.startswith("json"):
+            stripped = stripped[len("json"):]
+        stripped = stripped.strip("` \n")
+    try:
+        parsed = _json.loads(stripped)
+    except Exception:
+        parsed = {"summary": text[:280], "insights": []}
+
+    insights: list[FleetInsight] = []
+    for r in (parsed.get("insights") or [])[:6]:
+        try:
+            insights.append(FleetInsight(
+                kind=str(r.get("kind") or "observation"),
+                title=str(r.get("title") or ""),
+                detail=str(r.get("detail") or ""),
+                action=r.get("action"),
+                monitor_ids=list(r.get("monitor_ids") or []),
+                asset_keys=list(r.get("asset_keys") or []),
+            ))
+        except Exception:
+            continue
+    return FleetInsightsResponse(
+        insights=insights,
+        summary=str(parsed.get("summary") or ''),
+    )
+
+
+@router.post('/{project_id}/monitors/ask-fleet', response_model=MonitorAskResponse)
+async def ask_monitor_fleet(project_id: str, request: FleetAskRequest):
+    """Fleet-level Q&A. Answers questions like 'what's underprotected?'
+    or 'which monitors are trending badly?' using the full monitor
+    list + stats as context."""
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    all_monitors = await list_monitors(project_id)
+    stats = all_monitors.stats
+
+    # Compact fleet dump — same shape as insights but shorter.
+    lines = [
+        f"FLEET: total={stats.get('total', 0)} passing={stats.get('passing', 0)} "
+        f"failing={stats.get('failing', 0)} warn={stats.get('warn', 0)} "
+        f"never_run={stats.get('never_run', 0)}",
+        "",
+        "MONITORS:",
+    ]
+    for m in all_monitors.monitors[:80]:
+        lines.append(
+            f"  • [{m.kind}] {m.label} on {m.target_asset_keys} → {m.last_status}"
+        )
+    if len(all_monitors.monitors) > 80:
+        lines.append(f"  … +{len(all_monitors.monitors) - 80} more")
+
+    system_prompt = (
+        "You are a senior data reliability engineer helping a colleague understand "
+        "a Dagster project's monitor fleet. Answer their question concisely (3-8 "
+        "sentences), referencing concrete monitor names + asset keys from the "
+        "context. If they ask a question you can't answer from the fleet snapshot, "
+        "say what you'd need to gather."
+    )
+    user_prompt = f"CONTEXT:\n{chr(10).join(lines)}\n\nQUESTION: {request.question}"
+    answer = await _call_llm(system_prompt, user_prompt, prior_turns=request.history)
+    return MonitorAskResponse(answer=answer, used_context={"monitor_count": len(all_monitors.monitors)})
+
+
 class GenerateMonitorsRequest(BaseModel):
     asset_key: str
     # Optional hints: number of proposals + focus area

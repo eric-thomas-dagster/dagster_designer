@@ -478,6 +478,31 @@ export const projectsApi = {
     return response.data as any;
   },
 
+  monitorFleetInsights: async (
+    projectId: string,
+  ): Promise<{
+    summary: string;
+    insights: Array<{
+      kind: 'concern' | 'suggestion' | 'observation' | string;
+      title: string;
+      detail: string;
+      action: string | null;
+      monitor_ids: string[];
+      asset_keys: string[];
+    }>;
+  }> => {
+    const response = await api.get(`/projects/${projectId}/monitors/insights`);
+    return response.data as any;
+  },
+
+  askMonitorFleet: async (
+    projectId: string,
+    body: { question: string; history?: Array<{ role: 'user' | 'assistant'; content: string }> },
+  ): Promise<{ answer: string; used_context: Record<string, any> }> => {
+    const response = await api.post(`/projects/${projectId}/monitors/ask-fleet`, body);
+    return response.data as any;
+  },
+
   askMonitor: async (
     projectId: string,
     monitorId: string,
