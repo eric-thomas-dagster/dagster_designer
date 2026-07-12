@@ -225,6 +225,12 @@ async def ingestion_history_endpoint(project_id: str, limit: int = 1000):
     project = project_service.get_project(project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
+    # Dagster+ (cloud) projects have no local ingestion log file. The
+    # Ingestions tab renders empty in that case (fine -- run history
+    # lives in the Dagster+ UI). Return empty rather than 500-ing on a
+    # missing directory.
+    if getattr(project, "is_dagster_plus", False):
+        return {"events": []}
     project_dir = project_service._get_project_dir(project)
     events = read_events(project_dir, limit=limit)
     return {"events": events}

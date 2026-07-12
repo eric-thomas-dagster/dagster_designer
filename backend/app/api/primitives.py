@@ -155,6 +155,33 @@ async def list_primitives(project_id: str, category: PrimitiveCategory):
         from ..services.project_service import project_service
         import sys
 
+        # Dagster+ (cloud) short-circuit: mirror the list-all endpoint.
+        _cloud_project = project_service.get_project(project_id)
+        if _cloud_project and getattr(_cloud_project, "is_dagster_plus", False):
+            dp = _cloud_project.discovered_primitives or {}
+            if category == "asset_check":
+                items: list[dict] = []
+                for node in (_cloud_project.graph.nodes if _cloud_project.graph else []):
+                    if node.node_kind != "asset":
+                        continue
+                    for check in (node.data.get("checks") or []):
+                        items.append({
+                            "name": check.get("name", ""),
+                            "key": check.get("key", ""),
+                            "description": check.get("description", ""),
+                            "asset_key": node.data.get("asset_key", ""),
+                            "file": check.get("source", ""),
+                        })
+            else:
+                cat_map = {"schedule": "schedules", "sensor": "sensors", "job": "jobs"}
+                items = list(dp.get(cat_map.get(category, ""), []))
+            return {
+                "project_id": project_id,
+                "category": category,
+                "primitives": items,
+                "total": len(items),
+            }
+
         current_time = time.time()
         if project_id in _assets_cache:
             cache_time, cached_defs = _assets_cache[project_id]
@@ -266,6 +293,36 @@ async def list_all_primitives(project_id: str):
         from ..services.asset_introspection_service import _assets_cache
         from ..services.project_service import project_service
         import sys
+
+        # Dagster+ (cloud) short-circuit: never touch the local FS or
+        # dg CLI. Everything is populated by _hydrate_cloud_graph via
+        # GraphQL and stored on project.discovered_primitives + graph.
+        _cloud_project = project_service.get_project(project_id)
+        if _cloud_project and getattr(_cloud_project, "is_dagster_plus", False):
+            dp = _cloud_project.discovered_primitives or {}
+            asset_checks: list[dict] = []
+            for node in (_cloud_project.graph.nodes if _cloud_project.graph else []):
+                if node.node_kind != "asset":
+                    continue
+                for check in (node.data.get("checks") or []):
+                    asset_checks.append({
+                        "name": check.get("name", ""),
+                        "key": check.get("key", ""),
+                        "description": check.get("description", ""),
+                        "asset_key": node.data.get("asset_key", ""),
+                        "file": check.get("source", ""),
+                    })
+            return {
+                "project_id": project_id,
+                "primitives": {
+                    "schedules": list(dp.get("schedules", [])),
+                    "sensors": list(dp.get("sensors", [])),
+                    "jobs": list(dp.get("jobs", [])),
+                    "asset_checks": asset_checks,
+                    "freshness_policies": [],
+                },
+                "source": "dagster_plus",
+            }
 
         current_time = time.time()
         if project_id in _assets_cache:
@@ -903,7 +960,34 @@ async def list_all_definitions(project_id: str):
         # First, try to use the shared asset introspection service
         # This service uses locking to prevent multiple simultaneous dg list defs calls
         from ..services.asset_introspection_service import asset_introspection_service, _assets_cache
+        from ..services.project_service import project_service
         import sys
+
+        # Dagster+ (cloud) short-circuit: no local codebase to introspect
+        # with `dg list defs`. Return primitives already hydrated from
+        # GraphQL by _hydrate_cloud_graph.
+        _cloud_project = project_service.get_project(project_id)
+        if _cloud_project and getattr(_cloud_project, "is_dagster_plus", False):
+            dp = _cloud_project.discovered_primitives or {}
+            asset_checks: list[dict] = []
+            for node in (_cloud_project.graph.nodes if _cloud_project.graph else []):
+                if node.node_kind != "asset":
+                    continue
+                for check in (node.data.get("checks") or []):
+                    asset_checks.append({
+                        "name": check.get("name", ""),
+                        "key": check.get("key", ""),
+                        "description": check.get("description", ""),
+                        "asset_key": node.data.get("asset_key", ""),
+                        "file": check.get("source", ""),
+                    })
+            return {
+                "project_id": project_id,
+                "jobs": list(dp.get("jobs", [])),
+                "schedules": list(dp.get("schedules", [])),
+                "sensors": list(dp.get("sensors", [])),
+                "asset_checks": asset_checks,
+            }
 
         current_time = time.time()
 

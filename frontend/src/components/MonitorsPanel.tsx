@@ -9,6 +9,9 @@ import { useProjectStore } from '@/hooks/useProject';
 import { AddMonitorDialog } from './AddMonitorDialog';
 import { MonitorDetailPage } from './MonitorDetailPage';
 import { GenerateMonitorsDialog } from './GenerateMonitorsDialog';
+import { AutoCoverageModal } from './AssetDetailPage';
+import { assetsApi } from '@/services/api';
+import { notify } from './Notifications';
 
 type Monitor = Awaited<ReturnType<typeof projectsApi.listMonitors>>['monitors'][number];
 type Status = 'passing' | 'failing' | 'warn' | 'never_run';
@@ -20,9 +23,11 @@ const KIND_META: Record<Monitor['kind'], { label: string; icon: any; tone: strin
 };
 
 const bucket = (m: Monitor): Status => {
+  // Local vocabulary: pass|success|fail|error|warn. Dagster+ (cloud)
+  // returns SUCCEEDED|FAILED|SKIPPED from AssetCheckExecutionResolvedStatus.
   const s = (m.last_status || '').toLowerCase();
-  if (s === 'pass' || s === 'success') return 'passing';
-  if (s === 'fail' || s === 'error' || s === 'runtime error') return 'failing';
+  if (s === 'pass' || s === 'success' || s === 'succeeded') return 'passing';
+  if (s === 'fail' || s === 'error' || s === 'runtime error' || s === 'failed') return 'failing';
   if (s === 'warn') return 'warn';
   return 'never_run';
 };
@@ -166,11 +171,14 @@ export function MonitorsPanel({ onOpenFile }: MonitorsPanelProps) {
           </div>
 
           {/* AI Assistant — fleet-level insights + chat. Only renders
-              when an LLM key is configured (empty response otherwise). */}
-          <FleetAiAssistant projectId={currentProject.id} onOpenMonitor={(id) => {
-            const m = monitors.find((x) => x.id === id);
-            if (m) setSelected(m);
-          }} />
+              when an LLM key is configured (empty response otherwise).
+              Hidden for Dagster+ cloud projects (read-only). */}
+          {!(currentProject as any).is_dagster_plus && (
+            <FleetAiAssistant projectId={currentProject.id} onOpenMonitor={(id) => {
+              const m = monitors.find((x) => x.id === id);
+              if (m) setSelected(m);
+            }} />
+          )}
 
           {/* Alerts strip — failures right now */}
           {failing.length > 0 && (
@@ -192,6 +200,12 @@ export function MonitorsPanel({ onOpenFile }: MonitorsPanelProps) {
                 Show failing →
               </button>
             </div>
+          )}
+
+          {/* Coverage gaps -- assets with zero monitors. Bulk Auto
+              Coverage entry point lives here. */}
+          {!(currentProject as any)?.is_dagster_plus && (
+            <CoverageGapsSection monitors={monitors} />
           )}
 
           {/* Filter bar */}
@@ -940,6 +954,405 @@ function Fact({ label, value, mono }: { label: string; value: string; mono?: boo
     <div className="flex flex-col gap-0.5">
       <span className="text-[10px] uppercase tracking-wider text-gray-500">{label}</span>
       <span className={`text-gray-800 ${mono ? 'font-mono' : ''} break-all`}>{value}</span>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Coverage gaps section — assets in the project with zero monitors, plus
+// a bulk Auto Coverage flow. Users can multi-select assets and get a
+// per-asset review of suggested checks before applying.
+// ---------------------------------------------------------------------------
+
+interface UncoveredAsset {
+  asset_key: string;
+  group_name: string | null;
+  kinds: string[];
+  has_schedule: boolean;
+}
+
+function CoverageGapsSection({ monitors }: { monitors: Monitor[] }) {
+  const { currentProject } = useProjectStore();
+  const [expanded, setExpanded] = useState(false);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [singleAssetKey, setSingleAssetKey] = useState<string | null>(null);
+  const [bulkOpen, setBulkOpen] = useState(false);
+
+  // Every asset key that already has a monitor attached (as target).
+  const coveredKeys = useMemo(() => {
+    const s = new Set<string>();
+    for (const m of monitors) for (const k of m.target_asset_keys || []) s.add(k);
+    return s;
+  }, [monitors]);
+
+  // Uncovered = assets in the graph that neither have a monitor nor
+  // are external/connection stubs. Rank by "importance heuristic":
+  // has downstream consumers first, then has a schedule, then rest.
+  const uncovered = useMemo<UncoveredAsset[]>(() => {
+    if (!currentProject) return [];
+    const nodes = currentProject.graph?.nodes || [];
+    const list: UncoveredAsset[] = [];
+    for (const n of nodes) {
+      if (n.node_kind !== 'asset') continue;
+      const d = n.data as any;
+      if (d.is_external || d.is_connection) continue;
+      const key = (d.asset_key as string) || n.id;
+      if (coveredKeys.has(key)) continue;
+      list.push({
+        asset_key: key,
+        group_name: d.group_name || null,
+        kinds: Array.isArray(d.kinds) ? d.kinds : [],
+        has_schedule: Array.isArray(d.schedules) && d.schedules.length > 0,
+      });
+    }
+    // Rank: schedule first, then alphabetical for determinism.
+    list.sort((a, b) => {
+      if (a.has_schedule !== b.has_schedule) return a.has_schedule ? -1 : 1;
+      return a.asset_key.localeCompare(b.asset_key);
+    });
+    return list;
+  }, [currentProject, coveredKeys]);
+
+  if (uncovered.length === 0) {
+    return (
+      <div className="px-4 py-2.5 bg-emerald-50 border border-emerald-200 rounded-md flex items-center gap-3">
+        <CheckCircle2 className="w-5 h-5 text-emerald-600 flex-shrink-0" />
+        <div className="text-sm font-medium text-emerald-900">
+          Every asset in this project has at least one monitor. Nice.
+        </div>
+      </div>
+    );
+  }
+
+  const visibleUncovered = expanded ? uncovered : uncovered.slice(0, 8);
+  const allSelected = visibleUncovered.length > 0 && visibleUncovered.every((u) => selected.has(u.asset_key));
+
+  const toggle = (k: string) => setSelected((prev) => {
+    const next = new Set(prev);
+    if (next.has(k)) next.delete(k); else next.add(k);
+    return next;
+  });
+  const toggleAllVisible = () => {
+    if (allSelected) {
+      setSelected((prev) => {
+        const next = new Set(prev);
+        for (const u of visibleUncovered) next.delete(u.asset_key);
+        return next;
+      });
+    } else {
+      setSelected((prev) => {
+        const next = new Set(prev);
+        for (const u of visibleUncovered) next.add(u.asset_key);
+        return next;
+      });
+    }
+  };
+
+  return (
+    <div className="bg-white border border-amber-200 rounded-lg overflow-hidden">
+      <div className="flex items-center justify-between gap-3 border-b border-amber-100 px-4 py-2.5 bg-amber-50/50">
+        <div className="flex items-center gap-2 min-w-0">
+          <Zap className="w-4 h-4 text-amber-600" />
+          <div className="text-sm font-semibold text-amber-900">
+            Coverage gaps
+            <span className="ml-1.5 text-xs font-normal text-amber-700">
+              ({uncovered.length} asset{uncovered.length === 1 ? '' : 's'} with no monitors)
+            </span>
+          </div>
+        </div>
+        <div className="flex items-center gap-2 flex-shrink-0">
+          {selected.size > 0 && (
+            <button
+              onClick={() => setBulkOpen(true)}
+              className="inline-flex items-center gap-1 px-3 py-1 text-xs font-medium text-white bg-blue-600 hover:bg-blue-700 rounded"
+              title="Analyze the selected assets and pick which suggested checks to add"
+            >
+              <Zap className="w-3 h-3" />
+              Suggest coverage for {selected.size}
+            </button>
+          )}
+          <button
+            onClick={() => setExpanded(!expanded)}
+            className="text-xs font-medium text-amber-700 hover:text-amber-900"
+          >
+            {expanded ? 'Show fewer' : uncovered.length > 8 ? `Show all ${uncovered.length}` : ''}
+          </button>
+        </div>
+      </div>
+
+      <table className="w-full text-sm">
+        <thead className="bg-white border-b border-gray-100">
+          <tr>
+            <th className="w-8 px-3 py-1.5">
+              <input
+                type="checkbox"
+                checked={allSelected}
+                onChange={toggleAllVisible}
+                title="Toggle all visible"
+                className="w-3.5 h-3.5"
+              />
+            </th>
+            <th className="text-left px-3 py-1.5 text-[10px] font-medium text-gray-600 uppercase tracking-wider">Asset</th>
+            <th className="text-left px-3 py-1.5 text-[10px] font-medium text-gray-600 uppercase tracking-wider">Group</th>
+            <th className="text-left px-3 py-1.5 text-[10px] font-medium text-gray-600 uppercase tracking-wider">Kinds</th>
+            <th className="text-left px-3 py-1.5 text-[10px] font-medium text-gray-600 uppercase tracking-wider">Signals</th>
+            <th className="w-32 px-3 py-1.5"></th>
+          </tr>
+        </thead>
+        <tbody>
+          {visibleUncovered.map((u) => (
+            <tr key={u.asset_key} className="border-b border-gray-50 last:border-0 hover:bg-amber-50/30">
+              <td className="px-3 py-1.5">
+                <input
+                  type="checkbox"
+                  checked={selected.has(u.asset_key)}
+                  onChange={() => toggle(u.asset_key)}
+                  className="w-3.5 h-3.5"
+                />
+              </td>
+              <td className="px-3 py-1.5 font-mono text-xs text-gray-900 truncate">{u.asset_key}</td>
+              <td className="px-3 py-1.5 text-xs text-gray-700">{u.group_name || '—'}</td>
+              <td className="px-3 py-1.5 text-xs">
+                <div className="flex flex-wrap gap-1">
+                  {u.kinds.slice(0, 3).map((k) => (
+                    <span key={k} className="px-1.5 py-0.5 rounded bg-indigo-50 border border-indigo-200 text-indigo-700 text-[10px] font-mono">{k}</span>
+                  ))}
+                </div>
+              </td>
+              <td className="px-3 py-1.5 text-[10px]">
+                {u.has_schedule && (
+                  <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-blue-50 border border-blue-200 text-blue-700">
+                    <Clock className="w-2.5 h-2.5" />has schedule
+                  </span>
+                )}
+              </td>
+              <td className="px-3 py-1.5 text-right">
+                <button
+                  onClick={() => setSingleAssetKey(u.asset_key)}
+                  className="inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-medium text-blue-700 bg-blue-50 border border-blue-200 rounded hover:bg-blue-100"
+                >
+                  <Zap className="w-3 h-3" /> Auto cover
+                </button>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+
+      {singleAssetKey && (
+        <AutoCoverageModal
+          assetKey={singleAssetKey}
+          onClose={() => setSingleAssetKey(null)}
+        />
+      )}
+      {bulkOpen && (
+        <BulkAutoCoverageModal
+          assetKeys={Array.from(selected)}
+          onClose={() => {
+            setBulkOpen(false);
+            setSelected(new Set());
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+/**
+ * Bulk Auto Coverage flow -- fetches per-asset suggestions in one call,
+ * lets the user opt-in per suggestion (grouped by asset), then applies
+ * the whole batch through /coverage-apply-bulk. Same modal shape as the
+ * single-asset version but with a per-asset accordion.
+ */
+function BulkAutoCoverageModal({ assetKeys, onClose }: { assetKeys: string[]; onClose: () => void }) {
+  const { currentProject, loadProject } = useProjectStore();
+  const [loading, setLoading] = useState(true);
+  const [applying, setApplying] = useState(false);
+  const [perAsset, setPerAsset] = useState<Array<{ asset_key: string; suggestions: any[] }>>([]);
+  const [selected, setSelected] = useState<Record<string, Set<string>>>({}); // asset_key -> set of suggestion names
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!currentProject || assetKeys.length === 0) return;
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    assetsApi.coverageSuggestBulk(currentProject.id, assetKeys).then((r) => {
+      if (cancelled) return;
+      setPerAsset(r.per_asset || []);
+      // Pre-select high-confidence per asset.
+      const init: Record<string, Set<string>> = {};
+      for (const a of r.per_asset || []) {
+        init[a.asset_key] = new Set(a.suggestions.filter((s: any) => s.confidence === 'high').map((s: any) => s.name));
+      }
+      setSelected(init);
+      setLoading(false);
+    }).catch((e) => {
+      if (cancelled) return;
+      setError(e?.response?.data?.detail || e?.message || 'Failed to load suggestions.');
+      setLoading(false);
+    });
+    return () => { cancelled = true; };
+  }, [currentProject?.id, assetKeys.join('|')]);
+
+  const totalSelected = Object.values(selected).reduce((n, s) => n + s.size, 0);
+  const totalSuggestions = perAsset.reduce((n, a) => n + a.suggestions.length, 0);
+
+  const toggle = (assetKey: string, name: string) => {
+    setSelected((prev) => {
+      const cur = new Set(prev[assetKey] || []);
+      if (cur.has(name)) cur.delete(name); else cur.add(name);
+      return { ...prev, [assetKey]: cur };
+    });
+  };
+  const toggleAllForAsset = (assetKey: string) => {
+    const a = perAsset.find((x) => x.asset_key === assetKey);
+    if (!a) return;
+    const cur = selected[assetKey] || new Set();
+    if (cur.size === a.suggestions.length) {
+      setSelected({ ...selected, [assetKey]: new Set() });
+    } else {
+      setSelected({ ...selected, [assetKey]: new Set(a.suggestions.map((s: any) => s.name)) });
+    }
+  };
+  const selectAllHighConfidence = () => {
+    const next: Record<string, Set<string>> = {};
+    for (const a of perAsset) {
+      next[a.asset_key] = new Set(a.suggestions.filter((s: any) => s.confidence === 'high').map((s: any) => s.name));
+    }
+    setSelected(next);
+  };
+  const selectNone = () => {
+    const next: Record<string, Set<string>> = {};
+    for (const a of perAsset) next[a.asset_key] = new Set();
+    setSelected(next);
+  };
+
+  const apply = async () => {
+    if (!currentProject || totalSelected === 0) return;
+    setApplying(true);
+    try {
+      const payload = perAsset
+        .map((a) => ({
+          asset_key: a.asset_key,
+          suggestions: a.suggestions.filter((s: any) => (selected[a.asset_key] || new Set()).has(s.name)),
+        }))
+        .filter((p) => p.suggestions.length > 0);
+      const r = await assetsApi.coverageApplyBulk(currentProject.id, payload);
+      if (r.applied > 0) notify.success(`Applied ${r.applied} check${r.applied === 1 ? '' : 's'} across ${payload.length} asset${payload.length === 1 ? '' : 's'}.`);
+      if (r.failed && r.failed.length > 0) {
+        notify.error(`${r.failed.length} check${r.failed.length === 1 ? '' : 's'} failed to apply.`);
+      }
+      await loadProject(currentProject.id);
+      onClose();
+    } catch (e: any) {
+      notify.error(e?.response?.data?.detail || e?.message || 'Apply failed.');
+    } finally {
+      setApplying(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-6" onClick={onClose}>
+      <div className="bg-white rounded-lg shadow-2xl w-full max-w-3xl max-h-[85vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
+        <div className="px-5 py-4 border-b border-gray-200 flex items-center justify-between">
+          <div>
+            <h2 className="text-base font-semibold text-gray-900 flex items-center gap-2">
+              <Zap className="w-4 h-4 text-blue-600" />
+              Suggest coverage for {assetKeys.length} asset{assetKeys.length === 1 ? '' : 's'}
+            </h2>
+            <p className="text-xs text-gray-500 mt-0.5">Review and pick which checks to apply. Recommended items are pre-selected.</p>
+          </div>
+          <button onClick={onClose} className="p-1 text-gray-400 hover:text-gray-700 rounded"><X className="w-5 h-5" /></button>
+        </div>
+
+        <div className="flex-1 overflow-y-auto p-5">
+          {loading && (
+            <div className="text-center py-8 text-gray-500">
+              <Loader2 className="w-6 h-6 animate-spin mx-auto mb-2" />
+              <p className="text-sm">Analyzing {assetKeys.length} assets…</p>
+            </div>
+          )}
+          {error && <div className="p-3 bg-rose-50 border border-rose-200 rounded text-sm text-rose-800">{error}</div>}
+          {!loading && !error && perAsset.length === 0 && (
+            <div className="text-center py-8 text-gray-500 text-sm">No suggestions returned for these assets.</div>
+          )}
+          {!loading && !error && perAsset.length > 0 && (
+            <>
+              <div className="flex items-center justify-between mb-3 text-xs">
+                <span className="text-gray-600">{totalSelected} of {totalSuggestions} suggestions selected</span>
+                <div className="flex items-center gap-2">
+                  <button onClick={selectAllHighConfidence} className="text-blue-700 hover:text-blue-900 font-medium">Recommended only</button>
+                  <span className="text-gray-300">|</span>
+                  <button onClick={selectNone} className="text-blue-700 hover:text-blue-900 font-medium">None</button>
+                </div>
+              </div>
+              {perAsset.map((a) => {
+                const assetSelected = selected[a.asset_key] || new Set();
+                if (a.suggestions.length === 0) return null;
+                return (
+                  <div key={a.asset_key} className="mb-4 border border-gray-200 rounded-lg overflow-hidden">
+                    <div className="px-3 py-2 bg-gray-50 border-b border-gray-100 flex items-center justify-between gap-2">
+                      <div className="flex-1 min-w-0">
+                        <div className="font-mono text-xs text-gray-900 truncate">{a.asset_key}</div>
+                        <div className="text-[10px] text-gray-500 mt-0.5">
+                          {assetSelected.size} of {a.suggestions.length} selected
+                        </div>
+                      </div>
+                      <button onClick={() => toggleAllForAsset(a.asset_key)} className="text-[10px] text-blue-700 hover:text-blue-900 font-medium">
+                        {assetSelected.size === a.suggestions.length ? 'Uncheck all' : 'Check all'}
+                      </button>
+                    </div>
+                    <div className="p-2 space-y-1">
+                      {a.suggestions.map((s: any) => (
+                        <label
+                          key={s.name}
+                          className={`flex items-start gap-2 p-2 rounded border text-xs cursor-pointer transition ${
+                            assetSelected.has(s.name) ? 'bg-blue-50/60 border-blue-300' : 'bg-white border-gray-200 hover:border-gray-300'
+                          }`}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={assetSelected.has(s.name)}
+                            onChange={() => toggle(a.asset_key, s.name)}
+                            className="mt-0.5"
+                          />
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <span className="font-medium text-gray-900">{s.description}</span>
+                              {s.confidence === 'high' && (
+                                <span className="text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-800 border border-emerald-200">
+                                  recommended
+                                </span>
+                              )}
+                            </div>
+                            <div className="text-[10px] text-gray-500 mt-0.5">{s.rationale}</div>
+                          </div>
+                        </label>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })}
+            </>
+          )}
+        </div>
+
+        <div className="px-5 py-3 border-t border-gray-200 flex items-center justify-between">
+          <p className="text-[11px] text-gray-500">Each selected item becomes an EnhancedAssetCheck under <span className="font-mono">defs/monitors/</span>.</p>
+          <div className="flex items-center gap-2">
+            <button onClick={onClose} className="px-3 py-1.5 text-sm text-gray-700 hover:bg-gray-100 rounded">Cancel</button>
+            <button
+              onClick={apply}
+              disabled={applying || loading || totalSelected === 0}
+              className="inline-flex items-center gap-1.5 px-4 py-1.5 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 rounded disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {applying ? <Loader2 className="w-4 h-4 animate-spin" /> : <Zap className="w-4 h-4" />}
+              {applying ? 'Applying…' : `Apply ${totalSelected} check${totalSelected === 1 ? '' : 's'}`}
+            </button>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }

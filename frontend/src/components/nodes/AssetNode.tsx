@@ -191,15 +191,26 @@ export const AssetNode = memo(({ data, selected, id }: NodeProps) => {
               <span>Needs config</span>
             </div>
           )}
-          {/* Group badge - only show if not "default" */}
+          {/* Group badge - only show if not "default". Doubles as a
+              "collapse this group" affordance when the asset is
+              currently rendered inside an expanded group (in which
+              case its data.onCollapseGroup callback is set by the
+              GraphEditor's per-group expand logic). */}
           {hasGroup && data.group_name !== 'default' && (
-            <div
-              className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-medium bg-blue-100 text-blue-700 border border-blue-300"
-              title={`Group: ${data.group_name}`}
+            <button
+              type="button"
+              onClick={(e) => {
+                if (!data.onCollapseGroup) return;
+                e.stopPropagation();
+                data.onCollapseGroup();
+              }}
+              className={`inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-medium bg-blue-100 text-blue-700 border border-blue-300 ${data.onCollapseGroup ? 'cursor-pointer hover:bg-blue-200' : ''}`}
+              title={data.onCollapseGroup ? `Collapse ${data.group_name} back to a group card` : `Group: ${data.group_name}`}
             >
               <Database className="w-2.5 h-2.5" />
               <span className="truncate max-w-[80px]">{data.group_name}</span>
-            </div>
+              {data.onCollapseGroup && <span className="ml-0.5 text-blue-500">×</span>}
+            </button>
           )}
 
           {/* Owners badge */}

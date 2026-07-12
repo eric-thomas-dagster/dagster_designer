@@ -94,21 +94,42 @@ class ConnectDagsterPlusRequest(BaseModel):
     location: str | None = None        # optional code-location filter
 
 
+class TestDagsterPlusDeploymentHint(BaseModel):
+    """Lightweight deployment descriptor surfaced on Test-connection so
+    the dialog can show users which deployments exist under the org.
+    Same shape as DagsterPlusDeployment below -- kept as a separate type
+    to avoid re-ordering that model above the ConnectDagsterPlusRequest."""
+    deployment_name: str
+    deployment_type: str | None = None
+    deployment_status: str | None = None
+
+
 class TestDagsterPlusResponse(BaseModel):
     ok: bool
     version: str | None = None
     detail: str | None = None
+    # When deployment is left blank at test time, we probe the org for
+    # its full deployment list so the dialog can show what's available
+    # and hint at the org's default. `default_deployment` is a heuristic
+    # (the sole PRODUCTION-typed entry, when there is exactly one).
+    deployments: list[TestDagsterPlusDeploymentHint] = []
+    default_deployment: str | None = None
 
 
 @router.post("/dagster-plus/test", response_model=TestDagsterPlusResponse)
 async def test_dagster_plus_connection(request: ConnectDagsterPlusRequest):
     """Validate a Dagster+ connection without creating a project. Called
     by the connect dialog's "Test connection" button so users get an
-    early ping/pong before we commit anything."""
-    from ..services.dagster_plus_client import query, DagsterPlusError, PING_QUERY
+    early ping/pong before we commit anything.
+
+    On success, we also enumerate the org's deployments so the dialog
+    can show users what's available and hint at the default (avoids
+    guessing 'prod' when a given org uses e.g. 'data-eng-prod')."""
+    from ..services.dagster_plus_client import (
+        query, DagsterPlusError, PING_QUERY, DEPLOYMENTS_QUERY, probe_default_deployment,
+    )
     try:
         data = await query(request.org, request.deployment, request.token, PING_QUERY)
-        return TestDagsterPlusResponse(ok=True, version=str(data.get("version") or "unknown"))
     except DagsterPlusError as e:
         # str(e) can contain non-ASCII characters that fail to encode
         # when the HTTP layer (or some downstream serializer) picks
@@ -117,6 +138,42 @@ async def test_dagster_plus_connection(request: ConnectDagsterPlusRequest):
         return TestDagsterPlusResponse(ok=False, detail=_safe(str(e)))
     except Exception as e:
         return TestDagsterPlusResponse(ok=False, detail=_safe(f"Unexpected error: {e}"))
+
+    version = str(data.get("version") or "unknown")
+
+    # Best-effort deployment enumeration. Runs at the org level (empty
+    # deployment) so it works whether or not the user filled in a
+    # specific one. Failure here is non-fatal -- the connection still
+    # validated.
+    deployments: list[TestDagsterPlusDeploymentHint] = []
+    default_deployment: str | None = None
+    try:
+        dep_data = await query(request.org, "", request.token, DEPLOYMENTS_QUERY)
+        for d in (dep_data.get("fullDeployments") or []):
+            deployments.append(TestDagsterPlusDeploymentHint(
+                deployment_name=d.get("deploymentName") or "",
+                deployment_type=d.get("deploymentType"),
+                deployment_status=d.get("deploymentStatus"),
+            ))
+    except Exception as e:
+        # Not fatal -- ping succeeded, we just can't enrich.
+        print(f"[dagster+] deployment enumeration during test failed: {e}", flush=True)
+
+    # Detect the org's actual default deployment via the org-level
+    # /graphql endpoint's 307 redirect. Dagster+'s deploymentType is
+    # 'PRODUCTION' for every non-branch deployment, so it can't tell us
+    # which one is the *default* -- the redirect target can.
+    try:
+        default_deployment = await probe_default_deployment(request.org, request.token)
+    except Exception as e:
+        print(f"[dagster+] default deployment probe failed: {e}", flush=True)
+
+    return TestDagsterPlusResponse(
+        ok=True,
+        version=version,
+        deployments=deployments,
+        default_deployment=default_deployment,
+    )
 
 
 def _safe(s: str) -> str:
@@ -159,7 +216,12 @@ async def connect_dagster_plus(request: ConnectDagsterPlusRequest):
     # since ProjectCreate doesn't carry them.
     project.is_dagster_plus = True
     project.dagster_plus_org = request.org.strip()
-    project.dagster_plus_deployment = (request.deployment or "prod").strip()
+    # Leave deployment None when user submits blank -- the client library
+    # then hits the org-level /graphql endpoint and follows Dagster+'s
+    # 307 redirect to the org's actual default (varies per org --
+    # hooli's is `data-eng-prod`, not `prod`). Forcing "prod" here made
+    # the picker misreport the current deployment and broke API calls.
+    project.dagster_plus_deployment = (request.deployment or "").strip() or None
     project.dagster_plus_token = request.token
     project.dagster_plus_location = (request.location or "").strip() or None
     project_service._save_project(project)
@@ -192,7 +254,7 @@ async def get_dagster_plus_assets(project_id: str):
     try:
         data = await query(
             project.dagster_plus_org or "",
-            project.dagster_plus_deployment or "prod",
+            project.dagster_plus_deployment or "",
             project.dagster_plus_token or "",
             ASSETS_QUERY,
         )
@@ -237,7 +299,7 @@ async def get_dagster_plus_asset_checks(project_id: str):
     try:
         data = await query(
             project.dagster_plus_org or "",
-            project.dagster_plus_deployment or "prod",
+            project.dagster_plus_deployment or "",
             project.dagster_plus_token or "",
             ASSET_CHECKS_QUERY,
         )
@@ -297,11 +359,22 @@ async def list_dagster_plus_deployments(project_id: str):
             DEPLOYMENTS_QUERY,
         )
     except DagsterPlusError as e:
-        raise HTTPException(status_code=502, detail=str(e))
+        # Sanitize -- str(e) can contain em-dashes / curly quotes that
+        # blow up when Starlette encodes them through downstream layers.
+        raise HTTPException(status_code=502, detail=_safe(str(e)))
+    except Exception as e:
+        # Any other unexpected error surfaces as 500 to the frontend;
+        # log the traceback here so we can debug from server logs
+        # instead of a blind "Request failed with status code 500".
+        import traceback
+        print(f"[dagster+] list_deployments unexpected error: {e}\n{traceback.format_exc()}", flush=True)
+        raise HTTPException(status_code=500, detail=_safe(f"Unexpected error listing deployments: {e}"))
     deps = [
         DagsterPlusDeployment(
             deployment_name=d.get("deploymentName") or "",
-            deployment_id=d.get("deploymentId"),
+            # Dagster+ returns deploymentId as an int in newer schema
+            # versions; our model types it as str | None so coerce.
+            deployment_id=(str(d.get("deploymentId")) if d.get("deploymentId") is not None else None),
             deployment_type=d.get("deploymentType"),
             deployment_status=d.get("deploymentStatus"),
         )
@@ -324,13 +397,24 @@ async def switch_dagster_plus_deployment(project_id: str, request: SwitchDeploym
     project = project_service.get_project(project_id)
     if not project or not project.is_dagster_plus:
         raise HTTPException(status_code=404, detail="Not a Dagster+ project.")
-    project.dagster_plus_deployment = (request.deployment or "").strip() or None
-    project_service._save_project(project)
     try:
-        await _hydrate_cloud_graph(project)
+        project.dagster_plus_deployment = (request.deployment or "").strip() or None
+        project_service._save_project(project)
+        try:
+            await _hydrate_cloud_graph(project)
+        except Exception as e:
+            # Non-fatal: hydrate can fail if the new deployment is bad;
+            # we still want the picker to update the pinned choice so
+            # the user can pick a different one without contorting.
+            import traceback
+            print(f"[dagster+] hydrate after switch failed: {e}\n{traceback.format_exc()}", flush=True)
+        return _strip_token(project)
+    except HTTPException:
+        raise
     except Exception as e:
-        print(f"[dagster+] hydrate after deployment switch failed: {e}", flush=True)
-    return _strip_token(project)
+        import traceback
+        print(f"[dagster+] switch_deployment unexpected error: {e}\n{traceback.format_exc()}", flush=True)
+        raise HTTPException(status_code=500, detail=_safe(f"Failed to switch deployment: {e}"))
 
 
 @router.get("/{project_id}/dagster-plus/runs", response_model=DagsterPlusRunsResponse)
@@ -343,7 +427,7 @@ async def get_dagster_plus_runs(project_id: str, limit: int = 25):
     try:
         data = await query(
             project.dagster_plus_org or "",
-            project.dagster_plus_deployment or "prod",
+            project.dagster_plus_deployment or "",
             project.dagster_plus_token or "",
             RUNS_QUERY,
             variables={"limit": max(1, min(limit, 100))},
@@ -528,6 +612,15 @@ async def _hydrate_cloud_graph(project: Project) -> None:
     assets_data = await query(org, dep, tok, ASSETS_QUERY)
     raw_assets = assets_data.get("assetNodes") or []
 
+    from datetime import datetime as _dt, timezone as _tz
+    def _epoch_to_iso(ts) -> str | None:
+        if ts is None:
+            return None
+        try:
+            return _dt.fromtimestamp(float(ts), tz=_tz.utc).isoformat()
+        except Exception:
+            return None
+
     checks_by_asset: dict[str, list[dict]] = {}
     per_asset_schedules: dict[str, list[dict]] = {}
     per_asset_sensors: dict[str, list[dict]] = {}
@@ -548,7 +641,10 @@ async def _hydrate_cloud_graph(project: Project) -> None:
                     "blocking": bool(c.get("blocking")),
                     "job_names": list(c.get("jobNames") or []),
                     "last_status": (last.get("status") if last else None),
-                    "last_run_at": (last.get("timestamp") if last else None),
+                    # Dagster+ returns timestamp as a Unix-epoch float;
+                    # convert to ISO-8601 UTC so the Monitor model's
+                    # `last_run_at: str | None` accepts it.
+                    "last_run_at": _epoch_to_iso(last.get("timestamp")) if last else None,
                     "last_severity": (evl.get("severity") if evl else None),
                     "last_success": (evl.get("success") if evl else None),
                 })
@@ -713,9 +809,8 @@ async def _hydrate_cloud_graph(project: Project) -> None:
             # information_schema, external BigQuery tables) with
             # isExecutable=false + isMaterializable=false + empty
             # jobNames. Real, project-defined assets are the opposite.
-            # Surfacing this as `is_external` lets the frontend hide
-            # them by default so users see real lineage first.
             is_external = not (a.get("isExecutable") or a.get("isMaterializable")) and not (a.get("jobNames") or [])
+
             # Normalize dagster tags into two arrays:
             #  • kinds:  everything under dagster/kind/* (dbt, snowflake, bigquery, ...)
             #  • tags:   flat "key" or "key=value" list for filter chips
@@ -731,11 +826,83 @@ async def _hydrate_cloud_graph(project: Project) -> None:
                     continue   # internal Dagster tags aren't user-actionable
                 else:
                     flat_tags.append(f"{k}={v}" if v else k)
+
+            # is_connection = a stricter classifier. Not every external
+            # asset is a "connection" -- BI dashboards (Tableau/Looker/
+            # Hex), orchestrator adapters (Airflow/dbt Cloud), and
+            # cross-project Dagster refs all show up as external too,
+            # and none of them are warehouse-catalog scrapes.
+            #
+            # We use a small allowlist of pure-storage kinds and flag
+            # an asset as a connection only when EVERY kind it carries
+            # is in that list. If any kind is something else (tableau,
+            # airflow, dbt, python, sql, etc.), it's not a scrape.
+            # This is much more defensible than trying to enumerate
+            # every "compute" kind Dagster+ might emit.
+            STORAGE_KINDS = {
+                'snowflake', 'bigquery', 'databricks', 'redshift',
+                'postgres', 'mysql', 'gcs', 's3', 'azureblob',
+                'iceberg', 'duckdb', 'clickhouse', 'trino',
+                'delta', 'unity', 'catalog',
+            }
+            path_parts = ((a.get("assetKey") or {}).get("path") or [])
+            has_info_schema = any(p == 'information_schema' for p in path_parts)
+            kinds_lower = [k.lower() for k in kinds_from_tags]
+            only_storage_kinds = bool(kinds_lower) and all(k in STORAGE_KINDS for k in kinds_lower)
+            # Top-level path segment tests. Dagster+ prefixes true
+            # connection assets with the connection id; real Dagster
+            # asset keys effectively never lead with these tokens.
+            CONNECTION_TOP_PREFIXES = (
+                'databricks', 'snowflake', 'bigquery', 'iceberg', 'redshift',
+                'gcp_', 'aws_', 'azure_',
+            )
+            top_seg = (path_parts[0] if path_parts else '').lower()
+            looks_like_connection_top = any(top_seg == p or top_seg.startswith(p) for p in CONNECTION_TOP_PREFIXES)
+            # Hard override: any asset participating in lineage (has
+            # upstream OR downstream dependencies) is definitely not a
+            # warehouse scrape. Scrapes are terminal observations --
+            # they don't reference or get referenced by project code.
+            # Applied AFTER the positive tells so a definitive path like
+            # 'Databricks/.../information_schema/x' still counts as a
+            # connection when it's a true leaf.
+            participates_in_lineage = (
+                bool(a.get("dependencyKeys") or [])
+                or bool(a.get("dependedByKeys") or [])
+            )
+            is_connection = (
+                not participates_in_lineage
+                and (
+                    has_info_schema
+                    or looks_like_connection_top
+                    or (is_external and only_storage_kinds)
+                )
+            )
+            # Connection source = the top-level path segment ("Databricks",
+            # "GCP_SALESENG", ...). Used to group these in the catalog.
+            connection_source = path_parts[0] if is_connection and path_parts else None
             # Owners → list of email/team strings
             owner_strs: list[str] = []
             for o in (a.get("owners") or []):
                 if isinstance(o, dict):
                     owner_strs.append(o.get("email") or o.get("team") or "")
+            # Column schema from asset metadata. Dagster+ surfaces column
+            # info via TableSchemaMetadataEntry -- we pull it here so the
+            # cloud dbt view can show the columns tab (and the schema
+            # cache benefits the ComponentConfigModal column-picker too).
+            cols_dict: dict[str, dict] = {}
+            for me in (a.get("metadataEntries") or []):
+                if me and me.get("__typename") == "TableSchemaMetadataEntry":
+                    schema = me.get("schema") or {}
+                    for c in (schema.get("columns") or []):
+                        cn = c.get("name")
+                        if not cn:
+                            continue
+                        cols_dict[cn] = {
+                            "description": c.get("description") or None,
+                            "data_type": c.get("type") or None,
+                            "tests": [],
+                        }
+                    break  # first TableSchema entry is authoritative
             nodes.append(GraphNode(
                 id=key_to_id[key],
                 type="asset",
@@ -753,6 +920,8 @@ async def _hydrate_cloud_graph(project: Project) -> None:
                     "is_materializable": bool(defn.get("isMaterializable")),
                     "is_observable": bool(defn.get("isObservable")),
                     "is_external": is_external,
+                    "is_connection": is_connection,
+                    "connection_source": connection_source,
                     "automation_condition": None,
                     "deps": upstream.get(key, []),
                     "checks": checks_by_asset.get(key, []),
@@ -774,7 +943,8 @@ async def _hydrate_cloud_graph(project: Project) -> None:
                     "io_output_type": None,
                     "io_input_required": False,
                     "io_expected_columns": None,
-                    "io_output_columns": None,
+                    "io_output_columns": list(cols_dict.keys()) if cols_dict else None,
+                    "columns": cols_dict,
                     "io_compatible_upstream": None,
                     "source": None,
                     "is_partitioned": defn.get("isPartitioned", False),
@@ -799,14 +969,38 @@ async def _hydrate_cloud_graph(project: Project) -> None:
 
     project.graph = PipelineGraph(nodes=nodes, edges=edges)
 
-    # Persist the schedules + sensors under discovered_primitives so
+    # Persist schedules + sensors + jobs under discovered_primitives so
     # the Automation tab (PrimitivesManager) has data to render. Keep
     # the shape roughly parallel to what dg list defs returns locally.
+    # Jobs: aggregate every distinct jobName referenced by an assetNode.
+    # Dagster+'s GraphQL doesn't expose a jobsOrError at deployment
+    # level in a way that gives us description / status, so we derive
+    # the list from asset-to-job attribution instead. Better than
+    # nothing and matches what users see in the Dagster+ UI.
+    seen_jobs: dict[str, dict] = {}
+    for a in raw_assets:
+        akey = "/".join(((a.get("assetKey") or {}).get("path") or []))
+        for jn in (a.get("jobNames") or []):
+            if not jn:
+                continue
+            entry = seen_jobs.setdefault(jn, {"name": jn, "asset_keys": []})
+            if akey and akey not in entry["asset_keys"]:
+                entry["asset_keys"].append(akey)
     project.discovered_primitives = {
         "schedules": all_schedules,
         "sensors": all_sensors,
-        "jobs": [],
+        "jobs": list(seen_jobs.values()),
     }
+
+    # Persist so downstream endpoints (Automations, Monitors, dbt tab)
+    # can read via project_service.get_project without re-hydrating.
+    # Every endpoint currently reloads the project from disk on each
+    # request, so without this the discovered_primitives + graph
+    # populated above vanish the moment this function returns.
+    try:
+        project_service._save_project(project)
+    except Exception as e:
+        print(f"[dagster+] save after hydrate failed: {e}", flush=True)
 
 
 class DagsterCloudLocation(BaseModel):
@@ -2837,21 +3031,35 @@ async def list_dbt_models(project_id: str, dbt_relative_path: str | None = None)
             await _hydrate_cloud_graph(project)
         except Exception:
             pass
+
+        # First pass: identify every dbt asset by its full asset key.
+        # Needed so we can rewrite dependency lists to point at other
+        # models' unique_ids instead of raw asset keys -- otherwise the
+        # lineage view can't stitch model->model edges and everything
+        # looks like source->model.
+        def _is_dbt_node(n) -> bool:
+            kinds = n.data.get('kinds') or []
+            desc = (n.data.get('description') or '').lower()
+            return any(k and 'dbt' in k.lower() for k in kinds) or (
+                'dbt model' in desc or 'dbt seed' in desc or 'dbt snapshot' in desc
+            )
+        dbt_asset_keys: set[str] = set()
+        for n in project.graph.nodes:
+            if n.node_kind == 'asset' and _is_dbt_node(n):
+                ak = n.data.get('asset_key') or ''
+                if ak:
+                    dbt_asset_keys.add(ak)
+
         cloud_models: list[DbtModelSummary] = []
         for n in project.graph.nodes:
             if n.node_kind != 'asset':
                 continue
-            kinds = n.data.get('kinds') or []
-            desc = (n.data.get('description') or '').lower()
-            is_dbt = any(k and 'dbt' in k.lower() for k in kinds) or (
-                'dbt model' in desc or 'dbt seed' in desc or 'dbt snapshot' in desc
-            )
-            if not is_dbt:
+            if not _is_dbt_node(n):
                 continue
             asset_key = n.data.get('asset_key') or ''
             name = asset_key.split('/')[-1] or asset_key
             checks = n.data.get('checks') or []
-            # Any dbt test from cloud shows up in the checks list —
+            # Any dbt test from cloud shows up in the checks list --
             # cluster them under the model as test detail entries.
             tests_detail: list[DbtTestDetail] = []
             for c in checks:
@@ -2862,19 +3070,41 @@ async def list_dbt_models(project_id: str, dbt_relative_path: str | None = None)
                     target_column=None,
                     last_run_status=(c.get('last_status') or None),
                 ))
+            # Map deps to unique_ids that match another model's, using
+            # the full asset key as the identifier suffix so paths with
+            # slashes stay unambiguous (`analytics/orders_cleaned` !=
+            # `raw/orders_cleaned`).
+            deps_raw = list(n.data.get('deps') or [])
+            deps_uids: list[str] = []
+            for dep in deps_raw:
+                if dep in dbt_asset_keys:
+                    deps_uids.append(f"model.cloud.{dep}")
+                else:
+                    # Non-dbt upstream (raw data source, external ref).
+                    # Prefix with `source.` so the lineage view renders
+                    # it in the "source" style rather than as a phantom
+                    # model.
+                    deps_uids.append(f"source.cloud.{dep}")
+            # Columns come from the asset's TableSchema metadata that
+            # _hydrate_cloud_graph attaches to node.data.columns. Same
+            # shape the local dbt path uses ({description, data_type,
+            # tests}) so the drawer's columns tab renders identically.
+            model_columns = n.data.get('columns') or {}
             cloud_models.append(DbtModelSummary(
-                unique_id=f"model.cloud.{name}",
+                unique_id=f"model.cloud.{asset_key}",
                 name=name,
-                resource_type='model',
+                resource_type=('seed' if 'dbt seed' in (n.data.get('description') or '').lower()
+                               else 'snapshot' if 'dbt snapshot' in (n.data.get('description') or '').lower()
+                               else 'model'),
                 schema=None,
                 database=None,
                 description=n.data.get('description') or None,
                 materialization=None,
                 tags=list(n.data.get('tags') or []),
-                depends_on_nodes=list(n.data.get('deps') or []),
+                depends_on_nodes=deps_uids,
                 package_name=None,
                 relative_sql_path=None,
-                columns={},
+                columns=model_columns,
                 tests=[t.unique_id for t in tests_detail],
                 tests_detail=tests_detail,
                 last_run_status=None,
@@ -4186,6 +4416,34 @@ class MonitorsResponse(BaseModel):
     stats: dict[str, int]               # total / passing / failing / warn / never_run
 
 
+def _finalize_monitors_response(monitors: list["Monitor"]) -> "MonitorsResponse":
+    """Compute bucket stats + sort monitors for the response. Extracted
+    so the cloud path (no local dbt / no monitor history file) can bail
+    out early after collecting checks from the graph."""
+    def _b(status: str | None) -> str:
+        # Local Dagster / dbt use pass|success|fail|error|warn.
+        # Dagster+ GraphQL surfaces SUCCEEDED|FAILED|STARTED|SKIPPED
+        # from AssetCheckExecutionResolvedStatus. Accept both.
+        s = (status or '').lower()
+        if s in ('pass', 'success', 'succeeded'): return 'passing'
+        if s in ('fail', 'error', 'runtime error', 'failed'): return 'failing'
+        if s == 'warn': return 'warn'
+        return 'never_run'
+    stats = {
+        'total': len(monitors),
+        'passing': sum(1 for m in monitors if _b(m.last_status) == 'passing'),
+        'failing': sum(1 for m in monitors if _b(m.last_status) == 'failing'),
+        'warn':    sum(1 for m in monitors if _b(m.last_status) == 'warn'),
+        'never_run': sum(1 for m in monitors if _b(m.last_status) == 'never_run'),
+        'dbt_tests':      sum(1 for m in monitors if m.kind == 'dbt_test'),
+        'asset_checks':   sum(1 for m in monitors if m.kind == 'asset_check'),
+        'enhanced_checks': sum(1 for m in monitors if m.kind == 'enhanced_check'),
+    }
+    order = {'failing': 0, 'warn': 1, 'passing': 2, 'never_run': 3}
+    monitors.sort(key=lambda m: (order.get(_b(m.last_status), 4), m.label.lower()))
+    return MonitorsResponse(monitors=monitors, stats=stats)
+
+
 @router.get('/{project_id}/monitors', response_model=MonitorsResponse)
 async def list_monitors(project_id: str):
     """Aggregate every monitor in the project into one flat list. Sources:
@@ -4215,6 +4473,18 @@ async def list_monitors(project_id: str):
     # frontend 500 timeout without any new information gained.
 
     # --- Native + enhanced asset checks (from the stored project graph) ---
+    def _coerce_ts(v) -> str | None:
+        """Defensive: some pre-fix cloud project files stored last_run_at
+        as a Unix-epoch float. Coerce to ISO string so the Monitor model
+        accepts it without a re-hydrate."""
+        if v is None or isinstance(v, str):
+            return v
+        try:
+            from datetime import datetime as _d, timezone as _t
+            return _d.fromtimestamp(float(v), tz=_t.utc).isoformat()
+        except Exception:
+            return None
+
     for node in project.graph.nodes:
         if node.node_kind != 'asset':
             continue
@@ -4235,11 +4505,18 @@ async def list_monitors(project_id: str):
                 source_location=check.get('source') or node.data.get('source'),
                 source_project=node.data.get('component_id') or component_type.rsplit('.', 1)[-1] if component_type else None,
                 last_status=check.get('last_status'),
-                last_run_at=check.get('last_run_at'),
+                last_run_at=_coerce_ts(check.get('last_run_at')),
             ))
 
     # --- dbt tests across every dbt project inside this Dagster project ---
+    # Skip for Dagster+ cloud projects: there's no local file system to
+    # walk for manifest.json / run_results.json. Asset-check monitors
+    # already came from the graph above via the cloud hydrate.
     root = project_service._get_project_dir(project)
+    if project.is_dagster_plus:
+        # Wrap up early -- everything below (dbt walk + monitor history)
+        # depends on a local project directory that cloud projects lack.
+        return _finalize_monitors_response(monitors)
     # Snapshot the current run_results.json into monitor history so
     # first-time visits populate a data point without waiting for a
     # subsequent dbt run. Idempotent via de-dupe on (monitor_id, ts).
@@ -4692,6 +4969,281 @@ async def _call_llm(system_prompt: str, user_prompt: str, prior_turns: list[dict
 
 # Keep the old name as an alias for any earlier code that references it.
 _call_claude = _call_llm
+
+
+# ---------------------------------------------------------------------------
+# Auto Coverage -- Sifflet-style "suggest a monitoring baseline for me"
+# for a single asset. Heuristics-only for now: freshness (when the asset
+# has a schedule), row_count anomaly, null_ratio per column, uniqueness
+# on id-shaped columns. No LLM required; deterministic + explainable.
+# ---------------------------------------------------------------------------
+
+
+class AutoCoverageSuggestion(BaseModel):
+    """One proposed check. The shape maps 1:1 to the fields the
+    /monitors POST endpoint understands so apply-flow can forward
+    without translation."""
+    name: str
+    check_kind: str                          # freshness | row_count | null_ratio | uniqueness
+    description: str
+    severity: str = 'error'
+    target_column: str | None = None
+    # Per-kind params (only the relevant ones are populated):
+    max_age_seconds: int | None = None
+    min_row_count: int | None = None
+    max_row_count: int | None = None
+    row_count_z_score: float | None = None
+    max_null_ratio: float | None = None
+    # Rationale for the suggestion -- lets users understand WHY we
+    # suggested it. Shows in the UI as a helper line.
+    rationale: str
+    # Confidence: 'high' | 'medium' | 'low'. UI can pre-check high-
+    # confidence suggestions and leave the rest for the user to opt in.
+    confidence: str = 'medium'
+
+
+class AutoCoverageSuggestResponse(BaseModel):
+    asset_key: str
+    suggestions: list[AutoCoverageSuggestion]
+
+
+@router.post('/{project_id}/assets/coverage-suggest', response_model=AutoCoverageSuggestResponse)
+async def suggest_auto_coverage(project_id: str, request: dict):
+    """Given an asset key, propose a set of monitors to add. Reads
+    from the hydrated project graph so it works for both local and
+    Dagster+ projects (though only local can currently apply)."""
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    asset_key = (request.get('asset_key') or '').strip()
+    if not asset_key:
+        raise HTTPException(status_code=400, detail="asset_key is required.")
+
+    node = next(
+        (n for n in (project.graph.nodes if project.graph else []) if
+         n.node_kind == 'asset' and (n.data.get('asset_key') == asset_key or n.id == asset_key)),
+        None,
+    )
+    if not node:
+        raise HTTPException(status_code=404, detail=f"Asset '{asset_key}' not found in this project.")
+
+    d = node.data or {}
+    columns: dict = d.get('columns') or {}
+    schedules: list = d.get('schedules') or []
+    existing_checks: list = d.get('checks') or []
+    existing_kinds = {(c.get('check_kind') or c.get('kind') or '').lower() for c in existing_checks}
+    existing_by_col = {(c.get('target_column') or ''): (c.get('check_kind') or '').lower()
+                       for c in existing_checks if c.get('target_column')}
+
+    suggestions: list[AutoCoverageSuggestion] = []
+    safe_name = asset_key.replace('/', '_').replace('.', '_').replace('-', '_').lower()
+
+    # ---- 1) Freshness ---------------------------------------------------
+    # If the asset has a schedule, suggest an SLA at 2x the perceived
+    # cadence. Without cron parsing we use a heuristic tiered ceiling:
+    # daily → 26h, hourly → 90m, weekly → 8d. Otherwise no suggestion.
+    if 'freshness' not in existing_kinds and schedules:
+        cron = (schedules[0] or {}).get('cron') or ''
+        max_age = _infer_freshness_max_age_seconds(cron)
+        if max_age:
+            suggestions.append(AutoCoverageSuggestion(
+                name=f"{safe_name}_freshness",
+                check_kind='freshness',
+                description=f"Alert if {asset_key} isn't materialized within the expected SLA window.",
+                max_age_seconds=max_age,
+                rationale=f"Asset has schedule '{schedules[0].get('name')}' ({cron or 'no cron parsed'}); suggested SLA is 2x the cadence.",
+                confidence='high',
+            ))
+
+    # ---- 2) Row-count anomaly ------------------------------------------
+    # Broadly applicable -- z-score detects sudden drops / spikes without
+    # needing the user to hard-code min/max bounds. Skip if the asset
+    # already has ANY row-count check to avoid duplicates.
+    if 'row_count' not in existing_kinds:
+        suggestions.append(AutoCoverageSuggestion(
+            name=f"{safe_name}_row_count_anomaly",
+            check_kind='row_count',
+            description=f"Detect a sudden row-count drop or spike on {asset_key}.",
+            row_count_z_score=3.0,
+            rationale="Row-count anomaly detection is cheap and catches most upstream data outages.",
+            confidence='high',
+        ))
+
+    # ---- 3) Uniqueness on id-shaped columns ----------------------------
+    ID_PATTERNS = ('_id', '_key', '_pk', '_uid')
+    for col in columns.keys():
+        col_l = col.lower()
+        looks_id = (col_l in ('id', 'pk', 'uid', 'uuid') or any(col_l.endswith(p) for p in ID_PATTERNS))
+        if not looks_id:
+            continue
+        if existing_by_col.get(col) in ('uniqueness', 'unique'):
+            continue
+        suggestions.append(AutoCoverageSuggestion(
+            name=f"{safe_name}_{col}_unique",
+            check_kind='uniqueness',
+            description=f"Ensure `{col}` is unique in {asset_key}.",
+            target_column=col,
+            rationale=f"`{col}` looks like an identifier column (matches id/_id/_key/_pk shape).",
+            confidence='high',
+        ))
+
+    # ---- 4) Null ratio on columns without an obvious nullable name -----
+    # For every column not already covered, propose a null_ratio<=1%.
+    # Pre-checking only 'high confidence' (id + freshness) is intentional;
+    # we mark null_ratio suggestions medium so users opt in per-column.
+    NULLABLE_HINTS = ('optional', 'nullable', 'note', 'comment', 'nickname')
+    for col in columns.keys():
+        col_l = col.lower()
+        if any(h in col_l for h in NULLABLE_HINTS):
+            continue  # column name suggests nulls are expected
+        if existing_by_col.get(col) in ('null_ratio', 'not_null'):
+            continue
+        suggestions.append(AutoCoverageSuggestion(
+            name=f"{safe_name}_{col}_not_null",
+            check_kind='null_ratio',
+            description=f"Alert if more than 1% of `{col}` rows are NULL.",
+            target_column=col,
+            max_null_ratio=0.01,
+            rationale=f"`{col}` doesn't look like a nullable-by-design column.",
+            confidence='medium',
+        ))
+
+    return AutoCoverageSuggestResponse(asset_key=asset_key, suggestions=suggestions)
+
+
+def _infer_freshness_max_age_seconds(cron: str) -> int | None:
+    """Very rough cron parser -- we're not trying to be a real cron
+    library, just to get a ballpark cadence. Falls back to daily.
+    Returns 2x the cadence as the SLA."""
+    if not cron:
+        return 26 * 3600  # 26h -- generous daily
+    c = cron.strip().lower()
+    # Common shortcuts first
+    if c in ('@hourly', '0 * * * *'):
+        return 2 * 3600 + 30 * 60      # 2h30m
+    if c in ('@daily', '@midnight', '0 0 * * *'):
+        return 26 * 3600                # 26h
+    if c in ('@weekly',) or c.endswith(' * 0'):
+        return 8 * 24 * 3600            # 8d
+    # If there's a specific minute + hour with a day-of-week, treat as weekly
+    parts = c.split()
+    if len(parts) == 5:
+        _min, hour, dom, mon, dow = parts
+        # Very roughly: if dom+mon+dow are wildcards → daily; if dow is set → weekly.
+        if dom == '*' and mon == '*' and dow == '*':
+            return 26 * 3600
+        if dow != '*' and dom == '*':
+            return 8 * 24 * 3600
+    return 26 * 3600
+
+
+class ApplyCoverageRequest(BaseModel):
+    asset_key: str
+    suggestions: list[AutoCoverageSuggestion]
+
+
+class ApplyCoverageResponse(BaseModel):
+    applied: int
+    failed: list[dict] = []                  # [{name, error}]
+
+
+@router.post('/{project_id}/assets/coverage-apply', response_model=ApplyCoverageResponse)
+async def apply_auto_coverage(project_id: str, request: ApplyCoverageRequest):
+    """Apply a batch of AutoCoverage suggestions. Each becomes an
+    EnhancedAssetCheck instance via the existing add_monitor logic.
+    Continues past individual failures so a bad suggestion doesn't
+    block the rest."""
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    if getattr(project, 'is_dagster_plus', False):
+        raise HTTPException(status_code=400, detail="Auto Coverage can only be applied to local projects (Dagster+ is read-only).")
+
+    applied = 0
+    failed: list[dict] = []
+    for s in request.suggestions:
+        try:
+            req = AddMonitorRequest(
+                implementation='enhanced_check',
+                name=s.name,
+                target_asset_key=request.asset_key,
+                check_kind=s.check_kind,
+                description=s.description,
+                severity=s.severity,
+                max_age_seconds=s.max_age_seconds,
+                min_row_count=s.min_row_count,
+                max_row_count=s.max_row_count,
+                row_count_z_score=s.row_count_z_score,
+                column=s.target_column,
+                max_null_ratio=s.max_null_ratio,
+                # Uniqueness for enhanced-check uses null_ratio=0 shim
+                # on the column when we don't have first-class uniqueness
+                # in the enhanced form yet. But the add_monitor validator
+                # accepts 'uniqueness' as a kind, so pass through.
+            )
+            await add_monitor(project_id, req)
+            applied += 1
+        except HTTPException as e:
+            failed.append({"name": s.name, "error": _safe(str(e.detail))})
+        except Exception as e:
+            failed.append({"name": s.name, "error": _safe(str(e))})
+
+    return ApplyCoverageResponse(applied=applied, failed=failed)
+
+
+# ---- Bulk versions -- used by the Monitors "Coverage gaps" flow ------
+
+
+class BulkCoverageSuggestRequest(BaseModel):
+    asset_keys: list[str]
+
+
+class BulkCoverageSuggestResponse(BaseModel):
+    per_asset: list[AutoCoverageSuggestResponse]
+
+
+@router.post('/{project_id}/assets/coverage-suggest-bulk', response_model=BulkCoverageSuggestResponse)
+async def suggest_auto_coverage_bulk(project_id: str, request: BulkCoverageSuggestRequest):
+    """Fan-out the single-asset suggestion endpoint across a batch.
+    Used by the Monitors page "Coverage gaps" flow so the user can
+    review a fleet-wide baseline without N sequential round-trips."""
+    per_asset: list[AutoCoverageSuggestResponse] = []
+    for k in request.asset_keys or []:
+        try:
+            r = await suggest_auto_coverage(project_id, {"asset_key": k})
+            per_asset.append(r)
+        except HTTPException:
+            # Non-fatal: skip assets we can't analyze (missing from
+            # graph, cross-project refs, etc.). Keep going for the rest.
+            continue
+    return BulkCoverageSuggestResponse(per_asset=per_asset)
+
+
+class BulkApplyCoverageRequest(BaseModel):
+    per_asset: list[ApplyCoverageRequest]
+
+
+class BulkApplyCoverageResponse(BaseModel):
+    applied: int
+    failed: list[dict] = []
+
+
+@router.post('/{project_id}/assets/coverage-apply-bulk', response_model=BulkApplyCoverageResponse)
+async def apply_auto_coverage_bulk(project_id: str, request: BulkApplyCoverageRequest):
+    """Apply per-asset selections for several assets in one call."""
+    total_applied = 0
+    all_failed: list[dict] = []
+    for entry in (request.per_asset or []):
+        try:
+            r = await apply_auto_coverage(project_id, entry)
+            total_applied += r.applied
+            for f in (r.failed or []):
+                all_failed.append({**f, "asset_key": entry.asset_key})
+        except HTTPException as e:
+            all_failed.append({"name": "-", "asset_key": entry.asset_key, "error": _safe(str(e.detail))})
+        except Exception as e:
+            all_failed.append({"name": "-", "asset_key": entry.asset_key, "error": _safe(str(e))})
+    return BulkApplyCoverageResponse(applied=total_applied, failed=all_failed)
 
 
 @router.post('/{project_id}/monitors/{monitor_id:path}/ask', response_model=MonitorAskResponse)

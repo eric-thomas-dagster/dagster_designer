@@ -35,7 +35,13 @@ export function ConnectDagsterPlusDialog({ open, onOpenChange, onConnected }: Co
   const [showToken, setShowToken] = useState(false);
   const [testing, setTesting] = useState(false);
   const [connecting, setConnecting] = useState(false);
-  const [testResult, setTestResult] = useState<{ ok: boolean; version?: string | null; detail?: string | null } | null>(null);
+  const [testResult, setTestResult] = useState<{
+    ok: boolean;
+    version?: string | null;
+    detail?: string | null;
+    deployments?: Array<{ deployment_name: string; deployment_type: string | null; deployment_status: string | null }>;
+    default_deployment?: string | null;
+  } | null>(null);
 
   const reset = () => {
     setName(''); setDescription(''); setOrg(''); setDeployment(''); setToken('');
@@ -204,25 +210,77 @@ deployment: deployment.trim(),
             </div>
 
             {testResult && (
-              <div className={`p-3 rounded flex items-start gap-2 text-xs ${
+              <div className={`p-3 rounded text-xs ${
                 testResult.ok
                   ? 'bg-emerald-50 border border-emerald-200 text-emerald-800'
                   : 'bg-rose-50 border border-rose-200 text-rose-800'
               }`}>
-                {testResult.ok ? <CheckCircle2 className="w-4 h-4 flex-shrink-0 mt-0.5" /> : <XCircle className="w-4 h-4 flex-shrink-0 mt-0.5" />}
-                <div>
-                  {testResult.ok ? (
-                    <>
-                      <div className="font-semibold">Connected!</div>
-                      <div className="mt-0.5">Dagster version <span className="font-mono">{testResult.version}</span>. Ready to save.</div>
-                    </>
-                  ) : (
-                    <>
-                      <div className="font-semibold">Couldn't connect</div>
-                      <div className="mt-0.5">{testResult.detail}</div>
-                    </>
-                  )}
+                <div className="flex items-start gap-2">
+                  {testResult.ok ? <CheckCircle2 className="w-4 h-4 flex-shrink-0 mt-0.5" /> : <XCircle className="w-4 h-4 flex-shrink-0 mt-0.5" />}
+                  <div className="flex-1">
+                    {testResult.ok ? (
+                      <>
+                        <div className="font-semibold">Connected!</div>
+                        <div className="mt-0.5">Dagster version <span className="font-mono">{testResult.version}</span>. Ready to save.</div>
+                      </>
+                    ) : (
+                      <>
+                        <div className="font-semibold">Couldn't connect</div>
+                        <div className="mt-0.5">{testResult.detail}</div>
+                      </>
+                    )}
+                  </div>
                 </div>
+                {testResult.ok && testResult.deployments && testResult.deployments.length > 0 && (
+                  <div className="mt-3 pt-3 border-t border-emerald-200">
+                    <div className="text-[11px] uppercase tracking-wider text-emerald-900/70 mb-1.5 font-medium">
+                      Deployments in this org ({testResult.deployments.length})
+                    </div>
+                    <div className="space-y-1">
+                      {testResult.deployments.map((d) => {
+                        const isDefault = testResult.default_deployment === d.deployment_name;
+                        const isPicked = deployment.trim() === d.deployment_name;
+                        return (
+                          <button
+                            key={d.deployment_name}
+                            type="button"
+                            onClick={() => setDeployment(isPicked ? '' : d.deployment_name)}
+                            className={`w-full flex items-center justify-between gap-2 px-2 py-1 rounded border text-left ${
+                              isPicked
+                                ? 'bg-emerald-100 border-emerald-400'
+                                : 'bg-white/50 border-emerald-100 hover:bg-emerald-50'
+                            }`}
+                            title={isPicked ? 'Click to clear (use org default)' : 'Click to pin this deployment'}
+                          >
+                            <div className="flex items-center gap-1.5 min-w-0">
+                              <span className="font-mono text-[11px] text-emerald-900 truncate">{d.deployment_name}</span>
+                              {/* Dagster+ tags every full deployment as
+                                  'PRODUCTION' regardless of intent, so the
+                                  type label isn't useful here. Show only
+                                  branch deployments (which do differ). */}
+                              {d.deployment_type && d.deployment_type.toUpperCase() !== 'PRODUCTION' && (
+                                <span className="text-[9px] uppercase tracking-wider px-1 py-0.5 rounded bg-emerald-100 text-emerald-800 border border-emerald-200">
+                                  {d.deployment_type.toLowerCase()}
+                                </span>
+                              )}
+                              {isDefault && (
+                                <span className="text-[9px] uppercase tracking-wider px-1 py-0.5 rounded bg-blue-100 text-blue-800 border border-blue-200" title="Org default (from /graphql redirect target)">
+                                  default
+                                </span>
+                              )}
+                            </div>
+                            {d.deployment_status && (
+                              <span className="text-[10px] text-emerald-700/70">{d.deployment_status.toLowerCase()}</span>
+                            )}
+                          </button>
+                        );
+                      })}
+                    </div>
+                    <div className="mt-1.5 text-[10px] text-emerald-800/70 italic">
+                      Leave the Deployment field blank to follow the org default automatically. Click a row to pin it instead.
+                    </div>
+                  </div>
+                )}
               </div>
             )}
           </div>

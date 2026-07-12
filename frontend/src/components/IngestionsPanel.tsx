@@ -435,8 +435,9 @@ export function IngestionsPanel({ onAddDataSource, onEditComponent }: Ingestions
         </button>
       </div>
 
-      {/* AI Assistant — fleet-level insights + chat */}
-      {currentProject && (
+      {/* AI Assistant — fleet-level insights + chat. Hidden on cloud
+          (read-only, so its "add / restructure" ideas can't be acted on). */}
+      {currentProject && !(currentProject as any).is_dagster_plus && (
         <div className="px-8 pt-4">
           <AiAssistantPanel
             title="AI Assistant · Ingestions"

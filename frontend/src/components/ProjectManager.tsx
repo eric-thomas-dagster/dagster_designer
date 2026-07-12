@@ -880,9 +880,15 @@ export function ProjectManager() {
                   <button
                     onClick={async (e) => {
                       e.stopPropagation();
+                      // Cloud projects: this only removes the local
+                      // connection record, not any cloud data. Word the
+                      // confirm accordingly so users don't panic.
+                      const isCloud = !!(project as any).is_dagster_plus;
                       const confirmed = await confirmDialog(
-                        `Are you sure you want to delete "${project.name}"? This will remove the project and all its files.`,
-                        { title: 'Delete project', destructive: true }
+                        isCloud
+                          ? `Disconnect "${project.name}"? This removes the local connection record only -- your Dagster+ deployment is untouched.`
+                          : `Are you sure you want to delete "${project.name}"? This will remove the project and all its files.`,
+                        { title: isCloud ? 'Disconnect Dagster+ project' : 'Delete project', destructive: true }
                       );
                       if (!confirmed) return;
 
@@ -890,7 +896,6 @@ export function ProjectManager() {
                         await projectsApi.delete(project.id);
                         await loadProjects();
                         if (currentProject?.id === project.id) {
-                          // If we deleted the current project, clear it
                           window.location.reload();
                         }
                       } catch (error) {
@@ -899,7 +904,7 @@ export function ProjectManager() {
                       }
                     }}
                     className="p-2 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded transition-colors opacity-0 group-hover:opacity-100"
-                    title="Delete project"
+                    title={(project as any).is_dagster_plus ? 'Disconnect Dagster+ project' : 'Delete project'}
                   >
                     <Trash2 className="w-4 h-4" />
                   </button>
@@ -1105,9 +1110,12 @@ function DeploymentPicker({ projectId, currentDeployment, onSwitched }: {
   const pick = async (deployment: string) => {
     setSwitching(true);
     try {
+      // "" tells the backend to clear the deployment and use the org
+      // default (via the org-level /graphql redirect). Anything else
+      // pins the project to that specific deployment.
       await projectsApi.switchDagsterPlusDeployment(projectId, deployment);
       onSwitched();
-      notify.success(`Switched to ${deployment}`);
+      notify.success(deployment ? `Switched to ${deployment}` : 'Using org default deployment');
     } catch (e: any) {
       notify.error(e?.response?.data?.detail || e?.message || 'Switch failed');
     } finally {
@@ -1115,6 +1123,9 @@ function DeploymentPicker({ projectId, currentDeployment, onSwitched }: {
       setOpen(false);
     }
   };
+
+  // Treat null/empty/"none" as "org default" for display purposes.
+  const usingDefault = !currentDeployment || currentDeployment.toLowerCase() === 'none';
 
   return (
     <div className="relative">
@@ -1125,7 +1136,7 @@ function DeploymentPicker({ projectId, currentDeployment, onSwitched }: {
         title="Switch Dagster+ deployment"
       >
         <Cloud className="w-3.5 h-3.5" />
-        <span className="font-mono truncate max-w-[140px]">{currentDeployment || 'default'}</span>
+        <span className="font-mono truncate max-w-[140px]">{usingDefault ? 'org default' : currentDeployment}</span>
         <ChevronDown className="w-3 h-3" />
       </button>
       {open && (
@@ -1143,6 +1154,23 @@ function DeploymentPicker({ projectId, currentDeployment, onSwitched }: {
             )}
             {!loading && !error && deployments.length === 0 && (
               <div className="px-3 py-2 text-xs text-gray-500 italic">No deployments found.</div>
+            )}
+            {!loading && !error && (
+              <button
+                onClick={() => pick('')}
+                disabled={usingDefault || switching}
+                className={`w-full flex items-center justify-between gap-2 px-3 py-2 text-sm hover:bg-blue-50 border-b border-gray-100 ${usingDefault ? 'bg-blue-50/70' : ''} disabled:cursor-not-allowed`}
+                title="Follow the org's default deployment (via GraphQL redirect). Recommended when you don't want to pin to a specific one."
+              >
+                <div className="flex items-center gap-2 min-w-0">
+                  <Cloud className={`w-3.5 h-3.5 flex-shrink-0 ${usingDefault ? 'text-blue-600' : 'text-gray-400'}`} />
+                  <div className="min-w-0">
+                    <div className={`italic truncate ${usingDefault ? 'text-blue-700 font-medium' : 'text-gray-900'}`}>org default</div>
+                    <div className="text-[10px] text-gray-500">follow org-level redirect</div>
+                  </div>
+                </div>
+                {usingDefault && <CheckCircle className="w-3.5 h-3.5 text-emerald-600 flex-shrink-0" />}
+              </button>
             )}
             {deployments.map((d) => {
               const active = d.deployment_name === currentDeployment;

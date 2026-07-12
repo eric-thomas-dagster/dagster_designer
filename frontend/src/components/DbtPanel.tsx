@@ -469,13 +469,15 @@ export function DbtPanel({ onOpenFile }: DbtPanelProps) {
               {data.project_name}
             </span>
           ) : null}
-          <button
-            onClick={() => setShowAddDbtProject(true)}
-            className="inline-flex items-center gap-1 px-2 py-1 text-xs text-gray-600 border border-gray-200 rounded hover:bg-gray-50"
-            title="Clone another dbt repo or scaffold a new one"
-          >
-            <Plus className="w-3 h-3" /> Add dbt project
-          </button>
+          {!isCloudProject && (
+            <button
+              onClick={() => setShowAddDbtProject(true)}
+              className="inline-flex items-center gap-1 px-2 py-1 text-xs text-gray-600 border border-gray-200 rounded hover:bg-gray-50"
+              title="Clone another dbt repo or scaffold a new one"
+            >
+              <Plus className="w-3 h-3" /> Add dbt project
+            </button>
+          )}
         </div>
         <div className="flex items-center gap-2">
           {/* On cloud projects we leave the write buttons visible but
@@ -515,14 +517,19 @@ export function DbtPanel({ onOpenFile }: DbtPanelProps) {
       <div className="bg-white border-b border-gray-200 px-8">
         <div className="flex items-center gap-1">
           {([
-            { v: 'models',    label: 'Models',    icon: Layers },
-            { v: 'lineage',   label: 'Lineage',   icon: Network },
-            { v: 'tests',     label: 'Tests',     icon: TestTube2 },
-            { v: 'docs',      label: 'Docs',      icon: Book },
-            { v: 'selectors', label: 'Selectors', icon: Filter },
-            { v: 'exposures', label: 'Exposures', icon: Share2 },
-            { v: 'freshness', label: 'Freshness', icon: Clock },
-          ] as const).map(({ v, label, icon: Icon }) => (
+            // Cloud projects reconstruct dbt data from the asset graph
+            // via GraphQL -- no manifest.json access, so tabs that
+            // depend on manifest-only content (docs, selectors,
+            // exposures, freshness) don't have anything to render.
+            // Hide them entirely rather than surface empty states.
+            { v: 'models',    label: 'Models',    icon: Layers,   cloud: true },
+            { v: 'lineage',   label: 'Lineage',   icon: Network,  cloud: true },
+            { v: 'tests',     label: 'Tests',     icon: TestTube2, cloud: true },
+            { v: 'docs',      label: 'Docs',      icon: Book,     cloud: false },
+            { v: 'selectors', label: 'Selectors', icon: Filter,   cloud: false },
+            { v: 'exposures', label: 'Exposures', icon: Share2,   cloud: false },
+            { v: 'freshness', label: 'Freshness', icon: Clock,    cloud: false },
+          ] as const).filter(({ cloud }) => !isCloudProject || cloud).map(({ v, label, icon: Icon }) => (
             <button
               key={v}
               onClick={() => setView(v)}
@@ -582,7 +589,7 @@ export function DbtPanel({ onOpenFile }: DbtPanelProps) {
           </button>
         </div>
       )}
-      {data && view === 'models' && data.dbt_project_relative_path && (
+      {data && view === 'models' && data.dbt_project_relative_path && !isCloudProject && (
         <div className="px-8 pt-6">
           <AiAssistantPanel
             title="AI Assistant · dbt"
@@ -753,13 +760,15 @@ export function DbtPanel({ onOpenFile }: DbtPanelProps) {
                                 <FileText className="w-3 h-3" />
                               </button>
                             )}
-                            <button
-                              onClick={() => handleDeleteModel(m)}
-                              className="p-1 text-gray-400 hover:text-rose-600 hover:bg-rose-50 rounded"
-                              title="Delete this model (removes .sql + schema.yml block)"
-                            >
-                              <Trash2 className="w-3.5 h-3.5" />
-                            </button>
+                            {!isCloudProject && (
+                              <button
+                                onClick={() => handleDeleteModel(m)}
+                                className="p-1 text-gray-400 hover:text-rose-600 hover:bg-rose-50 rounded"
+                                title="Delete this model (removes .sql + schema.yml block)"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                            )}
                           </div>
                         </td>
                       </tr>
@@ -784,10 +793,30 @@ export function DbtPanel({ onOpenFile }: DbtPanelProps) {
             onModelClick={(uid) => setSelectedUniqueId(uid)}
             selectedUniqueId={selectedUniqueId}
           />
-          {/* Model count badge, mirroring the asset graph's status pill. */}
-          <div className="absolute top-3 left-3 px-2 py-1 text-[11px] text-gray-600 bg-white/95 border border-gray-200 rounded shadow-sm pointer-events-none">
-            {data.models.length} models · click a node to inspect
-          </div>
+          {/* Count badge -- split models vs source refs. The lineage
+              view also renders source uids referenced by depends_on
+              but not present in `data.models`, so the pure "models"
+              count would mismatch what the user sees on screen. */}
+          {(() => {
+            const modelIds = new Set(data.models.map((m) => m.unique_id));
+            const sourceRefs = new Set<string>();
+            for (const m of data.models) {
+              for (const dep of m.depends_on_nodes || []) {
+                if (!modelIds.has(dep)) sourceRefs.add(dep);
+              }
+            }
+            const seedsAndSnaps = data.models.filter((m) => m.resource_type === 'seed' || m.resource_type === 'snapshot').length;
+            const pureModels = data.models.length - seedsAndSnaps;
+            const parts: string[] = [];
+            parts.push(`${pureModels} model${pureModels === 1 ? '' : 's'}`);
+            if (seedsAndSnaps) parts.push(`${seedsAndSnaps} seed/snapshot${seedsAndSnaps === 1 ? '' : 's'}`);
+            if (sourceRefs.size) parts.push(`${sourceRefs.size} source${sourceRefs.size === 1 ? '' : 's'}`);
+            return (
+              <div className="absolute top-3 left-3 px-2 py-1 text-[11px] text-gray-600 bg-white/95 border border-gray-200 rounded shadow-sm pointer-events-none">
+                {parts.join(' · ')} · click a node to inspect
+              </div>
+            );
+          })()}
         </div>
       )}
 
@@ -797,8 +826,10 @@ export function DbtPanel({ onOpenFile }: DbtPanelProps) {
       {data && view === 'tests' && (
         <TestsView
           data={data}
-          onAdd={(model) => setAddTestFor({ model })}
-          onDelete={handleDeleteTest}
+          // Cloud is read-only: pass undefined handlers so the Tests
+          // view drops the write-side controls entirely.
+          onAdd={isCloudProject ? undefined : (model) => setAddTestFor({ model })}
+          onDelete={isCloudProject ? undefined : handleDeleteTest}
           onOpenModel={(uid) => setSelectedUniqueId(uid)}
           search={testSearch} setSearch={setTestSearch}
           statusFilter={testStatusFilter} setStatusFilter={setTestStatusFilter}
@@ -1255,8 +1286,8 @@ export function DbtPanel({ onOpenFile }: DbtPanelProps) {
           }
           onPreview={() => runPreview(selected)}
           onColumnLineage={() => setColumnLineageFor(selected)}
-          onAddTest={() => setAddTestFor({ model: selected })}
-          onDeleteTest={(uid) => handleDeleteTest(uid)}
+          onAddTest={isCloudProject ? undefined : () => setAddTestFor({ model: selected })}
+          onDeleteTest={isCloudProject ? undefined : (uid) => handleDeleteTest(uid)}
           running={runningModel === selected.unique_id}
         />
       )}
@@ -1387,8 +1418,10 @@ function TestsView({
   kindFilter, setKindFilter,
 }: {
   data: NonNullable<Awaited<ReturnType<typeof projectsApi.listDbtModels>>>;
-  onAdd: (model: Model) => void;
-  onDelete: (testUniqueId: string) => void;
+  // undefined -> read-only mode (Dagster+); hides the Add / Delete
+  // controls entirely rather than showing them disabled.
+  onAdd?: (model: Model) => void;
+  onDelete?: (testUniqueId: string) => void;
   onOpenModel: (uid: string) => void;
   search: string; setSearch: (v: string) => void;
   statusFilter: 'all' | 'pass' | 'fail' | 'never'; setStatusFilter: (v: 'all' | 'pass' | 'fail' | 'never') => void;
@@ -1493,12 +1526,14 @@ function TestsView({
                   {modelFailing > 0 && (
                     <span className="text-[10px] text-rose-700 font-medium">{modelFailing} failing</span>
                   )}
-                  <button
-                    onClick={() => onAdd(model)}
-                    className="ml-auto inline-flex items-center gap-0.5 text-[10px] font-medium text-emerald-700 hover:text-emerald-900"
-                  >
-                    <Plus className="w-3 h-3" /> Add test
-                  </button>
+                  {onAdd && (
+                    <button
+                      onClick={() => onAdd(model)}
+                      className="ml-auto inline-flex items-center gap-0.5 text-[10px] font-medium text-emerald-700 hover:text-emerald-900"
+                    >
+                      <Plus className="w-3 h-3" /> Add test
+                    </button>
+                  )}
                 </div>
                 <ul className="divide-y divide-gray-50">
                   {tests.map((t) => (
@@ -1517,13 +1552,15 @@ function TestsView({
                         {t.last_run_status ? t.last_run_status : 'never run'}
                         {t.duration_ms != null && ` · ${(t.duration_ms / 1000).toFixed(1)}s`}
                       </span>
-                      <button
-                        onClick={() => onDelete(t.unique_id)}
-                        className="opacity-0 group-hover:opacity-100 p-0.5 text-gray-400 hover:text-rose-600"
-                        title="Remove test"
-                      >
-                        <X className="w-3 h-3" />
-                      </button>
+                      {onDelete && (
+                        <button
+                          onClick={() => onDelete(t.unique_id)}
+                          className="opacity-0 group-hover:opacity-100 p-0.5 text-gray-400 hover:text-rose-600"
+                          title="Remove test"
+                        >
+                          <X className="w-3 h-3" />
+                        </button>
+                      )}
                     </li>
                   ))}
                 </ul>

@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { memo, useCallback, useEffect, useRef, useState } from 'react';
 import ReactFlow, {
   Node,
   Edge,
@@ -14,6 +14,9 @@ import ReactFlow, {
   MiniMap,
   NodeTypes,
   EdgeTypes,
+  NodeProps,
+  Handle,
+  Position,
   useViewport,
   EdgeProps,
   getBezierPath,
@@ -30,14 +33,75 @@ import { AssetIOPanel } from './AssetIOPanel';
 import { DagsterAIBar } from './DagsterAIBar';
 import { AddDataDialog } from './AddDataDialog';
 import { notify } from './Notifications';
+import { AutoCoverageModal } from './AssetDetailPage';
 import { useProjectStore } from '@/hooks/useProject';
 import { projectsApi, componentsApi } from '@/services/api';
-import { Play, Plus } from 'lucide-react';
+import { Play, Plus, Layers, CheckCircle } from 'lucide-react';
 import type { GraphNode, GraphEdge, ComponentSchema } from '@/types';
+
+// Node for the "collapse to groups" mode. Fixed width (so edges hit
+// consistent x-anchors), auto height (so content doesn't leave blank
+// space below). The whole card is clickable to expand -- ReactFlow
+// still lets the underlying drag through when the user actually
+// initiates a drag gesture, so making the card the click target is
+// safe and much more discoverable than a small button.
+const GroupNode = memo(({ data }: NodeProps) => {
+  // Click handling for group cards lives on the ReactFlow onNodeClick
+  // handler in GraphEditorInner (see: node.type === 'assetGroup'). We
+  // deliberately don't attach onClick here -- fighting ReactFlow's
+  // pointer event system inside custom nodes made the click zone feel
+  // unreliable. The whole card is a click target via cursor:pointer
+  // and ReactFlow's native onNodeClick.
+  const kinds: string[] = data?.kinds || [];
+  return (
+    <>
+      <Handle type="target" position={Position.Left} isConnectable={false} style={{ background: '#6366f1', pointerEvents: 'none' }} />
+      <div
+        className="rounded-lg border-2 border-indigo-300 bg-gradient-to-br from-indigo-50 to-white shadow-md p-2.5 hover:border-indigo-500 hover:shadow-lg hover:from-indigo-100 transition cursor-pointer"
+        style={{ width: 220 }}
+        title="Click anywhere to expand this group's assets"
+      >
+        <div className="flex items-center justify-between gap-2">
+          <div className="flex items-center gap-1.5 min-w-0">
+            <Layers className="w-4 h-4 text-indigo-600 flex-shrink-0" />
+            <div className="font-semibold text-sm text-indigo-900 truncate">{data?.label || 'ungrouped'}</div>
+          </div>
+          <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-indigo-100 text-indigo-800 border border-indigo-200 flex-shrink-0">
+            {data?.assetCount || 0}
+          </span>
+        </div>
+        {kinds.length > 0 && (
+          <div className="flex flex-wrap gap-1 mt-1.5">
+            {kinds.slice(0, 4).map((k) => (
+              <span key={k} className="text-[9px] font-mono px-1 py-0.5 rounded bg-white border border-indigo-200 text-indigo-700">{k}</span>
+            ))}
+            {kinds.length > 4 && (
+              <span className="text-[9px] text-indigo-600 self-center">+{kinds.length - 4}</span>
+            )}
+          </div>
+        )}
+        {(data?.withChecks || 0) > 0 && (
+          <div className="text-[10px] text-emerald-700 mt-1 flex items-center gap-1">
+            <CheckCircle className="w-3 h-3" />
+            {data.withChecks} with checks
+          </div>
+        )}
+        <div className="text-[10px] text-indigo-700 mt-1.5 font-medium">
+          Click to expand →
+        </div>
+      </div>
+      <Handle type="source" position={Position.Right} isConnectable={false} style={{ background: '#6366f1', pointerEvents: 'none' }} />
+    </>
+  );
+});
 
 const nodeTypes: NodeTypes = {
   component: ComponentNode,
   asset: AssetNode,
+  // ReactFlow reserves 'group' as a subflow-container node type and
+  // wraps it in a default dashed outer container -- register under a
+  // custom name so our card renders alone.
+  assetGroup: GroupNode,
 };
 
 // Custom edge component that shows delete button when clicked for custom edges
@@ -375,14 +439,61 @@ interface GraphEditorProps {
    *  dialog after the CLI install completes. Wire the same way ComponentPalette
    *  passes the component_type up so App can open the config modal. */
   onAddDataSource?: (componentType: string) => void;
+  /** Notifies parent when the user toggles between graph / catalog view.
+   *  App uses this to hide the Project Components sidebar when the
+   *  catalog is showing (no per-asset editing surface for a table). */
+  onViewModeChange?: (mode: 'graph' | 'catalog') => void;
+  /** Open the full-screen AssetDetailPage for the given node id. Called
+   *  from catalog rows and (indirectly) from PropertyPanel. */
+  onOpenAssetDetail?: (nodeId: string) => void;
 }
 
-function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource }: GraphEditorProps) {
+function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onViewModeChange, onOpenAssetDetail }: GraphEditorProps) {
   const [addDataOpen, setAddDataOpen] = useState(false);
   // Group-collapse toggle -- folds assets by group_name into one node
   // per group, edges aggregated. Auto-on for large cloud graphs
   // (>60 assets) so users see manageable structure by default.
   const [collapseToGroups, setCollapseToGroups] = useState(false);
+  // Per-group opt-out from collapse. When collapseToGroups=true,
+  // groups in this Set render their individual assets in place while
+  // the rest remain aggregated. Cleared whenever the global collapse
+  // toggle flips so users don't get stuck with a mixed view they
+  // didn't expect.
+  const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
+  // Groups whose expanded-view layout has already been applied. When a
+  // group is freshly expanded we lay out its assets via the mixed-DAG
+  // longest-path layout; after that first placement, subsequent renders
+  // must keep whatever position the user has dragged the asset to. If
+  // we re-applied the layout every render, drags would snap right back.
+  const laidOutGroupsRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    // Only mutate the ref *after* the render has consumed its previous
+    // value (see groupedView memo). Sync-add newly-expanded groups so
+    // the next render treats them as "already placed"; drop groups that
+    // aren't expanded any more so they get fresh layout on re-expand.
+    const next = new Set<string>();
+    for (const g of expandedGroups) next.add(g);
+    laidOutGroupsRef.current = next;
+  }, [expandedGroups]);
+  // Stable callbacks so memoized GroupNode / AssetNode instances aren't
+  // forced to re-render each time `groupedView` recomputes (the memo
+  // creates fresh closures otherwise, defeating React.memo).
+  const handleExpandGroup = useCallback((g: string) => {
+    setExpandedGroups(prev => {
+      if (prev.has(g)) return prev;
+      const next = new Set(prev);
+      next.add(g);
+      return next;
+    });
+  }, []);
+  const handleCollapseGroup = useCallback((g: string) => {
+    setExpandedGroups(prev => {
+      if (!prev.has(g)) return prev;
+      const next = new Set(prev);
+      next.delete(g);
+      return next;
+    });
+  }, []);
   // Lineage filters — apply to both graph + catalog views. Kept
   // client-side so filtering is instant on large clouds without
   // roundtripping the whole graph.
@@ -392,13 +503,29 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource }: G
   // View toggle — the Assets tab flips between the graph editor and
   // a searchable / filterable table (catalog). Catalog is a huge win
   // for wide cloud orgs where the graph is hard to scan.
-  const [viewMode, setViewMode] = useState<'graph' | 'catalog'>('graph');
-  // Hide "external" (connection-only) assets — the observed-only
-  // Iceberg / BigQuery / Databricks information_schema rows Dagster+
-  // brings in via connections. Default ON for cloud projects since
-  // they usually flood the graph.
-  const [hideExternal, setHideExternal] = useState(false);
-  const { currentProject, updateGraph, setCurrentProject } = useProjectStore();
+  const [viewMode, setViewModeInternal] = useState<'graph' | 'catalog'>('graph');
+  // Auto Coverage modal state -- opened from the per-row lightning
+  // bolt in the catalog. Same modal component the detail page uses.
+  const [autoCoverageAssetKey, setAutoCoverageAssetKey] = useState<string | null>(null);
+  const setViewMode = useCallback((mode: 'graph' | 'catalog') => {
+    setViewModeInternal(mode);
+    onViewModeChange?.(mode);
+  }, [onViewModeChange]);
+  // Fire once on mount so the parent starts in sync (matters when the
+  // cloud-defaults effect flips to catalog before any user click).
+  useEffect(() => {
+    onViewModeChange?.(viewMode);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [viewMode]);
+  // Lineage graph hides "external leaves" by default -- any is_external
+  // node with no downstream edge inside this project. That covers both
+  // warehouse-connection scrapes (Databricks/BigQuery info_schema) AND
+  // orphaned external Dagster refs that nothing here consumes. Content-
+  // agnostic rule (no tag/path guessing). Users can flip this off to
+  // see everything. The catalog view ignores this -- it shows all
+  // assets with connections grouped into their own sections.
+  const [showAllInGraph, setShowAllInGraph] = useState(false);
+  const { currentProject, updateGraph, setCurrentProject, isLoading } = useProjectStore();
   const [nodes, setNodes, onNodesChange] = useNodesState([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState([]);
   const [selectedAssets, setSelectedAssets] = useState<string[]>([]);
@@ -644,6 +771,10 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource }: G
   // Handle keyboard delete
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
+      // Cloud projects are read-only -- keyboard delete would remove
+      // the node from the local graph copy but the next hydrate would
+      // bring it back. Cleaner to no-op the shortcut entirely.
+      if ((currentProject as any)?.is_dagster_plus) return;
       // Only handle Delete or Backspace when a component node is selected
       if ((event.key === 'Delete' || event.key === 'Backspace') && !event.repeat) {
         // Find selected component nodes (not asset nodes, those shouldn't be deleted)
@@ -714,20 +845,20 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource }: G
         shouldAutoArrange.current = true;
       }
 
-      // Dagster+ (cloud) projects come in with a naive
-      // longest-path layout on the backend; that stacks large layers
-      // vertically and looks bad. Always schedule an auto-arrange on
-      // first render so users see a properly grouped graph without
-      // clicking Arrange manually.
+      // Dagster+ (cloud) projects come in with a naive longest-path
+      // layout on the backend; that stacks large layers vertically and
+      // looks bad. Schedule an auto-arrange on first render so users
+      // see a properly grouped graph without clicking Arrange manually.
       if ((currentProject as any).is_dagster_plus) {
         shouldAutoArrange.current = true;
-        // Wide cloud graphs default to collapsed-to-groups so the
-        // first paint isn't a hundred-node wall. Users can hit
-        // "Expand assets" in the ribbon to see individuals.
-        const assetCount = currentProject.graph.nodes.filter((n: GraphNode) => n.node_kind === 'asset').length;
-        if (assetCount > 60 && !collapseToGroups) {
-          setCollapseToGroups(true);
-        }
+      }
+      // Wide graphs (local OR cloud) default to collapsed-to-groups
+      // so the first paint isn't a hundred-node wall. Users can hit
+      // "Expand assets" in the ribbon to see individuals, or click a
+      // single group card to expand just that one.
+      const assetCount = currentProject.graph.nodes.filter((n: GraphNode) => n.node_kind === 'asset').length;
+      if (assetCount > 60 && !collapseToGroups) {
+        setCollapseToGroups(true);
       }
 
       const flowNodes: Node[] = currentProject.graph.nodes.map((node: GraphNode) => {
@@ -1761,6 +1892,15 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource }: G
 
   const onNodeClick = useCallback(
     (event: React.MouseEvent, node: Node) => {
+      // Group aggregate cards -- clicking anywhere expands that group.
+      // Handled here at the ReactFlow level (instead of in GroupNode's
+      // own onClick) so we don't fight ReactFlow's internal pointer
+      // event system, which was making the in-node click zone feel
+      // unreliable.
+      if (node.type === 'assetGroup') {
+        node.data?.onExpand?.();
+        return;
+      }
       onNodeSelect(node.id);
 
       // Handle multi-select for assets with Cmd/Ctrl key
@@ -1877,8 +2017,18 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource }: G
     return (
       <div className="flex items-center justify-center h-full text-gray-500">
         <div className="text-center">
-          <p className="text-lg font-medium">No project selected</p>
-          <p className="text-sm mt-2">Create or open a project to get started</p>
+          {isLoading ? (
+            <>
+              <div className="inline-block w-8 h-8 border-4 border-gray-200 border-t-indigo-500 rounded-full animate-spin mb-3" />
+              <p className="text-lg font-medium">Loading project…</p>
+              <p className="text-sm mt-1 text-gray-400">Fetching assets and lineage.</p>
+            </>
+          ) : (
+            <>
+              <p className="text-lg font-medium">No project selected</p>
+              <p className="text-sm mt-2">Create or open a project to get started</p>
+            </>
+          )}
         </div>
       </div>
     );
@@ -1901,9 +2051,17 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource }: G
     return Array.from(s).sort();
   }, [nodes]);
 
-  const matchesFilters = (node: Node): boolean => {
-    if (node.data?.node_kind !== 'asset') return true;   // components always pass
-    if (hideExternal && node.data?.is_external) return false;
+  // Set of node IDs that have at least one outgoing edge -- used to
+  // detect "external leaves" (external + no downstream in this project).
+  const nodesWithDownstream = React.useMemo(() => {
+    const s = new Set<string>();
+    for (const e of edges) s.add(e.source);
+    return s;
+  }, [edges]);
+
+  // Common filters (search + group + kind). Applied in both views.
+  const matchesUserFilters = (node: Node): boolean => {
+    if (node.data?.node_kind !== 'asset') return true;
     if (groupFilter !== 'all' && (node.data?.group_name || '') !== groupFilter) return false;
     if (kindFilter !== 'all' && !(node.data?.kinds || []).includes(kindFilter)) return false;
     if (assetSearch.trim()) {
@@ -1914,7 +2072,16 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource }: G
     return true;
   };
 
-  const isFiltering = hideExternal || assetSearch.trim() !== '' || groupFilter !== 'all' || kindFilter !== 'all';
+  // Graph-only additional filter: hide external leaves unless the
+  // user explicitly opts into showing everything.
+  const matchesFilters = (node: Node): boolean => {
+    if (!matchesUserFilters(node)) return false;
+    if (node.data?.node_kind !== 'asset') return true;
+    if (!showAllInGraph && node.data?.is_external && !nodesWithDownstream.has(node.id)) return false;
+    return true;
+  };
+
+  const isFiltering = assetSearch.trim() !== '' || groupFilter !== 'all' || kindFilter !== 'all' || showAllInGraph;
 
   // First-load defaults for Dagster+ projects: catalog view + hide
   // externals + collapse-to-groups (already handled above). Fire
@@ -1925,7 +2092,8 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource }: G
     if (didSetCloudDefaults.current === currentProject.id) return;
     didSetCloudDefaults.current = currentProject.id;
     setViewMode('catalog');
-    setHideExternal(true);
+    // showAllInGraph defaults to false already -- lineage graph hides
+    // external leaves out of the box on cloud projects.
   }, [currentProject?.id]);
 
   // Update nodes to show selection. When filtering, hide non-matching
@@ -1956,70 +2124,157 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource }: G
     const nodeToGroup = new Map<string, string>();
     for (const n of assets) nodeToGroup.set(n.id, groupOf(n));
 
-    // Group summaries + aggregated positions (average of member positions)
-    const groupInfo: Record<string, { assets: Node[]; kinds: Set<string>; hasChecks: number; xSum: number; ySum: number; count: number }> = {};
+    // Group summaries -- collected for every group so the aggregated
+    // node knows its member count / kinds even after some groups get
+    // expanded individually.
+    const groupInfo: Record<string, { assets: Node[]; kinds: Set<string>; hasChecks: number }> = {};
     for (const n of assets) {
       const g = groupOf(n);
-      const info = groupInfo[g] ||= { assets: [], kinds: new Set(), hasChecks: 0, xSum: 0, ySum: 0, count: 0 };
+      const info = groupInfo[g] ||= { assets: [], kinds: new Set(), hasChecks: 0 };
       info.assets.push(n);
       for (const k of (n.data?.kinds || [])) info.kinds.add(k);
       if ((n.data?.checks || []).length > 0) info.hasChecks += 1;
-      info.xSum += (n.position?.x || 0);
-      info.ySum += (n.position?.y || 0);
-      info.count += 1;
     }
 
-    const groupNodes: Node[] = Object.entries(groupInfo).map(([g, info]) => ({
-      id: `__group__::${g}`,
-      type: 'group' as any,
-      position: { x: info.xSum / info.count, y: info.ySum / info.count },
-      data: {
-        label: g,
-        group_name: g,
-        assetCount: info.assets.length,
-        kinds: Array.from(info.kinds),
-        withChecks: info.hasChecks,
-        node_kind: 'asset',   // reuse existing renderer wiring
-        isGroup: true,
-        onExpand: () => setCollapseToGroups(false),
-      },
-      draggable: true,
-    }));
+    // idToOutputId: each individual asset maps to either its own id
+    // (when the group is expanded) or its aggregated __group__:: id
+    // (when the group is collapsed). Used to rewrite edges below.
+    const isGroupExpanded = (g: string) => expandedGroups.has(g);
+    const idToOutputId = new Map<string, string>();
+    for (const n of assets) {
+      const g = groupOf(n);
+      idToOutputId.set(n.id, isGroupExpanded(g) ? n.id : `__group__::${g}`);
+    }
 
-    // Aggregate edges across groups. Skip self-loops (same group).
+    // Aggregate edges. Between two nodes in the same collapsed group
+    // this becomes a self-loop, which we drop. Between two expanded
+    // assets it stays direct. Between one expanded + one collapsed
+    // it becomes an asset→group or group→asset edge, which just works.
     const seen = new Map<string, number>();
     for (const e of edges) {
-      const s = nodeToGroup.get(e.source);
-      const t = nodeToGroup.get(e.target);
+      const s = idToOutputId.get(e.source);
+      const t = idToOutputId.get(e.target);
       if (!s || !t || s === t) continue;
-      const k = `${s}→${t}`;
+      const k = `${s}||${t}`;
       seen.set(k, (seen.get(k) || 0) + 1);
     }
-    const groupEdges: Edge[] = Array.from(seen.entries()).map(([k, count]) => {
-      const [s, t] = k.split('→');
+
+    // Longest-path DAG layout across the mixed node set (aggregated
+    // group placeholders + expanded individual assets). Every asset
+    // shows up as its "output id", so this handles the mixed case
+    // uniformly without special-casing.
+    const outputIds = new Set(idToOutputId.values());
+    const outAdj: Record<string, string[]> = Object.fromEntries(Array.from(outputIds).map(id => [id, []]));
+    const inDeg: Record<string, number> = Object.fromEntries(Array.from(outputIds).map(id => [id, 0]));
+    for (const k of seen.keys()) {
+      const [s, t] = k.split('||');
+      if (outAdj[s]) outAdj[s].push(t);
+      if (t in inDeg) inDeg[t] = (inDeg[t] || 0) + 1;
+    }
+    const layer: Record<string, number> = Object.fromEntries(Array.from(outputIds).map(id => [id, 0]));
+    const remaining = { ...inDeg };
+    const queue: string[] = Array.from(outputIds).filter(id => remaining[id] === 0);
+    while (queue.length) {
+      const id = queue.shift()!;
+      for (const t of outAdj[id] || []) {
+        layer[t] = Math.max(layer[t], layer[id] + 1);
+        remaining[t]--;
+        if (remaining[t] === 0) queue.push(t);
+      }
+    }
+    const byLayer: Record<number, string[]> = {};
+    for (const id of outputIds) (byLayer[layer[id]] ||= []).push(id);
+    // Deterministic vertical ordering by id inside each layer.
+    for (const L of Object.keys(byLayer)) byLayer[+L].sort();
+    const X_STEP = 380;
+    const Y_STEP = 180;
+    const posById: Record<string, { x: number; y: number }> = {};
+    for (const [L, ids] of Object.entries(byLayer)) {
+      const lyr = parseInt(L, 10);
+      for (let i = 0; i < ids.length; i++) {
+        posById[ids[i]] = { x: lyr * X_STEP, y: i * Y_STEP };
+      }
+    }
+
+    // Build the actual React Flow nodes: aggregated group placeholders
+    // for collapsed groups, individual asset nodes (with new positions)
+    // for expanded ones.
+    const outNodes: Node[] = [];
+    const emittedGroupIds = new Set<string>();
+    for (const [g, info] of Object.entries(groupInfo)) {
+      if (isGroupExpanded(g)) continue;
+      const id = `__group__::${g}`;
+      emittedGroupIds.add(id);
+      outNodes.push({
+        id,
+        type: 'assetGroup' as any,
+        position: posById[id] || { x: 0, y: 0 },
+        data: {
+          label: g,
+          group_name: g,
+          assetCount: info.assets.length,
+          kinds: Array.from(info.kinds),
+          withChecks: info.hasChecks,
+          node_kind: 'asset',
+          isGroup: true,
+          onExpand: () => handleExpandGroup(g),
+        },
+        draggable: true,
+      });
+    }
+    for (const n of assets) {
+      const g = groupOf(n);
+      if (!isGroupExpanded(g)) continue;
+      // Only apply the DAG layout position on the *first* render after
+      // this group was expanded. Subsequent renders (including those
+      // triggered by the user dragging an asset) trust the node's own
+      // position so drags persist.
+      const alreadyLaidOut = laidOutGroupsRef.current.has(g);
+      outNodes.push({
+        ...n,
+        position: alreadyLaidOut ? n.position : (posById[n.id] || n.position),
+        data: {
+          ...n.data,
+          // Attach a per-asset "collapse this group" callback the
+          // AssetNode can surface (or a caller can wire up). We also
+          // put group_name here so a future group border can bracket
+          // these together visually.
+          onCollapseGroup: () => handleCollapseGroup(g),
+        },
+      });
+    }
+
+    const outEdges: Edge[] = Array.from(seen.entries()).map(([k, count]) => {
+      const [s, t] = k.split('||');
+      const bothGroups = s.startsWith('__group__::') && t.startsWith('__group__::');
       return {
-        id: `ge__${k}`,
-        source: `__group__::${s}`,
-        target: `__group__::${t}`,
-        label: count > 1 ? `${count} deps` : undefined,
+        id: `agg__${k}`,
+        source: s,
+        target: t,
+        label: bothGroups && count > 1 ? `${count} deps` : undefined,
         style: { strokeWidth: Math.min(4, 1 + Math.log2(count + 1)), stroke: '#6366f1' },
       } as Edge;
     });
 
-    return { nodes: groupNodes, edges: groupEdges };
-  }, [collapseToGroups, perAssetDisplay, edges]);
+    return { nodes: outNodes, edges: outEdges };
+  }, [collapseToGroups, expandedGroups, perAssetDisplay, edges, handleExpandGroup, handleCollapseGroup]);
 
   const displayNodes = groupedView ? groupedView.nodes : perAssetDisplay;
   const displayEdges = groupedView ? groupedView.edges : edges;
 
   return (
     <div className="w-full h-full flex flex-col">
-      {/* Slim header row — actions on the right, matches Automation/Pipelines */}
-      <div className="flex-shrink-0 bg-white border-b border-gray-200 px-4 py-2 flex items-center justify-between gap-2">
-        <div className="flex items-center gap-2 flex-1 min-w-0">
-          {/* Search + filters — apply to both graph + catalog view.
-              Kept in the ribbon so they persist across the toggle. */}
-          <div className="relative w-56 flex-shrink-0">
+      {/* Slim header row -- filters on the left, actions on the right.
+          Graph-only controls (collapse / arrange / show-leaves) hide
+          in catalog view. Icon-only buttons on the right side keep the
+          horizontal budget under control for wide monitors and small ones. */}
+      {(() => {
+        const isCloud = !!(currentProject as any)?.is_dagster_plus;
+        const inGraph = viewMode === 'graph';
+        return (
+      <div className="flex-shrink-0 bg-white border-b border-gray-200 px-3 py-2 flex items-center justify-between gap-2">
+        <div className="flex items-center gap-1.5 flex-1 min-w-0">
+          <div className="relative w-44 flex-shrink-0">
             <svg className="w-3.5 h-3.5 text-gray-400 absolute left-2 top-1/2 -translate-y-1/2 pointer-events-none" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-4.35-4.35M17 11a6 6 0 11-12 0 6 6 0 0112 0z" />
             </svg>
@@ -2033,7 +2288,7 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource }: G
           <select
             value={groupFilter}
             onChange={(e) => setGroupFilter(e.target.value)}
-            className="text-xs px-2 py-1 border border-gray-300 rounded bg-white"
+            className="text-xs px-2 py-1 border border-gray-300 rounded bg-white max-w-[140px]"
             title="Filter by asset group"
           >
             <option value="all">All groups</option>
@@ -2043,32 +2298,22 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource }: G
             <select
               value={kindFilter}
               onChange={(e) => setKindFilter(e.target.value)}
-              className="text-xs px-2 py-1 border border-gray-300 rounded bg-white"
+              className="text-xs px-2 py-1 border border-gray-300 rounded bg-white max-w-[120px]"
               title="Filter by kind (dbt / sql / python / etc.)"
             >
               <option value="all">All kinds</option>
               {allKinds.map((k) => <option key={k} value={k}>{k}</option>)}
             </select>
           )}
-          <label className="inline-flex items-center gap-1 text-[11px] text-gray-700 cursor-pointer" title="Hide 'external' assets — observed-only rows Dagster+ imports from connections (Databricks/BigQuery information_schema, etc). They're rarely useful in lineage.">
-            <input
-              type="checkbox"
-              checked={hideExternal}
-              onChange={(e) => setHideExternal(e.target.checked)}
-              className="w-3 h-3"
-            />
-            <span>Hide external</span>
-          </label>
           {isFiltering && (
             <button
-              onClick={() => { setAssetSearch(''); setGroupFilter('all'); setKindFilter('all'); setHideExternal(false); }}
-              className="text-[11px] text-gray-500 hover:text-gray-800 underline decoration-dotted"
+              onClick={() => { setAssetSearch(''); setGroupFilter('all'); setKindFilter('all'); setShowAllInGraph(false); }}
+              className="text-[11px] text-gray-500 hover:text-gray-800 underline decoration-dotted whitespace-nowrap"
             >
-              Clear filters
+              Clear
             </button>
           )}
-          {/* View toggle: Graph ↔ Catalog */}
-          <div className="ml-2 flex items-center bg-gray-100 rounded p-0.5">
+          <div className="ml-1 flex items-center bg-gray-100 rounded p-0.5">
             {(['graph', 'catalog'] as const).map((v) => (
               <button
                 key={v}
@@ -2079,154 +2324,253 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource }: G
               </button>
             ))}
           </div>
-        </div>
-        <div className="flex items-center gap-2">
-        {selectedAssets.length > 0 && (
-          <>
-            <span className="text-xs text-gray-500 mr-1">
-              {selectedAssets.length} selected
-            </span>
-            <button
-              onClick={handleMaterializeSelected}
-              disabled={isMaterializing}
-              className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium bg-primary text-primary-foreground rounded-md hover:bg-accent disabled:opacity-50 disabled:cursor-not-allowed"
+          {inGraph && (
+            <label
+              className="inline-flex items-center gap-1 text-[11px] text-gray-700 cursor-pointer whitespace-nowrap"
+              title="By default the lineage graph hides external assets that nothing in this project consumes (usually warehouse-catalog scrapes and orphaned observability nodes). Check to show them too."
             >
-              <Play className="w-4 h-4" />
-              <span>{isMaterializing ? 'Materializing…' : 'Materialize selected'}</span>
-            </button>
-          </>
-        )}
-        <button
-          onClick={() => setAddDataOpen(true)}
-          className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium bg-primary text-primary-foreground rounded-md hover:bg-accent"
-          title="Connect a database, warehouse, SaaS app, file, or API"
-        >
-          <Plus className="w-4 h-4" />
-          <span>Add data</span>
-        </button>
-        <button
-          onClick={() => setCollapseToGroups(!collapseToGroups)}
-          className={`flex items-center gap-1.5 px-2.5 py-1.5 text-sm rounded ${
-            collapseToGroups ? 'bg-indigo-100 text-indigo-700 hover:bg-indigo-200' : 'text-gray-700 hover:bg-gray-100'
-          }`}
-          title={collapseToGroups ? 'Show individual assets' : 'Collapse to asset groups (better for wide graphs)'}
-        >
-          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" />
-          </svg>
-          <span>{collapseToGroups ? 'Expand assets' : 'Collapse to groups'}</span>
-        </button>
-        <button
-          onClick={arrangeGroups}
-          className="flex items-center gap-1.5 px-2.5 py-1.5 text-sm text-gray-700 hover:bg-gray-100 rounded"
-          title="Arrange groups in a grid to prevent overlaps (preserves positions within groups)"
-        >
-          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zM14 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z" />
-          </svg>
-          <span>Arrange Groups</span>
-        </button>
+              <input
+                type="checkbox"
+                checked={showAllInGraph}
+                onChange={(e) => setShowAllInGraph(e.target.checked)}
+                className="w-3 h-3"
+              />
+              <span>Include orphaned externals</span>
+            </label>
+          )}
+        </div>
+        <div className="flex items-center gap-1 flex-shrink-0">
+          {selectedAssets.length > 0 && (
+            <>
+              <span className="text-xs text-gray-500 mr-1 whitespace-nowrap">
+                {selectedAssets.length} selected
+              </span>
+              <button
+                onClick={handleMaterializeSelected}
+                disabled={isMaterializing}
+                className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium bg-primary text-primary-foreground rounded-md hover:bg-accent disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                <Play className="w-4 h-4" />
+                <span>{isMaterializing ? 'Materializing…' : 'Materialize'}</span>
+              </button>
+            </>
+          )}
+          <button
+            onClick={() => setAddDataOpen(true)}
+            disabled={isCloud}
+            className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium bg-primary text-primary-foreground rounded-md hover:bg-accent disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-primary"
+            title={isCloud ? 'Not available on Dagster+ (read-only)' : 'Connect a database, warehouse, SaaS app, file, or API'}
+          >
+            <Plus className="w-4 h-4" />
+            <span>Add data</span>
+          </button>
+          {inGraph && (
+            <>
+              <button
+                onClick={() => {
+                  setCollapseToGroups(!collapseToGroups);
+                  // Reset per-group expansion when toggling the global mode
+                  // -- otherwise switching back to collapsed would leave
+                  // stale expansions the user forgot about.
+                  setExpandedGroups(new Set());
+                }}
+                className={`inline-flex items-center justify-center w-8 h-8 rounded ${
+                  collapseToGroups ? 'bg-indigo-100 text-indigo-700 hover:bg-indigo-200' : 'text-gray-700 hover:bg-gray-100'
+                }`}
+                title={collapseToGroups ? 'Expand groups: show individual assets' : 'Collapse to one card per asset group. Click a card to expand just that group.'}
+                aria-label={collapseToGroups ? 'Expand groups' : 'Collapse groups'}
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" />
+                </svg>
+              </button>
+              <button
+                onClick={arrangeGroups}
+                className="inline-flex items-center justify-center w-8 h-8 text-gray-700 hover:bg-gray-100 rounded"
+                title="Arrange groups in a grid to prevent overlaps (preserves positions within groups)"
+                aria-label="Arrange groups"
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zM14 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z" />
+                </svg>
+              </button>
+            </>
+          )}
         </div>
       </div>
+        );
+      })()}
       {/* Catalog view — searchable/filterable table of the same
           filtered asset set. Uses the filters + search from the
           ribbon so state is shared with the graph view. */}
-      {viewMode === 'catalog' && (
-        <div className="flex-1 min-h-0 overflow-y-auto bg-gray-50 p-6">
-          <div className="bg-white border border-gray-200 rounded-lg overflow-hidden">
-            <div className="px-4 py-3 border-b border-gray-100 flex items-center justify-between">
-              <h2 className="text-sm font-semibold text-gray-900">Asset catalog</h2>
-              <span className="text-xs text-gray-500">
-                {perAssetDisplay.filter((n) => n.data?.node_kind === 'asset').length} assets
-              </span>
+      {viewMode === 'catalog' && (() => {
+        // Catalog shows EVERYTHING (subject only to search/group/kind
+        // filters). Connection-scrape assets always land in their own
+        // sections at the bottom, never mingled with the primary list.
+        // The graph's "external leaves" hiding does not affect the
+        // catalog -- users go there specifically to browse the full
+        // asset inventory including externals.
+        const allAssets = nodes.filter((n) => n.data?.node_kind === 'asset' && matchesUserFilters(n));
+        const primaryAssets = allAssets.filter((n) => !n.data?.is_connection);
+        const connectionAssets = allAssets.filter((n) => !!n.data?.is_connection);
+        // Group connection assets by source (top-level path segment:
+        // "Databricks", "GCP_SALESENG", ...).
+        const connectionsBySource: Record<string, Node[]> = {};
+        for (const n of connectionAssets) {
+          const src = (n.data?.connection_source as string) || 'Other';
+          (connectionsBySource[src] ||= []).push(n);
+        }
+        const connectionSources = Object.keys(connectionsBySource).sort();
+
+        const renderTypeBadge = (n: Node) => {
+          const isConnection = !!n.data?.is_connection;
+          const isExternal = !!n.data?.is_external;
+          const isObservable = !!n.data?.is_observable;
+          if (isConnection) {
+            return <span className="px-1.5 py-0.5 rounded bg-amber-50 border border-amber-200 text-amber-700 font-medium" title="Warehouse connection scrape (info_schema / catalog metadata)">connection</span>;
+          }
+          if (isExternal) {
+            return <span className="px-1.5 py-0.5 rounded bg-gray-100 border border-gray-200 text-gray-500 font-medium" title="External Dagster asset -- observed here, defined in another project">external</span>;
+          }
+          if (isObservable) {
+            return <span className="px-1.5 py-0.5 rounded bg-blue-50 border border-blue-200 text-blue-700 font-medium">observable</span>;
+          }
+          return <span className="px-1.5 py-0.5 rounded bg-emerald-50 border border-emerald-200 text-emerald-700 font-medium">materializable</span>;
+        };
+
+        const renderRow = (n: Node) => {
+          const key = n.data?.asset_key || '';
+          // Use raw per-asset edges here, NOT displayEdges. In
+          // collapsed mode displayEdges is aggregated to group-level
+          // ids (e.g. `__group__::analytics`) so filtering by an
+          // individual asset id returns nothing -- which is why the
+          // deps/downstream columns were showing 0 for every row.
+          const upstreamEdges = edges.filter((e) => e.target === n.id);
+          const downstreamEdges = edges.filter((e) => e.source === n.id);
+          const checks = (n.data?.checks || []).length;
+          const isExternal = !!n.data?.is_external;
+          const isPartitioned = !!n.data?.is_partitioned;
+          const owners = (n.data?.owners || []) as string[];
+          const tags = (n.data?.tags || []) as string[];
+          return (
+            <tr
+              key={n.id}
+              className={`border-b border-gray-50 last:border-0 hover:bg-gray-50/50 cursor-pointer ${isExternal ? 'opacity-70' : ''}`}
+              // Catalog rows open the full-screen detail view directly
+              // -- it's the natural affordance for a table row. The
+              // graph pane still uses the sidebar for quick-peek.
+              onClick={() => { onNodeSelect(n.id); onOpenAssetDetail?.(n.id); }}
+            >
+              <td className="px-4 py-2 font-mono text-xs text-gray-900">
+                {key}
+                {isPartitioned && (
+                  <span className="ml-1.5 text-[9px] uppercase tracking-wider text-purple-600" title="Partitioned">·part</span>
+                )}
+              </td>
+              <td className="px-4 py-2 text-xs text-gray-700">{n.data?.group_name || '—'}</td>
+              <td className="px-4 py-2 text-xs">
+                <div className="flex flex-wrap gap-1">
+                  {(n.data?.kinds || []).map((k: string) => (
+                    <span key={k} className="px-1.5 py-0.5 rounded bg-indigo-50 border border-indigo-200 text-indigo-700 text-[10px] font-mono">{k}</span>
+                  ))}
+                </div>
+              </td>
+              <td className="px-4 py-2 text-[10px]">{renderTypeBadge(n)}</td>
+              <td className="px-4 py-2 text-[11px] text-gray-700">
+                {owners.length > 0 ? owners.slice(0, 2).join(', ') + (owners.length > 2 ? ` +${owners.length - 2}` : '') : <span className="text-gray-400 italic">—</span>}
+              </td>
+              <td className="px-4 py-2 text-[10px]">
+                <div className="flex flex-wrap gap-1">
+                  {tags.slice(0, 3).map((t: string) => (
+                    <span key={t} className="px-1.5 py-0.5 rounded bg-gray-100 text-gray-700 font-mono">{t}</span>
+                  ))}
+                  {tags.length > 3 && (
+                    <span className="text-gray-500">+{tags.length - 3}</span>
+                  )}
+                </div>
+              </td>
+              <td className="px-4 py-2 text-xs text-gray-600 tabular-nums">{upstreamEdges.length}</td>
+              <td className="px-4 py-2 text-xs text-gray-600 tabular-nums">{downstreamEdges.length}</td>
+              <td className="px-4 py-2 text-xs text-gray-600 tabular-nums">
+                {checks > 0 ? <span className="text-emerald-700 font-medium">{checks}</span> : '—'}
+              </td>
+              <td className="px-4 py-2 text-[11px] text-gray-600 truncate max-w-[300px]" title={n.data?.description || ''}>
+                {n.data?.description || <span className="text-gray-400 italic">—</span>}
+              </td>
+              <td className="px-2 py-2 text-right whitespace-nowrap">
+                {/* Auto coverage per-row shortcut. Hidden on cloud
+                    (read-only). stopPropagation so the click doesn't
+                    also open the detail page. */}
+                {!(currentProject as any)?.is_dagster_plus && (
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setAutoCoverageAssetKey((n.data?.asset_key as string) || n.id);
+                    }}
+                    className="inline-flex items-center gap-1 px-2 py-1 text-[10px] font-medium text-blue-700 bg-blue-50 border border-blue-200 rounded hover:bg-blue-100"
+                    title="Suggest a monitoring baseline (freshness / row count / uniqueness / null checks) for this asset"
+                  >
+                    <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
+                    </svg>
+                    Auto coverage
+                  </button>
+                )}
+              </td>
+            </tr>
+          );
+        };
+
+        const headerRow = (
+          <thead className="bg-gray-50 border-b border-gray-100">
+            <tr>
+              <th className="text-left px-4 py-2 text-xs font-medium text-gray-700 uppercase tracking-wider">Asset key</th>
+              <th className="text-left px-4 py-2 text-xs font-medium text-gray-700 uppercase tracking-wider">Group</th>
+              <th className="text-left px-4 py-2 text-xs font-medium text-gray-700 uppercase tracking-wider">Kinds</th>
+              <th className="text-left px-4 py-2 text-xs font-medium text-gray-700 uppercase tracking-wider" title="materializable / observable / external Dagster asset / warehouse connection scrape">Type</th>
+              <th className="text-left px-4 py-2 text-xs font-medium text-gray-700 uppercase tracking-wider">Owners</th>
+              <th className="text-left px-4 py-2 text-xs font-medium text-gray-700 uppercase tracking-wider">Tags</th>
+              <th className="text-left px-4 py-2 text-xs font-medium text-gray-700 uppercase tracking-wider">Deps</th>
+              <th className="text-left px-4 py-2 text-xs font-medium text-gray-700 uppercase tracking-wider">Downstream</th>
+              <th className="text-left px-4 py-2 text-xs font-medium text-gray-700 uppercase tracking-wider">Checks</th>
+              <th className="text-left px-4 py-2 text-xs font-medium text-gray-700 uppercase tracking-wider">Description</th>
+              <th className="text-right px-2 py-2 text-xs font-medium text-gray-700 uppercase tracking-wider">Actions</th>
+            </tr>
+          </thead>
+        );
+
+        return (
+          <div className="flex-1 min-h-0 overflow-y-auto bg-gray-50 p-6 space-y-4">
+            <div className="bg-white border border-gray-200 rounded-lg overflow-hidden">
+              <div className="px-4 py-3 border-b border-gray-100 flex items-center justify-between">
+                <h2 className="text-sm font-semibold text-gray-900">Asset catalog</h2>
+                <span className="text-xs text-gray-500">
+                  {primaryAssets.length} asset{primaryAssets.length === 1 ? '' : 's'}
+                </span>
+              </div>
+              <table className="w-full text-sm">
+                {headerRow}
+                <tbody>
+                  {primaryAssets.map(renderRow)}
+                  {primaryAssets.length === 0 && (
+                    <tr><td colSpan={11} className="px-4 py-8 text-center text-xs text-gray-500 italic">No assets match the current filters.</td></tr>
+                  )}
+                </tbody>
+              </table>
             </div>
-            <table className="w-full text-sm">
-              <thead className="bg-gray-50 border-b border-gray-100">
-                <tr>
-                  <th className="text-left px-4 py-2 text-xs font-medium text-gray-700 uppercase tracking-wider">Asset key</th>
-                  <th className="text-left px-4 py-2 text-xs font-medium text-gray-700 uppercase tracking-wider">Group</th>
-                  <th className="text-left px-4 py-2 text-xs font-medium text-gray-700 uppercase tracking-wider">Kinds</th>
-                  <th className="text-left px-4 py-2 text-xs font-medium text-gray-700 uppercase tracking-wider" title="Materializable ↔ external (observed-only) ↔ observable">Type</th>
-                  <th className="text-left px-4 py-2 text-xs font-medium text-gray-700 uppercase tracking-wider">Owners</th>
-                  <th className="text-left px-4 py-2 text-xs font-medium text-gray-700 uppercase tracking-wider">Tags</th>
-                  <th className="text-left px-4 py-2 text-xs font-medium text-gray-700 uppercase tracking-wider">Deps</th>
-                  <th className="text-left px-4 py-2 text-xs font-medium text-gray-700 uppercase tracking-wider">Downstream</th>
-                  <th className="text-left px-4 py-2 text-xs font-medium text-gray-700 uppercase tracking-wider">Checks</th>
-                  <th className="text-left px-4 py-2 text-xs font-medium text-gray-700 uppercase tracking-wider">Description</th>
-                </tr>
-              </thead>
-              <tbody>
-                {perAssetDisplay.filter((n) => n.data?.node_kind === 'asset').map((n) => {
-                  const key = n.data?.asset_key || '';
-                  const upstreamEdges = displayEdges.filter((e) => e.target === n.id);
-                  const downstreamEdges = displayEdges.filter((e) => e.source === n.id);
-                  const checks = (n.data?.checks || []).length;
-                  const isExternal = !!n.data?.is_external;
-                  const isPartitioned = !!n.data?.is_partitioned;
-                  const isObservable = !!n.data?.is_observable;
-                  const owners = (n.data?.owners || []) as string[];
-                  const tags = (n.data?.tags || []) as string[];
-                  return (
-                    <tr
-                      key={n.id}
-                      className={`border-b border-gray-50 last:border-0 hover:bg-gray-50/50 cursor-pointer ${isExternal ? 'opacity-60' : ''}`}
-                      onClick={() => {
-                        onNodeSelect(n.id);
-                        setViewMode('graph');
-                      }}
-                    >
-                      <td className="px-4 py-2 font-mono text-xs text-gray-900">
-                        {key}
-                        {isPartitioned && (
-                          <span className="ml-1.5 text-[9px] uppercase tracking-wider text-purple-600" title="Partitioned">·part</span>
-                        )}
-                      </td>
-                      <td className="px-4 py-2 text-xs text-gray-700">{n.data?.group_name || '—'}</td>
-                      <td className="px-4 py-2 text-xs">
-                        <div className="flex flex-wrap gap-1">
-                          {(n.data?.kinds || []).map((k: string) => (
-                            <span key={k} className="px-1.5 py-0.5 rounded bg-indigo-50 border border-indigo-200 text-indigo-700 text-[10px] font-mono">{k}</span>
-                          ))}
-                        </div>
-                      </td>
-                      <td className="px-4 py-2 text-[10px]">
-                        {isExternal ? (
-                          <span className="px-1.5 py-0.5 rounded bg-gray-100 border border-gray-200 text-gray-500 font-medium" title="Observed via a connection, not materialized here">external</span>
-                        ) : isObservable ? (
-                          <span className="px-1.5 py-0.5 rounded bg-blue-50 border border-blue-200 text-blue-700 font-medium">observable</span>
-                        ) : (
-                          <span className="px-1.5 py-0.5 rounded bg-emerald-50 border border-emerald-200 text-emerald-700 font-medium">materializable</span>
-                        )}
-                      </td>
-                      <td className="px-4 py-2 text-[11px] text-gray-700">
-                        {owners.length > 0 ? owners.slice(0, 2).join(', ') + (owners.length > 2 ? ` +${owners.length - 2}` : '') : <span className="text-gray-400 italic">—</span>}
-                      </td>
-                      <td className="px-4 py-2 text-[10px]">
-                        <div className="flex flex-wrap gap-1">
-                          {tags.slice(0, 3).map((t: string) => (
-                            <span key={t} className="px-1.5 py-0.5 rounded bg-gray-100 text-gray-700 font-mono">{t}</span>
-                          ))}
-                          {tags.length > 3 && (
-                            <span className="text-gray-500">+{tags.length - 3}</span>
-                          )}
-                        </div>
-                      </td>
-                      <td className="px-4 py-2 text-xs text-gray-600 tabular-nums">{upstreamEdges.length}</td>
-                      <td className="px-4 py-2 text-xs text-gray-600 tabular-nums">{downstreamEdges.length}</td>
-                      <td className="px-4 py-2 text-xs text-gray-600 tabular-nums">
-                        {checks > 0 ? <span className="text-emerald-700 font-medium">{checks}</span> : '—'}
-                      </td>
-                      <td className="px-4 py-2 text-[11px] text-gray-600 truncate max-w-[300px]" title={n.data?.description || ''}>
-                        {n.data?.description || <span className="text-gray-400 italic">—</span>}
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
+
+            {connectionSources.map((src) => (
+              <ConnectionSection
+                key={src}
+                source={src}
+                assets={connectionsBySource[src]}
+                renderRow={renderRow}
+                headerRow={headerRow}
+              />
+            ))}
           </div>
-        </div>
-      )}
+        );
+      })()}
 
       {viewMode === 'graph' && (
       <div className="flex-1 min-h-0 relative">
@@ -2263,21 +2607,41 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource }: G
         minZoom={0.2}
         maxZoom={2}
       >
-        <GroupOverlay nodes={nodes} setNodes={setNodes} />
+        {/* Group bounding boxes:
+             - Fully-expanded (collapseToGroups=false): draw boxes for
+               every visible group (matches how the un-collapsed view
+               has always looked).
+             - Mixed collapsed (collapseToGroups=true, some expanded):
+               draw boxes only for the expanded groups so their
+               individual assets get the same visual grouping as when
+               fully expanded. Collapsed groups already have their own
+               card and don't need an outer box.
+             - Fully collapsed: no boxes -- the cards ARE the groups. */}
+        {(!collapseToGroups || expandedGroups.size > 0) && (
+          <GroupOverlay
+            nodes={displayNodes.filter((n) => !collapseToGroups || expandedGroups.has(n.data?.group_name as string))}
+            setNodes={setNodes}
+          />
+        )}
         <Background variant={BackgroundVariant.Dots} gap={16} size={1} />
         <Controls />
         <MiniMap />
       </ReactFlow>
       {/* Docked at the bottom of the graph pane (above the I/O panel when
-          it's open) so the AI bar never covers input/output previews. */}
-      <DagsterAIBar />
+          it's open) so the AI bar never covers input/output previews.
+          Suppressed for Dagster+ cloud projects -- they're read-only, so
+          the AI bar's "generate / edit / create" prompts have no effect. */}
+      {!(currentProject as any).is_dagster_plus && <DagsterAIBar />}
       </div>
       )}
 
       {/* Docked I/O preview panel — appears when the user selects an asset
           node and shows compact input/output tables. Buttons in its header
-          hand off to the full DataPreviewModal. */}
-      {currentProject && ioPanelAssetKey && (() => {
+          hand off to the full DataPreviewModal.
+          NOT rendered for Dagster+ projects: previewing requires spawning
+          the project's local venv Python to run the asset, which doesn't
+          exist for cloud-connected projects (they're read-only via GraphQL). */}
+      {currentProject && ioPanelAssetKey && !(currentProject as any).is_dagster_plus && (() => {
         // Upstream keys = source data of every edge ending at this node.
         // We match on both node.id and node.data.asset_key because the two
         // can differ for assets whose key has slashes (react-flow ids don't
@@ -2357,6 +2721,60 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource }: G
           onAddDataSource?.(componentType);
         }}
       />
+
+      {/* Auto coverage modal -- opened from the per-row shortcut in
+          the catalog. Same component the detail page uses. */}
+      {autoCoverageAssetKey && (
+        <AutoCoverageModal
+          assetKey={autoCoverageAssetKey}
+          onClose={() => setAutoCoverageAssetKey(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+// Catalog subsection for connection-scrape assets, grouped by
+// their top-level source (Databricks / GCP_SALESENG / ...). Collapsed
+// by default -- these lists can be huge and the user rarely needs
+// them; the affordance is there when they do.
+function ConnectionSection({
+  source,
+  assets,
+  renderRow,
+  headerRow,
+}: {
+  source: string;
+  assets: Node[];
+  renderRow: (n: Node) => JSX.Element;
+  headerRow: JSX.Element;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  return (
+    <div className="bg-white border border-amber-200 rounded-lg overflow-hidden">
+      <button
+        onClick={() => setExpanded(!expanded)}
+        className="w-full px-4 py-3 border-b border-amber-100 flex items-center justify-between bg-amber-50/50 hover:bg-amber-50 text-left"
+      >
+        <div className="flex items-center gap-2">
+          <svg className={`w-3 h-3 text-amber-700 transition-transform ${expanded ? 'rotate-90' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+          </svg>
+          <h2 className="text-sm font-semibold text-amber-900">
+            {source} <span className="font-normal text-amber-700">connection</span>
+          </h2>
+          <span className="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded bg-amber-100 text-amber-800 border border-amber-200">warehouse scrape</span>
+        </div>
+        <span className="text-xs text-amber-800">
+          {assets.length} asset{assets.length === 1 ? '' : 's'}
+        </span>
+      </button>
+      {expanded && (
+        <table className="w-full text-sm">
+          {headerRow}
+          <tbody>{assets.map(renderRow)}</tbody>
+        </table>
+      )}
     </div>
   );
 }

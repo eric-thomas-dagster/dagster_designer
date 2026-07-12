@@ -93,6 +93,44 @@ async def query(
     return body.get("data") or {}
 
 
+async def probe_default_deployment(org: str, token: str, timeout: float = 10.0) -> str | None:
+    """Hit the org-level /graphql and read the deployment name out of
+    the 3xx redirect target. This is the only authoritative signal for
+    "what is this org's default deployment" -- the fullDeployments
+    GraphQL query returns deploymentType='PRODUCTION' for every full
+    deployment, so it can't distinguish `data-eng-prod` from
+    `data-eng-dev` on its own.
+
+    Returns the deployment name (e.g. 'data-eng-prod') or None if the
+    org endpoint didn't redirect (unusual) or the target URL wasn't
+    parseable."""
+    if not org or not token:
+        return None
+    url = _graphql_url(org, "")
+    headers = {"Dagster-Cloud-Api-Token": token, "content-type": "application/json"}
+    body = {"query": "query { __typename }", "variables": {}}
+    try:
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
+            r = await client.post(url, headers=headers, json=body)
+            if r.status_code not in (301, 302, 303, 307, 308):
+                return None
+            loc = r.headers.get("location") or r.headers.get("Location")
+            if not loc:
+                return None
+            # Redirect target looks like:
+            #   https://hooli.dagster.cloud/data-eng-prod/graphql
+            #   /data-eng-prod/graphql (relative)
+            from urllib.parse import urlsplit
+            path = urlsplit(loc).path if "://" in loc else loc
+            # Strip leading slash and trailing "/graphql" -> deployment name
+            path = path.strip("/")
+            if path.endswith("/graphql"):
+                path = path[: -len("/graphql")].strip("/")
+            return path or None
+    except httpx.HTTPError:
+        return None
+
+
 # --- Query catalog ----------------------------------------------------------
 # Small library of common GraphQL queries we run against Dagster+.
 # They mirror the ones OSS Dagster's GraphiQL exposes, so users can
@@ -135,6 +173,20 @@ query DagsterPlusAssets {
     }
     dependencyKeys { path }
     dependedByKeys { path }
+    metadataEntries {
+      __typename
+      label
+      description
+      ... on TableSchemaMetadataEntry {
+        schema {
+          columns {
+            name
+            type
+            description
+          }
+        }
+      }
+    }
     assetChecksOrError(limit: 1000) {
       __typename
       ... on AssetChecks {

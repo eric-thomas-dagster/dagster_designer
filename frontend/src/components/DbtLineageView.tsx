@@ -139,7 +139,12 @@ export function DbtLineageView({ models, onModelClick, selectedUniqueId }: DbtLi
           nodesDraggable={false}
           nodesConnectable={false}
           proOptions={{ hideAttribution: true }}
-          onNodeClick={(_, node) => onModelClick?.(node.id)}
+          onNodeClick={(_, node) => {
+            // Sources aren't dbt models -- clicking them opens a detail
+            // drawer that has no data, which looks broken. Only forward
+            // clicks for uids we actually have a model for.
+            if (node.data?.model) onModelClick?.(node.id);
+          }}
         >
           <Background variant={BackgroundVariant.Dots} gap={16} size={1} />
           <Controls showInteractive={false} />

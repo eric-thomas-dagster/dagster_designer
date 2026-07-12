@@ -228,17 +228,26 @@ export function PrimitivesManager({
 
   const renderPrimitivesList = (primitives: Array<PrimitiveItem & { isManaged: boolean }>, category: PrimitiveCategory) => {
     if (!primitives || primitives.length === 0) {
+      const isCloud = !!(currentProject as any)?.is_dagster_plus;
       return (
         <div className="flex items-center justify-center h-64 text-gray-500">
           <div className="text-center">
             <p className="text-sm font-medium mb-2">No {category}s found</p>
-            <p className="text-xs text-gray-600 mb-4">Create a new {category} to get started</p>
-            <button
-              onClick={() => onNewPrimitive?.(category)}
-              className="inline-flex items-center px-3 py-2 text-sm font-medium text-white bg-primary rounded-md hover:bg-accent"
-            >
-              New {category}
-            </button>
+            {isCloud ? (
+              <p className="text-xs text-gray-600">
+                Dagster+ deployments define {category}s in code; none are visible for the selected deployment.
+              </p>
+            ) : (
+              <>
+                <p className="text-xs text-gray-600 mb-4">Create a new {category} to get started</p>
+                <button
+                  onClick={() => onNewPrimitive?.(category)}
+                  className="inline-flex items-center px-3 py-2 text-sm font-medium text-white bg-primary rounded-md hover:bg-accent"
+                >
+                  New {category}
+                </button>
+              </>
+            )}
           </div>
         </div>
       );
@@ -390,14 +399,16 @@ export function PrimitivesManager({
           })}
         </Tabs.List>
           <div className="flex items-center gap-1 pr-3">
-            <button
-              onClick={() => onNewPrimitive?.(activeTab)}
-              className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-primary-foreground bg-primary rounded-md hover:bg-accent transition-colors"
-              title={`Create a new ${activeTab.replace(/_/g, ' ')}`}
-            >
-              <span className="text-base leading-none">+</span>
-              <span>New {activeTab.replace(/_/g, ' ')}</span>
-            </button>
+            {!(currentProject as any)?.is_dagster_plus && (
+              <button
+                onClick={() => onNewPrimitive?.(activeTab)}
+                className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-primary-foreground bg-primary rounded-md hover:bg-accent transition-colors"
+                title={`Create a new ${activeTab.replace(/_/g, ' ')}`}
+              >
+                <span className="text-base leading-none">+</span>
+                <span>New {activeTab.replace(/_/g, ' ')}</span>
+              </button>
+            )}
             <button
               onClick={() => refetch()}
               className="flex items-center space-x-1 px-2 py-1.5 text-sm text-gray-600 hover:bg-gray-100 rounded"
@@ -416,20 +427,29 @@ export function PrimitivesManager({
 
         <Tabs.Content value="job" className="flex-1 overflow-y-auto">
           {renderPrimitivesList(getMergedPrimitives('job'), 'job')}
-          <CommunityAvailableSection categories={['jobs', 'job']} title="Community jobs" />
+          {/* Community sections are for browsing / installing templates,
+              which requires local write access. Hidden for Dagster+
+              cloud projects (read-only). */}
+          {!(currentProject as any)?.is_dagster_plus && (
+            <CommunityAvailableSection categories={['jobs', 'job']} title="Community jobs" />
+          )}
         </Tabs.Content>
 
         <Tabs.Content value="sensor" className="flex-1 overflow-y-auto">
           {renderPrimitivesList(getMergedPrimitives('sensor'), 'sensor')}
-          <CommunityAvailableSection categories={['sensor', 'sensors']} title="Community sensors" />
+          {!(currentProject as any)?.is_dagster_plus && (
+            <CommunityAvailableSection categories={['sensor', 'sensors']} title="Community sensors" />
+          )}
         </Tabs.Content>
 
         <Tabs.Content value="asset_check" className="flex-1 overflow-y-auto">
           {renderPrimitivesList(getMergedPrimitives('asset_check'), 'asset_check')}
-          <CommunityAvailableSection
-            categories={['check', 'checks', 'asset_check', 'asset_checks']}
-            title="Community asset checks"
-          />
+          {!(currentProject as any)?.is_dagster_plus && (
+            <CommunityAvailableSection
+              categories={['check', 'checks', 'asset_check', 'asset_checks']}
+              title="Community asset checks"
+            />
+          )}
         </Tabs.Content>
 
         <Tabs.Content value="freshness_policy" className="flex-1 overflow-y-auto">

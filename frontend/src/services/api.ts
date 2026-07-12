@@ -484,7 +484,13 @@ export const projectsApi = {
   // ------------ Dagster+ (cloud) integration ---------------------------
   testDagsterPlusConnection: async (
     body: { name: string; description?: string; org: string; deployment: string; token: string; location?: string },
-  ): Promise<{ ok: boolean; version: string | null; detail: string | null }> => {
+  ): Promise<{
+    ok: boolean;
+    version: string | null;
+    detail: string | null;
+    deployments: Array<{ deployment_name: string; deployment_type: string | null; deployment_status: string | null }>;
+    default_deployment: string | null;
+  }> => {
     const response = await api.post(`/projects/dagster-plus/test`, body);
     return response.data as any;
   },
@@ -1715,6 +1721,79 @@ export interface LaunchJobResponse {
   stderr: string;
 }
 
+// -------- Alerts (Dagster+ alert policies, authored locally) ----------
+export type AlertPolicyType = 'asset' | 'run' | 'code_location' | 'automation' | 'agent_downtime' | 'insight_metric';
+
+export interface AlertPolicy {
+  name: string;
+  description?: string | null;
+  enabled?: boolean;
+  type: AlertPolicyType;
+  asset?: {
+    asset_selection?: string | string[] | null;
+    asset_group?: string | null;
+    events?: string[];
+    tags?: Record<string, string> | null;
+  } | null;
+  run?: {
+    events?: string[];
+    tags?: Record<string, string> | null;
+    time_limit_seconds?: number | null;
+  } | null;
+  code_location?: Record<string, never> | null;
+  automation?: {
+    events?: string[];
+    include_schedules?: boolean;
+    include_sensors?: boolean;
+  } | null;
+  agent_downtime?: Record<string, never> | null;
+  insight_metric?: {
+    metric: string;
+    threshold?: number | null;
+    comparison?: string | null;
+  } | null;
+  notification_service?: {
+    email?: { email_addresses: string[] } | null;
+    slack?: { slack_workspace_name?: string | null; slack_channel_name: string } | null;
+    ms_teams?: { ms_teams_webhook_url: string } | null;
+    pagerduty?: { integration_key: string } | null;
+    webhook?: { url: string; headers?: Record<string, string> | null } | null;
+  };
+  extra_config?: Record<string, any> | null;
+}
+
+export interface AlertsFile {
+  path: string;
+  policies: AlertPolicy[];
+}
+
+export const alertsApi = {
+  list: async (projectId: string): Promise<AlertsFile> => {
+    const r = await api.get(`/projects/${projectId}/alerts`);
+    return r.data as AlertsFile;
+  },
+  save: async (projectId: string, policies: AlertPolicy[]): Promise<AlertsFile> => {
+    const r = await api.put(`/projects/${projectId}/alerts`, { policies });
+    return r.data as AlertsFile;
+  },
+  remove: async (projectId: string, name: string): Promise<AlertsFile> => {
+    const r = await api.delete(`/projects/${projectId}/alerts/${encodeURIComponent(name)}`);
+    return r.data as AlertsFile;
+  },
+  preview: async (projectId: string, policies: AlertPolicy[]): Promise<{ yaml: string }> => {
+    const r = await api.post(`/projects/${projectId}/alerts/preview`, { policies });
+    return r.data as { yaml: string };
+  },
+  syncToCloud: async (projectId: string, confirmed: boolean): Promise<{ success: boolean; detail: string; policies_pushed: number; stdout?: string | null; stderr?: string | null }> => {
+    const r = await api.post(`/projects/${projectId}/alerts/sync-to-cloud`, { confirmed });
+    return r.data as any;
+  },
+  syncFromCloud: async (projectId: string): Promise<AlertsFile> => {
+    const r = await api.post(`/projects/${projectId}/alerts/sync-from-cloud`);
+    return r.data as AlertsFile;
+  },
+};
+
 export const pipelinesApi = {
   create: async (projectId: string, pipeline: PipelineCreateRequest): Promise<PipelineResponse> => {
     const response = await api.post<PipelineResponse>(
@@ -1899,6 +1978,69 @@ export const assetsApi = {
       `/assets/${projectId}/known-schemas`,
     );
     return response.data;
+  },
+
+  /** Sifflet-style Auto Coverage. Given an asset key, returns a batch
+   *  of proposed monitors (freshness / row_count anomaly / uniqueness
+   *  on id-shaped columns / null_ratio per column). Deterministic
+   *  heuristics; frontend shows them in a preview modal and applies
+   *  the selected subset via coverageApply. */
+  coverageSuggest: async (
+    projectId: string,
+    assetKey: string,
+  ): Promise<{
+    asset_key: string;
+    suggestions: Array<{
+      name: string;
+      check_kind: string;
+      description: string;
+      severity: string;
+      target_column: string | null;
+      max_age_seconds: number | null;
+      min_row_count: number | null;
+      max_row_count: number | null;
+      row_count_z_score: number | null;
+      max_null_ratio: number | null;
+      rationale: string;
+      confidence: string;
+    }>;
+  }> => {
+    const response = await api.post(`/projects/${projectId}/assets/coverage-suggest`, {
+      asset_key: assetKey,
+    });
+    return response.data as any;
+  },
+
+  coverageApply: async (
+    projectId: string,
+    assetKey: string,
+    suggestions: any[],
+  ): Promise<{ applied: number; failed: Array<{ name: string; error: string }> }> => {
+    const response = await api.post(`/projects/${projectId}/assets/coverage-apply`, {
+      asset_key: assetKey,
+      suggestions,
+    });
+    return response.data as any;
+  },
+
+  coverageSuggestBulk: async (
+    projectId: string,
+    assetKeys: string[],
+  ): Promise<{ per_asset: Array<{ asset_key: string; suggestions: any[] }> }> => {
+    const response = await api.post(`/projects/${projectId}/assets/coverage-suggest-bulk`, {
+      asset_keys: assetKeys,
+    });
+    return response.data as any;
+  },
+
+  coverageApplyBulk: async (
+    projectId: string,
+    perAsset: Array<{ asset_key: string; suggestions: any[] }>,
+  ): Promise<{ applied: number; failed: Array<{ asset_key: string; name: string; error: string }> }> => {
+    const response = await api.post(`/projects/${projectId}/assets/coverage-apply-bulk`, {
+      per_asset: perAsset,
+    });
+    return response.data as any;
   },
 
   /** Heuristic column-level lineage for one asset, generated from the

@@ -55,6 +55,8 @@ interface PropertyPanelProps {
   onConfigureComponent?: (component: ComponentInstance) => void;
   onOpenFile?: (filePath: string) => void;
   onNewPrimitiveForAsset?: (category: 'schedule' | 'job' | 'sensor' | 'asset_check' | 'freshness_policy', assetKey: string) => void;
+  /** Opens the full-screen AssetDetailPage overlay for this node. */
+  onOpenDetail?: (nodeId: string) => void;
 }
 
 // Collapsible wrapper for the freshness policy section — collapsed by default
@@ -80,7 +82,7 @@ function FreshnessPolicySection({ isConfigured, children }: { isConfigured: bool
   );
 }
 
-export function PropertyPanel({ nodeId, onConfigureComponent, onOpenFile, onNewPrimitiveForAsset }: PropertyPanelProps) {
+export function PropertyPanel({ nodeId, onConfigureComponent, onOpenFile, onNewPrimitiveForAsset, onOpenDetail }: PropertyPanelProps) {
   const { currentProject, updateGraph, loadProject } = useProjectStore();
   const node = currentProject?.graph.nodes.find((n) => n.id === nodeId);
 
@@ -872,6 +874,18 @@ export function PropertyPanel({ nodeId, onConfigureComponent, onOpenFile, onNewP
         </div>
 
         <div className="flex-1 overflow-y-auto p-4 space-y-4">
+          {/* Full-page details escape hatch. The sidebar is intentionally
+              compact; users clicking here get the Dagster-style asset
+              page (status KPIs, columns, automation, freshness, etc.). */}
+          {onOpenDetail && (
+            <button
+              onClick={() => onOpenDetail(node.id)}
+              className="w-full flex items-center justify-between gap-2 px-3 py-2 text-sm font-medium text-blue-700 bg-blue-50 border border-blue-200 rounded hover:bg-blue-100 transition"
+            >
+              <span>View full asset details</span>
+              <span className="text-blue-500">↗</span>
+            </button>
+          )}
           {/* dbt Asset Notice + authoring actions */}
           {isDbtComponentType(sourceComponent?.component_type) && (
             <div className="text-xs bg-blue-50 border border-blue-200 rounded-md p-3 space-y-3">
@@ -2124,23 +2138,29 @@ export function PropertyPanel({ nodeId, onConfigureComponent, onOpenFile, onNewP
             </div>
           )}
 
-          {/* Delete Button */}
-          <div className="border-t border-red-200 pt-4 mt-6">
-            <button
-              onClick={handleDeleteNode}
-              className="w-full p-3 bg-red-50 border-2 border-red-300 hover:border-red-500 hover:bg-red-100 rounded-lg transition-all group"
-            >
-              <div className="flex items-center justify-center space-x-2">
-                <Trash2 className="w-5 h-5 text-red-600 group-hover:text-red-700" />
-                <div className="text-sm font-semibold text-red-900 group-hover:text-red-950">
-                  Delete Component
+          {/* Delete Button -- suppressed for Dagster+ cloud projects.
+              Deleting a cloud-derived asset here would remove it from
+              the local graph copy but the next hydrate would bring it
+              back (source of truth is the deployment). Better to hide
+              the option than mislead. */}
+          {!(currentProject as any)?.is_dagster_plus && (
+            <div className="border-t border-red-200 pt-4 mt-6">
+              <button
+                onClick={handleDeleteNode}
+                className="w-full p-3 bg-red-50 border-2 border-red-300 hover:border-red-500 hover:bg-red-100 rounded-lg transition-all group"
+              >
+                <div className="flex items-center justify-center space-x-2">
+                  <Trash2 className="w-5 h-5 text-red-600 group-hover:text-red-700" />
+                  <div className="text-sm font-semibold text-red-900 group-hover:text-red-950">
+                    Delete Component
+                  </div>
                 </div>
-              </div>
-            </button>
-            <p className="text-xs text-gray-600 mt-2 text-center">
-              Remove from canvas and delete all connections (or press Delete/Backspace key)
-            </p>
-          </div>
+              </button>
+              <p className="text-xs text-gray-600 mt-2 text-center">
+                Remove from canvas and delete all connections (or press Delete/Backspace key)
+              </p>
+            </div>
+          )}
         </div>
       </div>
     );

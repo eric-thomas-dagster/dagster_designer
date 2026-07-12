@@ -15,11 +15,13 @@ import { PrimitivesManager } from './components/PrimitivesManager';
 import { ResourcesManager } from './components/ResourcesManager';
 import { PipelineBuilder } from './components/PipelineBuilder';
 import { DagsterStartupModal } from './components/DagsterStartupModal';
+import { AssetDetailPage } from './components/AssetDetailPage';
+import { AlertsPanel } from './components/AlertsPanel';
 import { DataPreviewModal } from './components/DataPreviewModal';
 import { DagsterCloudChip } from './components/DagsterCloudChip';
 import { NotificationHost, notify, confirmDialog } from './components/Notifications';
 import { useProjectStore } from './hooks/useProject';
-import { Network, FileCode, Zap, Package, ExternalLink, Settings, Workflow, ChevronDown, Skull, AlertTriangle, X, Loader2, CheckCircle, XCircle, PanelLeftClose, PanelLeft, Clock, Play, Radar, Timer, Download, Database, ShieldCheck, Cloud } from 'lucide-react';
+import { Network, FileCode, Zap, Package, ExternalLink, Settings, Workflow, ChevronDown, Skull, AlertTriangle, X, Loader2, CheckCircle, XCircle, PanelLeftClose, PanelLeft, Clock, Play, Radar, Timer, Download, Database, ShieldCheck, Cloud, Bell } from 'lucide-react';
 import { IngestionsPanel } from './components/IngestionsPanel';
 import { DbtPanel } from './components/DbtPanel';
 import { MonitorsPanel } from './components/MonitorsPanel';
@@ -222,6 +224,14 @@ function App() {
   const [editingComponent, setEditingComponent] = useState<ComponentInstance | null>(null);
   const [addingComponentType, setAddingComponentType] = useState<string | null>(null);
   const [componentsPanelHeight, setComponentsPanelHeight] = useState(60); // Percentage
+  // GraphEditor's graph/catalog toggle is lifted here so App can hide
+  // the Project Components sidebar in catalog mode (it only applies to
+  // the DAG view -- catalog is a searchable table with no drop zone).
+  const [assetsViewMode, setAssetsViewMode] = useState<'graph' | 'catalog'>('graph');
+  // Node id currently opened in the full-screen AssetDetailPage.
+  // Triggered from catalog rows and the "View full details" button in
+  // the PropertyPanel; null means the overlay is closed.
+  const [detailNodeId, setDetailNodeId] = useState<string | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [activeMainTab, setActiveMainTab] = useState('assets');
   const [templateBuilderTab, setTemplateBuilderTab] = useState<string | null>(null);
@@ -624,6 +634,23 @@ function App() {
   const handleOpenDagsterUI = async () => {
     if (!currentProject) return;
 
+    // Dagster+ (cloud) projects: no local `dagster dev` to spin up.
+    // Build the deployment URL directly and open the cloud UI in a
+    // new tab. Uses org's default deployment path when the project
+    // isn't pinned to a specific one.
+    if ((currentProject as any).is_dagster_plus) {
+      const org = ((currentProject as any).dagster_plus_org || '')
+        .replace(/^https?:\/\//, '')
+        .replace(/\.dagster\.(cloud|plus).*$/, '')
+        .split('/')[0];
+      const dep = (currentProject as any).dagster_plus_deployment || '';
+      const url = dep
+        ? `https://${org}.dagster.cloud/${dep}/home`
+        : `https://${org}.dagster.cloud/`;
+      window.open(url, '_blank');
+      return;
+    }
+
     setDagsterUILoading(true);
     try {
       // Check if Dagster UI is running
@@ -672,15 +699,20 @@ function App() {
     }
   };
 
+  const isCloudProject = !!currentProject && !!(currentProject as any).is_dagster_plus;
   const navItems = [
     { value: 'assets', label: 'Assets', icon: Network },
     { value: 'ingestions', label: 'Ingestions', icon: Download },
     { value: 'dbt', label: 'dbt', icon: Database },
     { value: 'monitors', label: 'Monitors', icon: ShieldCheck },
+    { value: 'alerts', label: 'Alerts', icon: Bell },
     { value: 'pipelines', label: 'Pipelines', icon: Workflow },
     { value: 'primitives', label: 'Automation', icon: Zap },
     { value: 'library', label: 'Library', icon: Package },
-    { value: 'code', label: 'Code', icon: FileCode, onHover: handleCodeTabHover },
+    // Code tab is meaningless for Dagster+ projects (no local codebase
+    // to edit -- deployment is read-only via GraphQL). Hide entirely
+    // so users don't hit dead links.
+    ...(isCloudProject ? [] : [{ value: 'code', label: 'Code', icon: FileCode, onHover: handleCodeTabHover }]),
     { value: 'resources', label: 'Resources', icon: Settings },
   ];
 
@@ -804,14 +836,22 @@ function App() {
                       <ExternalLink className="w-4 h-4" />
                       <span>Open Dagster UI</span>
                     </DropdownMenu.Item>
-                    <DropdownMenu.Separator className="h-px bg-gray-200 my-1" />
-                    <DropdownMenu.Item
-                      className="flex items-center gap-2 px-3 py-2 text-sm text-red-600 hover:bg-red-50 rounded cursor-pointer outline-none"
-                      onSelect={handleKillAllDagsterProcesses}
-                    >
-                      <Skull className="w-4 h-4" />
-                      <span>Kill All Dagster Processes</span>
-                    </DropdownMenu.Item>
+                    {/* Killing local Dagster processes is meaningless
+                        for Dagster+ (cloud) projects -- nothing runs
+                        locally, so hide the option entirely rather
+                        than confuse users. */}
+                    {!isCloudProject && (
+                      <>
+                        <DropdownMenu.Separator className="h-px bg-gray-200 my-1" />
+                        <DropdownMenu.Item
+                          className="flex items-center gap-2 px-3 py-2 text-sm text-red-600 hover:bg-red-50 rounded cursor-pointer outline-none"
+                          onSelect={handleKillAllDagsterProcesses}
+                        >
+                          <Skull className="w-4 h-4" />
+                          <span>Kill All Dagster Processes</span>
+                        </DropdownMenu.Item>
+                      </>
+                    )}
                   </DropdownMenu.Content>
                 </DropdownMenu.Portal>
               </DropdownMenu.Root>
@@ -838,11 +878,32 @@ function App() {
               Editing controls (delete, +Add data) hide on cloud since
               cloud is read-only for now. */}
           <Tabs.Content value="assets" className="flex-1 flex overflow-hidden">
+            {/* Asset detail view sits alongside the graph/catalog layout
+                and only one is visible at a time. We keep GraphEditor
+                mounted (via `hidden`) rather than unmounting it so the
+                user's view mode (graph vs catalog) survives the detour
+                through the detail page -- clicking Back returns them
+                exactly where they came from. */}
+            {detailNodeId && (
+              <div className="flex-1 min-w-0 flex flex-col">
+                <AssetDetailPage
+                  nodeId={detailNodeId}
+                  onClose={() => setDetailNodeId(null)}
+                  onNewPrimitiveForAsset={(category, assetKey) => {
+                    setTemplateBuilderAssetKey(assetKey);
+                    setTemplateBuilderTab(category);
+                  }}
+                />
+              </div>
+            )}
+            <div className={`${detailNodeId ? 'hidden' : 'flex'} flex-1 min-w-0 overflow-hidden`}>
             {/* Left Sidebar - Component Palette + Project Components.
                 Hidden entirely for Dagster+ projects since cloud is
                 read-only and "add a component" / "list local
-                components" don't apply to a live deployment. */}
-            {!(currentProject && (currentProject as any).is_dagster_plus) && (
+                components" don't apply to a live deployment. Also
+                hidden when the user is on the catalog view -- there's
+                no per-asset editing surface to drag onto. */}
+            {!(currentProject && (currentProject as any).is_dagster_plus) && assetsViewMode === 'graph' && (
             <aside
               data-sidebar
               className="w-64 flex-shrink-0 bg-white border-r border-gray-200 flex flex-col overflow-hidden"
@@ -894,6 +955,8 @@ function App() {
               <GraphEditor
                 onNodeSelect={setSelectedNodeId}
                 onAddDataSource={setAddingComponentType}
+                onViewModeChange={setAssetsViewMode}
+                onOpenAssetDetail={setDetailNodeId}
                 onPrimitiveClick={async (category, name) => {
                   // For asset checks — many are dbt-derived and don't live in
                   // our managed primitives list. Route via the backend search
@@ -935,9 +998,11 @@ function App() {
                     setTemplateBuilderAssetKey(assetKey);
                     setTemplateBuilderTab(category);
                   }}
+                  onOpenDetail={setDetailNodeId}
                 />
               </aside>
             )}
+            </div>
           </Tabs.Content>
 
           {/* Ingestions Tab Content — Fivetran/Airbyte-style monitoring
@@ -961,11 +1026,19 @@ function App() {
             <MonitorsPanel onOpenFile={handleOpenFile} />
           </Tabs.Content>
 
+          {/* Alerts Tab Content */}
+          <Tabs.Content value="alerts" className="flex-1 overflow-hidden">
+            <AlertsPanel />
+          </Tabs.Content>
+
           {/* Pipelines Tab Content */}
           <Tabs.Content value="pipelines" className="flex-1 overflow-hidden">
             <div className="h-full flex flex-col">
-              {/* AI Assistant strip — orphans, missing lineage, cost hints */}
-              {currentProject && (
+              {/* AI Assistant strip — orphans, missing lineage, cost hints.
+                  Hidden for Dagster+ (cloud) projects: they're read-only, so
+                  the assistant's "add / restructure / schedule" suggestions
+                  can't be acted on. */}
+              {currentProject && !isCloudProject && (
                 <div className="px-4 pt-3">
                   <AiAssistantPanel
                     title="AI Assistant · Pipelines"
@@ -999,8 +1072,9 @@ function App() {
           {/* Automation (Primitives) Tab Content */}
           <Tabs.Content value="primitives" className="flex-1 overflow-hidden">
             <div className="h-full flex flex-col overflow-y-auto">
-              {/* AI Assistant strip — schedule + sensor + automation-condition coverage */}
-              {currentProject && (
+              {/* AI Assistant strip — schedule + sensor + automation-condition coverage.
+                  Hidden for cloud (read-only). */}
+              {currentProject && !isCloudProject && (
                 <div className="px-4 pt-3">
                   <AiAssistantPanel
                     title="AI Assistant · Automation"
@@ -1042,9 +1116,19 @@ function App() {
       ) : (
         <div className="flex-1 flex items-center justify-center text-gray-500">
           <div className="text-center">
-            <Network className="w-16 h-16 mx-auto mb-4 text-gray-400" />
-            <p className="text-lg">No project selected</p>
-            <p className="text-sm mt-2">Create or open a project to get started</p>
+            {isProjectLoading ? (
+              <>
+                <div className="inline-block w-10 h-10 border-4 border-gray-200 border-t-indigo-500 rounded-full animate-spin mb-4" />
+                <p className="text-lg font-medium text-gray-700">Loading project…</p>
+                <p className="text-sm mt-1 text-gray-400">{loadingCloudLabel ? `Talking to ${loadingCloudLabel}` : 'Fetching assets and lineage.'}</p>
+              </>
+            ) : (
+              <>
+                <Network className="w-16 h-16 mx-auto mb-4 text-gray-400" />
+                <p className="text-lg">No project selected</p>
+                <p className="text-sm mt-2">Create or open a project to get started</p>
+              </>
+            )}
           </div>
         </div>
       )}
@@ -1095,6 +1179,7 @@ function App() {
           }}
         />
       )}
+
 
       {/* Dependency Installation Output Dialog */}
       {showDependencyOutputDialog && (

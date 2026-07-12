@@ -52,7 +52,17 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   dependencyInstallOutput: '',
 
   loadProject: async (id: string) => {
-    set({ isLoading: true, error: null });
+    // Clear currentProject when switching to a different project so
+    // the loading placeholder actually shows during the fetch.
+    // Otherwise the UI keeps rendering the previous project's data
+    // (stale graph, wrong tabs) until the new one lands, which is
+    // especially confusing right after a fresh Dagster+ connect.
+    const prev = get().currentProject;
+    if (!prev || prev.id !== id) {
+      set({ currentProject: null, isLoading: true, error: null });
+    } else {
+      set({ isLoading: true, error: null });
+    }
     try {
       const project = await projectsApi.get(id);
       set({ currentProject: project, isLoading: false });
