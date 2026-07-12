@@ -20,7 +20,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from .core.config import settings
-from .api import components, projects, git, codegen, dagster, files, templates, primitives, dagster_webserver, dbt_adapters, integrations, env_vars, pipelines, templates_registry, dbt_cloud, assets, dependencies, pipeline_templates, genie, alerts
+from .api import components, projects, git, codegen, dagster, files, templates, primitives, dagster_webserver, dbt_adapters, integrations, env_vars, pipelines, templates_registry, dbt_cloud, assets, dependencies, pipeline_templates, genie, alerts, runs
 
 # Create FastAPI app
 app = FastAPI(
@@ -58,6 +58,7 @@ app.include_router(dependencies.router, prefix=settings.api_prefix)  # New: Depe
 app.include_router(pipeline_templates.router, prefix=settings.api_prefix)  # New: Pipeline templates
 app.include_router(genie.router, prefix=settings.api_prefix)  # New: Genie NL planner
 app.include_router(alerts.router, prefix=settings.api_prefix)  # New: Alert policies (Dagster+)
+app.include_router(runs.router, prefix=settings.api_prefix)  # New: Runs history (local dagster dev + Dagster+)
 
 
 @app.get("/")

@@ -1345,10 +1345,10 @@ function BulkAutoCoverageModal({ assetKeys, onClose }: { assetKeys: string[]; on
             <button
               onClick={apply}
               disabled={applying || loading || totalSelected === 0}
-              className="inline-flex items-center gap-1.5 px-4 py-1.5 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 rounded disabled:opacity-50 disabled:cursor-not-allowed"
+              className="inline-flex items-center gap-1.5 px-4 py-1.5 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 rounded disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap"
             >
               {applying ? <Loader2 className="w-4 h-4 animate-spin" /> : <Zap className="w-4 h-4" />}
-              {applying ? 'Applying…' : `Apply ${totalSelected} check${totalSelected === 1 ? '' : 's'}`}
+              {applying ? 'Applying…' : (totalSelected === 1 ? 'Apply check' : `Apply ${totalSelected} checks`)}
             </button>
           </div>
         </div>

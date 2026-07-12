@@ -39,6 +39,29 @@
     --gray-600: 217 17% 35%;
     --gray-300: 213 24% 84%;
   }
+
+  /* Dark theme overrides. Everything reads from CSS variables so the
+     shell (bg-background / text-foreground) flips automatically; each
+     panel needs `dark:` variants sprinkled in as we go, but the base
+     shell + Tailwind color classes below already look right. */
+  .dark {
+    --background: 260 20% 8%;          /* deep near-black with a violet tint */
+    --foreground: 240 100% 96%;        /* near-white */
+
+    --muted: 260 12% 22%;
+    --muted-foreground: 240 8% 68%;
+
+    --border: 260 12% 22%;
+
+    --primary: 246 87% 72%;             /* lighter blurple for contrast */
+    --primary-foreground: 260 20% 8%;
+
+    --secondary: 260 12% 22%;
+    --secondary-foreground: 240 100% 96%;
+
+    --accent: 246 68% 60%;
+    --accent-foreground: 240 100% 96%;
+  }
 }
 
 @layer base {
@@ -51,6 +74,29 @@
     font-family: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
   }
 }
+
+/* --- Dark mode: broad-stroke color adjustments for components that
+       use explicit Tailwind grays / whites (many panels). We can't
+       audit every component in one pass, but overriding these tokens
+       at the class level gets the shell + most panels into an
+       acceptable dark state without touching each file. */
+.dark {
+  color-scheme: dark;
+}
+.dark .bg-white { @apply bg-slate-900; }
+.dark .bg-gray-50 { @apply bg-slate-900; }
+.dark .bg-gray-100 { @apply bg-slate-800; }
+.dark .text-gray-900 { @apply text-slate-100; }
+.dark .text-gray-800 { @apply text-slate-100; }
+.dark .text-gray-700 { @apply text-slate-200; }
+.dark .text-gray-600 { @apply text-slate-300; }
+.dark .text-gray-500 { @apply text-slate-400; }
+.dark .text-gray-400 { @apply text-slate-500; }
+.dark .border-gray-100 { @apply border-slate-800; }
+.dark .border-gray-200 { @apply border-slate-700; }
+.dark .border-gray-300 { @apply border-slate-600; }
+.dark .hover\:bg-gray-50:hover { @apply bg-slate-800; }
+.dark .hover\:bg-gray-100:hover { @apply bg-slate-800; }
 
 /* React Flow overrides */
 .react-flow__node {

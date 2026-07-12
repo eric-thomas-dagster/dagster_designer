@@ -1,7 +1,35 @@
 {
   "permissions": {
     "allow": [
-      "Bash(git -C /Users/ericthomas/dagster_designer_latest/dagster_designer commit -m ' *)"
+      "Bash(git -C /Users/ericthomas/dagster_designer_latest/dagster_designer commit -m ' *)",
+      "Bash(python3 -c \"import ast; ast.parse\\(open\\('/Users/ericthomas/dagster_designer_latest/dagster_designer/backend/app/api/projects.py'\\).read\\(\\)\\); print\\('OK'\\)\")",
+      "Bash(python3 -c \"import ast; ast.parse\\(open\\('/Users/ericthomas/dagster_designer_latest/dagster_designer/backend/app/api/projects.py'\\).read\\(\\)\\); print\\('backend OK'\\)\")",
+      "Bash(python3 -c \"import ast; ast.parse\\(open\\('/Users/ericthomas/dagster_designer_latest/dagster_designer/backend/app/api/projects.py'\\).read\\(\\)\\); ast.parse\\(open\\('/Users/ericthomas/dagster_designer_latest/dagster_designer/backend/app/services/dagster_plus_client.py'\\).read\\(\\)\\); print\\('backend OK'\\)\")",
+      "Bash(python3 -c \"import ast; ast.parse\\(open\\('/Users/ericthomas/dagster_designer_latest/dagster_designer/backend/app/api/projects.py'\\).read\\(\\)\\); ast.parse\\(open\\('/Users/ericthomas/dagster_designer_latest/dagster_designer/backend/app/api/primitives.py'\\).read\\(\\)\\); ast.parse\\(open\\('/Users/ericthomas/dagster_designer_latest/dagster_designer/backend/app/api/assets.py'\\).read\\(\\)\\); print\\('backend OK'\\)\")",
+      "Bash(lsof -ti:8000)",
+      "Bash(xargs -r kill -9)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\\\\n\" http://localhost:8000/api/v1/projects)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\" http://localhost:8000/api/v1/projects)",
+      "Bash(curl -s \"http://localhost:8000/api/v1/projects/15d41a02-1600-456f-aed1-a1f7455e934f/monitors\")",
+      "Bash(python3 -c ' *)",
+      "Bash(curl -s -w \"\\\\n===STATUS %{http_code}===\\\\n\" \"http://localhost:8000/api/v1/projects/15d41a02-1600-456f-aed1-a1f7455e934f/monitors\")",
+      "Bash(curl -s -w \"\\\\nSTATUS: %{http_code}\\\\n\" \"http://localhost:8000/api/v1/projects/15d41a02-1600-456f-aed1-a1f7455e934f/monitors\")",
+      "Bash(grep -n \"Checks summary\\\\|Section title=\\\\`Checks\" /Users/ericthomas/dagster_designer_latest/dagster_designer/frontend/src/components/AssetDetailPage.tsx)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\" http://localhost:8000/api/v1/projects/52982e76-d563-4202-bb3b-98975a2d0c1f/alerts)",
+      "Bash(git commit -m ' *)",
+      "Bash(grep -n \"</aside>\\\\s*$\\\\|</Tabs.Content>\" /Users/ericthomas/dagster_designer_latest/dagster_designer/frontend/src/App.tsx)",
+      "Bash(grep -n \"Apply.*check\\\\|Apply \\\\${\" /Users/ericthomas/dagster_designer_latest/dagster_designer/frontend/src/components/AssetDetailPage.tsx /Users/ericthomas/dagster_designer_latest/dagster_designer/frontend/src/components/MonitorsPanel.tsx)",
+      "Bash(curl -s -X POST -H \"content-type: application/json\" -d '{\"limit\":1}' -w \"%{http_code}\" -o /dev/null \"http://localhost:8000/api/v1/projects/52982e76-d563-4202-bb3b-98975a2d0c1f/runs/query\")",
+      "Bash(grep -n \"^import { memo,\" /Users/ericthomas/dagster_designer_latest/dagster_designer/frontend/src/components/RunsPanel.tsx)",
+      "Bash(curl -s \"http://localhost:8000/api/projects\")",
+      "Bash(python3 -c \"import sys,json; d=json.load\\(sys.stdin\\); [print\\(p.get\\('id'\\),'|',p.get\\('name'\\),'|',p.get\\('is_dagster_plus'\\)\\) for p in \\(d.get\\('projects'\\) or d if isinstance\\(d,list\\) else []\\)]\")",
+      "Bash(curl -s \"http://localhost:8000/projects\")",
+      "Bash(curl -s \"http://localhost:8000/api/v1/projects\")",
+      "Bash(python3 -c \"import sys,json; d=json.load\\(sys.stdin\\); [print\\(p.get\\('id'\\)[:8],'|',p.get\\('name'\\),'| plus:', p.get\\('is_dagster_plus'\\)\\) for p in \\(d if isinstance\\(d,list\\) else d.get\\('projects'\\) or []\\)]\")",
+      "Bash(python3 -c \"import sys,json; d=json.load\\(sys.stdin\\); [print\\(p.get\\('id'\\),p.get\\('name'\\),p.get\\('is_dagster_plus'\\)\\) for p in \\(d if isinstance\\(d,list\\) else d.get\\('projects'\\) or []\\)][:5]\")",
+      "Bash(curl -s \"http://localhost:8000/api/v1/projects/15d41a02-1600-456f-aed1-a1f7455e934f/runs/code-locations\")",
+      "Bash(curl -s \"http://localhost:8000/api/v1/projects/15d41a02-1600-456f-aed1-a1f7455e934f/runs/tag-keys\")",
+      "Bash(curl -s \"http://localhost:8000/api/v1/projects/15d41a02-1600-456f-aed1-a1f7455e934f/runs/tag-values?key=dagster/code_location\")"
     ]
   }
 }

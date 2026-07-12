@@ -94,25 +94,21 @@ export function AlertsPanel() {
 
   return (
     <div className="h-full flex flex-col overflow-hidden">
-      {/* Header */}
-      <div className="flex-shrink-0 bg-white border-b border-gray-200 px-6 py-3 flex items-center justify-between gap-4">
-        <div>
-          <h1 className="text-lg font-bold text-gray-900 flex items-center gap-2">
-            <Bell className="w-4 h-4 text-blue-600" />
-            Alerts
-          </h1>
-          <div className="text-xs text-gray-500 mt-0.5 flex items-center gap-2">
-            {state?.path && <span>YAML: <span className="font-mono">{state.path}</span></span>}
-            {state?.policies?.length !== undefined && (
-              <span>· {state.policies.length} policy{state.policies.length === 1 ? '' : 'ies'}</span>
-            )}
-          </div>
+      {/* Slim ribbon -- matches the Automation tab: no big page title
+          (the sidebar already labels this view), just contextual meta
+          on the left and action buttons on the right. */}
+      <div className="flex-shrink-0 bg-white border-b border-gray-200 px-4 py-2 flex items-center justify-between gap-4">
+        <div className="text-xs text-gray-500 min-w-0 truncate">
+          {state?.path && <>YAML: <span className="font-mono">{state.path}</span></>}
+          {state?.policies?.length !== undefined && (
+            <span className="ml-2">· {state.policies.length} {state.policies.length === 1 ? 'policy' : 'policies'}</span>
+          )}
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-shrink-0">
           <button
             onClick={() => setSyncOpen(true)}
             disabled={!state || state.policies.length === 0}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-blue-700 bg-blue-50 border border-blue-200 rounded hover:bg-blue-100 disabled:opacity-50 disabled:cursor-not-allowed"
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm text-gray-700 border border-gray-300 rounded hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
             title="Push local alerts to Dagster+ (destructive) or pull from Dagster+ into the local YAML"
           >
             <Upload className="w-4 h-4" />
@@ -120,7 +116,7 @@ export function AlertsPanel() {
           </button>
           <button
             onClick={() => setWizardMode({ mode: 'create' })}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-md"
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-primary-foreground bg-primary rounded-md hover:bg-accent"
           >
             <Plus className="w-4 h-4" />
             Create alert policy
@@ -129,7 +125,7 @@ export function AlertsPanel() {
       </div>
 
       {/* OSS disclaimer */}
-      <div className="mx-6 mt-4 px-3 py-2 bg-amber-50 border border-amber-200 rounded text-xs text-amber-900 flex items-start gap-2">
+      <div className="mx-4 mt-3 px-3 py-2 bg-amber-50 border border-amber-200 rounded text-xs text-amber-900 flex items-start gap-2">
         <Info className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" />
         <div>
           <strong>Alerts are only enforced on Dagster+ deployments.</strong> You can still author policies here for version control,
@@ -862,7 +858,7 @@ function SyncDialog({ onClose, onDone }: { onClose: () => void; onDone: () => vo
     setResult(null);
     try {
       const r = await alertsApi.syncFromCloud(currentProject.id);
-      setResult({ ok: true, msg: `Pulled ${r.policies.length} policy(ies) into ${r.path}.` });
+      setResult({ ok: true, msg: `Pulled ${r.policies.length} ${r.policies.length === 1 ? 'policy' : 'policies'} into ${r.path}.` });
       onDone();
     } catch (e: any) {
       setResult({ ok: false, msg: e?.response?.data?.detail || e?.message || 'Pull failed.' });

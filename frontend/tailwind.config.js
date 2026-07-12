@@ -1,5 +1,9 @@
 /** @type {import('tailwindcss').Config} */
 export default {
+  // 'class' strategy lets us toggle dark mode by adding/removing a
+  // `dark` class on <html>. Preference is persisted in localStorage
+  // (see main.tsx) so users don't get flashed light-mode on reload.
+  darkMode: 'class',
   content: [
     "./index.html",
     "./src/**/*.{js,ts,jsx,tsx}",

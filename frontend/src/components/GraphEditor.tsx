@@ -1,4 +1,5 @@
 import React, { memo, useCallback, useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import ReactFlow, {
   Node,
   Edge,
@@ -446,9 +447,14 @@ interface GraphEditorProps {
   /** Open the full-screen AssetDetailPage for the given node id. Called
    *  from catalog rows and (indirectly) from PropertyPanel. */
   onOpenAssetDetail?: (nodeId: string) => void;
+  /** Optional DOM node to portal the ribbon into. When supplied, the
+   *  ribbon renders full-width above the sidebar / graph / property
+   *  panel instead of only above the graph pane. That keeps the ribbon
+   *  layout stable when the property panel opens on the right. */
+  ribbonHost?: HTMLElement | null;
 }
 
-function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onViewModeChange, onOpenAssetDetail }: GraphEditorProps) {
+function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onViewModeChange, onOpenAssetDetail, ribbonHost }: GraphEditorProps) {
   const [addDataOpen, setAddDataOpen] = useState(false);
   // Group-collapse toggle -- folds assets by group_name into one node
   // per group, edges aggregated. Auto-on for large cloud graphs
@@ -2267,11 +2273,15 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
       {/* Slim header row -- filters on the left, actions on the right.
           Graph-only controls (collapse / arrange / show-leaves) hide
           in catalog view. Icon-only buttons on the right side keep the
-          horizontal budget under control for wide monitors and small ones. */}
+          horizontal budget under control for wide monitors and small ones.
+          When a `ribbonHost` DOM node is supplied by the parent (App
+          places one full-width above the sidebar + graph + property
+          panel), we portal the ribbon there so its width doesn't shift
+          when the property panel opens. */}
       {(() => {
         const isCloud = !!(currentProject as any)?.is_dagster_plus;
         const inGraph = viewMode === 'graph';
-        return (
+        const ribbonJsx = (
       <div className="flex-shrink-0 bg-white border-b border-gray-200 px-3 py-2 flex items-center justify-between gap-2">
         <div className="flex items-center gap-1.5 flex-1 min-w-0">
           <div className="relative w-44 flex-shrink-0">
@@ -2399,6 +2409,7 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
         </div>
       </div>
         );
+        return ribbonHost ? createPortal(ribbonJsx, ribbonHost) : ribbonJsx;
       })()}
       {/* Catalog view — searchable/filterable table of the same
           filtered asset set. Uses the filters + search from the

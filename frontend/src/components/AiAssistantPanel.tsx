@@ -48,7 +48,11 @@ export function AiAssistantPanel({
   const [insights, setInsights] = useState<AiInsightsResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [mode, setMode] = useState<'insights' | 'chat'>('insights');
-  const [collapsed, setCollapsed] = useState(false);
+  // Collapsed by default. Insights arriving from the LLM can be
+  // lengthy (10+ items), so users see the small header first and
+  // expand only when they want the recommendations. Prevents the
+  // panel from dominating the tab whenever it's open.
+  const [collapsed, setCollapsed] = useState(true);
   const [turns, setTurns] = useState<Array<{ role: 'user' | 'assistant'; content: string }>>([]);
   const [input, setInput] = useState('');
   const [chatLoading, setChatLoading] = useState(false);

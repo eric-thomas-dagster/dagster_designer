@@ -1794,6 +1794,139 @@ export const alertsApi = {
   },
 };
 
+// -------- Runs (local dagster dev + Dagster+ GraphQL) -----------------
+export interface Run {
+  run_id: string;
+  job_name: string | null;
+  pipeline_name: string | null;
+  status: string;
+  start_time: number | null;
+  end_time: number | null;
+  steps_succeeded: number | null;
+  steps_failed: number | null;
+  materializations: number | null;
+}
+
+export interface RunsListResponse {
+  runs: Run[];
+  next_cursor: string | null;
+  source: 'cloud' | 'local';
+  error?: string | null;
+}
+
+export interface RunStep {
+  step_key: string;
+  status: string;
+  start_time: number | null;
+  end_time: number | null;
+}
+export interface RunMaterialization {
+  asset_key: string;
+  partition: string | null;
+  timestamp: number | null;
+  metadata: Array<{ label: string; description: string | null; type: string }>;
+}
+export interface StepEdge {
+  from_step: string;
+  to_step: string;
+}
+export interface RunDetail {
+  run_id: string;
+  job_name: string | null;
+  pipeline_name: string | null;
+  status: string;
+  start_time: number | null;
+  end_time: number | null;
+  run_config_yaml: string | null;
+  tags: Record<string, string>;
+  steps: RunStep[];
+  step_edges: StepEdge[];
+  materializations: RunMaterialization[];
+  steps_succeeded: number | null;
+  steps_failed: number | null;
+  source: 'cloud' | 'local';
+  external_url: string | null;
+}
+
+export const runsApi = {
+  query: async (
+    projectId: string,
+    params: {
+      limit?: number;
+      cursor?: string | null;
+      statuses?: string[] | null;
+      job_name?: string | null;
+      tags?: Array<{ key: string; value: string }> | null;
+      code_location?: string | null;
+      created_after?: number | null;
+      created_before?: number | null;
+      updated_after?: number | null;
+    },
+  ): Promise<RunsListResponse> => {
+    const r = await api.post(`/projects/${projectId}/runs/query`, params);
+    return r.data as RunsListResponse;
+  },
+  detail: async (projectId: string, runId: string): Promise<RunDetail> => {
+    const r = await api.get(`/projects/${projectId}/runs/${runId}`);
+    return r.data as RunDetail;
+  },
+  logs: async (
+    projectId: string,
+    runId: string,
+    params: { cursor?: string | null; limit?: number } = {},
+  ): Promise<{
+    events: Array<{ type_name: string; message: string | null; level: string | null; timestamp: number | null; step_key: string | null }>;
+    cursor: string | null;
+    has_more: boolean;
+    source: string;
+    error?: string | null;
+  }> => {
+    const search = new URLSearchParams();
+    if (params.cursor) search.set('cursor', params.cursor);
+    if (params.limit) search.set('limit', String(params.limit));
+    const qs = search.toString();
+    const r = await api.get(`/projects/${projectId}/runs/${runId}/logs${qs ? '?' + qs : ''}`);
+    return r.data as any;
+  },
+  status: async (projectId: string, runId: string): Promise<{ run_id: string; status: string; error?: string | null }> => {
+    const r = await api.get(`/projects/${projectId}/runs/${runId}/status`);
+    return r.data as any;
+  },
+  reexecute: async (
+    projectId: string,
+    runId: string,
+    strategy: 'ALL_STEPS' | 'FROM_FAILURE',
+    stepKeys?: string[],
+  ): Promise<{ success: boolean; new_run_id: string | null; status: string | null; detail: string | null }> => {
+    const r = await api.post(`/projects/${projectId}/runs/${runId}/reexecute`, {
+      strategy,
+      step_keys: stepKeys && stepKeys.length > 0 ? stepKeys : null,
+    });
+    return r.data as any;
+  },
+  terminate: async (
+    projectId: string,
+    runId: string,
+  ): Promise<{ success: boolean; status: string | null; detail: string | null }> => {
+    const r = await api.post(`/projects/${projectId}/runs/${runId}/terminate`);
+    return r.data as any;
+  },
+  codeLocations: async (
+    projectId: string,
+  ): Promise<{ code_locations: string[]; source: 'local' | 'cloud' }> => {
+    const r = await api.get(`/projects/${projectId}/runs/code-locations`);
+    return r.data as any;
+  },
+  tagKeys: async (projectId: string): Promise<{ tag_keys: string[] }> => {
+    const r = await api.get(`/projects/${projectId}/runs/tag-keys`);
+    return r.data as any;
+  },
+  tagValues: async (projectId: string, key: string): Promise<{ key: string; values: string[] }> => {
+    const r = await api.get(`/projects/${projectId}/runs/tag-values`, { params: { key } });
+    return r.data as any;
+  },
+};
+
 export const pipelinesApi = {
   create: async (projectId: string, pipeline: PipelineCreateRequest): Promise<PipelineResponse> => {
     const response = await api.post<PipelineResponse>(

@@ -17,11 +17,12 @@ import { PipelineBuilder } from './components/PipelineBuilder';
 import { DagsterStartupModal } from './components/DagsterStartupModal';
 import { AssetDetailPage } from './components/AssetDetailPage';
 import { AlertsPanel } from './components/AlertsPanel';
+import { RunsPanel } from './components/RunsPanel';
 import { DataPreviewModal } from './components/DataPreviewModal';
 import { DagsterCloudChip } from './components/DagsterCloudChip';
 import { NotificationHost, notify, confirmDialog } from './components/Notifications';
 import { useProjectStore } from './hooks/useProject';
-import { Network, FileCode, Zap, Package, ExternalLink, Settings, Workflow, ChevronDown, Skull, AlertTriangle, X, Loader2, CheckCircle, XCircle, PanelLeftClose, PanelLeft, Clock, Play, Radar, Timer, Download, Database, ShieldCheck, Cloud, Bell } from 'lucide-react';
+import { Network, FileCode, Zap, Package, ExternalLink, Settings, Workflow, ChevronDown, Skull, AlertTriangle, X, Loader2, CheckCircle, XCircle, PanelLeftClose, PanelLeft, Clock, Play, Radar, Timer, Download, Database, ShieldCheck, Cloud, Bell, Sun, Moon } from 'lucide-react';
 import { IngestionsPanel } from './components/IngestionsPanel';
 import { DbtPanel } from './components/DbtPanel';
 import { MonitorsPanel } from './components/MonitorsPanel';
@@ -228,6 +229,10 @@ function App() {
   // the Project Components sidebar in catalog mode (it only applies to
   // the DAG view -- catalog is a searchable table with no drop zone).
   const [assetsViewMode, setAssetsViewMode] = useState<'graph' | 'catalog'>('graph');
+  // Ribbon host node -- GraphEditor portals its ribbon here so it spans
+  // full width above the sidebar + graph + property panel (i.e. stops
+  // shifting position when the property panel opens on the right).
+  const [assetsRibbonHost, setAssetsRibbonHost] = useState<HTMLDivElement | null>(null);
   // Node id currently opened in the full-screen AssetDetailPage.
   // Triggered from catalog rows and the "View full details" button in
   // the PropertyPanel; null means the overlay is closed.
@@ -706,6 +711,7 @@ function App() {
     { value: 'dbt', label: 'dbt', icon: Database },
     { value: 'monitors', label: 'Monitors', icon: ShieldCheck },
     { value: 'alerts', label: 'Alerts', icon: Bell },
+    { value: 'runs', label: 'Runs', icon: Play },
     { value: 'pipelines', label: 'Pipelines', icon: Workflow },
     { value: 'primitives', label: 'Automation', icon: Zap },
     { value: 'library', label: 'Library', icon: Package },
@@ -803,14 +809,19 @@ function App() {
                 <span className="text-sm text-gray-600">
                   {navItems.find((n) => n.value === activeMainTab)?.label ?? activeMainTab}
                 </span>
-                <span className="text-xs text-gray-400 ml-2">·</span>
-                <DagsterCloudChip projectId={currentProject.id} />
+                {!(currentProject as any)?.is_dagster_plus && (
+                  <>
+                    <span className="text-xs text-gray-400 ml-2">·</span>
+                    <DagsterCloudChip projectId={currentProject.id} />
+                  </>
+                )}
               </>
             ) : (
               <span className="text-sm text-gray-500">No project selected</span>
             )}
           </div>
           <div className="flex items-center gap-2">
+            <ThemeToggle />
             {currentProject && (
               <DropdownMenu.Root>
                 <DropdownMenu.Trigger asChild>
@@ -877,7 +888,18 @@ function App() {
               returning, so this UI reads the same shape either way.
               Editing controls (delete, +Add data) hide on cloud since
               cloud is read-only for now. */}
-          <Tabs.Content value="assets" className="flex-1 flex overflow-hidden">
+          <Tabs.Content value="assets" className="flex-1 flex flex-col overflow-hidden">
+            {/* Ribbon slot -- GraphEditor portals its top toolbar here
+                so it stretches from the left nav to the right edge and
+                doesn't reflow when the property panel opens. Hidden
+                on the detail page since it has its own header. */}
+            {!detailNodeId && (
+              <div
+                ref={setAssetsRibbonHost}
+                className="flex-shrink-0"
+              />
+            )}
+            <div className="flex-1 flex overflow-hidden">
             {/* Asset detail view sits alongside the graph/catalog layout
                 and only one is visible at a time. We keep GraphEditor
                 mounted (via `hidden`) rather than unmounting it so the
@@ -957,6 +979,7 @@ function App() {
                 onAddDataSource={setAddingComponentType}
                 onViewModeChange={setAssetsViewMode}
                 onOpenAssetDetail={setDetailNodeId}
+                ribbonHost={assetsRibbonHost}
                 onPrimitiveClick={async (category, name) => {
                   // For asset checks — many are dbt-derived and don't live in
                   // our managed primitives list. Route via the backend search
@@ -1003,6 +1026,7 @@ function App() {
               </aside>
             )}
             </div>
+            </div>
           </Tabs.Content>
 
           {/* Ingestions Tab Content — Fivetran/Airbyte-style monitoring
@@ -1029,6 +1053,11 @@ function App() {
           {/* Alerts Tab Content */}
           <Tabs.Content value="alerts" className="flex-1 overflow-hidden">
             <AlertsPanel />
+          </Tabs.Content>
+
+          {/* Runs Tab Content */}
+          <Tabs.Content value="runs" className="flex-1 overflow-hidden">
+            <RunsPanel />
           </Tabs.Content>
 
           {/* Pipelines Tab Content */}
@@ -1456,6 +1485,34 @@ function App() {
 
       <NotificationHost />
     </div>
+  );
+}
+
+/**
+ * Light/dark theme toggle. Reads the initial state from the class on
+ * <html> that main.tsx set from localStorage (or system preference).
+ * Persists changes back to localStorage so reloads stay in the picked
+ * mode without a flash of light-mode content.
+ */
+function ThemeToggle() {
+  const [isDark, setIsDark] = useState<boolean>(() =>
+    typeof document !== 'undefined' && document.documentElement.classList.contains('dark')
+  );
+  const toggle = () => {
+    const next = !isDark;
+    setIsDark(next);
+    document.documentElement.classList.toggle('dark', next);
+    try { localStorage.setItem('theme', next ? 'dark' : 'light'); } catch { /* private mode */ }
+  };
+  return (
+    <button
+      onClick={toggle}
+      className="p-2 text-gray-600 hover:bg-gray-100 rounded transition-colors"
+      title={isDark ? 'Switch to light mode' : 'Switch to dark mode'}
+      aria-label={isDark ? 'Switch to light mode' : 'Switch to dark mode'}
+    >
+      {isDark ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
+    </button>
   );
 }
 

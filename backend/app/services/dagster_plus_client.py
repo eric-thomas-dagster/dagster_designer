@@ -434,8 +434,8 @@ query DagsterPlusAssetCheckHistory(
 
 
 RUNS_QUERY = """
-query DagsterPlusRuns($limit: Int!) {
-  runsOrError(limit: $limit) {
+query DagsterRuns($limit: Int!, $cursor: String, $filter: RunsFilter) {
+  runsOrError(limit: $limit, cursor: $cursor, filter: $filter) {
     __typename
     ... on Runs {
       results {
