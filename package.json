@@ -1,0 +1,14 @@
+{
+  "name": "dagster-designer",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Native macOS shell for Dagster Designer",
+  "scripts": {
+    "tauri": "tauri",
+    "app:dev": "tauri dev",
+    "app:build": "tauri build"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2"
+  }
+}

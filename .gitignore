@@ -32,8 +32,10 @@ ENV/
 env.bak/
 venv.bak/
 
-# Rust / Tauri
-src-tauri/target/
+# Desktop wrapper: separate repo (eric-thomas-dagster/dagster-designer-desktop),
+# nested here as its own git checkout via `git subtree`/clone. Not tracked
+# by this repo at all -- see README for how to set it up.
+/src-tauri/
 
 # Node
 node_modules/
