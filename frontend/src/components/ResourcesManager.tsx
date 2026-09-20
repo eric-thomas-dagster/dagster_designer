@@ -7,6 +7,8 @@ import { useProjectStore } from '../hooks/useProject';
 import { Editor } from '@monaco-editor/react';
 import { EnvVarsManager } from './EnvVarsManager';
 import { notify } from './Notifications';
+import { API_BASE } from '@/services/api';
+import { useIsDarkMode } from '@/hooks/useIsDarkMode';
 
 interface ResourceListItem {
   name: string;
@@ -62,6 +64,7 @@ interface ResourcesManagerProps {
 }
 
 export function ResourcesManager({ onOpenFile }: ResourcesManagerProps = {}) {
+  const isDark = useIsDarkMode();
   const { currentProject } = useProjectStore();
   const [activeTab, setActiveTab] = useState<ResourceType>('io_manager');
 
@@ -71,7 +74,7 @@ export function ResourcesManager({ onOpenFile }: ResourcesManagerProps = {}) {
     queryKey: ['installed-resources', currentProject?.id],
     queryFn: async (): Promise<ResourcesListResponse | null> => {
       if (!currentProject) return null;
-      const res = await fetch(`/api/v1/templates/resources/${currentProject.id}`);
+      const res = await fetch(`${API_BASE}/templates/resources/${currentProject.id}`);
       if (!res.ok) return null;
       return res.json();
     },
@@ -1246,7 +1249,7 @@ export function ResourcesManager({ onOpenFile }: ResourcesManagerProps = {}) {
               defaultLanguage="python"
               value={code}
               onChange={(value) => setCode(value || '')}
-              theme="vs-light"
+              theme={isDark ? 'vs-dark' : 'vs-light'}
               options={{
                 minimap: { enabled: false },
                 fontSize: 13,

@@ -7,6 +7,7 @@ from typing import Any
 from ..services.dagster_cli_service import dagster_cli_service
 from ..services.project_service import project_service
 from ..services.component_installer import component_installer
+from ..core.uv_binary import find_uv_binary
 
 router = APIRouter(prefix="/dagster", tags=["dagster"])
 
@@ -288,7 +289,7 @@ async def install_component(request: InstallComponentRequest):
             import subprocess
             print(f"Installing dagster-dbt and {adapter_package} for dbt component...")
             result = subprocess.run(
-                ["/Users/ericthomas/.local/bin/uvx", "--with", "uv", "uv", "add", "dagster-dbt", adapter_package],
+                [find_uv_binary("uvx"), "--with", "uv", "uv", "add", "dagster-dbt", adapter_package],
                 cwd=str(dagster_project_path),
                 capture_output=True,
                 text=True,

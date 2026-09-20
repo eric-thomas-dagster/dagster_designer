@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo } from 'react';
 import { Plus, Trash2, Eye, EyeOff, Save, RefreshCw, Cloud, HardDrive } from 'lucide-react';
-import { envVarsApi, type EnvVariable } from '@/services/api';
+import { envVarsApi, type EnvVariable , API_BASE } from '@/services/api';
 import { notify } from './Notifications';
 
 interface EnvVarsManagerProps {
@@ -64,7 +64,7 @@ export function EnvVarsManager({ projectId }: EnvVarsManagerProps) {
     let cancelled = false;
     (async () => {
       try {
-        const res = await fetch(`/api/v1/env/${projectId}/dagster-plus-scope`);
+        const res = await fetch(`${API_BASE}/env/${projectId}/dagster-plus-scope`);
         if (!res.ok) return;
         const data = await res.json();
         if (cancelled) return;
@@ -99,7 +99,7 @@ export function EnvVarsManager({ projectId }: EnvVarsManagerProps) {
         const response = await envVarsApi.get(projectId);
         vars = response.variables;
       } else {
-        const res = await fetch(`/api/v1/env/${projectId}/scoped-fetch`, {
+        const res = await fetch(`${API_BASE}/env/${projectId}/scoped-fetch`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -185,7 +185,7 @@ export function EnvVarsManager({ projectId }: EnvVarsManagerProps) {
         await envVarsApi.update(projectId, activeState.variables);
         notify.success('Local .env saved');
       } else {
-        const res = await fetch(`/api/v1/env/${projectId}/scoped-push`, {
+        const res = await fetch(`${API_BASE}/env/${projectId}/scoped-push`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({

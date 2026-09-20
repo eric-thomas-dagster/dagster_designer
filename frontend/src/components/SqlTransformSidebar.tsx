@@ -1,5 +1,6 @@
 import Editor from '@monaco-editor/react';
 import { Terminal, Sparkles } from 'lucide-react';
+import { useIsDarkMode } from '@/hooks/useIsDarkMode';
 
 interface SqlTransformSidebarProps {
   attributes: Record<string, any>;
@@ -23,6 +24,7 @@ const IF_EXISTS_OPTIONS = ['fail', 'replace', 'append'] as const;
  * through the Advanced modal.
  */
 export function SqlTransformSidebar({ attributes, onChange, onOpenAdvanced }: SqlTransformSidebarProps) {
+  const isDark = useIsDarkMode();
   const sql = (attributes.sql as string) ?? '';
   const destinationTable = (attributes.destination_table as string) ?? '';
   const ifExists = (attributes.if_exists as string) ?? 'fail';
@@ -55,7 +57,7 @@ export function SqlTransformSidebar({ attributes, onChange, onOpenAdvanced }: Sq
             defaultLanguage="sql"
             value={sql}
             onChange={(v) => onChange('sql', v ?? '')}
-            theme="vs-light"
+            theme={isDark ? 'vs-dark' : 'vs-light'}
             options={{
               minimap: { enabled: false },
               lineNumbers: 'on',

@@ -20,6 +20,7 @@ import {
 import { primitivesApi, pipelinesApi, type PrimitiveCategory, type PrimitiveItem } from '@/services/api';
 import { useProjectStore } from '@/hooks/useProject';
 import { CommunityAvailableSection } from './CommunityAvailableSection';
+import { useIsDarkMode } from '@/hooks/useIsDarkMode';
 
 interface PrimitivesManagerProps {
   onNewPrimitive?: (category: string) => void;
@@ -34,6 +35,7 @@ export function PrimitivesManager({
   openPrimitive,
   onOpenPrimitiveConsumed,
 }: PrimitivesManagerProps = {}) {
+  const isDark = useIsDarkMode();
   const { currentProject } = useProjectStore();
   const [activeTab, setActiveTab] = useState<PrimitiveCategory>('schedule');
   const [selectedPrimitive, setSelectedPrimitive] = useState<PrimitiveItem | null>(null);
@@ -478,7 +480,7 @@ export function PrimitivesManager({
                   height="100%"
                   language="python"
                   value={primitiveDetails.primitive.code}
-                  theme="vs-light"
+                  theme={isDark ? 'vs-dark' : 'vs-light'}
                   options={{
                     readOnly: true,
                     minimap: { enabled: true },

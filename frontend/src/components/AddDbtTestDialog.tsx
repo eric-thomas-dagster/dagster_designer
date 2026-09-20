@@ -4,6 +4,7 @@ import Editor from '@monaco-editor/react';
 import { X, TestTube2, Loader2, Plus } from 'lucide-react';
 import { projectsApi } from '@/services/api';
 import { notify } from './Notifications';
+import { useIsDarkMode } from '@/hooks/useIsDarkMode';
 
 interface AddDbtTestDialogProps {
   open: boolean;
@@ -50,6 +51,7 @@ export function AddDbtTestDialog({
   open, onOpenChange, projectId, dbtRelativePath,
   modelUniqueId, modelName, columns, defaultColumn, onSaved,
 }: AddDbtTestDialogProps) {
+  const isDark = useIsDarkMode();
   const [kind, setKind] = useState<Kind>('not_null');
   const [column, setColumn] = useState<string>(defaultColumn ?? columns[0] ?? '');
   // accepted_values
@@ -311,7 +313,7 @@ export function AddDbtTestDialog({
                 <div>
                   <label className="text-[10px] uppercase tracking-wider text-gray-500 mb-1 block">SQL (return rows when the test fails)</label>
                   <div className="border border-gray-200 rounded overflow-hidden">
-                    <Editor height="200px" defaultLanguage="sql" value={sql} onChange={(v) => setSql(v ?? '')} theme="vs-light"
+                    <Editor height="200px" defaultLanguage="sql" value={sql} onChange={(v) => setSql(v ?? '')} theme={isDark ? 'vs-dark' : 'vs-light'}
                       options={{ minimap: { enabled: false }, fontSize: 12, scrollBeyondLastLine: false, wordWrap: 'on' }} />
                   </div>
                   <p className="text-[10px] text-gray-500 mt-0.5">

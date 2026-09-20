@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import * as Dialog from '@radix-ui/react-dialog';
 import { X, Search, Package, Loader2, Download, Info } from 'lucide-react';
 import { notify } from './Notifications';
+import { API_BASE } from '@/services/api';
 
 interface ManifestComponent {
   id: string;
@@ -45,7 +46,7 @@ export function CommunityTransformPicker({
   const { data: manifest, isLoading } = useQuery({
     queryKey: ['community-templates-manifest'],
     queryFn: async () => {
-      const res = await fetch('/api/v1/templates/manifest');
+      const res = await fetch(`${API_BASE}/templates/manifest`);
       if (!res.ok) throw new Error('Failed to load manifest');
       return res.json() as Promise<{ components: ManifestComponent[] }>;
     },
@@ -72,7 +73,7 @@ export function CommunityTransformPicker({
       // upstream key (last segment). e.g. "unique_dedup__stg_customers".
       const upstreamShort = upstreamAssetKey.split('/').pop() || 'input';
       const instanceName = `${componentId}__${upstreamShort}`.replace(/[^a-zA-Z0-9_]/g, '_');
-      const res = await fetch(`/api/v1/templates/install-via-cli/${componentId}`, {
+      const res = await fetch(`${API_BASE}/templates/install-via-cli/${componentId}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

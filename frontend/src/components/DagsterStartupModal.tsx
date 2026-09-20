@@ -1,5 +1,6 @@
 import { useEffect, useState, useRef } from 'react';
 import { X, Terminal, CheckCircle, XCircle, Loader } from 'lucide-react';
+import { API_BASE } from '@/services/api';
 
 interface DagsterStartupModalProps {
   projectId: string;
@@ -50,7 +51,7 @@ export function DagsterStartupModal({ projectId, onClose, onSuccess }: DagsterSt
       ]);
 
       // Make the API call
-      const response = await fetch(`/api/v1/dagster-ui/start/${projectId}`, {
+      const response = await fetch(`${API_BASE}/dagster-ui/start/${projectId}`, {
         method: 'POST',
       });
 

@@ -21,6 +21,7 @@ import {
 import { filesApi, type FileTreeNode } from '@/services/api';
 import { Terminal } from './Terminal';
 import { notify, confirmDialog } from './Notifications';
+import { useIsDarkMode } from '@/hooks/useIsDarkMode';
 
 interface CodeEditorProps {
   projectId: string;
@@ -35,6 +36,7 @@ interface OpenFile {
 }
 
 export function CodeEditor({ projectId, fileToOpen, onFileOpened }: CodeEditorProps) {
+  const isDark = useIsDarkMode();
   const [openFiles, setOpenFiles] = useState<OpenFile[]>([]);
   const [activeFilePath, setActiveFilePath] = useState<string | null>(null);
   const [expandedDirs, setExpandedDirs] = useState<Set<string>>(new Set(['/']));
@@ -1044,7 +1046,7 @@ export function CodeEditor({ projectId, fileToOpen, onFileOpened }: CodeEditorPr
                   }
                 });
               }}
-              theme="vs-light"
+              theme={isDark ? 'vs-dark' : 'vs-light'}
               options={{
                 minimap: { enabled: true },
                 fontSize: 14,

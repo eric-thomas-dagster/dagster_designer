@@ -16,7 +16,7 @@ import { CronBuilder } from './CronBuilder';
 import { Launchpad } from './Launchpad';
 import { notify } from './Notifications';
 import { useProjectStore } from '@/hooks/useProject';
-import { pipelinesApi, primitivesApi, templatesApi, projectsApi } from '@/services/api';
+import { pipelinesApi, primitivesApi, templatesApi, projectsApi , API_BASE } from '@/services/api';
 import {
   Workflow, Plus, Save, Clock, Radar, Play, Trash2, X, Grid, List,
   Layers, Database, Users, CheckCircle, Tag, Edit2, Code, Download, Upload, AlertTriangle
@@ -508,7 +508,7 @@ export function PipelineBuilder() {
 
       // Clear backend cache to force fresh fetch
       try {
-        await fetch(`/api/v1/primitives/definitions/cache/${currentProject.id}`, {
+        await fetch(`${API_BASE}/primitives/definitions/cache/${currentProject.id}`, {
           method: 'DELETE',
         });
       } catch (error) {
@@ -679,7 +679,7 @@ export function PipelineBuilder() {
         }
 
         // Call install endpoint which will handle both installing the component and creating the instance
-        const installResponse = await fetch(`/api/v1/templates-registry/install/${componentId}`, {
+        const installResponse = await fetch(`${API_BASE}/templates-registry/install/${componentId}`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -795,8 +795,15 @@ export function PipelineBuilder() {
           </div>
           <div className="flex-1 overflow-y-auto">
             {pipelines.length === 0 ? (
-              <div className="p-4 text-center text-gray-500 text-sm">
-                No pipelines yet. Create one to get started!
+              <div className="p-6 text-center">
+                <Workflow className="w-8 h-8 text-gray-300 mx-auto mb-3" />
+                <p className="text-sm text-gray-600 mb-4">No pipelines yet. Create one to get started!</p>
+                <button
+                  onClick={handleNewPipeline}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-primary-foreground bg-primary rounded-md hover:bg-accent"
+                >
+                  <Plus className="w-4 h-4" /> New Pipeline
+                </button>
               </div>
             ) : (
               <div className="divide-y divide-gray-200">

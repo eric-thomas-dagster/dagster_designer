@@ -5,6 +5,8 @@ import { DbtCloudImportModal } from './DbtCloudImportModal';
 import { ConnectDagsterPlusDialog } from './ConnectDagsterPlusDialog';
 import { Launchpad } from './Launchpad';
 import { notify, confirmDialog } from './Notifications';
+import { onMenuAction, isTauri, pickDirectory } from '@/services/tauri';
+import { openSettings } from './SettingsDialog';
 import {
   FolderOpen,
   Plus,
@@ -64,9 +66,101 @@ export function ProjectManager() {
   const [availableJobs, setAvailableJobs] = useState<any[]>([]);
   const [showJobsMenu, setShowJobsMenu] = useState(false);
 
+  // These full-screen dialogs are independent booleans with no shared
+  // z-index coordination, so opening a second one while a first is still
+  // open used to leave both mounted -- whichever rendered later in the DOM
+  // painted on top regardless of which was opened more recently (e.g. Open
+  // Launchpad then Preview Code left Launchpad stuck on top since it's
+  // mounted lower in this file, with Preview Code invisibly rendering
+  // behind it). Call this before opening any one of them so only ever one
+  // is on screen at a time.
+  const closeAllDialogs = () => {
+    setShowNewDialog(false);
+    setShowImportDialog(false);
+    setShowDbtCloudImportDialog(false);
+    setShowDagsterPlusDialog(false);
+    setShowProjectsDialog(false);
+    setShowCodePreview(false);
+    setShowValidationDialog(false);
+    setShowLaunchpad(false);
+  };
+
   useEffect(() => {
     loadProjects();
   }, [loadProjects]);
+
+  // Mirrors the in-page "Project" dropdown's actions in the native macOS
+  // menu bar (see src-tauri/src/main.rs). No-op outside Tauri.
+  useEffect(() => {
+    const unlistenPromise = onMenuAction((id) => {
+      switch (id) {
+        case 'app:preferences':
+          openSettings();
+          break;
+        case 'project:new':
+          closeAllDialogs();
+          setShowNewDialog(true);
+          break;
+        case 'project:open':
+          closeAllDialogs();
+          setShowProjectsDialog(true);
+          break;
+        case 'project:import':
+          closeAllDialogs();
+          setShowImportDialog(true);
+          break;
+        case 'project:import-dbt-cloud':
+          closeAllDialogs();
+          setShowDbtCloudImportDialog(true);
+          break;
+        case 'project:open-dagster-plus':
+          closeAllDialogs();
+          setShowDagsterPlusDialog(true);
+          break;
+        case 'project:save':
+          if (currentProject) saveProject();
+          break;
+        case 'actions:materialize-all':
+          if (currentProject) handleMaterializeAll();
+          break;
+        case 'actions:open-launchpad':
+          closeAllDialogs();
+          setLaunchpadMode('materialize');
+          setShowLaunchpad(true);
+          break;
+        case 'actions:launch-job':
+          closeAllDialogs();
+          setLaunchpadMode('job');
+          setShowLaunchpad(true);
+          break;
+        case 'actions:regenerate-lineage':
+          if (currentProject) handleRegenerateLineage();
+          break;
+        case 'actions:discover-components':
+          if (currentProject) handleDiscoverComponents();
+          break;
+        case 'actions:validate':
+          if (currentProject) { closeAllDialogs(); handleValidateProject(); }
+          break;
+        case 'actions:dockerfile':
+          if (currentProject) handleScaffoldBuildArtifacts();
+          break;
+        case 'actions:github-actions':
+          if (currentProject) handleScaffoldGithubActions();
+          break;
+        case 'actions:preview-code':
+          if (currentProject) { closeAllDialogs(); handlePreview(); }
+          break;
+        case 'actions:export':
+          if (currentProject) handleExport();
+          break;
+      }
+    });
+    return () => {
+      unlistenPromise.then((unlisten) => unlisten());
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentProject]);
 
   useEffect(() => {
     // Fetch available jobs when project changes
@@ -96,6 +190,11 @@ export function ProjectManager() {
     } finally {
       setIsCreating(false);
     }
+  };
+
+  const handleBrowseImportPath = async () => {
+    const dir = await pickDirectory('Select a Dagster project folder');
+    if (dir) setImportPath(dir);
   };
 
   const handleImportProject = async () => {
@@ -153,6 +252,7 @@ export function ProjectManager() {
     try {
       const result = await codegenApi.preview(currentProject.id);
       setCodePreview(result.files);
+      closeAllDialogs();
       setShowCodePreview(true);
     } catch (error) {
       console.error('Preview failed:', error);
@@ -328,6 +428,7 @@ export function ProjectManager() {
     try {
       const result = await projectsApi.validate(currentProject.id);
       setValidationResult(result);
+      closeAllDialogs();
       setShowValidationDialog(true);
 
       // Update status based on validation result
@@ -407,6 +508,7 @@ export function ProjectManager() {
               <div className="absolute right-0 mt-1 w-64 bg-white border border-gray-200 rounded-md shadow-lg z-20">
                 <button
                   onClick={() => {
+                    closeAllDialogs();
                     setShowNewDialog(true);
                     setShowProjectMenu(false);
                   }}
@@ -417,6 +519,7 @@ export function ProjectManager() {
                 </button>
                 <button
                   onClick={() => {
+                    closeAllDialogs();
                     setShowImportDialog(true);
                     setShowProjectMenu(false);
                   }}
@@ -427,6 +530,7 @@ export function ProjectManager() {
                 </button>
                 <button
                   onClick={() => {
+                    closeAllDialogs();
                     setShowDbtCloudImportDialog(true);
                     setShowProjectMenu(false);
                   }}
@@ -437,6 +541,7 @@ export function ProjectManager() {
                 </button>
                 <button
                   onClick={() => {
+                    closeAllDialogs();
                     setShowDagsterPlusDialog(true);
                     setShowProjectMenu(false);
                   }}
@@ -449,6 +554,7 @@ export function ProjectManager() {
                 </button>
                 <button
                   onClick={() => {
+                    closeAllDialogs();
                     setShowProjectsDialog(true);
                     setShowProjectMenu(false);
                   }}
@@ -521,6 +627,7 @@ export function ProjectManager() {
                   </button>
                   <button
                     onClick={() => {
+                      closeAllDialogs();
                       setLaunchpadMode('materialize');
                       setShowLaunchpad(true);
                       setShowActionsMenu(false);
@@ -550,6 +657,7 @@ export function ProjectManager() {
                             <button
                               key={job.id}
                               onClick={() => {
+                                closeAllDialogs();
                                 setSelectedJobName(job.name);
                                 setLaunchpadMode('job');
                                 setShowLaunchpad(true);
@@ -804,17 +912,30 @@ export function ProjectManager() {
                 <label className="block text-sm font-medium text-gray-700 mb-1">
                   Project Path
                 </label>
-                <input
-                  type="text"
-                  value={importPath}
-                  onChange={(e) => setImportPath(e.target.value)}
-                  onKeyPress={(e) => e.key === 'Enter' && handleImportProject()}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  placeholder="/path/to/dagster/project"
-                  autoFocus
-                />
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    value={importPath}
+                    onChange={(e) => setImportPath(e.target.value)}
+                    onKeyPress={(e) => e.key === 'Enter' && handleImportProject()}
+                    className="flex-1 min-w-0 px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    placeholder="/path/to/dagster/project"
+                    autoFocus
+                  />
+                  {isTauri && (
+                    <button
+                      type="button"
+                      onClick={handleBrowseImportPath}
+                      className="px-3 py-2 text-sm border border-gray-300 rounded-md hover:bg-gray-50 whitespace-nowrap"
+                    >
+                      Browse…
+                    </button>
+                  )}
+                </div>
                 <p className="text-xs text-gray-500 mt-1">
-                  Enter the absolute path to an existing Dagster project directory
+                  {isTauri
+                    ? 'Choose an existing Dagster project directory, or type its path'
+                    : 'Enter the absolute path to an existing Dagster project directory'}
                 </p>
               </div>
 

@@ -5,6 +5,7 @@ import { X, FileCode, Loader2, Wand2, Code2 } from 'lucide-react';
 import { projectsApi } from '@/services/api';
 import { notify } from './Notifications';
 import { DbtVisualComposer } from './DbtVisualComposer';
+import { useIsDarkMode } from '@/hooks/useIsDarkMode';
 
 interface AddDbtModelDialogProps {
   open: boolean;
@@ -32,6 +33,7 @@ const STARTER_SQL = `select
 `;
 
 export function AddDbtModelDialog({ open, onOpenChange, projectId, onCreated }: AddDbtModelDialogProps) {
+  const isDark = useIsDarkMode();
   const [dbtProjects, setDbtProjects] = useState<Array<{
     name: string; relative_path: string; model_paths: string[]; is_git_repo: boolean;
   }>>([]);
@@ -247,7 +249,7 @@ export function AddDbtModelDialog({ open, onOpenChange, projectId, onCreated }: 
                     defaultLanguage="sql"
                     value={sql}
                     onChange={(v) => setSql(v ?? '')}
-                    theme="vs-light"
+                    theme={isDark ? 'vs-dark' : 'vs-light'}
                     options={{
                       minimap: { enabled: false },
                       lineNumbers: 'on',

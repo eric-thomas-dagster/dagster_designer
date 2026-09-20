@@ -3,6 +3,8 @@ import { useQueryClient } from '@tanstack/react-query';
 import { Sparkles, ArrowUp, Loader2, ChevronDown, X, Check } from 'lucide-react';
 import { useProjectStore } from '@/hooks/useProject';
 import { notify } from './Notifications';
+import { API_BASE, aiApi, type AiProvidersStatus } from '@/services/api';
+import { openSettings, onAiProvidersChanged } from './SettingsDialog';
 
 interface AIPick {
   component_type: string;
@@ -31,12 +33,6 @@ const MODEL_OPTIONS = [
   { value: 'claude-opus-4-5', label: 'Claude Opus 4.5 (highest quality)' },
 ];
 
-interface AiProvidersStatus {
-  openai_available: boolean;
-  anthropic_available: boolean;
-  any_available: boolean;
-}
-
 export function DagsterAIBar() {
   const { currentProject, loadProject } = useProjectStore();
   const queryClient = useQueryClient();
@@ -53,11 +49,16 @@ export function DagsterAIBar() {
   const [providers, setProviders] = useState<AiProvidersStatus | null>(null);
   useEffect(() => {
     let cancelled = false;
-    fetch('/api/v1/ai/providers')
-      .then((r) => r.json())
-      .then((d) => { if (!cancelled) setProviders(d); })
-      .catch(() => { if (!cancelled) setProviders({ openai_available: false, anthropic_available: false, any_available: false }); });
-    return () => { cancelled = true; };
+    const load = () => {
+      aiApi.providers()
+        .then((d) => { if (!cancelled) setProviders(d); })
+        .catch(() => { if (!cancelled) setProviders({ openai_available: false, anthropic_available: false, any_available: false }); });
+    };
+    load();
+    // Refetch right after a key is saved/cleared in Settings so this banner
+    // (and the model dropdown) update without needing a reload.
+    const unsubscribe = onAiProvidersChanged(load);
+    return () => { cancelled = true; unsubscribe(); };
   }, []);
 
   const availableModels = useMemo(() => {
@@ -111,7 +112,7 @@ export function DagsterAIBar() {
         body.refinement = refineWith;
       }
 
-      const res = await fetch('/api/v1/ai/plan', {
+      const res = await fetch(`${API_BASE}/ai/plan`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
@@ -154,7 +155,7 @@ export function DagsterAIBar() {
           attributes.upstream_asset_keys = pick.upstream_asset_names.join(', ');
         }
         try {
-          const res = await fetch(`/api/v1/templates/install-via-cli/${pick.component_type}`, {
+          const res = await fetch(`${API_BASE}/templates/install-via-cli/${pick.component_type}`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -409,30 +410,25 @@ export function DagsterAIBar() {
               <div className="font-semibold text-gray-900 mb-1">
                 Dagster AI needs an API key
               </div>
-              <div className="text-xs text-gray-600 space-y-1">
-                <div>Add one to <span className="font-mono text-gray-800">backend/.env</span>, then restart the backend:</div>
-                <pre className="mt-1 px-2 py-1.5 text-[11px] font-mono bg-gray-50 border border-gray-200 rounded overflow-x-auto">
-{`OPENAI_API_KEY=sk-...     # OR
+              <div className="text-xs text-gray-600 space-y-2">
+                <div>Add an OpenAI or Anthropic key to unlock the AI assistant — takes effect immediately, no restart needed.</div>
+                <button
+                  onClick={openSettings}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-primary text-primary-foreground rounded-md hover:bg-accent"
+                >
+                  <Sparkles className="w-3.5 h-3.5" />
+                  Add API key…
+                </button>
+                <details className="pt-0.5">
+                  <summary className="cursor-pointer text-gray-500 hover:text-gray-700">
+                    Prefer to set it manually?
+                  </summary>
+                  <pre className="mt-1.5 px-2 py-1.5 text-[11px] font-mono bg-gray-50 border border-gray-200 rounded overflow-x-auto">
+{`# backend/.env
+OPENAI_API_KEY=sk-...     # OR
 ANTHROPIC_API_KEY=sk-ant-...`}
-                </pre>
-                <div className="flex items-center gap-3 pt-1">
-                  <a
-                    href="https://platform.openai.com/api-keys"
-                    target="_blank"
-                    rel="noreferrer"
-                    className="text-primary hover:underline"
-                  >
-                    Get OpenAI key →
-                  </a>
-                  <a
-                    href="https://console.anthropic.com/settings/keys"
-                    target="_blank"
-                    rel="noreferrer"
-                    className="text-primary hover:underline"
-                  >
-                    Get Anthropic key →
-                  </a>
-                </div>
+                  </pre>
+                </details>
               </div>
             </div>
           </div>
@@ -482,9 +478,12 @@ ANTHROPIC_API_KEY=sk-ant-...`}
                       </button>
                     ))}
                     {providers && (!providers.openai_available || !providers.anthropic_available) && (
-                      <div className="border-t border-gray-100 mt-1 px-3 py-1.5 text-[10px] text-gray-400 italic">
-                        {providers.openai_available ? 'Anthropic key not set' : 'OpenAI key not set'} — add to backend/.env to unlock more models
-                      </div>
+                      <button
+                        onClick={openSettings}
+                        className="w-full text-left border-t border-gray-100 mt-1 px-3 py-1.5 text-[10px] text-gray-400 italic hover:text-primary hover:bg-gray-50"
+                      >
+                        {providers.openai_available ? 'Anthropic key not set' : 'OpenAI key not set'} — add it in Settings to unlock more models
+                      </button>
                     )}
                   </div>
                 )}

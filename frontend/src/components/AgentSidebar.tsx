@@ -1,6 +1,7 @@
 import { useMemo } from 'react';
 import Editor from '@monaco-editor/react';
 import { Bot, Plus, X, Server, Sparkles } from 'lucide-react';
+import { useIsDarkMode } from '@/hooks/useIsDarkMode';
 
 interface AgentSidebarProps {
   attributes: Record<string, any>;
@@ -72,6 +73,7 @@ const PRESETS: { label: string; server: McpServer }[] = [
 ];
 
 export function AgentSidebar({ attributes, onChange, onOpenAdvanced, componentType }: AgentSidebarProps) {
+  const isDark = useIsDarkMode();
   const provider = useMemo(() => detectProvider(componentType || ''), [componentType]);
 
   const model = (attributes.model as string) ?? '';
@@ -140,7 +142,7 @@ export function AgentSidebar({ attributes, onChange, onOpenAdvanced, componentTy
             defaultLanguage="markdown"
             value={systemPrompt}
             onChange={(v) => onChange('system_prompt', v ?? '')}
-            theme="vs-light"
+            theme={isDark ? 'vs-dark' : 'vs-light'}
             options={{
               minimap: { enabled: false },
               lineNumbers: 'off',
@@ -164,7 +166,7 @@ export function AgentSidebar({ attributes, onChange, onOpenAdvanced, componentTy
             defaultLanguage="markdown"
             value={prompt}
             onChange={(v) => onChange('prompt', v ?? '')}
-            theme="vs-light"
+            theme={isDark ? 'vs-dark' : 'vs-light'}
             options={{
               minimap: { enabled: false },
               lineNumbers: 'off',

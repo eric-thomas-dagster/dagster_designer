@@ -4,6 +4,7 @@ import Editor from '@monaco-editor/react';
 import { X, Play, AlertCircle, Calendar } from 'lucide-react';
 import yaml from 'js-yaml';
 import { partitionsApi, type PartitionDef, type BackfillRequest } from '@/services/api';
+import { useIsDarkMode } from '@/hooks/useIsDarkMode';
 
 interface PartitionBackfillProps {
   open: boolean;
@@ -20,6 +21,7 @@ export function PartitionBackfill({
   assetKey,
   onLaunch,
 }: PartitionBackfillProps) {
+  const isDark = useIsDarkMode();
   const [partitionDef, setPartitionDef] = useState<PartitionDef | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -430,7 +432,7 @@ export function PartitionBackfill({
                         defaultLanguage="yaml"
                         value={configYaml}
                         onChange={handleConfigChange}
-                        theme="vs-light"
+                        theme={isDark ? 'vs-dark' : 'vs-light'}
                         options={{
                           minimap: { enabled: false },
                           fontSize: 13,

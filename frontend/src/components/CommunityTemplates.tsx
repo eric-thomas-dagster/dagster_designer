@@ -4,6 +4,7 @@ import { Search, Download, ExternalLink, X, ChevronRight, Package } from 'lucide
 import { List, type RowComponentProps } from 'react-window';
 import { useProjectStore } from '@/hooks/useProject';
 import { notify } from './Notifications';
+import { API_BASE } from '@/services/api';
 
 interface ComponentTemplate {
   id: string;
@@ -131,7 +132,7 @@ export function CommunityTemplates() {
   const { data: manifest, isLoading, error } = useQuery({
     queryKey: ['community-templates-manifest'],
     queryFn: async () => {
-      const response = await fetch('/api/v1/templates/manifest', {
+      const response = await fetch(`${API_BASE}/templates/manifest`, {
         cache: 'no-store', // Disable browser caching
       });
       if (!response.ok) {
@@ -147,7 +148,7 @@ export function CommunityTemplates() {
     queryKey: ['component-details', selectedComponent?.id],
     queryFn: async () => {
       if (!selectedComponent) return null;
-      const response = await fetch(`/api/v1/templates/component/${selectedComponent.id}`);
+      const response = await fetch(`${API_BASE}/templates/component/${selectedComponent.id}`);
       if (!response.ok) {
         throw new Error('Failed to fetch component details');
       }
@@ -160,7 +161,7 @@ export function CommunityTemplates() {
     mutationFn: async (component: ComponentTemplate) => {
       if (!currentProject) throw new Error('No project selected');
 
-      const response = await fetch(`/api/v1/templates/install/${component.id}`, {
+      const response = await fetch(`${API_BASE}/templates/install/${component.id}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

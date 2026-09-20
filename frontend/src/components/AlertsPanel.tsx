@@ -1,12 +1,13 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
   Bell, Plus, Trash2, X, Upload, Download, ChevronRight, ChevronLeft,
-  Loader2, AlertTriangle, CheckCircle2, Table as TableIcon, Play,
+  Loader2, CheckCircle2, Table as TableIcon, Play,
   FolderOpen, Clock, Activity, TrendingUp, Cloud, Info, Copy, Edit3,
 } from 'lucide-react';
 import { useProjectStore } from '@/hooks/useProject';
 import { alertsApi, type AlertPolicy, type AlertPolicyType, type AlertsFile } from '@/services/api';
 import { notify } from './Notifications';
+import { Notice } from './Notice';
 
 /**
  * Alert Policies surface -- lists local policies (parsed from the
@@ -125,13 +126,10 @@ export function AlertsPanel() {
       </div>
 
       {/* OSS disclaimer */}
-      <div className="mx-4 mt-3 px-3 py-2 bg-amber-50 border border-amber-200 rounded text-xs text-amber-900 flex items-start gap-2">
-        <Info className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" />
-        <div>
-          <strong>Alerts are only enforced on Dagster+ deployments.</strong> You can still author policies here for version control,
-          but OSS Dagster ignores them at runtime.
-        </div>
-      </div>
+      <Notice icon={Info} className="mx-4 mt-3">
+        <strong>Alerts are only enforced on Dagster+ deployments.</strong> You can still author policies here for version control,
+        but OSS Dagster ignores them at runtime.
+      </Notice>
 
       {/* Body */}
       <div className="flex-1 overflow-y-auto p-6">
@@ -878,15 +876,12 @@ function SyncDialog({ onClose, onDone }: { onClose: () => void; onDone: () => vo
           <button onClick={onClose} className="p-1 text-gray-400 hover:text-gray-700"><X className="w-5 h-5" /></button>
         </div>
         <div className="p-5 space-y-4">
-          <div className="p-3 bg-amber-50 border border-amber-300 rounded text-xs text-amber-900 flex items-start gap-2">
-            <AlertTriangle className="w-4 h-4 mt-0.5 flex-shrink-0 text-amber-600" />
-            <div>
+          <Notice>
               <strong>Extreme caution.</strong> There's only one canonical set of alerts per Dagster+ deployment.
               Pushing REPLACES the entire set on Dagster+ with what's in your local YAML. Any policy that exists
               in Dagster+ but not in the file will be deleted. Pulling REPLACES your local YAML with what's currently
               live on Dagster+.
-            </div>
-          </div>
+          </Notice>
 
           <div className="p-3 border border-gray-200 rounded">
             <div className="text-sm font-medium text-gray-900 mb-1 flex items-center gap-1.5">

@@ -3,6 +3,7 @@ import Editor from '@monaco-editor/react';
 import { Sparkles, Zap, Eye } from 'lucide-react';
 import { assetsApi } from '@/services/api';
 import { useProjectStore } from '@/hooks/useProject';
+import { useIsDarkMode } from '@/hooks/useIsDarkMode';
 
 interface LLMSidebarProps {
   attributes: Record<string, any>;
@@ -101,6 +102,7 @@ function detectProvider(componentType: string): Provider {
 }
 
 export function LLMSidebar({ attributes, onChange, onOpenAdvanced, componentType }: LLMSidebarProps) {
+  const isDark = useIsDarkMode();
   const provider = useMemo(() => detectProvider(componentType || ''), [componentType]);
   const { currentProject } = useProjectStore();
 
@@ -236,7 +238,7 @@ export function LLMSidebar({ attributes, onChange, onOpenAdvanced, componentType
             defaultLanguage="markdown"
             value={systemPrompt}
             onChange={(v) => onChange('system_prompt', v ?? '')}
-            theme="vs-light"
+            theme={isDark ? 'vs-dark' : 'vs-light'}
             options={{
               minimap: { enabled: false },
               lineNumbers: 'off',
@@ -262,7 +264,7 @@ export function LLMSidebar({ attributes, onChange, onOpenAdvanced, componentType
             defaultLanguage="markdown"
             value={userPromptTemplate}
             onChange={(v) => onChange('user_prompt_template', v ?? '')}
-            theme="vs-light"
+            theme={isDark ? 'vs-dark' : 'vs-light'}
             options={{
               minimap: { enabled: false },
               lineNumbers: 'off',

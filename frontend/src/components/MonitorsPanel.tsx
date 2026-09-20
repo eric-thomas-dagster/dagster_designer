@@ -12,6 +12,7 @@ import { GenerateMonitorsDialog } from './GenerateMonitorsDialog';
 import { AutoCoverageModal } from './AssetDetailPage';
 import { assetsApi } from '@/services/api';
 import { notify } from './Notifications';
+import { usePageActions } from '@/hooks/usePageActions';
 
 type Monitor = Awaited<ReturnType<typeof projectsApi.listMonitors>>['monitors'][number];
 type Status = 'passing' | 'failing' | 'warn' | 'never_run';
@@ -98,6 +99,12 @@ export function MonitorsPanel({ onOpenFile }: MonitorsPanelProps) {
     }
     return true;
   });
+
+  usePageActions('Monitors', 'monitors', [
+    { id: 'refresh', label: 'Refresh', accelerator: 'CmdOrCtrl+R', handler: refresh },
+    { id: 'generate', label: 'Generate with AI…', handler: () => setShowGenerate(true) },
+    { id: 'new', label: 'New Monitor…', accelerator: 'CmdOrCtrl+Shift+N', handler: () => setShowAddMonitor(true) },
+  ]);
 
   if (!currentProject) {
     return <div className="p-8 text-center text-sm text-gray-500">Open a project first.</div>;
@@ -250,10 +257,18 @@ export function MonitorsPanel({ onOpenFile }: MonitorsPanelProps) {
                   {monitors.length === 0 ? "No monitors defined yet in this project." : "No monitors match the current filters."}
                 </p>
                 {monitors.length === 0 && (
-                  <p className="text-xs text-gray-500 mt-1 max-w-md mx-auto">
-                    Add native asset checks, community enhanced checks, or dbt tests to protect your assets.
-                    We'll pull them all together here.
-                  </p>
+                  <>
+                    <p className="text-xs text-gray-500 mt-1 max-w-md mx-auto mb-4">
+                      Add native asset checks, community enhanced checks, or dbt tests to protect your assets.
+                      We'll pull them all together here.
+                    </p>
+                    <button
+                      onClick={() => setShowAddMonitor(true)}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium bg-primary text-primary-foreground rounded-md"
+                    >
+                      <ShieldCheck className="w-4 h-4" /> New monitor
+                    </button>
+                  </>
                 )}
               </div>
             ) : (

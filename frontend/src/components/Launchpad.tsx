@@ -5,6 +5,7 @@ import Editor from '@monaco-editor/react';
 import { X, Play, Tag, AlertCircle, CheckCircle2, Calendar } from 'lucide-react';
 import yaml from 'js-yaml';
 import { partitionsApi, type PartitionDef } from '@/services/api';
+import { useIsDarkMode } from '@/hooks/useIsDarkMode';
 
 interface LaunchpadProps {
   open: boolean;
@@ -29,6 +30,7 @@ export function Launchpad({
   defaultConfig = {},
   configSchema: _configSchema = {},
 }: LaunchpadProps) {
+  const isDark = useIsDarkMode();
   const [configYaml, setConfigYaml] = useState<string>('');
   const [tags, setTags] = useState<Record<string, string>>({});
   const [showTagEditor, setShowTagEditor] = useState(false);
@@ -245,7 +247,7 @@ export function Launchpad({
                   defaultLanguage="yaml"
                   value={configYaml}
                   onChange={handleEditorChange}
-                  theme="vs-light"
+                  theme={isDark ? 'vs-dark' : 'vs-light'}
                   options={{
                     minimap: { enabled: false },
                     fontSize: 13,

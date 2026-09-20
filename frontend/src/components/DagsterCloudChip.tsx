@@ -3,6 +3,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Cloud, MapPin, X, Loader2, Plus } from 'lucide-react';
 import { notify, confirmDialog } from './Notifications';
 import { useProjectStore } from '@/hooks/useProject';
+import { API_BASE } from '@/services/api';
 
 interface DagsterCloudLocation {
   location_name: string;
@@ -33,7 +34,7 @@ export function DagsterCloudChip({ projectId }: DagsterCloudChipProps) {
   const { data: config, isLoading } = useQuery({
     queryKey: ['dagster-cloud', projectId],
     queryFn: async (): Promise<DagsterCloudConfig> => {
-      const res = await fetch(`/api/v1/projects/${projectId}/dagster-cloud`);
+      const res = await fetch(`${API_BASE}/projects/${projectId}/dagster-cloud`);
       if (!res.ok) throw new Error('Failed to load dagster_cloud.yaml');
       return res.json();
     },
@@ -50,7 +51,7 @@ export function DagsterCloudChip({ projectId }: DagsterCloudChipProps) {
 
   const saveMutation = useMutation({
     mutationFn: async (locations: DagsterCloudLocation[]) => {
-      const res = await fetch(`/api/v1/projects/${projectId}/dagster-cloud`, {
+      const res = await fetch(`${API_BASE}/projects/${projectId}/dagster-cloud`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ locations }),

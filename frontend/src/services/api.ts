@@ -4,7 +4,12 @@ import type {
   ProjectCreate,
 } from '@/types';
 
-const API_BASE = '/api/v1';
+// In the browser (dev or a plain web deploy) this stays relative and rides
+// Vite's dev proxy / whatever reverse proxy fronts the app. The Tauri build
+// sets VITE_API_BASE to an absolute http://127.0.0.1:PORT URL because the
+// packaged webview loads the UI from a tauri:// origin, not from the
+// backend's origin, so a relative path would resolve nowhere.
+export const API_BASE = import.meta.env.VITE_API_BASE || '/api/v1';
 
 const api = axios.create({
   baseURL: API_BASE,
@@ -2225,5 +2230,25 @@ export interface IngestionEvent {
   duration_ms?: number;
   status: 'success' | 'failure' | 'running';
 }
+
+export interface AiProvidersStatus {
+  openai_available: boolean;
+  anthropic_available: boolean;
+  any_available: boolean;
+}
+
+export const aiApi = {
+  providers: async (): Promise<AiProvidersStatus> => {
+    const response = await api.get<AiProvidersStatus>('/ai/providers');
+    return response.data;
+  },
+  // Pass a key to set it, or '' to clear it. Omit a field to leave that
+  // provider's key untouched. Applied to the running backend immediately --
+  // no restart needed.
+  setKeys: async (keys: { openai_api_key?: string; anthropic_api_key?: string }): Promise<AiProvidersStatus> => {
+    const response = await api.post<AiProvidersStatus>('/ai/keys', keys);
+    return response.data;
+  },
+};
 
 export default api;

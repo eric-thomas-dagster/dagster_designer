@@ -4,9 +4,22 @@ import { useComponent } from '@/hooks/useComponentRegistry';
 import { TranslationEditor } from './TranslationEditor';
 import { EnhancedDataQualityChecksBuilder } from './EnhancedDataQualityChecksBuilder';
 import { useProjectStore } from '@/hooks/useProject';
-import { dbtAdaptersApi, type AdapterInfo } from '@/services/api';
+import { dbtAdaptersApi, type AdapterInfo , API_BASE } from '@/services/api';
 import { notify } from './Notifications';
 import type { ComponentInstance } from '@/types';
+
+// `x-dagster-io` type fields (inputs.type, outputs.type, accepts[]) are
+// freeform strings community component authors write by hand, not a
+// strict enum -- e.g. dataframe_to_braze declares its input type as
+// "DataFrame | source" (mutually exclusive with a separate `source:`
+// config) rather than the plain "dataframe" every other component uses.
+// An exact-match check against "dataframe" silently fails on phrasing
+// like that and disables filtering entirely rather than erroring, so
+// swallowing that variety with a lenient substring match is safer than
+// chasing every real-world phrasing as a special case.
+function isDataFrameType(t: unknown): boolean {
+  return typeof t === 'string' && t.toLowerCase().includes('dataframe');
+}
 
 interface ComponentConfigModalProps {
   component: ComponentInstance | null;
@@ -336,7 +349,7 @@ export function ComponentConfigModal({
           ? formData.asset_name
           : (label || componentId);
 
-        const response = await fetch(`/api/v1/templates/configure/${componentId}`, {
+        const response = await fetch(`${API_BASE}/templates/configure/${componentId}`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -757,38 +770,84 @@ export function ComponentConfigModal({
       );
     }
 
+    // Same idea as the upstream_asset_keys case below, but for the many
+    // single-input community components (mostly "transformation" category
+    // — R Script, Outlier Clipper, and dozens more) that take exactly one
+    // upstream DataFrame and so declare a singular `upstream_asset_key`
+    // field instead of a plural one. Without this it fell through to a
+    // plain text box with no indication of what a valid value even looks
+    // like.
+    if (fieldName === 'upstream_asset_key') {
+      const acceptsDataFrames = isDataFrameType(componentSchema?.schema?.['x-dagster-io']?.inputs?.type) ||
+                                 (componentSchema?.schema?.['x-dagster-io']?.inputs?.accepts || []).some(isDataFrameType);
+
+      let filteredAssets = availableAssets;
+      if (acceptsDataFrames) {
+        // io_output_type comes straight from the producing component's own
+        // x-dagster-io.outputs.type schema field (see
+        // asset_introspection_service.py) -- the actual declared contract,
+        // not a guess. A hardcoded list of component_type substrings used
+        // to stand in here, but that can only ever recognize the exact
+        // component types someone thought to list, and (worse) silently
+        // treats everything else — including dbt models, which produce
+        // database tables, not DataFrames — as unfiltered, so they show up
+        // as valid inputs even though they aren't.
+        filteredAssets = availableAssets.filter((assetKey: string) => {
+          const assetNode = currentProject?.graph.nodes.find(
+            (n: any) => (n.data.asset_key === assetKey || n.data.label === assetKey || n.id === assetKey)
+          );
+          return isDataFrameType(assetNode?.data.io_output_type);
+        });
+      }
+
+      return (
+        <div className="space-y-1">
+          <select
+            value={value || ''}
+            onChange={(e) => handleFieldChange(fieldName, e.target.value)}
+            className="w-full px-3 py-2 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+          >
+            <option value="">Select an asset…</option>
+            {filteredAssets.map((assetKey: string) => (
+              <option key={assetKey} value={assetKey}>
+                {assetKey}
+              </option>
+            ))}
+          </select>
+          {filteredAssets.length === 0 && (
+            <p className="text-xs text-gray-500">
+              {acceptsDataFrames
+                ? 'No DataFrame-producing assets available. Add a data source component first.'
+                : 'No assets available'}
+            </p>
+          )}
+        </div>
+      );
+    }
+
     // Special handling for upstream_asset_keys - show multi-select dropdown filtered by output type
     if (fieldName === 'upstream_asset_keys') {
       // Parse current value (comma-separated string to array)
       const selectedValues = value ? value.split(',').map((s: string) => s.trim()).filter(Boolean) : [];
 
       // Check if component only accepts DataFrame inputs
-      const acceptsDataFrames = componentSchema?.['x-dagster-io']?.inputs?.type === 'dataframe' ||
-                                 componentSchema?.['x-dagster-io']?.inputs?.accepts?.includes('dataframe');
+      const acceptsDataFrames = isDataFrameType(componentSchema?.schema?.['x-dagster-io']?.inputs?.type) ||
+                                 (componentSchema?.schema?.['x-dagster-io']?.inputs?.accepts || []).some(isDataFrameType);
 
-      // Filter available assets based on what the component accepts
+      // Filter available assets based on what the component accepts.
+      // io_output_type is the producing component's own declared
+      // x-dagster-io.outputs.type (see asset_introspection_service.py) --
+      // the real contract, not a guess from a hardcoded list of
+      // component_type substrings (which used to live here, and which
+      // couldn't tell a dbt model -- a database table, not a DataFrame --
+      // from an actual DataFrame producer).
       let filteredAssets = availableAssets;
       if (acceptsDataFrames) {
-        // For now, use heuristics to identify DataFrame-producing assets
-        // TODO: Could be enhanced by checking each asset's component schema
         filteredAssets = availableAssets.filter((assetKey: string) => {
           const assetNode = currentProject?.graph.nodes.find(
             (n: any) => (n.data.asset_key === assetKey || n.data.label === assetKey || n.id === assetKey)
           );
-          if (!assetNode) return false;
-
-          // Check if it's a known DataFrame-producing component type
-          const componentType = assetNode.data.component_type || '';
-          const isDataFrameProducer =
-            componentType.includes('synthetic_data_generator') ||
-            componentType.includes('dataframe_transformer') ||
-            componentType.includes('csv_file') ||
-            componentType.includes('database_query') ||
-            componentType.includes('rest_api') ||
-            componentType.includes('duckdb_query') ||
-            componentType.includes('time_series');
-
-          return isDataFrameProducer;
+          return isDataFrameType(assetNode?.data.io_output_type);
         });
       }
 

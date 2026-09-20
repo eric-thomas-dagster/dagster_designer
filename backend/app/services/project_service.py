@@ -13,6 +13,7 @@ from datetime import datetime
 from typing import Dict, Tuple
 
 from ..core.config import settings
+from ..core.uv_binary import find_uv_binary
 from ..models.project import Project, ProjectCreate, ProjectUpdate
 from ..models.partition import PartitionConfig
 from ..models.freshness import FreshnessPolicy
@@ -1372,7 +1373,7 @@ if custom_lineage_edges:
         try:
             # Run create-dagster project command
             result = subprocess.run(
-                ["/Users/ericthomas/.local/bin/uvx", "create-dagster", "project", str(project_dir), "--no-uv-sync", "--verbose"],
+                [find_uv_binary("uvx"), "create-dagster", "project", str(project_dir), "--no-uv-sync", "--verbose"],
                 capture_output=True,
                 text=True,
                 timeout=120,
@@ -1646,7 +1647,7 @@ if custom_lineage_edges:
                 if not venv_dir.exists():
                     log(f"📦 Creating virtual environment at {venv_dir}...")
                     result = subprocess.run(
-                        ["/Users/ericthomas/.local/bin/uv", "venv", ".venv"],
+                        [find_uv_binary("uv"), "venv", ".venv"],
                         cwd=str(project_dir),
                         capture_output=True,
                         text=True
@@ -1662,7 +1663,7 @@ if custom_lineage_edges:
                 # Use uv pip install with --python flag
                 venv_python = str((venv_dir / "bin" / "python3").absolute())
                 result = subprocess.run(
-                    ["/Users/ericthomas/.local/bin/uv", "pip", "install", "--python", venv_python, "dagster-dg-cli", "dagster-dg-core"],
+                    [find_uv_binary("uv"), "pip", "install", "--python", venv_python, "dagster-dg-cli", "dagster-dg-core"],
                     cwd=str(project_dir),
                     capture_output=True,
                     text=True
@@ -1679,7 +1680,7 @@ if custom_lineage_edges:
                 start_time = time.time()
                 # Use --python flag to target the venv (same approach as Steps 1 and 3)
                 process = subprocess.Popen(
-                    ["/Users/ericthomas/.local/bin/uv", "pip", "install", "--python", venv_python, "-e", ".[dev]"],
+                    [find_uv_binary("uv"), "pip", "install", "--python", venv_python, "-e", ".[dev]"],
                     cwd=str(install_dir),
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
@@ -1704,7 +1705,7 @@ if custom_lineage_edges:
                 log(f"📦 Step 3/3: Installing core Dagster packages...")
                 venv_python = str((venv_dir / "bin" / "python3").absolute())
                 result = subprocess.run(
-                    ["/Users/ericthomas/.local/bin/uv", "pip", "install", "--python", venv_python,
+                    [find_uv_binary("uv"), "pip", "install", "--python", venv_python,
                      "dagster", "dagster-webserver", "dagster-cloud", "dagster-dbt"],
                     cwd=str(project_dir),
                     capture_output=True,
@@ -1762,7 +1763,7 @@ if custom_lineage_edges:
                 # Add verbose flag to get more output from UV
                 # Use UV directly (not uvx) for much faster performance
                 process = subprocess.Popen(
-                    ["/Users/ericthomas/.local/bin/uv", "add", "-v", "dagster-dbt", "dbt-core==1.10.13", adapter_package],
+                    [find_uv_binary("uv"), "add", "-v", "dagster-dbt", "dbt-core==1.10.13", adapter_package],
                     cwd=str(project_dir),
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
@@ -1818,7 +1819,7 @@ if custom_lineage_edges:
             # Use UV directly (not uvx) for much faster performance
             # Install dev dependencies too (includes dagster-dg-cli which we need for `dg list defs`)
             process = subprocess.Popen(
-                ["/Users/ericthomas/.local/bin/uv", "sync", "-v"],
+                [find_uv_binary("uv"), "sync", "-v"],
                 cwd=str(project_dir),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
@@ -1879,7 +1880,7 @@ if custom_lineage_edges:
             start_time = time.time()
             # Use UV directly (not uvx) for much faster performance
             process = subprocess.Popen(
-                ["bash", "-c", f"UV_PROJECT_ENVIRONMENT={venv_path} /Users/ericthomas/.local/bin/uv pip install -e ."],
+                ["bash", "-c", f"UV_PROJECT_ENVIRONMENT={venv_path} {find_uv_binary('uv')} pip install -e ."],
                 cwd=str(install_dir),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,

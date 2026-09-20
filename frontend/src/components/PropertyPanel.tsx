@@ -9,7 +9,7 @@ import { PartitionBackfill } from './PartitionBackfill';
 import { PartitionConfig } from './PartitionConfig';
 import { DataPreviewModal } from './DataPreviewModal';
 import { notify, confirmDialog } from './Notifications';
-import { assetsApi, projectsApi, primitivesApi, partitionsApi, templatesApi, type BackfillRequest } from '@/services/api';
+import { assetsApi, projectsApi, primitivesApi, partitionsApi, templatesApi, API_BASE, type BackfillRequest } from '@/services/api';
 import type { ComponentInstance } from '@/types';
 import { InlineAttributesForm } from './InlineAttributesForm';
 import { pickSpecializedSidebar } from './SpecializedSidebar';
@@ -91,7 +91,7 @@ export function PropertyPanel({ nodeId, onConfigureComponent, onOpenFile, onNewP
   const { data: manifest } = useQuery({
     queryKey: ['community-templates-manifest'],
     queryFn: async () => {
-      const response = await fetch('/api/v1/templates/manifest');
+      const response = await fetch(`${API_BASE}/templates/manifest`);
       if (!response.ok) {
         throw new Error('Failed to fetch manifest');
       }
@@ -250,7 +250,7 @@ export function PropertyPanel({ nodeId, onConfigureComponent, onOpenFile, onNewP
       const componentName = sourceComponentId.replace('community_', '');
       setLoadingCommunityComponent(true);
 
-      fetch(`/api/v1/projects/${currentProject?.id}/community-component/${componentName}`)
+      fetch(`${API_BASE}/projects/${currentProject?.id}/community-component/${componentName}`)
         .then(res => res.json())
         .then(data => {
           setSourceComponent({

@@ -477,6 +477,7 @@ async def get_installed_components(project_id: str):
                             "component_type": component_type,
                             "category": manifest_data.get('category', 'community'),
                             "version": manifest_data.get('version', '1.0.0'),
+                            "icon": manifest_data.get('icon', ''),
                         })
                     except Exception as e:
                         print(f"Warning: Could not read manifest for {item.name}: {e}")

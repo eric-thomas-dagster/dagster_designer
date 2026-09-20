@@ -3,6 +3,7 @@ import * as Dialog from '@radix-ui/react-dialog';
 import { DiffEditor } from '@monaco-editor/react';
 import { X, GitCommit, Loader2 } from 'lucide-react';
 import { projectsApi } from '@/services/api';
+import { useIsDarkMode } from '@/hooks/useIsDarkMode';
 
 interface SqlDiffDialogProps {
   open: boolean;
@@ -20,6 +21,7 @@ interface SqlDiffDialogProps {
  * latest on-disk state.
  */
 export function SqlDiffDialog({ open, onOpenChange, projectId, dbtRelativePath, relativeSqlPath, title }: SqlDiffDialogProps) {
+  const isDark = useIsDarkMode();
   const [diff, setDiff] = useState<Awaited<ReturnType<typeof projectsApi.getDbtModelDiff>> | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -90,7 +92,7 @@ export function SqlDiffDialog({ open, onOpenChange, projectId, dbtRelativePath, 
                   original={diff.committed}
                   modified={diff.current}
                   language="sql"
-                  theme="vs-light"
+                  theme={isDark ? 'vs-dark' : 'vs-light'}
                   options={{
                     renderSideBySide: true,
                     minimap: { enabled: false },

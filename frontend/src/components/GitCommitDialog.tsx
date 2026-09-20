@@ -3,6 +3,7 @@ import * as Dialog from '@radix-ui/react-dialog';
 import { X, GitCommit, Loader2, GitBranch, ArrowUp, ArrowDown } from 'lucide-react';
 import { projectsApi } from '@/services/api';
 import { notify } from './Notifications';
+import { Notice } from './Notice';
 
 interface GitCommitDialogProps {
   open: boolean;
@@ -118,9 +119,7 @@ export function GitCommitDialog({ open, onOpenChange, projectId, subpath, defaul
               </div>
             )}
             {!loading && status?.is_git_repo === false && (
-              <div className="p-3 bg-amber-50 border border-amber-200 rounded text-sm text-amber-800">
-                This directory isn't a git repository — no origin to push to.
-              </div>
+              <Notice>This directory isn't a git repository — no origin to push to.</Notice>
             )}
             {!loading && status?.is_git_repo && (
               <>

@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { useMutation } from '@tanstack/react-query';
 import { X, Cloud, CheckCircle, AlertCircle, Loader } from 'lucide-react';
+import { API_BASE } from '@/services/api';
 
 interface DbtCloudProject {
   id: number;
@@ -37,7 +38,7 @@ export function DbtCloudImportModal({ isOpen, onClose, onSuccess }: DbtCloudImpo
   // Test connection mutation
   const testConnectionMutation = useMutation({
     mutationFn: async () => {
-      const response = await fetch('/api/v1/dbt-cloud/test-connection', {
+      const response = await fetch(`${API_BASE}/dbt-cloud/test-connection`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -67,7 +68,7 @@ export function DbtCloudImportModal({ isOpen, onClose, onSuccess }: DbtCloudImpo
   // Import mutation
   const importMutation = useMutation({
     mutationFn: async () => {
-      const response = await fetch('/api/v1/dbt-cloud/import', {
+      const response = await fetch(`${API_BASE}/dbt-cloud/import`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

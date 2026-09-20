@@ -36,7 +36,8 @@ import { AddDataDialog } from './AddDataDialog';
 import { notify } from './Notifications';
 import { AutoCoverageModal } from './AssetDetailPage';
 import { useProjectStore } from '@/hooks/useProject';
-import { projectsApi, componentsApi } from '@/services/api';
+import { useIsDarkMode } from '@/hooks/useIsDarkMode';
+import { projectsApi, componentsApi , API_BASE } from '@/services/api';
 import { Play, Plus, Layers, CheckCircle } from 'lucide-react';
 import type { GraphNode, GraphEdge, ComponentSchema } from '@/types';
 
@@ -154,7 +155,7 @@ function CustomEdge({ id, source, target, sourceX, sourceY, targetX, targetY, so
 
       // Regenerate to refresh the graph and ensure saved state is correct
       console.log('[CustomEdge] Regenerating assets to refresh graph state');
-      const response = await fetch(`/api/v1/projects/${currentProject.id}/regenerate-assets`, {
+      const response = await fetch(`${API_BASE}/projects/${currentProject.id}/regenerate-assets`, {
         method: 'POST',
       });
       const updatedProject = await response.json();
@@ -193,7 +194,7 @@ function CustomEdge({ id, source, target, sourceX, sourceY, targetX, targetY, so
 
       // On error, trigger regeneration to restore the correct state
       try {
-        const response = await fetch(`/api/v1/projects/${currentProject.id}/regenerate-assets`, {
+        const response = await fetch(`${API_BASE}/projects/${currentProject.id}/regenerate-assets`, {
           method: 'POST',
         });
         const updatedProject = await response.json();
@@ -1311,7 +1312,7 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
       hasTriggeredRegeneration.current = true;
 
       // Trigger asset regeneration
-      fetch(`/api/v1/projects/${currentProject.id}/regenerate-assets`, {
+      fetch(`${API_BASE}/projects/${currentProject.id}/regenerate-assets`, {
         method: 'POST',
       })
         .then((response) => response.json())
@@ -1717,7 +1718,7 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
           console.log('[GraphEditor] Custom lineage saved, triggering background regeneration with layout recalculation');
 
           // Trigger asset regeneration in background to confirm and recalculate layout
-          const response = await fetch(`/api/v1/projects/${currentProject.id}/regenerate-assets?recalculate_layout=true`, {
+          const response = await fetch(`${API_BASE}/projects/${currentProject.id}/regenerate-assets?recalculate_layout=true`, {
             method: 'POST',
           });
 
@@ -1994,7 +1995,7 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
       // Trigger layout recalculation after adding a new asset
       if (currentProject) {
         console.log('[GraphEditor] Triggering layout recalculation after adding component');
-        fetch(`/api/v1/projects/${currentProject.id}/regenerate-assets?recalculate_layout=true`, {
+        fetch(`${API_BASE}/projects/${currentProject.id}/regenerate-assets?recalculate_layout=true`, {
           method: 'POST',
         }).then(async (response) => {
           if (response.ok) {
@@ -2315,14 +2316,6 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
               {allKinds.map((k) => <option key={k} value={k}>{k}</option>)}
             </select>
           )}
-          {isFiltering && (
-            <button
-              onClick={() => { setAssetSearch(''); setGroupFilter('all'); setKindFilter('all'); setShowAllInGraph(false); }}
-              className="text-[11px] text-gray-500 hover:text-gray-800 underline decoration-dotted whitespace-nowrap"
-            >
-              Clear
-            </button>
-          )}
           <div className="ml-1 flex items-center bg-gray-100 rounded p-0.5">
             {(['graph', 'catalog'] as const).map((v) => (
               <button
@@ -2347,6 +2340,18 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
               />
               <span>Include orphaned externals</span>
             </label>
+          )}
+          {/* Clears whichever of the filters above (search/group/kind/this
+              checkbox) is active -- kept last so it always reads as "clear
+              everything before me" rather than popping up in the middle of
+              the row depending on which filter happened to trigger it. */}
+          {isFiltering && (
+            <button
+              onClick={() => { setAssetSearch(''); setGroupFilter('all'); setKindFilter('all'); setShowAllInGraph(false); }}
+              className="text-[11px] text-gray-500 hover:text-gray-800 underline decoration-dotted whitespace-nowrap"
+            >
+              Clear
+            </button>
           )}
         </div>
         <div className="flex items-center gap-1 flex-shrink-0">
@@ -2793,6 +2798,12 @@ function ConnectionSection({
 // Component to render group bounding boxes with proper viewport transformation
 function GroupOverlay({ nodes, setNodes }: { nodes: Node[]; setNodes: React.Dispatch<React.SetStateAction<Node[]>> }) {
   const { x, y, zoom } = useViewport();
+  // SVG fill/stroke are plain XML attributes, not CSS -- they don't pick up
+  // Tailwind's dark: classes or our .dark CSS overrides at all, which is
+  // why the group background stayed white/near-white (98% lightness) in
+  // dark mode regardless of everything else on the page correctly going
+  // dark. Read the theme in JS instead and pick the color explicitly.
+  const isDark = useIsDarkMode();
 
   // Handler to select all nodes in a group when clicking the header
   const handleGroupHeaderClick = useCallback((groupName: string, event: React.MouseEvent) => {
@@ -2889,8 +2900,16 @@ function GroupOverlay({ nodes, setNodes }: { nodes: Node[]; setNodes: React.Disp
                   y={bound.y}
                   width={bound.width}
                   height={bound.height}
-                  fill={isGroupSelected ? 'hsl(246, 68%, 96%)' : 'hsl(246, 68%, 98%)'}
-                  stroke={isGroupSelected ? 'hsl(246, 68%, 56%)' : 'hsl(246, 60%, 80%)'}
+                  fill={
+                    isDark
+                      ? isGroupSelected ? 'hsl(246, 45%, 18%)' : 'hsl(246, 40%, 13%)'
+                      : isGroupSelected ? 'hsl(246, 68%, 96%)' : 'hsl(246, 68%, 98%)'
+                  }
+                  stroke={
+                    isDark
+                      ? isGroupSelected ? 'hsl(246, 68%, 65%)' : 'hsl(246, 40%, 30%)'
+                      : isGroupSelected ? 'hsl(246, 68%, 56%)' : 'hsl(246, 60%, 80%)'
+                  }
                   strokeWidth={1.5 / zoom}
                   rx="6"
                   style={{ pointerEvents: 'none' }}

@@ -3,12 +3,13 @@ import ReactFlow, { Background, BackgroundVariant, Controls, MiniMap, Handle, Po
 import 'reactflow/dist/style.css';
 import {
   Play, RefreshCw, Loader2, ChevronRight, ChevronLeft, ExternalLink,
-  CheckCircle2, XCircle, Clock, AlertTriangle, Ban, Search, Filter as FilterIcon,
+  CheckCircle2, XCircle, Clock, Ban, Search, Filter as FilterIcon,
   Copy, Tag as TagIcon, Layers, FileText,
 } from 'lucide-react';
 import { useProjectStore } from '@/hooks/useProject';
 import { runsApi, dagsterUIApi, type Run, type RunDetail } from '@/services/api';
 import { notify } from './Notifications';
+import { Notice } from './Notice';
 
 /**
  * Runs surface -- paginated list of Dagster run history.
@@ -308,15 +309,12 @@ export function RunsPanel() {
       {/* Body */}
       <div className="flex-1 overflow-y-auto p-6 bg-gray-50">
         {warning && (
-          <div className="mb-3 p-3 bg-amber-50 border border-amber-200 rounded text-sm text-amber-900 flex items-start justify-between gap-3">
-            <div className="flex items-start gap-2">
-              <AlertTriangle className="w-4 h-4 mt-0.5 flex-shrink-0" />
-              <span>{warning}</span>
-            </div>
-            {!isCloud && (
-              <StartDgDevButton onStarted={() => load(cursor)} />
-            )}
-          </div>
+          <Notice
+            className="mb-3"
+            action={!isCloud && <StartDgDevButton onStarted={() => load(cursor)} />}
+          >
+            {warning}
+          </Notice>
         )}
         {error && (
           <div className="mb-3 p-3 bg-rose-50 border border-rose-200 rounded text-sm text-rose-800">

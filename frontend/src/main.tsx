@@ -4,18 +4,16 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import App from './App';
 import './index.css';
 
-// Apply the persisted theme BEFORE React renders so users don't flash
-// light-mode content on reload when they've picked dark. If nothing is
-// saved, follow the system preference.
+// Follow the OS appearance setting (System Settings > Appearance) rather
+// than an in-app toggle, same as any other native Mac app. Applied before
+// React renders so there's no flash of the wrong theme, and kept in sync
+// live if the user changes their system appearance while the app is open.
 (() => {
-  try {
-    const saved = localStorage.getItem('theme');
-    const prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
-    const dark = saved === 'dark' || (saved === null && prefersDark);
-    document.documentElement.classList.toggle('dark', dark);
-  } catch {
-    // localStorage inaccessible (private mode, etc.) -- default to light.
-  }
+  if (!window.matchMedia) return;
+  const media = window.matchMedia('(prefers-color-scheme: dark)');
+  const apply = () => document.documentElement.classList.toggle('dark', media.matches);
+  apply();
+  media.addEventListener('change', apply);
 })();
 
 const queryClient = new QueryClient({

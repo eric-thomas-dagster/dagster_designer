@@ -6,6 +6,7 @@ import {
 } from 'lucide-react';
 import { useProjectStore } from '@/hooks/useProject';
 import { notify } from './Notifications';
+import { API_BASE } from '@/services/api';
 
 interface ManifestComponent {
   id: string;
@@ -79,7 +80,7 @@ export function AddDataDialog({ open, onOpenChange, onSourcePicked }: AddDataDia
   const { data: manifest, isLoading } = useQuery({
     queryKey: ['community-templates-manifest'],
     queryFn: async () => {
-      const res = await fetch('/api/v1/templates/manifest');
+      const res = await fetch(`${API_BASE}/templates/manifest`);
       if (!res.ok) throw new Error('Failed to load community manifest');
       return res.json() as Promise<{ components: ManifestComponent[] }>;
     },
@@ -91,7 +92,7 @@ export function AddDataDialog({ open, onOpenChange, onSourcePicked }: AddDataDia
     mutationFn: async (componentId: string) => {
       if (!currentProject) throw new Error('No project selected');
       setInstallingId(componentId);
-      const res = await fetch(`/api/v1/templates/install-via-cli/${componentId}`, {
+      const res = await fetch(`${API_BASE}/templates/install-via-cli/${componentId}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         // template_only: install the component but DO NOT drop a demo

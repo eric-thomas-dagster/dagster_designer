@@ -4,6 +4,7 @@ import { Search, Workflow, X, ChevronRight, TrendingUp, DollarSign, Target, Pack
 import { useProjectStore } from '@/hooks/useProject';
 import { PipelineConfigForm } from './PipelineConfigForm';
 import { notify } from './Notifications';
+import { API_BASE } from '@/services/api';
 
 interface PipelineComponent {
   component_id: string;
@@ -65,7 +66,7 @@ export function PipelineTemplates() {
   const { data: manifest, isLoading, error } = useQuery({
     queryKey: ['pipeline-templates-manifest'],
     queryFn: async () => {
-      const response = await fetch('/api/v1/pipeline-templates/manifest');
+      const response = await fetch(`${API_BASE}/pipeline-templates/manifest`);
       if (!response.ok) {
         throw new Error('Failed to fetch pipeline manifest');
       }
@@ -77,7 +78,7 @@ export function PipelineTemplates() {
     queryKey: ['pipeline-details', selectedPipeline?.id],
     queryFn: async () => {
       if (!selectedPipeline) return null;
-      const response = await fetch(`/api/v1/pipeline-templates/pipeline/${selectedPipeline.id}`);
+      const response = await fetch(`${API_BASE}/pipeline-templates/pipeline/${selectedPipeline.id}`);
       if (!response.ok) {
         throw new Error('Failed to fetch pipeline details');
       }
@@ -90,7 +91,7 @@ export function PipelineTemplates() {
     mutationFn: async ({ pipeline, config }: { pipeline: PipelineTemplate; config: Record<string, any> }) => {
       if (!currentProject) throw new Error('No project selected');
 
-      const response = await fetch(`/api/v1/pipeline-templates/install/${pipeline.id}`, {
+      const response = await fetch(`${API_BASE}/pipeline-templates/install/${pipeline.id}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

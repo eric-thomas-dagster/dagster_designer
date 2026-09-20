@@ -21,8 +21,12 @@ import { RunsPanel } from './components/RunsPanel';
 import { DataPreviewModal } from './components/DataPreviewModal';
 import { DagsterCloudChip } from './components/DagsterCloudChip';
 import { NotificationHost, notify, confirmDialog } from './components/Notifications';
+import { SettingsHost } from './components/SettingsDialog';
 import { useProjectStore } from './hooks/useProject';
-import { Network, FileCode, Zap, Package, ExternalLink, Settings, Workflow, ChevronDown, Skull, AlertTriangle, X, Loader2, CheckCircle, XCircle, PanelLeftClose, PanelLeft, Clock, Play, Radar, Timer, Download, Database, ShieldCheck, Cloud, Bell, Sun, Moon } from 'lucide-react';
+import { useRunNotifications } from './hooks/useRunNotifications';
+import { setActiveTabGlobal } from './services/activeTab';
+import { onMenuAction } from './services/tauri';
+import { Network, FileCode, Zap, Package, ExternalLink, Settings, Workflow, ChevronDown, Skull, AlertTriangle, X, Loader2, CheckCircle, XCircle, PanelLeftClose, PanelLeft, Clock, Play, Radar, Timer, Download, Database, ShieldCheck, Cloud, Bell } from 'lucide-react';
 import { IngestionsPanel } from './components/IngestionsPanel';
 import { DbtPanel } from './components/DbtPanel';
 import { MonitorsPanel } from './components/MonitorsPanel';
@@ -30,6 +34,7 @@ import { AiAssistantPanel } from './components/AiAssistantPanel';
 import { projectsApi as _projectsApi } from './services/api';
 import { dagsterUIApi, projectsApi, filesApi, primitivesApi } from './services/api';
 import type { ComponentInstance } from './types';
+import { API_BASE } from '@/services/api';
 
 function BrandMark() {
   const [failed, setFailed] = useState(false);
@@ -221,6 +226,7 @@ function StatusStrip(props: StatusStripProps) {
 }
 
 function App() {
+  useRunNotifications();
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [editingComponent, setEditingComponent] = useState<ComponentInstance | null>(null);
   const [addingComponentType, setAddingComponentType] = useState<string | null>(null);
@@ -238,7 +244,14 @@ function App() {
   // the PropertyPanel; null means the overlay is closed.
   const [detailNodeId, setDetailNodeId] = useState<string | null>(null);
   const [isDragging, setIsDragging] = useState(false);
-  const [activeMainTab, setActiveMainTab] = useState('assets');
+  const [activeMainTab, setActiveMainTabState] = useState('assets');
+  // Also broadcasts to the module-level activeTab store so page components
+  // can tell whether they're the one currently visible (for usePageActions)
+  // without this being threaded through as a prop everywhere.
+  const setActiveMainTab = (tab: string) => {
+    setActiveMainTabState(tab);
+    setActiveTabGlobal(tab);
+  };
   const [templateBuilderTab, setTemplateBuilderTab] = useState<string | null>(null);
   const [templateBuilderAssetKey, setTemplateBuilderAssetKey] = useState<string | null>(null);
   const [primitiveToOpen, setPrimitiveToOpen] = useState<{ category: string; name: string } | null>(null);
@@ -300,6 +313,21 @@ function App() {
     const exists = currentProject.graph.nodes.some((n) => n.id === selectedNodeId);
     if (!exists) setSelectedNodeId(null);
   }, [currentProject, selectedNodeId]);
+
+  // Native "View" menu (Cmd+1-9, see src-tauri/src/main.rs) mirrors the
+  // left-nav rail. "Code" isn't in navItems for Dagster+ projects (no local
+  // codebase to edit), so ignore it rather than switching to a dead tab.
+  // No-op outside Tauri.
+  useEffect(() => {
+    const isCloudProject = !!currentProject && !!(currentProject as any).is_dagster_plus;
+    const unlistenPromise = onMenuAction((id) => {
+      if (!id.startsWith('view:')) return;
+      const tab = id.slice('view:'.length);
+      if (tab === 'code' && isCloudProject) return;
+      setActiveMainTab(tab);
+    });
+    return () => { unlistenPromise.then((unlisten) => unlisten()); };
+  }, [currentProject]);
 
   // Delay validation check by 2 seconds after project loads to avoid blocking UI
   useEffect(() => {
@@ -578,7 +606,7 @@ function App() {
       try {
         // Clear asset introspection cache to force fresh dg list defs
         try {
-          await fetch(`/api/v1/projects/${currentProject.id}/regenerate-assets/cache`, {
+          await fetch(`${API_BASE}/projects/${currentProject.id}/regenerate-assets/cache`, {
             method: 'DELETE',
           });
         } catch (error) {
@@ -586,7 +614,7 @@ function App() {
         }
 
         // Call regenerate-assets API
-        const response = await fetch(`/api/v1/projects/${currentProject.id}/regenerate-assets`, {
+        const response = await fetch(`${API_BASE}/projects/${currentProject.id}/regenerate-assets`, {
           method: 'POST',
         });
         if (response.ok) {
@@ -688,7 +716,7 @@ function App() {
     if (!confirmed) return;
 
     try {
-      const response = await fetch(`/api/v1/dagster-ui/kill-all`, {
+      const response = await fetch(`${API_BASE}/dagster-ui/kill-all`, {
         method: 'POST',
       });
 
@@ -758,7 +786,7 @@ function App() {
       <nav
         className={`${navCollapsed ? 'w-14' : 'w-56'} transition-[width] duration-150 flex flex-col bg-[hsl(var(--dagster-black))] text-white/80 border-r border-[hsl(var(--dagster-black))]`}
       >
-        <div className={`${navCollapsed ? 'px-3 justify-center' : 'px-5 justify-between'} py-4 flex items-center gap-2 border-b border-white/10`}>
+        <div className={`h-14 flex-shrink-0 ${navCollapsed ? 'px-3 justify-center' : 'px-5 justify-between'} flex items-center gap-2 border-b border-white/10`}>
           {!navCollapsed && (
             <div className="flex items-center gap-2 min-w-0">
               <BrandMark />
@@ -776,7 +804,7 @@ function App() {
                   value={value}
                   onMouseEnter={onHover}
                   title={navCollapsed ? label : undefined}
-                  className={`group flex items-center ${navCollapsed ? 'justify-center px-2' : 'gap-3 px-3'} py-2 rounded-md text-sm font-medium text-white/70 hover:text-white hover:bg-white/5 data-[state=active]:bg-white/10 data-[state=active]:text-white transition-colors focus:outline-none`}
+                  className={`group flex items-center ${navCollapsed ? 'justify-center px-2' : 'gap-3 px-3'} py-2 rounded-md text-sm font-medium text-white/70 hover:text-white hover:bg-white/5 data-[state=active]:bg-[hsl(var(--selected))] data-[state=active]:text-white transition-colors focus:outline-none`}
                 >
                   <Icon className="w-4 h-4 flex-shrink-0" />
                   {!navCollapsed && <span>{label}</span>}
@@ -821,7 +849,6 @@ function App() {
             )}
           </div>
           <div className="flex items-center gap-2">
-            <ThemeToggle />
             {currentProject && (
               <DropdownMenu.Root>
                 <DropdownMenu.Trigger asChild>
@@ -1484,36 +1511,10 @@ function App() {
       )}
 
       <NotificationHost />
+      <SettingsHost />
     </div>
   );
 }
 
-/**
- * Light/dark theme toggle. Reads the initial state from the class on
- * <html> that main.tsx set from localStorage (or system preference).
- * Persists changes back to localStorage so reloads stay in the picked
- * mode without a flash of light-mode content.
- */
-function ThemeToggle() {
-  const [isDark, setIsDark] = useState<boolean>(() =>
-    typeof document !== 'undefined' && document.documentElement.classList.contains('dark')
-  );
-  const toggle = () => {
-    const next = !isDark;
-    setIsDark(next);
-    document.documentElement.classList.toggle('dark', next);
-    try { localStorage.setItem('theme', next ? 'dark' : 'light'); } catch { /* private mode */ }
-  };
-  return (
-    <button
-      onClick={toggle}
-      className="p-2 text-gray-600 hover:bg-gray-100 rounded transition-colors"
-      title={isDark ? 'Switch to light mode' : 'Switch to dark mode'}
-      aria-label={isDark ? 'Switch to light mode' : 'Switch to dark mode'}
-    >
-      {isDark ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
-    </button>
-  );
-}
 
 export default App;

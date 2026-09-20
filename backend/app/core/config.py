@@ -11,7 +11,14 @@ class Settings(BaseSettings):
     api_prefix: str = "/api/v1"
 
     # CORS
-    cors_origins: list[str] = ["http://localhost:5173", "http://localhost:3000"]
+    # tauri://localhost (macOS/Linux) and http://tauri.localhost (Windows) are
+    # the origins Tauri's packaged webview loads the UI from.
+    cors_origins: list[str] = [
+        "http://localhost:5173",
+        "http://localhost:3000",
+        "tauri://localhost",
+        "http://tauri.localhost",
+    ]
 
     # Storage
     data_dir: Path = Path("./data")

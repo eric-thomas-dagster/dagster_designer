@@ -123,6 +123,15 @@ async def get_component(component_type: str, project_id: str | None = None):
                                             required.append(field_name)
                                     if required:
                                         transformed_schema['required'] = required
+                                    # x-dagster-io (input/output type contract, e.g. "dataframe")
+                                    # was being silently dropped here -- it lives alongside
+                                    # "attributes" in the source schema.json, not inside it, so
+                                    # copying `attributes` alone left it out. The frontend's
+                                    # asset pickers (ComponentConfigModal) rely on this to filter
+                                    # to only DataFrame-producing upstream assets; without it
+                                    # every asset in the project looked equally valid.
+                                    if 'x-dagster-io' in schema_data:
+                                        transformed_schema['x-dagster-io'] = schema_data['x-dagster-io']
                                 else:
                                     # If already in correct format, use as-is
                                     transformed_schema = schema_data.get('schema', schema_data)

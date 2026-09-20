@@ -1,6 +1,7 @@
 import { useState, useMemo } from 'react';
 import { Search, ExternalLink, Database, Cloud, Cpu, Bell, Package, Download, Check, X, ChevronRight, Code } from 'lucide-react';
 import { notify } from './Notifications';
+import { API_BASE } from '@/services/api';
 
 interface Integration {
   name: string;
@@ -650,7 +651,7 @@ export function IntegrationCatalog({ projectId }: IntegrationCatalogProps) {
     setInstalling(prev => new Set(prev).add(packageName));
 
     try {
-      const response = await fetch(`/api/v1/integrations/${projectId}/install`, {
+      const response = await fetch(`${API_BASE}/integrations/${projectId}/install`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Cloud, Download, Loader2 } from 'lucide-react';
 import { useProjectStore } from '@/hooks/useProject';
 import { notify } from './Notifications';
+import { API_BASE } from '@/services/api';
 
 interface ManifestComponent {
   id: string;
@@ -46,7 +47,7 @@ export function CommunityAvailableSection({
   const { data: manifest, isLoading } = useQuery({
     queryKey: ['community-templates-manifest'],
     queryFn: async () => {
-      const res = await fetch('/api/v1/templates/manifest');
+      const res = await fetch(`${API_BASE}/templates/manifest`);
       if (!res.ok) throw new Error('Failed to load community manifest');
       return res.json() as Promise<{ components: ManifestComponent[] }>;
     },
@@ -57,7 +58,7 @@ export function CommunityAvailableSection({
     queryKey: ['installed-components', currentProject?.id],
     queryFn: async () => {
       if (!currentProject) return { components: [] as InstalledComponent[] };
-      const res = await fetch(`/api/v1/templates/installed/${currentProject.id}`);
+      const res = await fetch(`${API_BASE}/templates/installed/${currentProject.id}`);
       if (!res.ok) return { components: [] as InstalledComponent[] };
       return res.json() as Promise<{ components: InstalledComponent[] }>;
     },
@@ -68,7 +69,7 @@ export function CommunityAvailableSection({
     mutationFn: async (componentId: string) => {
       if (!currentProject) throw new Error('No project selected');
       setInstallingId(componentId);
-      const res = await fetch(`/api/v1/templates/install-via-cli/${componentId}`, {
+      const res = await fetch(`${API_BASE}/templates/install-via-cli/${componentId}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ project_id: currentProject.id, config: {} }),

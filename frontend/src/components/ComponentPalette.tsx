@@ -1,10 +1,12 @@
 import { useMemo, useState } from 'react';
 import { useComponentRegistry } from '@/hooks/useComponentRegistry';
-import { Database, ArrowRight, Download, RefreshCw, Box, Search, Plus, Code, FileText, Play, Clock, Radar, CheckCircle, FileCode, Package, Loader2, Cloud } from 'lucide-react';
+import { Database, ArrowRight, Download, RefreshCw, Box, Search, Plus, Code, FileText, Play, Clock, Radar, CheckCircle, FileCode, Loader2 } from 'lucide-react';
 import { CreatePythonAssetDialog } from './CreatePythonAssetDialog';
 import { useProjectStore } from '@/hooks/useProject';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { notify } from './Notifications';
+import { API_BASE } from '@/services/api';
+import { ComponentIcon } from './ComponentIcon';
 
 const iconMap: Record<string, React.ComponentType<any>> = {
   database: Database,
@@ -30,6 +32,7 @@ interface ManifestComponent {
   category: string;
   description: string;
   tags?: string[];
+  icon?: string;
 }
 
 export function ComponentPalette({ onComponentClick }: ComponentPaletteProps) {
@@ -46,9 +49,9 @@ export function ComponentPalette({ onComponentClick }: ComponentPaletteProps) {
     queryKey: ['installed-components', currentProject?.id],
     queryFn: async () => {
       if (!currentProject) return { components: [] };
-      const response = await fetch(`/api/v1/templates/installed/${currentProject.id}`);
+      const response = await fetch(`${API_BASE}/templates/installed/${currentProject.id}`);
       if (!response.ok) return { components: [] };
-      return response.json() as Promise<{ components: Array<{ id: string; name: string; description: string; component_type: string; category: string }> }>;
+      return response.json() as Promise<{ components: Array<{ id: string; name: string; description: string; component_type: string; category: string; icon?: string }> }>;
     },
     enabled: !!currentProject,
   });
@@ -60,7 +63,7 @@ export function ComponentPalette({ onComponentClick }: ComponentPaletteProps) {
   const { data: manifest, isLoading: isLoadingManifest } = useQuery({
     queryKey: ['community-templates-manifest'],
     queryFn: async () => {
-      const res = await fetch('/api/v1/templates/manifest');
+      const res = await fetch(`${API_BASE}/templates/manifest`);
       if (!res.ok) throw new Error('Failed to load community manifest');
       return res.json() as Promise<{ components: ManifestComponent[] }>;
     },
@@ -74,7 +77,7 @@ export function ComponentPalette({ onComponentClick }: ComponentPaletteProps) {
     mutationFn: async (componentId: string) => {
       if (!currentProject) throw new Error('No project selected');
       setInstallingId(componentId);
-      const res = await fetch(`/api/v1/templates/install-via-cli/${componentId}`, {
+      const res = await fetch(`${API_BASE}/templates/install-via-cli/${componentId}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         // template_only=true: install the template but don't create a
@@ -112,6 +115,11 @@ export function ComponentPalette({ onComponentClick }: ComponentPaletteProps) {
     'io_manager', 'io_managers',
     'check', 'checks', 'asset_check', 'asset_checks',
     'infrastructure',
+    // Decorators (@cached_asset, @sensitive_asset, etc.) wrap an *existing*
+    // asset function in your own source -- there's no standalone "instance"
+    // for a form to create the way there is for dbt/Fivetran/a Python
+    // asset, so they don't belong in a "drop this onto the graph" picker.
+    'decorator', 'decorators',
   ]);
   const isAssetProducing = (category: string | undefined) =>
     !NON_ASSET_CATEGORIES.has((category || '').toLowerCase());
@@ -329,7 +337,7 @@ export function ComponentPalette({ onComponentClick }: ComponentPaletteProps) {
                             title={comp.description || comp.name}
                             className="w-full flex items-center space-x-2 px-2.5 py-2 bg-gradient-to-br from-purple-50 to-pink-50 border border-purple-200 rounded-md hover:border-purple-400 transition-all group text-left cursor-move"
                           >
-                            <Package className="w-4 h-4 text-purple-600 flex-shrink-0" />
+                            <ComponentIcon icon={comp.icon} title={comp.name} className="text-purple-600 flex-shrink-0" />
                             <span className="text-sm font-medium text-gray-900 truncate flex-1">{comp.name}</span>
                             <Plus className="w-3.5 h-3.5 text-purple-400 ml-auto group-hover:text-purple-600 flex-shrink-0" />
                           </button>
@@ -346,7 +354,7 @@ export function ComponentPalette({ onComponentClick }: ComponentPaletteProps) {
                             title={comp.description || comp.name}
                             className="w-full flex items-center space-x-2 px-2.5 py-2 border border-dashed border-gray-300 bg-white rounded-md hover:border-primary/50 hover:bg-primary/5 transition-all group text-left disabled:opacity-60"
                           >
-                            <Cloud className="w-4 h-4 text-gray-400 group-hover:text-primary flex-shrink-0" />
+                            <ComponentIcon icon={comp.icon} title={comp.name} className="text-gray-400 group-hover:text-primary flex-shrink-0" />
                             <span className="text-sm text-gray-900 truncate flex-1">{comp.name}</span>
                             {isInstalling ? (
                               <Loader2 className="w-3.5 h-3.5 text-primary animate-spin flex-shrink-0" />

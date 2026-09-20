@@ -7,6 +7,7 @@ import {
 } from 'lucide-react';
 import { projectsApi } from '@/services/api';
 import { notify } from './Notifications';
+import { useIsDarkMode } from '@/hooks/useIsDarkMode';
 
 interface AddMonitorDialogProps {
   open: boolean;
@@ -92,6 +93,7 @@ const STARTER_CUSTOM_PYTHON = [
 ].join('\n');
 
 export function AddMonitorDialog({ open, onOpenChange, projectId, onSaved }: AddMonitorDialogProps) {
+  const isDark = useIsDarkMode();
   // Step state — a very lightweight wizard. We show all sections at
   // once but scope validation to what's currently active.
   const [step, setStep] = useState<'kind' | 'target' | 'config' | 'schedule' | 'review'>('kind');
@@ -500,7 +502,7 @@ export function AddMonitorDialog({ open, onOpenChange, projectId, onSaved }: Add
                           defaultLanguage="json"
                           value={advancedParamsJson}
                           onChange={(v) => setAdvancedParamsJson(v ?? '')}
-                          theme="vs-light"
+                          theme={isDark ? 'vs-dark' : 'vs-light'}
                           options={{ minimap: { enabled: false }, fontSize: 12, scrollBeyondLastLine: false, wordWrap: 'on' }}
                         />
                       </div>
@@ -626,7 +628,7 @@ export function AddMonitorDialog({ open, onOpenChange, projectId, onSaved }: Add
                           if (customLang === 'python' && implementation === 'enhanced_check') setCustomPython(v ?? '');
                           else setCustomSql(v ?? '');
                         }}
-                        theme="vs-light"
+                        theme={isDark ? 'vs-dark' : 'vs-light'}
                         options={{ minimap: { enabled: false }, fontSize: 12, scrollBeyondLastLine: false, wordWrap: 'on' }}
                       />
                     </div>

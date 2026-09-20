@@ -18,7 +18,7 @@ import {
   Timer,
   Workflow,
 } from 'lucide-react';
-import { primitivesApi } from '@/services/api';
+import { primitivesApi , API_BASE } from '@/services/api';
 import { CommunityTemplates } from './CommunityTemplates';
 import { PipelineTemplates } from './PipelineTemplates';
 import { CronBuilder } from './CronBuilder';
@@ -35,6 +35,7 @@ import {
   type FreshnessPolicyParams,
 } from '@/services/api';
 import { useProjectStore } from '@/hooks/useProject';
+import { useIsDarkMode } from '@/hooks/useIsDarkMode';
 
 interface TemplateBuilderProps {
   initialTab?: string | null;
@@ -43,6 +44,7 @@ interface TemplateBuilderProps {
 }
 
 export function TemplateBuilder({ initialTab, initialAssetKey, hideSubNav = false }: TemplateBuilderProps = {}) {
+  const isDark = useIsDarkMode();
   const { currentProject, loadProject } = useProjectStore();
   const queryClient = useQueryClient();
   const [activeTab, setActiveTab] = useState(initialTab || 'schedule');
@@ -433,7 +435,7 @@ ${generateYamlAttributes(communityAssetCheckAttributes, 1)}`;
 
         console.log('[TemplateBuilder] Saving community asset check with config:', config);
 
-        const response = await fetch(`/api/v1/templates/configure/${selectedCommunityAssetCheck}`, {
+        const response = await fetch(`${API_BASE}/templates/configure/${selectedCommunityAssetCheck}`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -483,7 +485,7 @@ ${generateYamlAttributes(communityAssetCheckAttributes, 1)}`;
         if (currentProject) {
           // Clear backend cache to force fresh fetch
           try {
-            await fetch(`/api/v1/primitives/definitions/cache/${currentProject.id}`, {
+            await fetch(`${API_BASE}/primitives/definitions/cache/${currentProject.id}`, {
               method: 'DELETE',
             });
           } catch (error) {
@@ -2474,7 +2476,7 @@ ${generateYamlAttributes(communityAssetCheckAttributes, 1)}`;
               language="python"
               value={generatedCode}
               onChange={(value) => setGeneratedCode(value || '')}
-              theme="vs-light"
+              theme={isDark ? 'vs-dark' : 'vs-light'}
               options={{
                 minimap: { enabled: false },
                 fontSize: 13,
