@@ -165,7 +165,7 @@ export function RunsPanel() {
                         return next;
                       });
                     }}
-                    className={`px-2 py-0.5 text-[10px] font-medium uppercase tracking-wider rounded border ${
+                    className={`px-2.5 py-1.5 text-xs font-medium uppercase tracking-wider rounded border ${
                       active
                         ? 'bg-blue-50 border-blue-400 text-blue-800'
                         : 'bg-white border-gray-300 text-gray-600 hover:border-gray-400'
@@ -179,31 +179,31 @@ export function RunsPanel() {
               {statusFilter.size > 0 && (
                 <button
                   onClick={() => setStatusFilter(new Set())}
-                  className="text-[10px] text-gray-500 hover:text-gray-800 underline decoration-dotted ml-1"
+                  className="text-xs text-gray-500 hover:text-gray-800 underline decoration-dotted ml-1"
                 >
                   clear
                 </button>
               )}
             </div>
             <div className="relative w-52">
-              <Search className="w-3.5 h-3.5 text-gray-400 absolute left-2 top-1/2 -translate-y-1/2 pointer-events-none" />
+              <Search className="w-3.5 h-3.5 text-gray-400 absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
               <input
                 value={jobFilter}
                 onChange={(e) => setJobFilter(e.target.value)}
                 placeholder="Filter by job name…"
-                className="w-full pl-7 pr-2 py-1 text-xs border border-gray-300 rounded"
+                className="w-full pl-7 pr-2 py-1.5 text-sm border border-gray-300 rounded"
               />
             </div>
             <button
               onClick={() => setShowAdvanced((v) => !v)}
-              className={`inline-flex items-center gap-1 px-2 py-1 text-[11px] rounded border ${showAdvanced ? 'bg-blue-50 border-blue-300 text-blue-800' : 'bg-white border-gray-300 text-gray-700 hover:bg-gray-50'}`}
+              className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs rounded border ${showAdvanced ? 'bg-blue-50 border-blue-300 text-blue-800' : 'bg-white border-gray-300 text-gray-700 hover:bg-gray-50'}`}
               title="More filters"
             >
-              <FilterIcon className="w-3 h-3" />
+              <FilterIcon className="w-3.5 h-3.5" />
               More filters
             </button>
             {source && (
-              <span className="text-[11px] text-gray-500 ml-1">
+              <span className="text-xs text-gray-500 ml-1">
                 Source: <span className="font-medium">{source === 'cloud' ? 'Dagster+' : 'Local dg dev'}</span>
               </span>
             )}
@@ -212,7 +212,7 @@ export function RunsPanel() {
           <button
             onClick={() => load(cursor)}
             disabled={loading}
-            className="inline-flex items-center gap-1 px-2 py-1 text-xs text-gray-700 hover:bg-gray-100 rounded"
+            className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs text-gray-700 hover:bg-gray-100 rounded border border-gray-300"
             title="Refresh"
           >
             {loading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
@@ -220,14 +220,14 @@ export function RunsPanel() {
           <button
             onClick={goPrev}
             disabled={prevCursors.length === 0 || loading}
-            className="inline-flex items-center gap-1 px-2 py-1 text-xs text-gray-700 hover:bg-gray-100 rounded disabled:opacity-40 disabled:cursor-not-allowed"
+            className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs text-gray-700 hover:bg-gray-100 rounded border border-gray-300 disabled:opacity-40 disabled:cursor-not-allowed"
           >
             <ChevronLeft className="w-3.5 h-3.5" /> Prev
           </button>
           <button
             onClick={goNext}
             disabled={!nextCursor || loading}
-            className="inline-flex items-center gap-1 px-2 py-1 text-xs text-gray-700 hover:bg-gray-100 rounded disabled:opacity-40 disabled:cursor-not-allowed"
+            className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs text-gray-700 hover:bg-gray-100 rounded border border-gray-300 disabled:opacity-40 disabled:cursor-not-allowed"
           >
             Next <ChevronRight className="w-3.5 h-3.5" />
           </button>

@@ -788,7 +788,7 @@ export function PipelineBuilder() {
     <div className="h-full flex bg-gray-50">
       {/* Left Sidebar - Pipeline List (top-level, matches Assets tab layout) */}
       <aside className="w-64 bg-white border-r border-gray-200 flex flex-col flex-shrink-0">
-          <div className="px-4 py-3 bg-gray-50 border-b border-gray-200">
+          <div className="h-[49px] px-4 bg-white border-b border-gray-200 flex items-center flex-shrink-0">
             <h3 className="text-xs font-semibold text-gray-700 uppercase tracking-wider">
               Your Pipelines
             </h3>
@@ -860,7 +860,7 @@ export function PipelineBuilder() {
       {/* Right column: header row + main content */}
       <div className="flex-1 flex flex-col min-w-0">
         {/* Header row — sits only above the main area, not the sidebar */}
-        <div className="bg-white border-b border-gray-200 px-4 py-2 flex items-center justify-end gap-1.5 flex-shrink-0">
+        <div className="h-[49px] bg-white border-b border-gray-200 px-4 flex items-center justify-end gap-1.5 flex-shrink-0">
           <button
             onClick={handleExportYAML}
             className="flex items-center gap-1.5 px-2.5 py-1.5 text-sm text-gray-700 hover:bg-gray-100 rounded"

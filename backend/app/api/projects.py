@@ -1718,10 +1718,7 @@ async def materialize_assets(project_id: str, request: MaterializeRequest):
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
 
-    # Get project path - construct it the same way as during project creation
-    project_name_sanitized = project.name.lower().replace(" ", "_").replace("-", "_")
-    project_dir_name = f"project_{project_id.split('-')[0]}_{project_name_sanitized}"
-    project_path = Path("./projects") / project_dir_name
+    project_path = project_service._get_project_dir(project)
     if not project_path.exists():
         raise HTTPException(status_code=404, detail=f"Project directory not found: {project_path}")
 

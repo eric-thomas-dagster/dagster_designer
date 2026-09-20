@@ -1,5 +1,5 @@
-import { useState, useEffect, useMemo } from 'react';
-import { Plus, Trash2, Eye, EyeOff, Save, RefreshCw, Cloud, HardDrive } from 'lucide-react';
+import { useState, useEffect, useMemo, useRef } from 'react';
+import { Plus, Trash2, Eye, EyeOff, Save, RefreshCw, Cloud, HardDrive, LogIn, Loader2 } from 'lucide-react';
 import { envVarsApi, type EnvVariable , API_BASE } from '@/services/api';
 import { notify } from './Notifications';
 
@@ -48,6 +48,9 @@ export function EnvVarsManager({ projectId }: EnvVarsManagerProps) {
   const [availableDeployments, setAvailableDeployments] = useState<string[]>([]);
   const [availableCodeLocations, setAvailableCodeLocations] = useState<string[]>([]);
   const [dagsterPlusAuthed, setDagsterPlusAuthed] = useState<boolean>(false);
+  const [signingIn, setSigningIn] = useState(false);
+  const unmountedRef = useRef(false);
+  useEffect(() => () => { unmountedRef.current = true; }, []);
 
   const activeKey = scopeKey(activeScope);
   const activeState = scopeData[activeKey] ?? emptyScopeState;
@@ -79,6 +82,48 @@ export function EnvVarsManager({ projectId }: EnvVarsManagerProps) {
       cancelled = true;
     };
   }, [projectId]);
+
+  // Runs `dg plus login` for the user instead of sending them to a terminal.
+  // It opens a browser and blocks server-side until the OAuth flow
+  // completes, so we fire it off detached (see the backend endpoint) and
+  // poll dagster-plus-scope here until `authenticated` flips to true.
+  const handleSignIn = async () => {
+    setSigningIn(true);
+    try {
+      const res = await fetch(`${API_BASE}/env/${projectId}/dagster-plus-login`, { method: 'POST' });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.detail || 'Failed to start sign-in');
+      notify.info('Opening your browser to sign in to Dagster+…');
+    } catch (err: any) {
+      notify.error(err?.message || 'Failed to start Dagster+ sign-in');
+      setSigningIn(false);
+      return;
+    }
+
+    for (let attempt = 0; attempt < 60; attempt++) {
+      await new Promise((r) => setTimeout(r, 2000));
+      if (unmountedRef.current) return;
+      try {
+        const res = await fetch(`${API_BASE}/env/${projectId}/dagster-plus-scope`);
+        if (!res.ok) continue;
+        const data = await res.json();
+        if (data.authenticated) {
+          setAvailableDeployments(data.deployments || []);
+          setAvailableCodeLocations(data.code_locations || []);
+          setDagsterPlusAuthed(true);
+          setSigningIn(false);
+          notify.success('Signed in to Dagster+');
+          return;
+        }
+      } catch {
+        // keep polling
+      }
+    }
+    if (!unmountedRef.current) {
+      setSigningIn(false);
+      notify.error("Didn't detect a completed sign-in. If the browser flow finished, try refreshing.");
+    }
+  };
 
   // Load whichever scope is active if it hasn't been loaded yet.
   useEffect(() => {
@@ -246,9 +291,15 @@ export function EnvVarsManager({ projectId }: EnvVarsManagerProps) {
           );
         })}
         {!dagsterPlusAuthed && (
-          <span className="ml-auto pr-4 text-xs text-gray-500">
-            Sign in with <code className="bg-gray-100 px-1 rounded">dg plus login</code> to see Dagster+ scopes
-          </span>
+          <button
+            onClick={handleSignIn}
+            disabled={signingIn}
+            className="ml-auto mr-4 flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium text-primary-foreground bg-primary rounded hover:bg-accent disabled:opacity-60"
+            title="Runs `dg plus login` and opens your browser to sign in"
+          >
+            {signingIn ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <LogIn className="w-3.5 h-3.5" />}
+            {signingIn ? 'Waiting for sign-in…' : 'Sign in to Dagster+'}
+          </button>
         )}
       </div>
 

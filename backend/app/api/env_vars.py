@@ -246,6 +246,37 @@ async def get_dagster_plus_scope(project_id: str):
     }
 
 
+@router.post("/{project_id}/dagster-plus-login")
+async def start_dagster_plus_login(project_id: str):
+    """Kick off `dg plus login` so the user can sign in from the browser
+    without opening a terminal.
+
+    `dg plus login` opens a browser for the OAuth flow and blocks in the
+    foreground until it completes, so it's spawned detached rather than
+    awaited here -- the frontend polls dagster-plus-scope afterward to
+    notice once `authenticated` flips to true.
+    """
+    import subprocess
+
+    project_dir = _resolve_project_dir(project_id)
+    dg_path = project_dir / ".venv" / "bin" / "dg"
+    if not dg_path.exists():
+        raise HTTPException(status_code=400, detail="Project venv missing dg CLI")
+
+    try:
+        subprocess.Popen(
+            [str(dg_path), "plus", "login"],
+            cwd=str(project_dir),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to start dg plus login: {e}")
+
+    return {"started": True}
+
+
 def _parse_env_file_content(content: str) -> list[dict]:
     """Parse .env text into [{key, value, is_sensitive}] list."""
     vars_out: list[dict] = []
