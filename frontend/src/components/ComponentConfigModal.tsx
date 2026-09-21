@@ -68,6 +68,14 @@ export function ComponentConfigModal({
   // was typed. These are assembled into the real target field's connection
   // string on every change -- see renderDestinationCredentialsField.
   const [destCredFieldValues, setDestCredFieldValues] = useState<Record<string, Record<string, string>>>({});
+  // Whether a destination-credentials field (see renderDestinationCredentialsField)
+  // is showing its structured sub-fields or a single "env var name" input.
+  // Keyed by fieldName since there could in principle be more than one such
+  // field. Undefined means "not yet toggled by the user" -- the initial mode
+  // is then inferred from whichever of the two underlying fields already has
+  // a value (so editing an existing env-var-based config doesn't silently
+  // switch it to structured mode and blank the env var out from under it).
+  const [credentialInputMode, setCredentialInputMode] = useState<Record<string, 'structured' | 'env_var'>>({});
 
   useEffect(() => {
     if (!currentProject) return;
@@ -643,13 +651,64 @@ export function ComponentConfigModal({
       );
     }
 
+    // destination_credentials_url and destination_credentials_env_var are
+    // mutually exclusive on the component side -- it checks the URL first
+    // and only falls back to the env var if the URL is empty (see
+    // component.py's _resolve_destination). Showing both editable at once
+    // let you fill in both and have one silently ignored with no indication
+    // why. Make the choice explicit instead: one or the other, and switching
+    // clears whichever isn't active so a save can never leave both set.
+    const envVarField = destFields.related_env_var_field as string | undefined;
+    const envVarFieldSchema = envVarField ? properties[envVarField] : undefined;
+    const inferredMode: 'structured' | 'env_var' =
+      envVarField && formData[envVarField] && !formData[fieldName] ? 'env_var' : 'structured';
+    const mode = credentialInputMode[fieldName] ?? inferredMode;
+
+    const switchMode = (next: 'structured' | 'env_var') => {
+      setCredentialInputMode((prev) => ({ ...prev, [fieldName]: next }));
+      if (next === 'env_var') {
+        handleFieldChange(fieldName, '');
+      } else if (envVarField) {
+        handleFieldChange(envVarField, '');
+        // Re-assemble from whatever's already been typed into the
+        // structured sub-fields for this destination (state persists across
+        // toggles) rather than leaving the target field blank until the
+        // next keystroke -- switching back shouldn't silently drop
+        // already-entered credentials.
+        const existingValues = destCredFieldValues[destination] || {};
+        handleFieldChange(fieldName, assembleDestinationUrl(option, existingValues));
+      }
+    };
+
+    const destinationLabel = destination.charAt(0).toUpperCase() + destination.slice(1);
+
+    if (mode === 'env_var' && envVarField) {
+      return (
+        <>
+          <label className="block text-sm font-medium text-gray-700 mb-1">
+            {envVarFieldSchema?.label || envVarField}
+          </label>
+          {envVarFieldSchema?.description && (
+            <p className="text-xs text-gray-500 mb-1">{envVarFieldSchema.description}</p>
+          )}
+          {renderField(envVarField, envVarFieldSchema || { type: 'string' })}
+          <button
+            type="button"
+            onClick={() => switchMode('structured')}
+            className="text-xs text-blue-600 hover:text-blue-800 mt-1"
+          >
+            Enter {destinationLabel} credentials directly instead
+          </button>
+        </>
+      );
+    }
+
     const values = destCredFieldValues[destination] || {};
     const updateSubField = (subName: string, value: string) => {
       const nextValues = { ...values, [subName]: value };
       setDestCredFieldValues((prev) => ({ ...prev, [destination]: nextValues }));
       handleFieldChange(fieldName, assembleDestinationUrl(option, nextValues));
     };
-    const destinationLabel = destination.charAt(0).toUpperCase() + destination.slice(1);
 
     return (
       <>
@@ -674,9 +733,17 @@ export function ComponentConfigModal({
           ))}
         </div>
         <p className="text-xs text-gray-400 mt-2">
-          Assembled into <code className="bg-gray-100 px-1 rounded">{fieldName}</code>. Pick a
-          destination without structured fields to edit the raw connection string instead.
+          Assembled into <code className="bg-gray-100 px-1 rounded">{fieldName}</code>.
         </p>
+        {envVarField && (
+          <button
+            type="button"
+            onClick={() => switchMode('env_var')}
+            className="text-xs text-blue-600 hover:text-blue-800 mt-1"
+          >
+            Reference an environment variable instead
+          </button>
+        )}
       </>
     );
   };
@@ -1480,7 +1547,20 @@ export function ComponentConfigModal({
                   <p className="text-sm text-gray-500">No configuration fields available</p>
                 )}
 
-                {Object.entries(properties).map(([fieldName, fieldSchema]: [string, any]) => {
+                {(() => {
+              // Fields "claimed" by another field's x-dagster-destination-fields
+              // (its related_env_var_field) are rendered inside that field's own
+              // block instead -- skip them here so they don't also show up as a
+              // separate, independently-editable entry.
+              const claimedFieldNames = new Set(
+                Object.values(properties)
+                  .map((s: any) => s?.['x-dagster-destination-fields']?.related_env_var_field)
+                  .filter(Boolean)
+              );
+              return Object.entries(properties).map(([fieldName, fieldSchema]: [string, any]) => {
+              if (claimedFieldNames.has(fieldName)) {
+                return null;
+              }
               if (fieldSchema['x-dagster-destination-fields']) {
                 return (
                   <div key={fieldName}>
@@ -1502,7 +1582,8 @@ export function ComponentConfigModal({
                 {renderField(fieldName, fieldSchema)}
               </div>
               );
-            })}
+            });
+            })()}
               </>
             )}
           </div>
