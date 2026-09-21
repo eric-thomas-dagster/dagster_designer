@@ -382,8 +382,19 @@ export function ComponentConfigModal({
           // Don't fail the whole operation if regeneration fails
         }
 
-        notify.success(`Component configured successfully!\n\nYAML file: ${result.yaml_file}\n\nThe asset has been added to your project.`);
-        onClose();
+        if (result.assets_regenerated) {
+          notify.success(`Component configured successfully!\n\nYAML file: ${result.yaml_file}\n\nThe asset has been added to your project.`);
+          onClose();
+        } else {
+          // Saved to disk, but Dagster's real component loading (stricter
+          // than this form's own validation) rejected it -- surface why
+          // instead of claiming success while it silently shows up
+          // nowhere. Leave the modal open so the user can fix the config
+          // and save again.
+          notify.error(
+            `Saved to ${result.yaml_file}, but Dagster couldn't load it:\n\n${result.regenerate_error || 'Unknown error'}\n\nFix the fields above and save again.`
+          );
+        }
       } catch (error: any) {
         console.error('Error configuring community component:', error);
         notify.error(`Failed to configure component:\n\n${error.message}`);

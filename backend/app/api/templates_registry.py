@@ -397,7 +397,17 @@ async def configure_component(
         print(f"[Configure] Updated component configuration: {yaml_file}")
         print(f"[Configure] Config: {yaml_config}")
 
-        # Auto-regenerate assets so the new component appears immediately
+        # Auto-regenerate assets so the new component appears immediately.
+        # This is where Dagster's REAL component loading (via `dg list
+        # defs`) happens -- it's stricter than validate_component_config
+        # above (which only checks against schema.json and tolerates
+        # unknown/extra fields), so a config that "validated" can still
+        # fail here, e.g. wrong attribute names. Track the real outcome
+        # instead of unconditionally reporting success, so the frontend
+        # can tell the user their component saved but isn't live yet
+        # instead of silently showing 0 of it anywhere.
+        assets_regenerated = False
+        regenerate_error = None
         try:
             from ..services.asset_introspection_service import AssetIntrospectionService
             asset_introspection_service = AssetIntrospectionService()
@@ -413,22 +423,63 @@ async def configure_component(
             project.graph.nodes = asset_nodes
             project.graph.edges = asset_edges
 
+            # Also add/update this instance in project.components -- a
+            # *separate* list from graph.nodes that e.g. IngestionsPanel
+            # filters on, not the graph. Without this, a component
+            # installed via install-via-cli shows up fine on the Assets
+            # graph but never appears in any component-instance list
+            # (Ingestions, etc.) since nothing else populates it.
+            #
+            # Deliberately NOT using project_service.discover_components_
+            # for_project here: that wipes project.components and rebuilds
+            # it purely from defs.yaml files on disk, which would silently
+            # drop synthetic entries with no file backing -- notably
+            # DependencyGraphComponent, which is how manually-drawn custom
+            # lineage edges get persisted (see genie_service.py). Just
+            # append/update this one instance instead.
+            from ..models.component import ComponentInstance as _ComponentInstance
+            new_instance = _ComponentInstance(
+                id=instance_name,
+                component_type=component_type,
+                label=instance_name.replace('_', ' ').title(),
+                attributes=validated_attributes,
+                is_asset_factory=True,
+            )
+            existing_idx = next(
+                (i for i, c in enumerate(project.components) if c.id == instance_name), None
+            )
+            if existing_idx is not None:
+                project.components[existing_idx] = new_instance
+            else:
+                project.components.append(new_instance)
+
             # Save the updated project
             project_service._save_project(project)
 
+            assets_regenerated = True
             print(f"[Configure] Successfully regenerated {len(asset_nodes)} assets")
         except Exception as e:
+            regenerate_error = str(e)
             print(f"[Configure] Warning: Failed to auto-regenerate assets: {e}")
-            # Don't fail the request if regeneration fails - user can manually regenerate
+            # Don't fail the request if regeneration fails - the defs.yaml
+            # is saved either way, and the user can fix the config and
+            # re-save once they see regenerate_error.
             import traceback
             traceback.print_exc()
 
-        return {
+        response = {
             "success": True,
-            "message": f"Component {instance_name} configured successfully",
+            "message": (
+                f"Component {instance_name} configured successfully"
+                if assets_regenerated
+                else f"Component {instance_name} saved, but Dagster couldn't load it yet"
+            ),
             "yaml_file": str(yaml_file.relative_to(project_dir)),
-            "assets_regenerated": True
+            "assets_regenerated": assets_regenerated,
         }
+        if regenerate_error:
+            response["regenerate_error"] = regenerate_error
+        return response
 
     except HTTPException:
         raise
