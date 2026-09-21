@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from ..core.config import settings
-from ..core.uv_binary import find_uv_binary
+from ..core.uv_binary import find_uv_binary, env_with_bundled_uv_on_path
 
 
 class DagsterCLIService:
@@ -42,6 +42,7 @@ class DagsterCLIService:
                     project_name,
                 ],
                 cwd=self.projects_dir,
+                env=env_with_bundled_uv_on_path(),
                 capture_output=True,
                 text=True,
                 timeout=120,

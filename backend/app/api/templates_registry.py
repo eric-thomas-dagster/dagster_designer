@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, List, Optional
 
 from ..services.project_service import project_service
-from ..core.uv_binary import find_uv_binary
+from ..core.uv_binary import find_uv_binary, env_with_bundled_uv_on_path
 
 router = APIRouter(prefix="/templates", tags=["templates"])
 
@@ -979,6 +979,11 @@ async def install_component_via_cli(
         result = subprocess.run(
             cmd,
             cwd=str(project_dir),
+            # The CLI itself internally shells out to bare "uv" (that's
+            # what --manager uv above tells it to use) -- putting our
+            # bundled uv on PATH here lets that internal call find it too,
+            # the same way find_uv_binary() resolves it for our own calls.
+            env=env_with_bundled_uv_on_path(),
             capture_output=True,
             text=True,
             timeout=300,

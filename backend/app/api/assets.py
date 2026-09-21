@@ -11,7 +11,7 @@ from pydantic import BaseModel
 from typing import Any
 
 from ..services.project_service import project_service
-from ..core.uv_binary import find_uv_binary
+from ..core.uv_binary import find_uv_binary, env_with_bundled_uv_on_path
 
 router = APIRouter(prefix="/assets", tags=["assets"])
 
@@ -808,6 +808,11 @@ async def create_transformer_asset(project_id: str, request: CreateTransformerRe
                         "--auto-install", "--manager", "uv", "--force",
                     ],
                     cwd=str(project_dir),
+                    # See templates_registry.py's identical install call for
+                    # why: --manager uv makes the CLI itself shell out to
+                    # bare "uv" internally, which needs our bundled uv on
+                    # PATH to find it.
+                    env=env_with_bundled_uv_on_path(),
                     capture_output=True, text=True, timeout=300,
                 )
                 if cli_result.returncode != 0:

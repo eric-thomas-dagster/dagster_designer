@@ -14,7 +14,7 @@ from datetime import datetime
 from typing import Dict, Tuple
 
 from ..core.config import settings
-from ..core.uv_binary import find_uv_binary
+from ..core.uv_binary import find_uv_binary, env_with_bundled_uv_on_path
 from ..models.project import Project, ProjectCreate, ProjectUpdate
 from ..models.partition import PartitionConfig
 from ..models.freshness import FreshnessPolicy
@@ -1448,6 +1448,10 @@ if custom_lineage_edges:
             result = subprocess.run(
                 [find_uv_binary("uvx"), "create-dagster", "project", str(project_dir), "--no-uv-sync", "--verbose"],
                 cwd=str(self.projects_dir),
+                # create-dagster may itself shell out to bare "uv" --
+                # see templates_registry.py's CLI install call for why
+                # this matters.
+                env=env_with_bundled_uv_on_path(),
                 capture_output=True,
                 text=True,
                 timeout=120,
