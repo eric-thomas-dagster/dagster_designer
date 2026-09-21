@@ -18,6 +18,32 @@ warnings.filterwarnings('ignore')
 _MULTIKEY_SENTINEL = object()
 
 
+def _project_dir_from_venv() -> Path | None:
+    """Derive the real project directory from this interpreter's own path
+    rather than os.getcwd(). assets.py invokes this script with
+    cwd=<backend dir> (not the project dir), so any os.getcwd()-based search
+    for a project's .duckdb file or dbt_project.yml looks in the wrong place
+    entirely once projects live outside the app bundle (~/Library/Application
+    Support/.../projects/<name>/, not next to the backend). This script
+    already runs via <project_dir>/.venv/bin/python (see
+    project_service._get_project_python_path), so the project dir is just
+    three parents up from sys.executable -- reliable regardless of cwd.
+    """
+    try:
+        # Deliberately NOT .resolve()'d: uv-managed venvs put a *symlink* at
+        # .venv/bin/python pointing at a shared interpreter under
+        # ~/.local/share/uv/python/..., so resolving it lands somewhere
+        # completely unrelated to the project. The unresolved path is
+        # exactly <project_dir>/.venv/bin/python, which is what we want.
+        venv_python = Path(sys.executable)
+        project_dir = venv_python.parent.parent.parent
+        if (project_dir / ".venv").is_dir():
+            return project_dir
+    except Exception:
+        pass
+    return None
+
+
 def _try_sql_transformer_output_preview(project_module: str, asset_key: str, row_limit: int = 100):
     """If this asset was created by SqlTransformerComponent, we know exactly
     which table it wrote — read `defs.yaml` and query it directly. This is
@@ -137,11 +163,16 @@ def _try_duckdb_preview(asset_key: str, row_limit: int = 100):
     seen = set()
     candidates = [c for c in candidates if not (c in seen or seen.add(c))]
 
-    # Find .duckdb files near cwd (dbt profiles.yml usually points at one via
-    # a relative path — safer to just search for the file directly).
+    # Find .duckdb files near the project dir (dbt profiles.yml usually
+    # points at one via a relative path — safer to just search for the file
+    # directly). Search the real project dir first (derived from this
+    # interpreter's own path, not cwd -- see _project_dir_from_venv), then
+    # fall back to cwd for any invocation that doesn't set it this way.
     cwd = _Path(os.getcwd())
+    project_dir = _project_dir_from_venv()
+    search_roots = ([project_dir] if project_dir else []) + [cwd, *cwd.parents[:3]]
     duckdb_paths = []
-    for root in [cwd, *cwd.parents[:3]]:
+    for root in search_roots:
         for p in root.glob("**/*.duckdb"):
             if any(part in {".venv", "node_modules", "__pycache__"} for part in p.parts):
                 continue
@@ -247,10 +278,13 @@ def _try_dbt_show_preview(asset_key: str, row_limit: int = 100):
     import subprocess as _sp
     from pathlib import Path as _Path
 
-    # Find the dbt project (has dbt_project.yml). Look near cwd first, then
-    # walk down into project subdirs (Jaffle Shop has it in ./jaffle-shop-classic/).
+    # Find the dbt project (has dbt_project.yml). Look near the real project
+    # dir first (derived from this interpreter's own path, not cwd -- see
+    # _project_dir_from_venv), then walk down into project subdirs (Jaffle
+    # Shop has it in ./jaffle-shop-classic/), then fall back to cwd.
     cwd = _Path(os.getcwd())
-    candidates = [cwd, *cwd.parents[:2]]
+    project_dir = _project_dir_from_venv()
+    candidates = ([project_dir] if project_dir else []) + [cwd, *cwd.parents[:2]]
     dbt_project_dir = None
     for root in candidates:
         for p in root.glob("**/dbt_project.yml"):
