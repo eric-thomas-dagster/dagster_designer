@@ -1,7 +1,9 @@
 import { useEffect, useState } from 'react';
-import { X, KeyRound, ExternalLink, CheckCircle2 } from 'lucide-react';
+import { X, KeyRound, ExternalLink, CheckCircle2, FolderCog } from 'lucide-react';
 import { aiApi, type AiProvidersStatus } from '@/services/api';
 import { notify } from './Notifications';
+import { isTauri, getProjectsDir, setProjectsDir, pickDirectory } from '@/services/tauri';
+import { useProjectStore } from '@/hooks/useProject';
 
 // Lightweight module-level pub-sub, same pattern as Notifications.tsx's
 // toast/confirm queues -- avoids threading "is settings open" state through
@@ -136,6 +138,8 @@ function SettingsDialog({ onClose }: { onClose: () => void }) {
           />
         </div>
 
+        {isTauri && <ProjectsFolderSection />}
+
         <div className="flex justify-end gap-2 mt-6">
           <button
             onClick={onClose}
@@ -152,6 +156,61 @@ function SettingsDialog({ onClose }: { onClose: () => void }) {
             {saving ? 'Saving…' : 'Save'}
           </button>
         </div>
+      </div>
+    </div>
+  );
+}
+
+/** Desktop-app only: where new projects get created (see src-tauri's
+ * resolve_projects_dir). Defaults to ~/Documents/Dagster Designer -- a
+ * plain, findable folder -- instead of the hidden app-data directory. */
+function ProjectsFolderSection() {
+  const [dir, setDir] = useState<string | null>(null);
+  const [changing, setChanging] = useState(false);
+
+  useEffect(() => {
+    getProjectsDir().then(setDir);
+  }, []);
+
+  const change = async () => {
+    const picked = await pickDirectory('Choose a folder for new Dagster projects');
+    if (!picked) return;
+    setChanging(true);
+    try {
+      await setProjectsDir(picked);
+      setDir(picked);
+      notify.success('Projects folder updated.');
+      useProjectStore.getState().loadProjects();
+    } catch (e: any) {
+      notify.error(e?.message || 'Failed to change the projects folder.');
+    } finally {
+      setChanging(false);
+    }
+  };
+
+  return (
+    <div className="mt-6 pt-4 border-t border-gray-200">
+      <div className="flex items-center gap-2 mb-1">
+        <FolderCog className="w-4 h-4 text-primary" />
+        <h3 className="text-sm font-semibold text-gray-900">Projects folder</h3>
+      </div>
+      <p className="text-xs text-gray-500 mb-2">
+        Where new projects are created. Existing projects stay where they are when you change this.
+      </p>
+      <div className="flex gap-2">
+        <input
+          type="text"
+          value={dir ?? 'Loading…'}
+          readOnly
+          className="flex-1 min-w-0 px-3 py-2 text-sm border border-gray-300 rounded-md bg-gray-50 text-gray-600"
+        />
+        <button
+          onClick={change}
+          disabled={changing || dir === null}
+          className="px-3 py-2 text-sm text-gray-700 border border-gray-300 rounded-md hover:bg-gray-100 disabled:opacity-50"
+        >
+          {changing ? 'Applying…' : 'Change…'}
+        </button>
       </div>
     </div>
   );

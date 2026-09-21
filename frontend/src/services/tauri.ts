@@ -70,6 +70,36 @@ export async function openExternalUrl(url: string): Promise<void> {
 }
 
 /**
+ * The folder new projects are created in (see src-tauri/src/main.rs's
+ * resolve_projects_dir) -- defaults to ~/Documents/Dagster Designer, but
+ * the user can point it elsewhere from Settings. Outside Tauri there's no
+ * such concept (the backend isn't spawned by this process), so this
+ * returns null.
+ */
+export async function getProjectsDir(): Promise<string | null> {
+  if (!isTauri) return null;
+  try {
+    const { invoke } = await import('@tauri-apps/api/core');
+    return await invoke<string>('get_projects_dir');
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Changes the projects folder and restarts the backend pointed at it --
+ * takes a few seconds (the same as a normal app launch) while the backend
+ * comes back up. Existing projects aren't moved; they just stop showing up
+ * until/unless that folder is pointed back to. Throws on failure (e.g. the
+ * chosen folder isn't writable), so callers should catch and surface it.
+ */
+export async function setProjectsDir(path: string): Promise<void> {
+  if (!isTauri) return;
+  const { invoke } = await import('@tauri-apps/api/core');
+  await invoke('set_projects_dir', { path });
+}
+
+/**
  * Subscribes to "menu-action" events emitted by the native menu bar (see
  * src-tauri/src/main.rs). No-op outside Tauri. Returns an unsubscribe
  * function, mirroring `@tauri-apps/api/event`'s own `listen()`.
