@@ -11,6 +11,7 @@ from pydantic import BaseModel
 from typing import Any
 
 from ..services.project_service import project_service
+from ..core.uv_binary import find_uv_binary
 
 router = APIRouter(prefix="/assets", tags=["assets"])
 
@@ -802,7 +803,7 @@ async def create_transformer_asset(project_id: str, request: CreateTransformerRe
             try:
                 cli_result = subprocess.run(
                     [
-                        "uvx", "--from", "dagster-community-components-cli",
+                        find_uv_binary("uvx"), "--from", "dagster-community-components-cli",
                         "dagster-component", "add", "dataframe_transformer",
                         "--auto-install", "--manager", "uv", "--force",
                     ],

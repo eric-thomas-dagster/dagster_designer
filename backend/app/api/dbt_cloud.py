@@ -8,6 +8,7 @@ from ..services.dbt_cloud.dbt_cloud_client import DbtCloudClient
 from ..services.project_service import project_service
 from ..models.project import ProjectCreate
 from ..core.config import settings
+from ..core.uv_binary import find_uv_binary
 
 router = APIRouter(prefix="/dbt-cloud", tags=["dbt-cloud"])
 
@@ -319,7 +320,7 @@ async def _setup_dbt_cloud_import(
     # Add dagster-dbt
     try:
         subprocess.run(
-            ["uv", "add", "dagster-dbt"],
+            [find_uv_binary("uv"), "add", "dagster-dbt"],
             cwd=project_dir,
             check=True,
             capture_output=True,
@@ -336,7 +337,7 @@ async def _setup_dbt_cloud_import(
     for adapter in detected_adapters:
         try:
             subprocess.run(
-                ["uv", "add", adapter],
+                [find_uv_binary("uv"), "add", adapter],
                 cwd=project_dir,
                 check=True,
                 capture_output=True,
@@ -353,7 +354,7 @@ async def _setup_dbt_cloud_import(
     print(f"[INFO] Setting up virtual environment...")
     try:
         subprocess.run(
-            ["uv", "sync"],
+            [find_uv_binary("uv"), "sync"],
             cwd=project_dir,
             check=True,
             capture_output=True,

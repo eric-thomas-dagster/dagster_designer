@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from ..core.config import settings
+from ..core.uv_binary import find_uv_binary
 
 
 class DagsterCLIService:
@@ -35,7 +36,7 @@ class DagsterCLIService:
             # Use uvx to create a new Dagster project
             result = subprocess.run(
                 [
-                    "uvx",
+                    find_uv_binary("uvx"),
                     "create-dagster@latest",
                     "project",
                     project_name,

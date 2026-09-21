@@ -4,6 +4,8 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+from ..core.uv_binary import find_uv_binary
+
 
 class ComponentInstaller:
     """Service for installing Dagster component libraries."""
@@ -57,7 +59,7 @@ class ComponentInstaller:
         try:
             # Run uv add to install the package
             result = subprocess.run(
-                ["uv", "add", package_name],
+                [find_uv_binary("uv"), "add", package_name],
                 cwd=project_path,
                 capture_output=True,
                 text=True,

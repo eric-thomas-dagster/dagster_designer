@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, List, Optional
 
 from ..services.project_service import project_service
+from ..core.uv_binary import find_uv_binary
 
 router = APIRouter(prefix="/templates", tags=["templates"])
 
@@ -890,7 +891,7 @@ async def install_component(
                     # Use uv add to install all packages at once
                     # This will update pyproject.toml automatically
                     result = subprocess.run(
-                        ["uv", "add"] + packages_to_install,
+                        [find_uv_binary("uv"), "add"] + packages_to_install,
                         check=True,
                         capture_output=True,
                         cwd=str(project_dir),
@@ -964,7 +965,7 @@ async def install_component_via_cli(
         raise HTTPException(status_code=404, detail=f"Project directory not found: {project_dir}")
 
     cmd = [
-        "uvx",
+        find_uv_binary("uvx"),
         "--from", "dagster-community-components-cli",
         "dagster-component",
         "add", component_id,
@@ -1024,7 +1025,7 @@ async def install_component_via_cli(
             if reqs:
                 print(f"[CLI Install] Installing template requirements: {reqs}")
                 add_result = subprocess.run(
-                    ["uv", "add", *reqs],
+                    [find_uv_binary("uv"), "add", *reqs],
                     cwd=str(project_dir),
                     capture_output=True,
                     text=True,

@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import shlex
 import subprocess
 import sys
 import time
@@ -143,9 +144,17 @@ class AssetIntrospectionService:
         try:
             # If using project venv, we need to activate it first
             if dg_path.exists():
-                # Run with venv activated using bash -c (use absolute paths for both)
-                dg_abs_path = str(dg_path.resolve())
-                cmd = f"source {str(venv_dir.resolve())}/bin/activate && {dg_abs_path} list defs --json"
+                # Run with venv activated using bash -c (use absolute paths for both).
+                # shlex.quote every interpolated path -- both this app's own
+                # install path (/Applications/Dagster Designer.app/...) and
+                # the default projects folder (~/Documents/Dagster
+                # Designer/...) contain a space, and an unquoted path here
+                # gets split into multiple bash tokens, breaking the command.
+                dg_abs_path = shlex.quote(str(dg_path.resolve()))
+                activate_path = shlex.quote(str(venv_dir.resolve() / "bin" / "activate"))
+                # unset PYTHONHOME too -- it can point the interpreter at the
+                # wrong stdlib if inherited from outside this process.
+                cmd = f"unset PYTHONHOME && source {activate_path} && {dg_abs_path} list defs --json"
                 print(f"[Asset Introspection] Running dg list defs for project {project.id}...", flush=True)
                 result = subprocess.run(
                     ["bash", "-c", cmd],
@@ -256,9 +265,18 @@ class AssetIntrospectionService:
 
                 # If using project venv, we need to set PATH to include venv bin
                 if dg_path.exists():
-                    # Use export PATH to ensure dbt and other tools are available
+                    # Export VIRTUAL_ENV too, not just PATH -- if it's already
+                    # set to something else (another project's venv, or this
+                    # app's own backend venv) in the environment this process
+                    # inherited, dg detects the mismatch against its own
+                    # project root and gets confused about which venv's
+                    # site-packages to actually use, breaking imports of the
+                    # project's own generated modules even though PATH
+                    # resolves dg itself correctly. Also unset PYTHONHOME,
+                    # which can point the interpreter at the wrong stdlib.
+                    venv_dir_abs = str(venv_dir.resolve())
                     venv_bin = str((venv_dir / "bin").resolve())
-                    cmd = f"export PATH=\"{venv_bin}:$PATH\" && dg list defs --json"
+                    cmd = f"export VIRTUAL_ENV=\"{venv_dir_abs}\" PATH=\"{venv_bin}:$PATH\" && unset PYTHONHOME && dg list defs --json"
 
                     proc = await asyncio.create_subprocess_shell(
                         cmd,

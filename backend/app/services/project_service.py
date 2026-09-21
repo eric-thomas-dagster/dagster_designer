@@ -1,6 +1,7 @@
 """Service for managing pipeline projects."""
 
 import json
+import shlex
 import uuid
 import subprocess
 import toml
@@ -1493,7 +1494,13 @@ if custom_lineage_edges:
                     project_path = component.attributes.get("project") or component.attributes.get("project_path", "dbt")
                     folder_name = component.id
 
-                    cmd = f"source {str(venv_dir.resolve())}/bin/activate && {str(dg_path.resolve())} scaffold defs dagster_dbt.DbtProjectComponent {folder_name} --project-path '{project_path}'"
+                    # shlex.quote the venv/dg paths -- the default projects
+                    # folder (~/Documents/Dagster Designer/...) contains a
+                    # space, and unquoted paths here get split into multiple
+                    # bash tokens, breaking the command.
+                    activate_path = shlex.quote(str((venv_dir / "bin" / "activate").resolve()))
+                    dg_abs_path = shlex.quote(str(dg_path.resolve()))
+                    cmd = f"source {activate_path} && {dg_abs_path} scaffold defs dagster_dbt.DbtProjectComponent {folder_name} --project-path '{project_path}'"
 
                     result = subprocess.run(
                         ["bash", "-c", cmd],
@@ -1952,8 +1959,15 @@ if custom_lineage_edges:
             import time
             start_time = time.time()
             # Use UV directly (not uvx) for much faster performance
+            # shlex.quote the uv path -- this app's own install path
+            # (/Applications/Dagster Designer.app/...) contains a space, and
+            # an unquoted path interpolated into a bash -c string gets split
+            # into multiple tokens, breaking the command (bash then reports
+            # "command not found", exit 127, for what looks like a
+            # perfectly fine absolute path).
+            uv_quoted = shlex.quote(find_uv_binary('uv'))
             process = subprocess.Popen(
-                ["bash", "-c", f"UV_PROJECT_ENVIRONMENT={venv_path} {find_uv_binary('uv')} pip install -e ."],
+                ["bash", "-c", f"UV_PROJECT_ENVIRONMENT={venv_path} {uv_quoted} pip install -e ."],
                 cwd=str(install_dir),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,

@@ -10,6 +10,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from ..core.config import settings
+from ..core.uv_binary import find_uv_binary
 
 router = APIRouter(prefix="/dagster-ui", tags=["dagster-ui"])
 
@@ -267,12 +268,13 @@ async def start_dagster_ui(project_id: str):
             # Check if dg is available in the project
             venv_dg = project_path / ".venv" / "bin" / "dg"
 
+            uv_bin = find_uv_binary("uv")
             if venv_dg.exists():
                 # Use dg dev via uv run
-                cmd = ["uv", "run", "dg", "dev", "--port", str(port), "--host", "0.0.0.0"]
+                cmd = [uv_bin, "run", "dg", "dev", "--port", str(port), "--host", "0.0.0.0"]
             else:
                 # Fall back to dagster dev via uv run
-                cmd = ["uv", "run", "dagster", "dev", "-p", str(port), "-h", "0.0.0.0"]
+                cmd = [uv_bin, "run", "dagster", "dev", "-p", str(port), "-h", "0.0.0.0"]
 
             process = subprocess.Popen(
                 cmd,

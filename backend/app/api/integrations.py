@@ -8,6 +8,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from ..services.project_service import project_service
+from ..core.uv_binary import find_uv_binary
 
 router = APIRouter(prefix="/integrations", tags=["integrations"])
 
@@ -52,7 +53,7 @@ def check_integration_installed(project_dir: Path, package: str) -> tuple[bool, 
         env["UV_PROJECT_ENVIRONMENT"] = str(venv_dir.absolute())
 
         result = subprocess.run(
-            ["uv", "pip", "show", package],
+            [find_uv_binary("uv"), "pip", "show", package],
             cwd=str(project_dir.absolute()),
             capture_output=True,
             text=True,
@@ -121,7 +122,7 @@ async def install_integration(project_id: str, request: InstallIntegrationReques
         env["UV_PROJECT_ENVIRONMENT"] = str(venv_dir.absolute())
 
         result = subprocess.run(
-            ["uv", "pip", "install", package_name],
+            [find_uv_binary("uv"), "pip", "install", package_name],
             cwd=str(project_dir.absolute()),
             capture_output=True,
             text=True,
