@@ -2,6 +2,7 @@
 
 import sys
 import json
+import asyncio
 import subprocess
 from pathlib import Path
 from typing import Any, Literal
@@ -1619,8 +1620,13 @@ async def validate_project(project_id: str):
         }
 
     try:
-        # Run dg list defs to validate the project
-        result = subprocess.run(
+        # Run dg list defs to validate the project. Off the event loop --
+        # see the comment on the materialize endpoint's own subprocess.run
+        # call for why: this can take up to 180s on a large project, and a
+        # direct blocking call here would freeze every other request for
+        # that whole time.
+        result = await asyncio.to_thread(
+            subprocess.run,
             [str(venv_dg.absolute()), "list", "defs"],
             cwd=str(project_dir.absolute()),
             capture_output=True,
@@ -1829,8 +1835,14 @@ async def materialize_assets(project_id: str, request: MaterializeRequest):
 
         print(f"[materialize] Using venv: {venv_path_abs}")
 
-        # Run command
-        result = subprocess.run(
+        # Run command. `dg launch` can legitimately take a long time for a
+        # real dbt project -- must run in a worker thread (not called
+        # directly), or the blocking subprocess.run() call freezes this
+        # whole ASGI event loop for the duration: every other request
+        # (other projects, run status, anything) would hang right along
+        # with it, not just this endpoint's own response.
+        result = await asyncio.to_thread(
+            subprocess.run,
             cmd,
             cwd=str(project_path),
             env=env,
@@ -2419,7 +2431,8 @@ async def get_asset_partitions(project_id: str, asset_key: str):
         # Get the project's Python executable
         project_python = project_service._get_project_python_path(project)
 
-        result = subprocess.run(
+        result = await asyncio.to_thread(
+            subprocess.run,
             [
                 str(project_python),
                 "-m",
@@ -2519,7 +2532,8 @@ async def get_asset_config_schema(project_id: str, asset_key: str):
         # Get the project's Python executable
         project_python = project_service._get_project_python_path(project)
 
-        result = subprocess.run(
+        result = await asyncio.to_thread(
+            subprocess.run,
             [
                 str(project_python),
                 "-m",
@@ -2678,7 +2692,8 @@ async def launch_backfill(project_id: str, request: BackfillRequest):
             cmd.extend(["--config", str(config_file)])
 
         # Execute the backfill command
-        result = subprocess.run(
+        result = await asyncio.to_thread(
+            subprocess.run,
             cmd,
             cwd=project_dir,
             capture_output=True,

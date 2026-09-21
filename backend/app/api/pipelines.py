@@ -722,6 +722,7 @@ async def launch_job(project_id: str, job_name: str, request: LaunchJobRequest):
 
     This executes the dg launch command to run a specific job.
     """
+    import asyncio
     import subprocess
     from pathlib import Path
     from app.services.project_service import project_service
@@ -801,8 +802,12 @@ async def launch_job(project_id: str, job_name: str, request: LaunchJobRequest):
 
         print(f"[launch_job] Using venv: {venv_path_abs}")
 
-        # Run command
-        result = subprocess.run(
+        # Run command off the event loop -- same reasoning as the
+        # materialize endpoint's identical fix: a job can legitimately run
+        # for minutes, and a direct blocking call here would freeze every
+        # other request against this backend for that whole time.
+        result = await asyncio.to_thread(
+            subprocess.run,
             cmd,
             cwd=str(project_path),
             env=env,
