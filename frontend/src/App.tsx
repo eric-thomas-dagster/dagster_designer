@@ -26,7 +26,7 @@ import { SettingsHost } from './components/SettingsDialog';
 import { useProjectStore } from './hooks/useProject';
 import { useRunNotifications } from './hooks/useRunNotifications';
 import { setActiveTabGlobal } from './services/activeTab';
-import { onMenuAction, openExternalUrl } from './services/tauri';
+import { onMenuAction, openExternalUrl, isTauri } from './services/tauri';
 import { Network, FileCode, Zap, Package, ExternalLink, Settings, Workflow, ChevronDown, Skull, AlertTriangle, X, Loader2, CheckCircle, XCircle, PanelLeftClose, PanelLeft, Clock, Play, Radar, Timer, Download, Database, ShieldCheck, Cloud, Bell } from 'lucide-react';
 import { IngestionsPanel } from './components/IngestionsPanel';
 import { DbtPanel } from './components/DbtPanel';
@@ -751,8 +751,13 @@ function App() {
     { value: 'resources', label: 'Resources', icon: Settings },
   ];
 
+  // No bg-background on the root div in the desktop app: it sits directly
+  // between the (transparent, vibrancy-backed) window and the nav rail, so
+  // an opaque fill here would paint over the vibrancy before the rail's own
+  // translucent color ever reaches it. The content pane below carries its
+  // own bg-background instead, so it stays opaque either way.
   return (
-    <div className="h-screen flex bg-background text-foreground">
+    <div className={`h-screen flex text-foreground ${isTauri ? '' : 'bg-background'}`}>
       {/* Global project-load overlay — surfaces mostly for Dagster+
           projects since cloud hydration (assets + checks + schedules +
           sensors) takes 2-6s on typical orgs. Local projects blip
@@ -783,18 +788,37 @@ function App() {
         </div>
       )}
 
-      {/* Left vertical nav rail */}
+      {/* Left vertical nav rail. In the desktop app it follows the system
+          appearance -- a light, subtly-tinted vibrancy panel in light mode
+          and the brand's dark navy in dark mode -- same as a native macOS
+          sidebar (Finder's own sidebar does the same). A plain browser tab
+          has nothing behind the page to blur, so it stays the original
+          always-dark-navy look there. */}
       <nav
-        className={`${navCollapsed ? 'w-14' : 'w-56'} transition-[width] duration-150 flex flex-col bg-[hsl(var(--dagster-black))] text-white/80 border-r border-[hsl(var(--dagster-black))]`}
+        className={`${navCollapsed ? 'w-14' : 'w-56'} transition-[width] duration-150 flex flex-col ${
+          isTauri
+            ? 'text-gray-700/90 dark:text-white/80 border-r border-gray-200/70 dark:border-[hsl(var(--dagster-black))] bg-white/40 dark:bg-[hsl(var(--dagster-black)/0.35)] backdrop-blur-xl'
+            : 'text-white/80 border-r border-[hsl(var(--dagster-black))] bg-[hsl(var(--dagster-black))]'
+        }`}
       >
-        <div className={`h-14 flex-shrink-0 ${navCollapsed ? 'px-3 justify-center' : 'px-5 justify-between'} flex items-center gap-2 border-b border-white/10`}>
-          {!navCollapsed && (
-            <div className="flex items-center gap-2 min-w-0">
-              <BrandMark />
-              <span className="text-sm font-semibold text-white tracking-tight truncate">Dagster Designer</span>
-            </div>
-          )}
-          {navCollapsed && <BrandMark />}
+        <div
+          className={`flex-shrink-0 flex flex-col border-b ${isTauri ? 'border-gray-200/70 dark:border-white/10 titlebar-drag-region' : 'border-white/10'}`}
+          {...(isTauri ? { 'data-tauri-drag-region': true } : {})}
+        >
+          {/* Pure drag strip the height of macOS's traffic-light cluster, so
+              the buttons never sit over -- and never cut off -- the brand
+              row below. Only needed in the desktop app, where the overlay
+              title bar leaves the OS controls floating over our content. */}
+          {isTauri && <div className="h-8 w-full" data-tauri-drag-region />}
+          <div className={`h-14 flex items-center gap-2 px-3 ${navCollapsed ? 'justify-center' : ''}`}>
+            {!navCollapsed && (
+              <div className="flex items-center gap-2 min-w-0">
+                <BrandMark />
+                <span className={`text-sm font-semibold tracking-tight truncate ${isTauri ? 'text-gray-900 dark:text-white' : 'text-white'}`}>Dagster Designer</span>
+              </div>
+            )}
+            {navCollapsed && <BrandMark />}
+          </div>
         </div>
         {currentProject && (
           <Tabs.Root value={activeMainTab} onValueChange={setActiveMainTab} orientation="vertical" className="flex-1 flex flex-col overflow-hidden">
@@ -806,7 +830,11 @@ function App() {
                       key={value}
                       value={value}
                       onMouseEnter={onHover}
-                      className={`group flex items-center ${navCollapsed ? 'justify-center px-2' : 'gap-3 px-3'} py-2 rounded-md text-sm font-medium text-white/70 hover:text-white hover:bg-white/5 data-[state=active]:bg-[hsl(var(--selected))] data-[state=active]:text-white transition-colors focus:outline-none`}
+                      className={`group flex items-center ${navCollapsed ? 'justify-center px-2' : 'gap-3 px-3'} py-2 rounded-md text-sm font-medium transition-colors focus:outline-none ${
+                        isTauri
+                          ? 'text-gray-600 hover:text-gray-900 hover:bg-black/5 data-[state=active]:bg-indigo-50 data-[state=active]:text-indigo-900 dark:text-white/70 dark:hover:text-white dark:hover:bg-white/5 dark:data-[state=active]:bg-[hsl(var(--selected))] dark:data-[state=active]:text-white'
+                          : 'text-white/70 hover:text-white hover:bg-white/5 data-[state=active]:bg-[hsl(var(--selected))] data-[state=active]:text-white'
+                      }`}
                     >
                       <Icon className="w-4 h-4 flex-shrink-0" />
                       {!navCollapsed && <span>{label}</span>}
@@ -833,22 +861,35 @@ function App() {
             </Tooltip.Provider>
           </Tabs.Root>
         )}
-        <div className={`mt-auto border-t border-white/10 flex ${navCollapsed ? 'flex-col items-center py-2 gap-1' : 'items-center justify-between px-3 py-2'}`}>
+        <div
+          className={`mt-auto border-t flex ${navCollapsed ? 'flex-col items-center py-2 gap-1' : 'items-center justify-between px-3 py-2'} ${
+            isTauri ? 'border-gray-200/70 dark:border-white/10' : 'border-white/10'
+          }`}
+        >
           <button
             onClick={() => setNavCollapsed((v) => !v)}
-            className="p-1.5 rounded text-white/50 hover:text-white hover:bg-white/5 transition-colors"
+            className={`p-1.5 rounded transition-colors ${
+              isTauri
+                ? 'text-gray-500 hover:text-gray-900 hover:bg-black/5 dark:text-white/50 dark:hover:text-white dark:hover:bg-white/5'
+                : 'text-white/50 hover:text-white hover:bg-white/5'
+            }`}
             title={navCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
             aria-label={navCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
           >
             {navCollapsed ? <PanelLeft className="w-4 h-4" /> : <PanelLeftClose className="w-4 h-4" />}
           </button>
-          {!navCollapsed && <span className="text-[11px] text-white/40">v0.1</span>}
+          {!navCollapsed && (
+            <span className={`text-[11px] ${isTauri ? 'text-gray-400 dark:text-white/40' : 'text-white/40'}`}>v0.1</span>
+          )}
         </div>
       </nav>
 
       {/* Right side: header + content + status strip */}
-      <div className="flex-1 flex flex-col overflow-hidden">
-        <header className="h-14 flex-shrink-0 bg-white border-b border-gray-200 px-5 flex items-center justify-between">
+      <div className="flex-1 flex flex-col overflow-hidden bg-background">
+        <header
+          className={`h-14 flex-shrink-0 bg-white border-b border-gray-200 px-5 flex items-center justify-between ${isTauri ? 'titlebar-drag-region' : ''}`}
+          {...(isTauri ? { 'data-tauri-drag-region': true } : {})}
+        >
           <div className="flex items-center gap-3 min-w-0">
             {currentProject ? (
               <>
@@ -868,7 +909,7 @@ function App() {
               <span className="text-sm text-gray-500">No project selected</span>
             )}
           </div>
-          <div className="flex items-center gap-2">
+          <div className={`flex items-center gap-2 ${isTauri ? 'titlebar-no-drag' : ''}`}>
             {currentProject && (
               <DropdownMenu.Root>
                 <DropdownMenu.Trigger asChild>

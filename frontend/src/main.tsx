@@ -2,7 +2,16 @@ import React from 'react';
 import ReactDOM from 'react-dom/client';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import App from './App';
+import { isTauri } from './services/tauri';
 import './index.css';
+
+// Marks <html> so index.css can drop body's opaque background only in the
+// desktop app -- body sits between the (transparent, vibrancy-backed)
+// window and everything React renders, so it would otherwise block the
+// nav rail's translucency the same way App.tsx's own root div did.
+if (isTauri) {
+  document.documentElement.classList.add('tauri');
+}
 
 // Follow the OS appearance setting (System Settings > Appearance) rather
 // than an in-app toggle, same as any other native Mac app. Applied before

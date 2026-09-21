@@ -83,6 +83,15 @@
   }
 }
 
+/* Desktop app only: let the window's own transparency + vibrancy reach the
+   nav rail's translucent background (see App.tsx) instead of being painted
+   over by body's opaque fill. html also needs it -- UA stylesheets give it
+   an opaque white canvas background by default. */
+html.tauri,
+html.tauri body {
+  background: transparent;
+}
+
 /* --- Dark mode: broad-stroke color adjustments for components that
        use explicit Tailwind grays / whites (many panels). We can't
        audit every component in one pass, but overriding these tokens
@@ -351,4 +360,18 @@
 
 .react-flow__node.selected {
   @apply ring-2 ring-primary;
+}
+
+/* Tauri overlay title bar: with a native title bar strip, the OS knows
+   what's draggable. With titleBarStyle: "Overlay" (traffic lights float
+   over our own content, no strip), we have to say so ourselves -- these
+   are standard WebKit properties, not Tailwind. `-webkit-app-region: drag`
+   marks a region the user can drag the window from; `no-drag` carves out
+   interactive elements (buttons, inputs) inside a drag region so clicks
+   still reach them instead of just moving the window. No-op outside Tauri. */
+.titlebar-drag-region {
+  -webkit-app-region: drag;
+}
+.titlebar-no-drag {
+  -webkit-app-region: no-drag;
 }
