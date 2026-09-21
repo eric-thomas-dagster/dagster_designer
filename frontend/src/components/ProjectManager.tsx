@@ -23,6 +23,7 @@ import {
   FileText,
   GitBranch,
   Cloud,
+  HardDrive,
   Workflow,
 } from 'lucide-react';
 
@@ -988,7 +989,20 @@ export function ProjectManager() {
                     }}
                     className="flex-1 text-left"
                   >
-                    <div className="font-medium text-gray-900">{project.name}</div>
+                    <div className="flex items-center gap-2">
+                      <span className="font-medium text-gray-900">{project.name}</span>
+                      {(project as any).is_dagster_plus ? (
+                        <span className="inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-700 border border-indigo-200">
+                          <Cloud className="w-3 h-3" />
+                          Dagster+
+                        </span>
+                      ) : (
+                        <span className="inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded bg-gray-100 text-gray-600 border border-gray-200">
+                          <HardDrive className="w-3 h-3" />
+                          Local
+                        </span>
+                      )}
+                    </div>
                     {project.description && (
                       <div className="text-sm text-gray-600 mt-1">
                         {project.description}
