@@ -825,6 +825,30 @@ export const projectsApi = {
     return response.data as any;
   },
 
+  getDbtSemanticModels: async (
+    projectId: string,
+    dbtRelativePath?: string,
+  ): Promise<{
+    dbt_project_relative_path: string;
+    semantic_models: Array<{
+      unique_id: string;
+      name: string;
+      description: string | null;
+      model: string | null;
+      primary_entity: string | null;
+      entities: Array<{ name: string; type: string | null; expr: string | null; description: string | null }>;
+      dimensions: Array<{ name: string; type: string | null; expr: string | null; description: string | null }>;
+      measures: Array<{ name: string; agg: string | null; expr: string | null; description: string | null; agg_time_dimension: string | null }>;
+      tags: string[];
+      depends_on_nodes: string[];
+    }>;
+  }> => {
+    const response = await api.get(`/projects/${projectId}/dbt-semantic-models`, {
+      params: dbtRelativePath ? { dbt_relative_path: dbtRelativePath } : {},
+    });
+    return response.data as any;
+  },
+
   runDbtModel: async (
     projectId: string,
     body: {

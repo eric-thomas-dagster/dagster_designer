@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { FileCode, Play, Loader2, CheckCircle2, XCircle, AlertTriangle, TestTube2, Book, FileText, Search, Layers, GitCommit, GitCompare, Clock, Eye, DollarSign, X, Network, Filter, Share2, ExternalLink, Sparkles, Plus, Trash2 } from 'lucide-react';
+import { FileCode, Play, Loader2, CheckCircle2, XCircle, AlertTriangle, TestTube2, Book, FileText, Search, Layers, GitCommit, GitCompare, Clock, Eye, DollarSign, X, Network, Filter, Share2, ExternalLink, Sparkles, Plus, Trash2, Sigma } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { projectsApi } from '@/services/api';
@@ -53,7 +53,7 @@ export function DbtPanel({ onOpenFile }: DbtPanelProps) {
   const [showGitCommit, setShowGitCommit] = useState(false);
   const [lineage, setLineage] = useState<Awaited<ReturnType<typeof projectsApi.getDbtColumnLineage>> | null>(null);
   const [diffFor, setDiffFor] = useState<{ path: string; name: string } | null>(null);
-  const [view, setView] = useState<'models' | 'lineage' | 'tests' | 'docs' | 'selectors' | 'exposures' | 'freshness'>('models');
+  const [view, setView] = useState<'models' | 'lineage' | 'tests' | 'docs' | 'selectors' | 'exposures' | 'semantic-models' | 'freshness'>('models');
   // Add-test dialog state — one flow used by drawer + Tests tab. The
   // target model + column are populated by whichever button opens it.
   const [addTestFor, setAddTestFor] = useState<{ model: Model; column?: string } | null>(null);
@@ -66,6 +66,7 @@ export function DbtPanel({ onOpenFile }: DbtPanelProps) {
   const [docs, setDocs] = useState<Awaited<ReturnType<typeof projectsApi.getDbtDocs>> | null>(null);
   const [selectors, setSelectors] = useState<Awaited<ReturnType<typeof projectsApi.getDbtSelectors>> | null>(null);
   const [exposures, setExposures] = useState<Awaited<ReturnType<typeof projectsApi.getDbtExposures>> | null>(null);
+  const [semanticModels, setSemanticModels] = useState<Awaited<ReturnType<typeof projectsApi.getDbtSemanticModels>> | null>(null);
   const [runningSelector, setRunningSelector] = useState<string | null>(null);
   const [scaffoldingDocs, setScaffoldingDocs] = useState(false);
   const [generatingDocs, setGeneratingDocs] = useState(false);
@@ -155,6 +156,9 @@ export function DbtPanel({ onOpenFile }: DbtPanelProps) {
     }).catch(() => {});
     projectsApi.getDbtExposures(currentProject.id, dbtPath).then((r) => {
       if (!cancelled) setExposures(r);
+    }).catch(() => {});
+    projectsApi.getDbtSemanticModels(currentProject.id, dbtPath).then((r) => {
+      if (!cancelled) setSemanticModels(r);
     }).catch(() => {});
     return () => { cancelled = true; };
   }, [currentProject?.id, data?.dbt_project_relative_path]);
@@ -528,6 +532,7 @@ export function DbtPanel({ onOpenFile }: DbtPanelProps) {
             { v: 'docs',      label: 'Docs',      icon: Book,     cloud: false },
             { v: 'selectors', label: 'Selectors', icon: Filter,   cloud: false },
             { v: 'exposures', label: 'Exposures', icon: Share2,   cloud: false },
+            { v: 'semantic-models', label: 'Semantic Models', icon: Sigma, cloud: false },
             { v: 'freshness', label: 'Freshness', icon: Clock,    cloud: false },
           ] as const).filter(({ cloud }) => !isCloudProject || cloud).map(({ v, label, icon: Icon }) => (
             <button
@@ -1122,6 +1127,104 @@ export function DbtPanel({ onOpenFile }: DbtPanelProps) {
                           <Trash2 className="w-3.5 h-3.5" />
                         </button>
                       </div>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Semantic Models — dbt's semantic layer (MetricFlow): entities,
+          dimensions, and measures layered on top of a model. Read straight
+          from manifest.json, same as Exposures above. Read-only -- these
+          are richer nested objects than a simple add/remove form suits
+          well, so editing stays in the dbt project's own YAML for now. */}
+      {data && view === 'semantic-models' && (
+        <div className="px-8 py-6">
+          <div className="bg-white border border-gray-200 rounded-lg overflow-hidden">
+            <div className="px-4 py-3 border-b border-gray-100 flex items-center justify-between">
+              <div>
+                <h2 className="text-sm font-semibold text-gray-900 flex items-center gap-1.5">
+                  <Sigma className="w-4 h-4 text-purple-500" /> Semantic Models
+                </h2>
+                <p className="text-[11px] text-gray-500 mt-0.5">
+                  dbt's semantic layer (MetricFlow) — entities, dimensions, and measures declared on top of a model.
+                </p>
+              </div>
+              <span className="text-xs text-gray-500">{semanticModels?.semantic_models.length ?? 0}</span>
+            </div>
+            {!semanticModels || semanticModels.semantic_models.length === 0 ? (
+              <div className="p-8 text-center text-xs text-gray-500 space-y-1">
+                <p>No semantic models declared yet.</p>
+                <p>
+                  Define one with a <code className="px-1 py-0.5 bg-gray-100 rounded font-mono">semantic_models:</code> block
+                  in your dbt project's YAML, then re-parse to see it here.
+                </p>
+              </div>
+            ) : (
+              <ul className="divide-y divide-gray-100">
+                {semanticModels.semantic_models.map((s) => (
+                  <li key={s.unique_id} className="px-4 py-3">
+                    <div className="flex items-baseline gap-2">
+                      <span className="font-mono text-sm font-semibold text-gray-900">{s.name}</span>
+                      {s.model && (
+                        <span className="text-[11px] text-gray-500 font-mono">on {s.model}</span>
+                      )}
+                    </div>
+                    {s.description && (
+                      <p className="text-xs text-gray-700 mt-1">{s.description}</p>
+                    )}
+                    <div className="flex flex-wrap gap-x-6 gap-y-2 mt-2">
+                      {s.entities.length > 0 && (
+                        <div>
+                          <div className="text-[10px] font-semibold text-gray-500 uppercase tracking-wide mb-1">Entities</div>
+                          <div className="flex flex-wrap gap-1">
+                            {s.entities.map((e) => (
+                              <span
+                                key={e.name}
+                                title={e.description ?? undefined}
+                                className="px-1.5 py-0.5 text-[10px] rounded bg-indigo-50 border border-indigo-200 text-indigo-700 font-mono"
+                              >
+                                {e.name}{e.type ? ` (${e.type})` : ''}
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                      {s.dimensions.length > 0 && (
+                        <div>
+                          <div className="text-[10px] font-semibold text-gray-500 uppercase tracking-wide mb-1">Dimensions</div>
+                          <div className="flex flex-wrap gap-1">
+                            {s.dimensions.map((d) => (
+                              <span
+                                key={d.name}
+                                title={d.description ?? undefined}
+                                className="px-1.5 py-0.5 text-[10px] rounded bg-blue-50 border border-blue-200 text-blue-700 font-mono"
+                              >
+                                {d.name}{d.type ? ` (${d.type})` : ''}
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                      {s.measures.length > 0 && (
+                        <div>
+                          <div className="text-[10px] font-semibold text-gray-500 uppercase tracking-wide mb-1">Measures</div>
+                          <div className="flex flex-wrap gap-1">
+                            {s.measures.map((m) => (
+                              <span
+                                key={m.name}
+                                title={m.description ?? undefined}
+                                className="px-1.5 py-0.5 text-[10px] rounded bg-emerald-50 border border-emerald-200 text-emerald-700 font-mono"
+                              >
+                                {m.name}{m.agg ? ` (${m.agg})` : ''}
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                      )}
                     </div>
                   </li>
                 ))}

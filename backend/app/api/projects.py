@@ -3740,6 +3740,119 @@ async def get_dbt_exposures(project_id: str, dbt_relative_path: str | None = Non
 
 
 # ---------------------------------------------------------------------------
+# dbt semantic models — MetricFlow/semantic layer definitions (entities,
+# dimensions, measures) declared on top of a dbt model. Parsed straight out
+# of manifest.json, same as exposures above; read-only for now since these
+# are richer, nested objects than a simple write form suits well.
+# ---------------------------------------------------------------------------
+
+class DbtSemanticEntity(BaseModel):
+    name: str
+    type: str | None = None   # primary | foreign | unique | natural
+    expr: str | None = None
+    description: str | None = None
+
+
+class DbtSemanticDimension(BaseModel):
+    name: str
+    type: str | None = None   # categorical | time
+    expr: str | None = None
+    description: str | None = None
+
+
+class DbtSemanticMeasure(BaseModel):
+    name: str
+    agg: str | None = None    # sum | count | count_distinct | average | min | max | ...
+    expr: str | None = None
+    description: str | None = None
+    agg_time_dimension: str | None = None
+
+
+class DbtSemanticModel(BaseModel):
+    unique_id: str
+    name: str
+    description: str | None = None
+    model: str | None = None              # underlying dbt model ref, e.g. ref('orders')
+    primary_entity: str | None = None
+    entities: list[DbtSemanticEntity] = []
+    dimensions: list[DbtSemanticDimension] = []
+    measures: list[DbtSemanticMeasure] = []
+    tags: list[str] = []
+    depends_on_nodes: list[str] = []
+
+
+class DbtSemanticModelsResponse(BaseModel):
+    dbt_project_relative_path: str
+    semantic_models: list[DbtSemanticModel] = []
+
+
+@router.get('/{project_id}/dbt-semantic-models', response_model=DbtSemanticModelsResponse)
+async def get_dbt_semantic_models(project_id: str, dbt_relative_path: str | None = None):
+    """List semantic models declared in the dbt project's manifest (dbt's
+    semantic layer / MetricFlow feature -- entities, dimensions, and
+    measures layered on top of a model). Empty when the manifest hasn't
+    been generated yet, or the project doesn't define any."""
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    root = project_service._get_project_dir(project)
+    dbt_projects = _find_dbt_projects(root)
+    if not dbt_projects:
+        return DbtSemanticModelsResponse(dbt_project_relative_path='', semantic_models=[])
+    chosen = dbt_projects[0]
+    if dbt_relative_path:
+        for p in dbt_projects:
+            if p.relative_path == dbt_relative_path:
+                chosen = p
+                break
+    dbt_root = (root / chosen.relative_path).resolve()
+    manifest = _load_dbt_artifact(dbt_root / 'target' / 'manifest.json')
+    semantic_models: list[DbtSemanticModel] = []
+    for uid, node in (manifest.get('semantic_models') or {}).items():
+        semantic_models.append(DbtSemanticModel(
+            unique_id=uid,
+            name=node.get('name', uid.split('.')[-1]),
+            description=node.get('description'),
+            model=node.get('model'),
+            primary_entity=node.get('primary_entity'),
+            entities=[
+                DbtSemanticEntity(
+                    name=e.get('name', ''),
+                    type=e.get('type'),
+                    expr=e.get('expr'),
+                    description=e.get('description'),
+                )
+                for e in (node.get('entities') or [])
+            ],
+            dimensions=[
+                DbtSemanticDimension(
+                    name=d.get('name', ''),
+                    type=d.get('type'),
+                    expr=d.get('expr'),
+                    description=d.get('description'),
+                )
+                for d in (node.get('dimensions') or [])
+            ],
+            measures=[
+                DbtSemanticMeasure(
+                    name=m.get('name', ''),
+                    agg=m.get('agg'),
+                    expr=m.get('expr'),
+                    description=m.get('description'),
+                    agg_time_dimension=m.get('agg_time_dimension'),
+                )
+                for m in (node.get('measures') or [])
+            ],
+            tags=list(node.get('tags') or []),
+            depends_on_nodes=list((node.get('depends_on') or {}).get('nodes') or []),
+        ))
+    return DbtSemanticModelsResponse(
+        dbt_project_relative_path=chosen.relative_path,
+        semantic_models=sorted(semantic_models, key=lambda s: s.name),
+    )
+
+
+# ---------------------------------------------------------------------------
 # Write endpoints for selectors / exposures / sources — power the
 # "Add" dialogs on each sub-tab. All three write yml non-destructively:
 # we read any existing file, merge our entry into the collection, and
