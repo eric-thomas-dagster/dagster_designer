@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import * as Tabs from '@radix-ui/react-tabs';
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu';
+import * as Tooltip from '@radix-ui/react-tooltip';
 import { useQueryClient, useQuery } from '@tanstack/react-query';
 import { GraphEditor } from './components/GraphEditor';
 import { Library } from './components/Library';
@@ -797,20 +798,39 @@ function App() {
         </div>
         {currentProject && (
           <Tabs.Root value={activeMainTab} onValueChange={setActiveMainTab} orientation="vertical" className="flex-1 flex flex-col overflow-hidden">
-            <Tabs.List className="flex-1 flex flex-col gap-0.5 px-2 py-3 overflow-y-auto" aria-label="Main navigation">
-              {navItems.map(({ value, label, icon: Icon, onHover }) => (
-                <Tabs.Trigger
-                  key={value}
-                  value={value}
-                  onMouseEnter={onHover}
-                  title={navCollapsed ? label : undefined}
-                  className={`group flex items-center ${navCollapsed ? 'justify-center px-2' : 'gap-3 px-3'} py-2 rounded-md text-sm font-medium text-white/70 hover:text-white hover:bg-white/5 data-[state=active]:bg-[hsl(var(--selected))] data-[state=active]:text-white transition-colors focus:outline-none`}
-                >
-                  <Icon className="w-4 h-4 flex-shrink-0" />
-                  {!navCollapsed && <span>{label}</span>}
-                </Tabs.Trigger>
-              ))}
-            </Tabs.List>
+            <Tooltip.Provider delayDuration={200}>
+              <Tabs.List className="flex-1 flex flex-col gap-0.5 px-2 py-3 overflow-y-auto" aria-label="Main navigation">
+                {navItems.map(({ value, label, icon: Icon, onHover }) => {
+                  const trigger = (
+                    <Tabs.Trigger
+                      key={value}
+                      value={value}
+                      onMouseEnter={onHover}
+                      className={`group flex items-center ${navCollapsed ? 'justify-center px-2' : 'gap-3 px-3'} py-2 rounded-md text-sm font-medium text-white/70 hover:text-white hover:bg-white/5 data-[state=active]:bg-[hsl(var(--selected))] data-[state=active]:text-white transition-colors focus:outline-none`}
+                    >
+                      <Icon className="w-4 h-4 flex-shrink-0" />
+                      {!navCollapsed && <span>{label}</span>}
+                    </Tabs.Trigger>
+                  );
+                  if (!navCollapsed) return trigger;
+                  return (
+                    <Tooltip.Root key={`${value}-tt`}>
+                      <Tooltip.Trigger asChild>{trigger}</Tooltip.Trigger>
+                      <Tooltip.Portal>
+                        <Tooltip.Content
+                          side="right"
+                          sideOffset={8}
+                          className="px-2 py-1 rounded-md bg-gray-900 text-white text-xs font-medium shadow-lg z-50 select-none"
+                        >
+                          {label}
+                          <Tooltip.Arrow className="fill-gray-900" width={8} height={4} />
+                        </Tooltip.Content>
+                      </Tooltip.Portal>
+                    </Tooltip.Root>
+                  );
+                })}
+              </Tabs.List>
+            </Tooltip.Provider>
           </Tabs.Root>
         )}
         <div className={`mt-auto border-t border-white/10 flex ${navCollapsed ? 'flex-col items-center py-2 gap-1' : 'items-center justify-between px-3 py-2'}`}>
