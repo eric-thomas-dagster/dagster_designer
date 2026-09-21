@@ -795,7 +795,7 @@ function App() {
           has nothing behind the page to blur, so it stays the original
           always-dark-navy look there. */}
       <nav
-        className={`${navCollapsed ? 'w-14' : 'w-56'} transition-[width] duration-150 flex flex-col ${
+        className={`${navCollapsed ? (isTauri ? 'w-20' : 'w-14') : 'w-56'} transition-[width] duration-150 flex flex-col ${
           isTauri
             ? 'text-gray-700/90 dark:text-white/80 border-r border-gray-200/70 dark:border-[hsl(var(--dagster-black))] bg-white/40 dark:bg-[hsl(var(--dagster-black)/0.35)] backdrop-blur-xl'
             : 'text-white/80 border-r border-[hsl(var(--dagster-black))] bg-[hsl(var(--dagster-black))]'
