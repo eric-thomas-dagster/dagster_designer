@@ -26,7 +26,7 @@ import { SettingsHost } from './components/SettingsDialog';
 import { useProjectStore } from './hooks/useProject';
 import { useRunNotifications } from './hooks/useRunNotifications';
 import { setActiveTabGlobal } from './services/activeTab';
-import { onMenuAction } from './services/tauri';
+import { onMenuAction, openExternalUrl } from './services/tauri';
 import { Network, FileCode, Zap, Package, ExternalLink, Settings, Workflow, ChevronDown, Skull, AlertTriangle, X, Loader2, CheckCircle, XCircle, PanelLeftClose, PanelLeft, Clock, Play, Radar, Timer, Download, Database, ShieldCheck, Cloud, Bell } from 'lucide-react';
 import { IngestionsPanel } from './components/IngestionsPanel';
 import { DbtPanel } from './components/DbtPanel';
@@ -681,7 +681,7 @@ function App() {
       const url = dep
         ? `https://${org}.dagster.cloud/${dep}/home`
         : `https://${org}.dagster.cloud/`;
-      window.open(url, '_blank');
+      openExternalUrl(url);
       return;
     }
 
@@ -692,7 +692,7 @@ function App() {
 
       if (status.running) {
         // Already running - open in new tab
-        window.open(status.url, '_blank');
+        openExternalUrl(status.url);
         setDagsterUILoading(false);
       } else {
         // Not running - show startup modal
@@ -1251,7 +1251,7 @@ function App() {
           onClose={() => setShowDagsterStartupModal(false)}
           onSuccess={(url) => {
             setShowDagsterStartupModal(false);
-            window.open(url, '_blank');
+            openExternalUrl(url);
           }}
         />
       )}

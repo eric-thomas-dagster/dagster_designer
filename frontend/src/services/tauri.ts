@@ -50,6 +50,26 @@ export async function pickDirectory(title?: string): Promise<string | null> {
 }
 
 /**
+ * Opens a URL in the system's default browser. Outside Tauri, this is
+ * just `window.open(url, '_blank')` -- but inside Tauri's WKWebView,
+ * `window.open` doesn't reliably open the OS browser (it's swallowed or
+ * opens a chromeless in-app window depending on platform), so it needs
+ * the opener plugin instead.
+ */
+export async function openExternalUrl(url: string): Promise<void> {
+  if (!isTauri) {
+    window.open(url, '_blank');
+    return;
+  }
+  try {
+    const { openUrl } = await import('@tauri-apps/plugin-opener');
+    await openUrl(url);
+  } catch {
+    window.open(url, '_blank');
+  }
+}
+
+/**
  * Subscribes to "menu-action" events emitted by the native menu bar (see
  * src-tauri/src/main.rs). No-op outside Tauri. Returns an unsubscribe
  * function, mirroring `@tauri-apps/api/event`'s own `listen()`.
