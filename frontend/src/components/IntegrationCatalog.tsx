@@ -2,6 +2,7 @@ import { useState, useMemo } from 'react';
 import { Search, ExternalLink, Database, Cloud, Cpu, Bell, Package, Download, Check, X, ChevronRight, Code } from 'lucide-react';
 import { notify } from './Notifications';
 import { API_BASE } from '@/services/api';
+import { ComponentIcon } from './ComponentIcon';
 
 interface Integration {
   name: string;
@@ -624,94 +625,74 @@ const getCategoryIcon = (category: string) => {
   }
 };
 
-// Real per-brand logo slugs (simple-icons), keyed by this catalog's own
-// `name` field. Matches this repo's own established convention for real
-// icons -- the community component manifest already tags brand-affiliated
-// components with icon: "si:<slug>" (e.g. "si:snowflake", "si:slack") --
-// cross-checked against that manifest and against the actual hosted SVGs
-// one at a time, not guessed. Not every name here has a real brand mark
-// (e.g. Fivetran, Hightouch, Weaviate, Hex, Sigma, Omni, Cube aren't in
-// simple-icons; "Delta Lake" and "Shell" both have a same-named but
-// wrong-brand entry there -- Delta Air Lines, Shell Oil -- so those two are
-// deliberately left out rather than showing a misleading logo). Anything
-// not listed here falls back to the generic category icon.
-//
-// `hex` is the brand's real color, from simple-icons' own published color
-// data -- but that data is missing entries for a handful of major brands
-// (Slack, OpenAI, AWS, Azure, Tableau, Power BI, Twilio, Microsoft Teams,
-// dbt -- their icon files exist and are used below, just not their color
-// metadata), and rather than guess those from memory, `hex: null` renders
-// that logo in a single neutral tone instead of a possibly-wrong "official"
-// color. The shape is still the real, verified logo either way.
-const BRAND_ICONS: Record<string, { slug: string; hex: string | null }> = {
-  Airbyte: { slug: 'airbyte', hex: '615EFF' },
-  dbt: { slug: 'dbt', hex: null },
-  Snowflake: { slug: 'snowflake', hex: '29B5E8' },
-  BigQuery: { slug: 'googlebigquery', hex: '669DF6' },
-  Databricks: { slug: 'databricks', hex: 'FF3621' },
-  DuckDB: { slug: 'duckdb', hex: 'FFF000' },
-  PostgreSQL: { slug: 'postgresql', hex: '4169E1' },
-  MySQL: { slug: 'mysql', hex: '4479A1' },
-  Teradata: { slug: 'teradata', hex: 'F37440' },
-  AWS: { slug: 'amazonaws', hex: null },
-  GCP: { slug: 'googlecloud', hex: '4285F4' },
-  Azure: { slug: 'microsoftazure', hex: null },
-  Kubernetes: { slug: 'kubernetes', hex: '326CE5' },
-  Docker: { slug: 'docker', hex: '2496ED' },
-  Modal: { slug: 'modal', hex: '7FEE64' },
-  Ray: { slug: 'ray', hex: '028CF0' },
-  Celery: { slug: 'celery', hex: '37814A' },
-  Dask: { slug: 'dask', hex: 'FC6E6B' },
-  PySpark: { slug: 'apachespark', hex: 'E25A1C' },
-  Datadog: { slug: 'datadog', hex: '632CA6' },
-  Prometheus: { slug: 'prometheus', hex: 'E6522C' },
-  Slack: { slug: 'slack', hex: null },
-  'Microsoft Teams': { slug: 'microsoftteams', hex: null },
-  PagerDuty: { slug: 'pagerduty', hex: '06AC38' },
-  Twilio: { slug: 'twilio', hex: null },
-  OpenAI: { slug: 'openai', hex: null },
-  Anthropic: { slug: 'anthropic', hex: '191919' },
-  Gemini: { slug: 'googlegemini', hex: '8E75B2' },
-  MLflow: { slug: 'mlflow', hex: '0194E2' },
-  'Weights & Biases': { slug: 'weightsandbiases', hex: 'FFBE00' },
-  Qdrant: { slug: 'qdrant', hex: 'DC244C' },
-  Looker: { slug: 'looker', hex: '4285F4' },
-  Tableau: { slug: 'tableau', hex: null },
-  'Power BI': { slug: 'powerbi', hex: null },
-  Pandas: { slug: 'pandas', hex: '150458' },
-  Polars: { slug: 'polars', hex: '0075FF' },
-  GitHub: { slug: 'github', hex: '181717' },
-  Jupyter: { slug: 'jupyter', hex: 'F37626' },
+// "si:<slug>" for the integrations with a real brand mark in simple-icons
+// -- same `icon` convention (and same ComponentIcon renderer) the
+// community component manifest already uses for brand-affiliated
+// components elsewhere in the app (Add Component picker in the lineage
+// view), so this reuses that existing, tested resolution instead of
+// re-implementing icon lookup and color handling from scratch. Slugs
+// checked one at a time against the actual hosted SVGs, not guessed; no
+// hardcoded colors here at all -- ComponentIcon's cdn.simpleicons.org
+// already serves each one pre-colored with the real brand color, and
+// falls back to a generic icon on its own if a given slug turns out not
+// to be in that CDN's catalog (true for a handful of major brands --
+// Slack, OpenAI, AWS, Azure, Tableau, Power BI, Twilio, Microsoft Teams,
+// dbt -- whose slug exists in the wider simple-icons file set but isn't in
+// simpleicons.org's serving catalog).
+// Not every name here has a real brand mark at all (e.g. Fivetran,
+// Hightouch, Weaviate, Hex, Sigma, Omni, Cube aren't in simple-icons;
+// "Delta Lake" and "Shell" both have a same-named but wrong-brand entry
+// there -- Delta Air Lines, Shell Oil -- so those two are deliberately
+// left out rather than showing a misleading logo). Anything not listed
+// here falls back to the generic category icon.
+const BRAND_ICON_SLUGS: Record<string, string> = {
+  Airbyte: 'airbyte',
+  dbt: 'dbt',
+  Snowflake: 'snowflake',
+  BigQuery: 'googlebigquery',
+  Databricks: 'databricks',
+  DuckDB: 'duckdb',
+  PostgreSQL: 'postgresql',
+  MySQL: 'mysql',
+  Teradata: 'teradata',
+  AWS: 'amazonaws',
+  GCP: 'googlecloud',
+  Azure: 'microsoftazure',
+  Kubernetes: 'kubernetes',
+  Docker: 'docker',
+  Modal: 'modal',
+  Ray: 'ray',
+  Celery: 'celery',
+  Dask: 'dask',
+  PySpark: 'apachespark',
+  Datadog: 'datadog',
+  Prometheus: 'prometheus',
+  Slack: 'slack',
+  'Microsoft Teams': 'microsoftteams',
+  PagerDuty: 'pagerduty',
+  Twilio: 'twilio',
+  OpenAI: 'openai',
+  Anthropic: 'anthropic',
+  Gemini: 'googlegemini',
+  MLflow: 'mlflow',
+  'Weights & Biases': 'weightsandbiases',
+  Qdrant: 'qdrant',
+  Looker: 'looker',
+  Tableau: 'tableau',
+  'Power BI': 'powerbi',
+  Pandas: 'pandas',
+  Polars: 'polars',
+  GitHub: 'github',
+  Jupyter: 'jupyter',
 };
 
-// Neutral fallback for the icons above without a verified brand color.
-const UNVERIFIED_COLOR_FALLBACK = '475569'; // slate-600
-
-/** Real colored brand mark when we have one (via CSS mask, so the single-
- * color SVG picks up the brand's actual hex), else the generic lucide
+/** Real colored brand mark when we have one, else the generic lucide
  * category icon -- same call signature/sizing either way so callers don't
  * need to branch. */
 function IntegrationIcon({ integration, className }: { integration: Integration; className?: string }) {
-  const brand = BRAND_ICONS[integration.name];
-  if (brand) {
-    return (
-      <div
-        role="img"
-        aria-label={`${integration.name} logo`}
-        className={className}
-        style={{
-          backgroundColor: `#${brand.hex ?? UNVERIFIED_COLOR_FALLBACK}`,
-          WebkitMaskImage: `url(https://cdn.jsdelivr.net/npm/simple-icons@latest/icons/${brand.slug}.svg)`,
-          maskImage: `url(https://cdn.jsdelivr.net/npm/simple-icons@latest/icons/${brand.slug}.svg)`,
-          WebkitMaskSize: 'contain',
-          maskSize: 'contain',
-          WebkitMaskRepeat: 'no-repeat',
-          maskRepeat: 'no-repeat',
-          WebkitMaskPosition: 'center',
-          maskPosition: 'center',
-        }}
-      />
-    );
+  const slug = BRAND_ICON_SLUGS[integration.name];
+  if (slug) {
+    return <ComponentIcon icon={`si:${slug}`} title={integration.name} className={className} />;
   }
   const Icon = getCategoryIcon(integration.category);
   return <Icon className={className} />;
