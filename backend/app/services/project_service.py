@@ -830,6 +830,61 @@ class ProjectService:
 
         return True
 
+    def migrate_projects(self, target_dir: Path, action: str) -> dict:
+        """Move or delete every project currently under self.projects_dir,
+        as part of changing where new projects are created (the desktop
+        app's Settings > Projects folder). `action` is "move" or "delete".
+
+        Must be called against the CURRENT projects_dir, before whatever's
+        switching PROJECTS_DIR to a new location actually does so -- once
+        that happens this service (or its successor after a backend
+        restart) can no longer find these projects to act on them.
+        """
+        import shutil
+
+        target_dir = Path(target_dir)
+        if action == "move":
+            target_dir.mkdir(parents=True, exist_ok=True)
+
+        moved = 0
+        deleted = 0
+        skipped: list[dict] = []
+
+        for project in self.list_projects():
+            project_dir = self._get_project_dir(project)
+            project_file = self._get_project_file(project.id)
+
+            if action == "delete":
+                if project_dir.exists():
+                    shutil.rmtree(project_dir)
+                if project_file.exists():
+                    project_file.unlink()
+                deleted += 1
+                continue
+
+            # action == "move"
+            dest_dir = target_dir / project_dir.name
+            dest_file = target_dir / project_file.name
+            if dest_dir.exists() or dest_file.exists():
+                skipped.append({"id": project.id, "name": project.name, "reason": "already exists at destination"})
+                continue
+
+            if project_dir.exists():
+                # Each project's own .venv embeds absolute paths tied to
+                # its old location and won't survive a move -- drop it here
+                # so the app recreates it fresh next time this project
+                # needs one, rather than carrying a silently broken venv
+                # over to the new location.
+                stale_venv = project_dir / ".venv"
+                if stale_venv.exists():
+                    shutil.rmtree(stale_venv)
+                shutil.move(str(project_dir), str(dest_dir))
+            if project_file.exists():
+                shutil.move(str(project_file), str(dest_file))
+            moved += 1
+
+        return {"moved": moved, "deleted": deleted, "skipped": skipped}
+
     def clone_repo_for_project(self, project_id: str, git_repo: str, git_branch: str = "main") -> tuple[Project, str] | None:
         """Clone a git repository for an existing project.
 

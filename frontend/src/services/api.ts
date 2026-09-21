@@ -73,6 +73,17 @@ export const projectsApi = {
     return response.data;
   },
 
+  /** Moves or deletes every project in the current projects folder, ahead
+   * of switching to a new one. Must be called before that switch -- it
+   * acts on wherever the backend is currently pointed. */
+  migrateFolder: async (targetDir: string, action: 'move' | 'delete') => {
+    const response = await api.post<{ moved: number; deleted: number; skipped: { id: string; name: string; reason: string }[] }>(
+      '/projects/migrate-folder',
+      { target_dir: targetDir, action }
+    );
+    return response.data;
+  },
+
   update: async (id: string, data: Partial<Project>) => {
     const response = await api.put<Project>(`/projects/${id}`, data);
     return response.data;

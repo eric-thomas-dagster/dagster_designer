@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { X, KeyRound, ExternalLink, CheckCircle2, FolderCog } from 'lucide-react';
-import { aiApi, type AiProvidersStatus } from '@/services/api';
-import { notify } from './Notifications';
+import { aiApi, projectsApi, type AiProvidersStatus } from '@/services/api';
+import { notify, confirmDialog } from './Notifications';
 import { isTauri, getProjectsDir, setProjectsDir, pickDirectory } from '@/services/tauri';
 import { useProjectStore } from '@/hooks/useProject';
 
@@ -167,23 +167,79 @@ function SettingsDialog({ onClose }: { onClose: () => void }) {
 function ProjectsFolderSection() {
   const [dir, setDir] = useState<string | null>(null);
   const [changing, setChanging] = useState(false);
+  // Set once a folder's been picked and there's at least one existing
+  // project to ask about -- renders the move/delete/leave choice below.
+  const [pendingDir, setPendingDir] = useState<string | null>(null);
 
   useEffect(() => {
     getProjectsDir().then(setDir);
   }, []);
 
-  const change = async () => {
-    const picked = await pickDirectory('Choose a folder for new Dagster projects');
-    if (!picked) return;
+  const applyChange = async (newDir: string) => {
     setChanging(true);
     try {
-      await setProjectsDir(picked);
-      setDir(picked);
+      await setProjectsDir(newDir);
+      setDir(newDir);
       notify.success('Projects folder updated.');
       useProjectStore.getState().loadProjects();
     } catch (e: any) {
       notify.error(e?.message || 'Failed to change the projects folder.');
     } finally {
+      setChanging(false);
+      setPendingDir(null);
+    }
+  };
+
+  const change = async () => {
+    const picked = await pickDirectory('Choose a folder for new Dagster projects');
+    if (!picked) return;
+    let hasExisting = false;
+    try {
+      const { total } = await projectsApi.list();
+      hasExisting = total > 0;
+    } catch {
+      // If we can't tell, err toward asking -- worst case an unnecessary click.
+      hasExisting = true;
+    }
+    if (hasExisting) {
+      setPendingDir(picked);
+    } else {
+      applyChange(picked);
+    }
+  };
+
+  const leaveAsIs = () => pendingDir && applyChange(pendingDir);
+
+  const move = async () => {
+    if (!pendingDir) return;
+    setChanging(true);
+    try {
+      const result = await projectsApi.migrateFolder(pendingDir, 'move');
+      const skippedNote = result.skipped.length
+        ? `, ${result.skipped.length} skipped (already existed there)`
+        : '';
+      notify.info(`Moved ${result.moved} project${result.moved === 1 ? '' : 's'}${skippedNote}.`);
+      await applyChange(pendingDir);
+    } catch (e: any) {
+      notify.error(e?.message || 'Failed to move existing projects — folder not changed.');
+      setChanging(false);
+    }
+  };
+
+  const deleteExisting = async () => {
+    if (!pendingDir) return;
+    const ok = await confirmDialog(
+      'This permanently deletes every project in the current folder. This cannot be undone.',
+      { title: 'Delete existing projects?', destructive: true }
+    );
+    if (!ok) return;
+    setChanging(true);
+    try {
+      const result = await projectsApi.migrateFolder(pendingDir, 'delete');
+      notify.info(`Deleted ${result.deleted} project${result.deleted === 1 ? '' : 's'}.`);
+      await applyChange(pendingDir);
+    } catch (e: any) {
+      notify.error(e?.message || 'Failed to delete existing projects — folder not changed.');
       setChanging(false);
     }
   };
@@ -212,6 +268,47 @@ function ProjectsFolderSection() {
           {changing ? 'Applying…' : 'Change…'}
         </button>
       </div>
+
+      {pendingDir && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-[60]">
+          <div className="bg-white rounded-lg shadow-xl w-full max-w-sm p-6">
+            <h3 className="text-base font-semibold text-gray-900 mb-2">Existing projects found</h3>
+            <p className="text-sm text-gray-600 mb-4">
+              You have projects in the current folder. What should happen to them when you switch to the new one?
+            </p>
+            <div className="space-y-2">
+              <button
+                onClick={move}
+                disabled={changing}
+                className="w-full text-left px-3 py-2 text-sm bg-primary text-primary-foreground rounded-md hover:bg-accent disabled:opacity-50"
+              >
+                Move them to the new folder
+              </button>
+              <button
+                onClick={leaveAsIs}
+                disabled={changing}
+                className="w-full text-left px-3 py-2 text-sm text-gray-700 border border-gray-300 rounded-md hover:bg-gray-100 disabled:opacity-50"
+              >
+                Leave them where they are (won't show up until you switch back)
+              </button>
+              <button
+                onClick={deleteExisting}
+                disabled={changing}
+                className="w-full text-left px-3 py-2 text-sm text-red-600 border border-gray-300 rounded-md hover:bg-red-50 disabled:opacity-50"
+              >
+                Delete them
+              </button>
+            </div>
+            <button
+              onClick={() => setPendingDir(null)}
+              disabled={changing}
+              className="mt-4 text-xs text-gray-500 hover:text-gray-700 disabled:opacity-50"
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

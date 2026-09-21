@@ -4,7 +4,7 @@ import sys
 import json
 import subprocess
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, BackgroundTasks
 from pydantic import BaseModel, Field
@@ -37,6 +37,14 @@ class CloneRepoResponse(BaseModel):
 class ProjectImportRequest(BaseModel):
     """Request to import an existing Dagster project."""
     path: str = Field(..., description="Absolute path to existing Dagster project directory")
+
+
+class ProjectsMigrateRequest(BaseModel):
+    """Request to move or delete every project under the current projects
+    folder, ahead of switching to a new one (desktop app's Settings >
+    Projects folder)."""
+    target_dir: str = Field(..., description="Destination folder (only used when action is 'move')")
+    action: Literal["move", "delete"]
 
 
 async def _install_dependencies_and_generate_assets(project: Project):
@@ -490,6 +498,19 @@ async def import_project(request: ProjectImportRequest):
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to import project: {str(e)}")
+
+
+@router.post("/migrate-folder")
+async def migrate_projects(request: ProjectsMigrateRequest):
+    """Move or delete every project currently in the projects folder, ahead
+    of the desktop app switching to a new one. Must be called BEFORE that
+    switch happens -- it acts on whatever projects_dir this running backend
+    is currently pointed at.
+    """
+    try:
+        return project_service.migrate_projects(Path(request.target_dir), request.action)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to migrate projects: {str(e)}")
 
 
 @router.get("/summary", response_model=ProjectSummaryListResponse)
