@@ -643,6 +643,37 @@ def main():
             }))
             sys.exit(0)
 
+        # Assets that declare required_resource_keys (e.g. a `sinks` config
+        # writing to a Dagster Resource) can't run under this script's mock
+        # context -- create_mock_context() stubs `resources` as an empty
+        # dict, so a real resource lookup would raise a confusing "'dict'
+        # object has no attribute '<resource_key>'" AttributeError. That's
+        # also the right call on purpose: preview is meant to be read-only,
+        # and actually acquiring a warehouse connection here would make a
+        # "preview" click capable of really writing to production. Surface
+        # a clear, actionable message instead of letting it crash.
+        # `io_manager` is on virtually every asset's required_resource_keys
+        # by default (Dagster's @asset decorator always declares it) even
+        # though this script's mock-context path never actually touches it
+        # -- it calls the compute function directly rather than running it
+        # through Dagster's real execution engine, so io_manager is a red
+        # herring here. Only flag genuinely extra keys (e.g. a `sinks`
+        # resource_key) that the mock context truly can't satisfy.
+        required_keys = set(getattr(asset_def, 'required_resource_keys', None) or []) - {'io_manager'}
+        if required_keys:
+            print(json.dumps({
+                "success": False,
+                "error": (
+                    f"Preview can't run '{asset_key}' directly -- it needs "
+                    f"{', '.join(sorted(required_keys))} resource(s) that this "
+                    f"lightweight preview doesn't wire up (previews are read-only "
+                    f"on purpose, so it won't try to open a real warehouse "
+                    f"connection). Click Run to here to materialize it for real, "
+                    f"then check the destination directly."
+                ),
+            }))
+            sys.exit(0)
+
         # Check if asset has upstream_asset_keys configuration
         configured_upstream_keys = get_upstream_asset_keys_from_config(project_module, asset_key)
 
