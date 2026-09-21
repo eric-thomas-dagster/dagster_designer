@@ -246,7 +246,7 @@ async def query_runs(project_id: str, params: RunsQueryParams):
     except httpx.ConnectError:
         return RunsListResponse(
             runs=[], next_cursor=None, source="local",
-            error=f"Local Dagster GraphQL isn't running (looked at localhost:{port}). Start `dg dev` -- either via Actions > Open Dagster UI, or the button on this page.",
+            error="Local Dagster isn't running yet. Start it below to see this project's run history.",
         )
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Local Dagster GraphQL error: {e}")
@@ -620,7 +620,10 @@ async def get_run_detail(project_id: str, run_id: str):
             async with httpx.AsyncClient(timeout=15.0) as client:
                 r = await client.post(url, json={"query": gql, "variables": variables})
         except httpx.ConnectError:
-            raise HTTPException(status_code=502, detail="Local Dagster GraphQL isn't running. Start `dg dev` first.")
+            raise HTTPException(
+                status_code=502,
+                detail="Local Dagster isn't running yet -- start it from Actions > Open Dagster UI, or the button on the Runs page.",
+            )
         except Exception as e:
             if strict:
                 raise HTTPException(status_code=502, detail=f"Local Dagster GraphQL error: {e}")
@@ -939,7 +942,7 @@ async def get_run_logs(
                 r = await client.post(url, json={"query": RUN_LOGS_QUERY, "variables": variables})
             body = r.json()
         except httpx.ConnectError:
-            return RunLogsResponse(events=[], source="local", error="Local Dagster GraphQL isn't running. Start `dg dev` first.")
+            return RunLogsResponse(events=[], source="local", error="Local Dagster isn't running, so there are no logs to show yet.")
         except Exception as e:
             raise HTTPException(status_code=502, detail=f"Local Dagster GraphQL error: {e}")
         # Surface GraphQL errors -- previously they were being swallowed
@@ -1131,7 +1134,7 @@ async def terminate_run(project_id: str, run_id: str):
                 r = await client.post(url, json={"query": TERMINATE_MUTATION, "variables": variables})
             body = r.json()
         except httpx.ConnectError:
-            raise HTTPException(status_code=502, detail="Local Dagster GraphQL isn't running.")
+            raise HTTPException(status_code=502, detail="Local Dagster isn't running, so there's nothing to terminate.")
         if body.get("errors"):
             msgs = "; ".join(e.get("message", "") for e in body["errors"])
             raise HTTPException(status_code=502, detail=f"GraphQL errors: {msgs}")

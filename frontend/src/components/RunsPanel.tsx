@@ -4,7 +4,7 @@ import 'reactflow/dist/style.css';
 import {
   Play, RefreshCw, Loader2, ChevronRight, ChevronLeft, ExternalLink,
   CheckCircle2, XCircle, Clock, Ban, Search, Filter as FilterIcon,
-  Copy, Tag as TagIcon, Layers, FileText,
+  Copy, Tag as TagIcon, Layers, FileText, PlayCircle,
 } from 'lucide-react';
 import { useProjectStore } from '@/hooks/useProject';
 import { runsApi, dagsterUIApi, type Run, type RunDetail } from '@/services/api';
@@ -310,6 +310,7 @@ export function RunsPanel() {
       <div className="flex-1 overflow-y-auto p-6 bg-gray-50">
         {warning && (
           <Notice
+            icon={PlayCircle}
             className="mb-3"
             action={!isCloud && <StartDgDevButton onStarted={() => load(cursor)} />}
           >

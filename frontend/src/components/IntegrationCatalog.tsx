@@ -624,6 +624,85 @@ const getCategoryIcon = (category: string) => {
   }
 };
 
+// Real per-brand logos (simple-icons CDN) for the integrations that have
+// one, keyed by this catalog's own `name` field and checked one at a time
+// against the actual hosted SVGs -- not every name here has a real brand
+// mark (e.g. Fivetran, Hightouch, Weaviate, Hex, Sigma, Omni, Cube aren't
+// in simple-icons; "Delta Lake" and "Shell" both have a same-named but
+// wrong-brand entry there -- Delta Air Lines, Shell Oil -- so those two
+// are deliberately left out rather than showing a misleading logo).
+// Anything not listed here falls back to the generic category icon.
+const BRAND_ICONS: Record<string, { slug: string; hex: string }> = {
+  Airbyte: { slug: 'airbyte', hex: '615EFF' },
+  dbt: { slug: 'dbt', hex: 'FF694B' },
+  Snowflake: { slug: 'snowflake', hex: '29B5E8' },
+  BigQuery: { slug: 'googlebigquery', hex: '669DF6' },
+  Databricks: { slug: 'databricks', hex: 'FF3621' },
+  DuckDB: { slug: 'duckdb', hex: 'FFF000' },
+  PostgreSQL: { slug: 'postgresql', hex: '4169E1' },
+  MySQL: { slug: 'mysql', hex: '4479A1' },
+  Teradata: { slug: 'teradata', hex: 'F37440' },
+  AWS: { slug: 'amazonaws', hex: 'FF9900' },
+  GCP: { slug: 'googlecloud', hex: '4285F4' },
+  Azure: { slug: 'microsoftazure', hex: '0078D4' },
+  Kubernetes: { slug: 'kubernetes', hex: '326CE5' },
+  Docker: { slug: 'docker', hex: '2496ED' },
+  Modal: { slug: 'modal', hex: '7FEE64' },
+  Ray: { slug: 'ray', hex: '028CF0' },
+  Celery: { slug: 'celery', hex: '37814A' },
+  Dask: { slug: 'dask', hex: 'FC6E6B' },
+  PySpark: { slug: 'apachespark', hex: 'E25A1C' },
+  Datadog: { slug: 'datadog', hex: '632CA6' },
+  Prometheus: { slug: 'prometheus', hex: 'E6522C' },
+  Slack: { slug: 'slack', hex: '4A154B' },
+  'Microsoft Teams': { slug: 'microsoftteams', hex: '6264A7' },
+  PagerDuty: { slug: 'pagerduty', hex: '06AC38' },
+  Twilio: { slug: 'twilio', hex: 'F22F46' },
+  OpenAI: { slug: 'openai', hex: '10A37F' },
+  Anthropic: { slug: 'anthropic', hex: '191919' },
+  Gemini: { slug: 'googlegemini', hex: '8E75B2' },
+  MLflow: { slug: 'mlflow', hex: '0194E2' },
+  'Weights & Biases': { slug: 'weightsandbiases', hex: 'FFBE00' },
+  Qdrant: { slug: 'qdrant', hex: 'DC244C' },
+  Looker: { slug: 'looker', hex: '4285F4' },
+  Tableau: { slug: 'tableau', hex: 'E97627' },
+  'Power BI': { slug: 'powerbi', hex: 'F2C811' },
+  Pandas: { slug: 'pandas', hex: '150458' },
+  Polars: { slug: 'polars', hex: '0075FF' },
+  GitHub: { slug: 'github', hex: '181717' },
+  Jupyter: { slug: 'jupyter', hex: 'F37626' },
+};
+
+/** Real colored brand mark when we have one (via CSS mask, so the single-
+ * color SVG picks up the brand's actual hex), else the generic lucide
+ * category icon -- same call signature/sizing either way so callers don't
+ * need to branch. */
+function IntegrationIcon({ integration, className }: { integration: Integration; className?: string }) {
+  const brand = BRAND_ICONS[integration.name];
+  if (brand) {
+    return (
+      <div
+        role="img"
+        aria-label={`${integration.name} logo`}
+        className={className}
+        style={{
+          backgroundColor: `#${brand.hex}`,
+          WebkitMaskImage: `url(https://cdn.jsdelivr.net/npm/simple-icons@latest/icons/${brand.slug}.svg)`,
+          maskImage: `url(https://cdn.jsdelivr.net/npm/simple-icons@latest/icons/${brand.slug}.svg)`,
+          WebkitMaskSize: 'contain',
+          maskSize: 'contain',
+          WebkitMaskRepeat: 'no-repeat',
+          maskRepeat: 'no-repeat',
+          WebkitMaskPosition: 'center',
+          maskPosition: 'center',
+        }}
+      />
+    );
+  }
+  const Icon = getCategoryIcon(integration.category);
+  return <Icon className={className} />;
+}
+
 export function IntegrationCatalog({ projectId }: IntegrationCatalogProps) {
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedCategory, setSelectedCategory] = useState('All');
@@ -730,8 +809,6 @@ export function IntegrationCatalog({ projectId }: IntegrationCatalogProps) {
       <div className="flex-1 overflow-y-auto p-4">
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 gap-4">
           {filteredIntegrations.map((integration) => {
-            const Icon = getCategoryIcon(integration.category);
-
             return (
               <div
                 key={`${integration.package}-${integration.name}`}
@@ -742,7 +819,7 @@ export function IntegrationCatalog({ projectId }: IntegrationCatalogProps) {
                 <div className="flex items-start justify-between mb-2">
                   <div className="flex items-start space-x-3 flex-1">
                     <div className="p-2 bg-blue-50 rounded-lg flex-shrink-0">
-                      <Icon className="w-5 h-5 text-blue-600" />
+                      <IntegrationIcon integration={integration} className="w-5 h-5 text-blue-600" />
                     </div>
                     <div className="flex-1 min-w-0">
                       <h3 className="font-semibold text-lg truncate">
@@ -818,10 +895,7 @@ export function IntegrationCatalog({ projectId }: IntegrationCatalogProps) {
               <div className="flex items-start justify-between">
                 <div className="flex items-start space-x-4">
                   <div className="p-3 bg-blue-50 rounded-lg">
-                    {(() => {
-                      const Icon = getCategoryIcon(selectedIntegration.category);
-                      return <Icon className="w-8 h-8 text-blue-600" />;
-                    })()}
+                    <IntegrationIcon integration={selectedIntegration} className="w-8 h-8 text-blue-600" />
                   </div>
                   <div>
                     <div className="flex items-center gap-2 mb-2">
