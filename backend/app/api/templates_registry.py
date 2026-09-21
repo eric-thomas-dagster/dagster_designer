@@ -334,13 +334,24 @@ async def configure_component(
         component_dir = components_dir / component_id
         manifest_file = component_dir / "manifest.yaml"
 
-        if not manifest_file.exists():
+        # Components installed via install-via-cli (the official
+        # dagster-community-components-cli, used by Ingestions' "Add
+        # source") never get a manifest.yaml -- that's a Designer-only
+        # convention the upstream CLI doesn't know to write. It does leave
+        # a defs.yaml stub with the canonical `type:` string though, so
+        # fall back to that before giving up.
+        stub_defs_file = defs_dir / component_id / "defs.yaml"
+
+        if manifest_file.exists():
+            with open(manifest_file, 'r') as f:
+                manifest_data = yaml.safe_load(f)
+            component_type = manifest_data.get('component_type')
+        elif stub_defs_file.exists():
+            stub_data = yaml.safe_load(stub_defs_file.read_text()) or {}
+            component_type = stub_data.get('type')
+        else:
             raise HTTPException(status_code=404, detail="Component manifest not found")
 
-        with open(manifest_file, 'r') as f:
-            manifest_data = yaml.safe_load(f)
-
-        component_type = manifest_data.get('component_type')
         if not component_type:
             raise HTTPException(status_code=500, detail="Component type not found in manifest")
 
@@ -1000,6 +1011,26 @@ async def install_component_via_cli(
             status_code=500,
             detail=f"defs.yaml at {defs_yaml_path} has no `type:` field to return",
         )
+
+    # Persist component_type where /configure/{component_id} (used by the
+    # Ingestions "Save" flow) looks for it. manifest.yaml is a
+    # Designer-only convention the upstream CLI doesn't write, and the
+    # demo defs.yaml we just read `type:` from gets deleted below for
+    # template-only installs (the common case: install now, configure
+    # later in the UI) -- without this, configuring later fails with
+    # "Component manifest not found" since nothing else on disk records
+    # the type string once that stub is gone.
+    manifest_component_dirs = (
+        list(project_dir.glob(f"src/*/components/{component_id}"))
+        + list(project_dir.glob(f"*/components/{component_id}"))
+    )
+    if manifest_component_dirs:
+        try:
+            (manifest_component_dirs[0] / "manifest.yaml").write_text(
+                yaml.safe_dump({"component_type": component_type}, sort_keys=False)
+            )
+        except Exception as e:
+            print(f"[CLI Install] Warning: couldn't write manifest.yaml for {component_id}: {e}")
 
     # If the caller supplied attributes (e.g. Dagster AI's proposed config),
     # merge them into the stub defs.yaml the CLI wrote. LLMs love to guess
