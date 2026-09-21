@@ -154,9 +154,16 @@ class ProjectService:
                 temp_repo_dir = Path(temp_dir) / repo_name
 
                 try:
-                    # Try to clone with the specified branch
+                    # Explicit cwd rather than inheriting the backend process's
+                    # own -- a GUI app launched via LaunchServices (double-click
+                    # or drag-installed, not run from a terminal) can end up
+                    # with a working directory git's getcwd() can't resolve,
+                    # even though the directory is objectively fine and the
+                    # parent process itself works. temp_dir was just created
+                    # by the context manager above, so it's guaranteed valid.
                     result = subprocess.run(
                         ["git", "clone", "--depth", "1", "-b", branch, repo_url, str(temp_repo_dir)],
+                        cwd=temp_dir,
                         capture_output=True,
                         text=True,
                     )
@@ -168,6 +175,7 @@ class ProjectService:
                         # Get the default branch using git ls-remote
                         ls_remote_result = subprocess.run(
                             ["git", "ls-remote", "--symref", repo_url, "HEAD"],
+                            cwd=temp_dir,
                             capture_output=True,
                             text=True,
                             check=True,
@@ -185,6 +193,7 @@ class ProjectService:
                         # Try cloning with the detected default branch
                         result = subprocess.run(
                             ["git", "clone", "--depth", "1", "-b", default_branch, repo_url, str(temp_repo_dir)],
+                            cwd=temp_dir,
                             capture_output=True,
                             text=True,
                             check=True,
@@ -1266,6 +1275,7 @@ if custom_lineage_edges:
             # Clone the repository
             subprocess.run(
                 ["git", "clone", "--depth", "1", "-b", branch, repo_url, str(repo_dir)],
+                cwd=str(project_dir),
                 check=True,
                 capture_output=True,
                 text=True,

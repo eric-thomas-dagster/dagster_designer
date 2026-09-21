@@ -415,6 +415,7 @@ async def _clone_and_setup_dbt_project(
         print(f"[INFO] Cloning {dbt_project_name} from {repo_url}...")
         subprocess.run(
             ["git", "clone", repo_url, str(target_path)],
+            cwd=str(target_path.parent),
             check=True,
             capture_output=True,
             text=True

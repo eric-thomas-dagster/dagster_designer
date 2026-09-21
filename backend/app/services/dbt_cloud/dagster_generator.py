@@ -118,6 +118,7 @@ class DagsterProjectGenerator:
             try:
                 subprocess.run(
                     ["git", "clone", repo_url, str(project_dir)],
+                    cwd=str(dbt_projects_dir),
                     check=True,
                     capture_output=True,
                     text=True
