@@ -61,6 +61,13 @@ export function ComponentConfigModal({
   // column-picker dropdowns on `*_column` / `*_columns` fields so users
   // aren't guessing column names into a blank text box.
   const [knownSchemas, setKnownSchemas] = useState<Record<string, { columns: string[]; dtypes: Record<string, string> }>>({});
+  // Per-destination structured credential sub-field values, for fields whose
+  // schema declares `x-dagster-destination-fields` (e.g. a dlt ingestion's
+  // `destination_credentials_url`). Keyed by the current `destination` value
+  // so switching between e.g. snowflake/postgres and back doesn't lose what
+  // was typed. These are assembled into the real target field's connection
+  // string on every change -- see renderDestinationCredentialsField.
+  const [destCredFieldValues, setDestCredFieldValues] = useState<Record<string, Record<string, string>>>({});
 
   useEffect(() => {
     if (!currentProject) return;
@@ -584,6 +591,94 @@ export function ComponentConfigModal({
       if (schema?.columns) schema.columns.forEach((c) => cols.add(c));
     }
     return Array.from(cols);
+  };
+
+  // Assembles a destination's connection-string template (see
+  // `x-dagster-destination-fields` in schema.json) from the structured
+  // sub-field values the user typed. Falls back to a field's own `default`
+  // when it's left blank (e.g. postgres' port), and only appends optional
+  // query params that actually have a value so an empty `role`/`warehouse`
+  // doesn't leave a dangling `&role=` in the URL.
+  const assembleDestinationUrl = (option: any, values: Record<string, string>): string => {
+    const getVal = (name: string) => {
+      const v = values[name];
+      if (v) return v;
+      const f = (option.fields || []).find((x: any) => x.name === name);
+      return f?.default || '';
+    };
+    let url = String(option.template?.base || '').replace(/\{(\w+)\}/g, (_: string, key: string) =>
+      encodeURIComponent(getVal(key))
+    );
+    const queryParams = option.template?.query_params || {};
+    const parts = Object.entries(queryParams)
+      .map(([qkey, fieldName]) => [qkey, getVal(fieldName as string)] as [string, string])
+      .filter(([, v]) => v)
+      .map(([qkey, v]) => `${qkey}=${encodeURIComponent(v)}`);
+    if (parts.length) url += (url.includes('?') ? '&' : '?') + parts.join('&');
+    return url;
+  };
+
+  // Renders structured, destination-specific credential fields (Account/
+  // Username/Password/... for Snowflake, Host/Port/... for Postgres, etc.)
+  // instead of one opaque "paste a connection string" text box, for fields
+  // whose schema declares `x-dagster-destination-fields`. Assembles them
+  // into the real target field (e.g. destination_credentials_url) on every
+  // keystroke, so the saved config is still just the one connection-string
+  // field the component actually reads -- no component.py changes needed.
+  // Destinations without a structured definition fall back to the plain
+  // field exactly as before.
+  const renderDestinationCredentialsField = (fieldName: string, fieldSchema: any, destFields: any) => {
+    const destination = formData[destFields.trigger_field];
+    const option = destination ? destFields.options?.[destination] : null;
+
+    if (!option) {
+      return (
+        <>
+          <label className="block text-sm font-medium text-gray-700 mb-1">{fieldName}</label>
+          {fieldSchema.description && (
+            <p className="text-xs text-gray-500 mb-1">{fieldSchema.description}</p>
+          )}
+          {renderField(fieldName, fieldSchema)}
+        </>
+      );
+    }
+
+    const values = destCredFieldValues[destination] || {};
+    const updateSubField = (subName: string, value: string) => {
+      const nextValues = { ...values, [subName]: value };
+      setDestCredFieldValues((prev) => ({ ...prev, [destination]: nextValues }));
+      handleFieldChange(fieldName, assembleDestinationUrl(option, nextValues));
+    };
+    const destinationLabel = destination.charAt(0).toUpperCase() + destination.slice(1);
+
+    return (
+      <>
+        <label className="block text-sm font-medium text-gray-700 mb-2">
+          {destinationLabel} credentials
+        </label>
+        <div className="space-y-3 pl-3 border-l-2 border-blue-200">
+          {(option.fields || []).map((f: any) => (
+            <div key={f.name}>
+              <label className="block text-xs font-medium text-gray-600 mb-1">
+                {f.label}
+                {f.required && <span className="text-red-500 ml-1">*</span>}
+              </label>
+              <input
+                type={f.widget === 'password' ? 'password' : 'text'}
+                value={values[f.name] || ''}
+                onChange={(e) => updateSubField(f.name, e.target.value)}
+                placeholder={f.description || f.default || f.label}
+                className="w-full px-3 py-2 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+              />
+            </div>
+          ))}
+        </div>
+        <p className="text-xs text-gray-400 mt-2">
+          Assembled into <code className="bg-gray-100 px-1 rounded">{fieldName}</code>. Pick a
+          destination without structured fields to edit the raw connection string instead.
+        </p>
+      </>
+    );
   };
 
   const renderField = (fieldName: string, fieldSchema: any) => {
@@ -1385,7 +1480,15 @@ export function ComponentConfigModal({
                   <p className="text-sm text-gray-500">No configuration fields available</p>
                 )}
 
-                {Object.entries(properties).map(([fieldName, fieldSchema]: [string, any]) => (
+                {Object.entries(properties).map(([fieldName, fieldSchema]: [string, any]) => {
+              if (fieldSchema['x-dagster-destination-fields']) {
+                return (
+                  <div key={fieldName}>
+                    {renderDestinationCredentialsField(fieldName, fieldSchema, fieldSchema['x-dagster-destination-fields'])}
+                  </div>
+                );
+              }
+              return (
               <div key={fieldName}>
                 <label className="block text-sm font-medium text-gray-700 mb-1">
                   {fieldName}
@@ -1398,7 +1501,8 @@ export function ComponentConfigModal({
                 )}
                 {renderField(fieldName, fieldSchema)}
               </div>
-            ))}
+              );
+            })}
               </>
             )}
           </div>
