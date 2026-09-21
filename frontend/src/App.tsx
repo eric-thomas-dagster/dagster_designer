@@ -805,20 +805,24 @@ function App() {
           className={`flex-shrink-0 flex flex-col border-b ${isTauri ? 'border-gray-200/70 dark:border-white/10 titlebar-drag-region' : 'border-white/10'}`}
           {...(isTauri ? { 'data-tauri-drag-region': true } : {})}
         >
-          {/* Pure drag strip the height of macOS's traffic-light cluster, so
-              the buttons never sit over -- and never cut off -- the brand
-              row below. Only needed in the desktop app, where the overlay
-              title bar leaves the OS controls floating over our content. */}
-          {isTauri && <div className="h-8 w-full" data-tauri-drag-region />}
-          <div className={`h-14 flex items-center gap-2 px-3 ${navCollapsed ? 'justify-center' : ''}`}>
-            {!navCollapsed && (
-              <div className="flex items-center gap-2 min-w-0">
-                <BrandMark />
-                <span className={`text-sm font-semibold tracking-tight truncate ${isTauri ? 'text-gray-900 dark:text-white' : 'text-white'}`}>Dagster Designer</span>
-              </div>
-            )}
-            {navCollapsed && <BrandMark />}
-          </div>
+          {/* Desktop app: no logo/wordmark here at all -- the Dock icon and
+              menu bar already say what app this is, so this is just the
+              drag strip under macOS's traffic lights, sized to their
+              height and nothing else. The web app has neither of those,
+              so it keeps the full icon + wordmark lockup. */}
+          {isTauri ? (
+            <div className="h-10 w-full" data-tauri-drag-region />
+          ) : (
+            <div className={`h-14 flex items-center gap-2 px-3 ${navCollapsed ? 'justify-center' : ''}`}>
+              {!navCollapsed && (
+                <div className="flex items-center gap-2 min-w-0">
+                  <BrandMark />
+                  <span className="text-sm font-semibold tracking-tight truncate text-white">Dagster Designer</span>
+                </div>
+              )}
+              {navCollapsed && <BrandMark />}
+            </div>
+          )}
         </div>
         {currentProject && (
           <Tabs.Root value={activeMainTab} onValueChange={setActiveMainTab} orientation="vertical" className="flex-1 flex flex-col overflow-hidden">
