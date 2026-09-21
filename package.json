@@ -6,7 +6,7 @@
   "scripts": {
     "tauri": "tauri",
     "app:dev": "tauri dev",
-    "app:build": "tauri build"
+    "app:build": "src-tauri/scripts/fetch-uv.sh && tauri build"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2"
