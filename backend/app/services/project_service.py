@@ -1436,9 +1436,17 @@ if custom_lineage_edges:
         project_dir = self._get_project_dir(project)
 
         try:
-            # Run create-dagster project command
+            # cwd explicit rather than inherited -- project_dir doesn't exist
+            # yet (create-dagster is what creates it), so use projects_dir,
+            # the nearest ancestor guaranteed to exist. See the git clone
+            # cwd fix earlier in this file for why this matters: a
+            # double-click/drag-installed launch (through LaunchServices)
+            # can leave the backend process with a working directory this
+            # kind of child process can't resolve, even though the
+            # directory is completely valid.
             result = subprocess.run(
                 [find_uv_binary("uvx"), "create-dagster", "project", str(project_dir), "--no-uv-sync", "--verbose"],
+                cwd=str(self.projects_dir),
                 capture_output=True,
                 text=True,
                 timeout=120,

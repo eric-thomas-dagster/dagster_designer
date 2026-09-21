@@ -145,7 +145,7 @@ class DagsterProjectGenerator:
             
             # Check if dbt is available
             try:
-                subprocess.run(["dbt", "--version"], capture_output=True, check=True)
+                subprocess.run(["dbt", "--version"], cwd=str(Path.home()), capture_output=True, check=True)
             except (subprocess.CalledProcessError, FileNotFoundError):
                 # dbt not available - skip manifest generation
                 continue
@@ -211,6 +211,7 @@ class DagsterProjectGenerator:
         try:
             result = subprocess.run(
                 ["create-dagster", "--version"],
+                cwd=str(Path.home()),
                 capture_output=True,
                 text=True,
                 check=True,
@@ -221,6 +222,7 @@ class DagsterProjectGenerator:
             try:
                 result = subprocess.run(
                     ["dg", "--version"],
+                    cwd=str(Path.home()),
                     capture_output=True,
                     text=True,
                     check=True,

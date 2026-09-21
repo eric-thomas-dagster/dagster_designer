@@ -245,6 +245,7 @@ except Exception as e:
         try:
             result = subprocess.run(
                 ["dg", "list", "components"],
+                cwd=str(self.projects_dir),
                 capture_output=True,
                 text=True,
                 timeout=30,
@@ -288,6 +289,7 @@ except Exception as e:
             # Run dg scaffold with --help to get options
             result = subprocess.run(
                 ["dg", "scaffold", "defs", component_type, "--help"],
+                cwd=str(self.projects_dir),
                 capture_output=True,
                 text=True,
                 timeout=10,
