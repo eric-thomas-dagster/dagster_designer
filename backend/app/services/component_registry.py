@@ -2,6 +2,7 @@
 
 import importlib
 import inspect
+import os
 import pkgutil
 import sys
 from typing import Any, Optional, Dict, List
@@ -66,7 +67,18 @@ class ComponentRegistry:
         """Dynamically discover components from all installed dagster-* packages."""
         # Get all installed packages
         installed_packages = {}
-        for module_info in pkgutil.iter_modules():
+        # pkgutil.iter_modules() with no args walks sys.path itself, which
+        # can contain entries that aren't real directories -- e.g. the
+        # synthetic marker setuptools' editable installs add (something like
+        # "__editable__.dagster_designer_backend-0.1.0.finder.__path_hook__"),
+        # present because this backend installs itself in editable mode.
+        # pkgutil/importlib raises FileNotFoundError on those instead of
+        # skipping them, so filter sys.path down to real directories first
+        # ('' means cwd, per Python's own sys.path convention).
+        search_paths = [
+            p for p in (entry or os.getcwd() for entry in sys.path) if os.path.isdir(p)
+        ]
+        for module_info in pkgutil.iter_modules(search_paths):
             if module_info.name.startswith('dagster_') or module_info.name == 'dagster':
                 installed_packages[module_info.name] = module_info
 
