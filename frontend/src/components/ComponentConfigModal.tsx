@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { X, Save, Download, CheckCircle, XCircle, Loader } from 'lucide-react';
+import { X, Save, Download, CheckCircle, XCircle, Loader, Plus } from 'lucide-react';
 import { useComponent } from '@/hooks/useComponentRegistry';
 import { TranslationEditor } from './TranslationEditor';
 import { EnhancedDataQualityChecksBuilder } from './EnhancedDataQualityChecksBuilder';
@@ -100,6 +100,19 @@ export function ComponentConfigModal({
   const availableAssets = currentProject?.graph.nodes
     .filter((node: any) => node.node_kind === 'asset' || node.type === 'component')
     .map((node: any) => node.data.asset_key || node.data.label || node.id) || [];
+
+  // Resource keys already configured in this project (from any component
+  // whose own attributes declare one, e.g. duckdb_resource/snowflake_resource
+  // instances) -- offered as autocomplete suggestions for a sink's
+  // resource_key, since that's a plain string with no structural link back
+  // to the resource component that registers it.
+  const availableResourceKeys = Array.from(
+    new Set(
+      (currentProject?.components || [])
+        .map((c: any) => c.attributes?.resource_key)
+        .filter((k: any): k is string => typeof k === 'string' && k.length > 0)
+    )
+  );
 
   useEffect(() => {
     if (component) {
@@ -1171,6 +1184,161 @@ export function ComponentConfigModal({
     }
 
     if (fieldType === 'array') {
+      // Special handling for `sinks` (array of {kind, resource_key, table,
+      // schema, if_exists, mode, match} objects, per the sinks-capable
+      // components -- rest_api_fetcher, dataframe_from_csv, database_query,
+      // okta_system_log_ingestion, redis_reader). The generic array
+      // renderer below (join('\n')/split('\n')) is built for string lists
+      // and silently corrupts an array of objects -- editing would show
+      // literal "[object Object]" text and turn every sink into a plain
+      // string on save. Render real per-sink fields instead.
+      if (fieldName === 'sinks' && fieldSchema.items?.type === 'object') {
+        const sinksList: any[] = Array.isArray(value) ? value : [];
+        const updateSink = (index: number, patch: Record<string, any>) => {
+          const next = sinksList.map((s, i) => (i === index ? { ...s, ...patch } : s));
+          handleFieldChange(fieldName, next);
+        };
+        const removeSink = (index: number) => {
+          handleFieldChange(fieldName, sinksList.filter((_, i) => i !== index));
+        };
+        const addSink = () => {
+          handleFieldChange(fieldName, [
+            ...sinksList,
+            { kind: 'table', resource_key: '', table: '', if_exists: 'append' },
+          ]);
+        };
+
+        return (
+          <div className="space-y-3">
+            {sinksList.length === 0 && (
+              <p className="text-xs text-gray-500">
+                No sinks configured — the asset just returns its DataFrame.
+              </p>
+            )}
+            {sinksList.map((sink, index) => (
+              <div key={index} className="border border-gray-200 rounded-md p-3 space-y-2 bg-gray-50">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-semibold text-gray-700">Sink {index + 1}</span>
+                  <button
+                    type="button"
+                    onClick={() => removeSink(index)}
+                    className="text-gray-400 hover:text-red-600"
+                    title="Remove sink"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-gray-600 mb-1">
+                    Resource Key <span className="text-red-500">*</span>
+                  </label>
+                  <input
+                    type="text"
+                    list={`sink-resource-keys-${index}`}
+                    value={sink.resource_key || ''}
+                    onChange={(e) => updateSink(index, { resource_key: e.target.value })}
+                    placeholder="e.g. snowflake_resource"
+                    className="w-full px-3 py-1.5 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  />
+                  <datalist id={`sink-resource-keys-${index}`}>
+                    {availableResourceKeys.map((k) => (
+                      <option key={k} value={k} />
+                    ))}
+                  </datalist>
+                  {availableResourceKeys.length === 0 && (
+                    <p className="text-xs text-gray-400 mt-0.5">
+                      Must match the resource_key of a resource component instance
+                      already configured in this project (e.g. snowflake_resource).
+                    </p>
+                  )}
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="block text-xs font-medium text-gray-600 mb-1">
+                      Table <span className="text-red-500">*</span>
+                    </label>
+                    <input
+                      type="text"
+                      value={sink.table || ''}
+                      onChange={(e) => updateSink(index, { table: e.target.value })}
+                      placeholder="destination_table"
+                      className="w-full px-3 py-1.5 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-gray-600 mb-1">Schema</label>
+                    <input
+                      type="text"
+                      value={sink.schema || ''}
+                      onChange={(e) => updateSink(index, { schema: e.target.value || undefined })}
+                      placeholder="(optional)"
+                      className="w-full px-3 py-1.5 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    />
+                  </div>
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="block text-xs font-medium text-gray-600 mb-1">If Exists</label>
+                    <select
+                      value={sink.if_exists || 'append'}
+                      onChange={(e) => updateSink(index, { if_exists: e.target.value })}
+                      className="w-full px-3 py-1.5 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
+                    >
+                      <option value="append">append</option>
+                      <option value="replace">replace</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-gray-600 mb-1">Mode</label>
+                    <select
+                      value={sink.mode || ''}
+                      onChange={(e) => {
+                        const mode = e.target.value || undefined;
+                        updateSink(index, mode ? { mode } : { mode: undefined });
+                      }}
+                      className="w-full px-3 py-1.5 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
+                    >
+                      <option value="">(none — plain append/replace)</option>
+                      <option value="upsert_on_match">upsert_on_match</option>
+                    </select>
+                  </div>
+                </div>
+                {sink.mode === 'upsert_on_match' && (
+                  <div>
+                    <label className="block text-xs font-medium text-gray-600 mb-1">
+                      Match Columns <span className="text-red-500">*</span>
+                    </label>
+                    <input
+                      type="text"
+                      value={Array.isArray(sink.match) ? sink.match.join(', ') : ''}
+                      onChange={(e) =>
+                        updateSink(index, {
+                          match: e.target.value.split(',').map((s) => s.trim()).filter(Boolean),
+                        })
+                      }
+                      placeholder="id, partition_date"
+                      className="w-full px-3 py-1.5 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    />
+                    <p className="text-xs text-gray-400 mt-0.5">
+                      Comma-separated column names used to match existing rows before
+                      delete + insert (partition-rewrite idempotency).
+                    </p>
+                  </div>
+                )}
+              </div>
+            ))}
+            <button
+              type="button"
+              onClick={addSink}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm text-blue-600 border border-blue-200 rounded-md hover:bg-blue-50"
+            >
+              <Plus className="w-3.5 h-3.5" />
+              Add sink
+            </button>
+          </div>
+        );
+      }
+
       // Special handling for deps and asset_selection fields - show multi-select dropdown
       if (fieldName === 'deps' || fieldName === 'asset_selection') {
         const selectedValues = Array.isArray(value) ? value : [];
