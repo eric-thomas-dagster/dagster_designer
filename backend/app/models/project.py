@@ -37,6 +37,12 @@ class Project(BaseModel):
     dagster_plus_deployment: str | None = Field("prod", description="Dagster+ deployment name — usually 'prod'")
     dagster_plus_token: str | None = Field(None, description="Dagster+ user token; NEVER returned to the frontend, only used server-side")
     dagster_plus_location: str | None = Field(None, description="Optional Dagster+ code location filter")
+    # Ephemeral — set in-memory when a cloud hydrate fails, never persisted
+    # to disk (callers that set it never call _save_project afterward, so
+    # it's naturally cleared on the next fresh load from disk). Lets the
+    # frontend show why project.graph might be stale/empty instead of
+    # silently showing nothing.
+    dagster_plus_last_error: str | None = Field(None, description="Last Dagster+ hydrate error, if any (not persisted)")
 
 
 class ProjectCreate(BaseModel):

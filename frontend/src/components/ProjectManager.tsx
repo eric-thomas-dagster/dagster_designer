@@ -1248,9 +1248,22 @@ function DeploymentPicker({ projectId, currentDeployment, onSwitched }: {
       // "" tells the backend to clear the deployment and use the org
       // default (via the org-level /graphql redirect). Anything else
       // pins the project to that specific deployment.
-      await projectsApi.switchDagsterPlusDeployment(projectId, deployment);
+      const updated = await projectsApi.switchDagsterPlusDeployment(projectId, deployment);
       onSwitched();
-      notify.success(deployment ? `Switched to ${deployment}` : 'Using org default deployment');
+      // The switch itself can succeed (the picker's choice is saved) while
+      // the follow-up fetch of assets/schedules/sensors for the NEW
+      // deployment fails (bad permissions, a large deployment timing out,
+      // etc.) -- that failure is non-fatal server-side so the picker still
+      // updates, but silently showing an empty graph with a "success" toast
+      // was the actual bug report: switch to a real deployment and nothing
+      // loads, with no indication why. Surface it instead.
+      if (updated?.dagster_plus_last_error) {
+        notify.error(
+          `Switched to ${deployment || 'org default'}, but couldn't load its data: ${updated.dagster_plus_last_error}`
+        );
+      } else {
+        notify.success(deployment ? `Switched to ${deployment}` : 'Using org default deployment');
+      }
     } catch (e: any) {
       notify.error(e?.response?.data?.detail || e?.message || 'Switch failed');
     } finally {

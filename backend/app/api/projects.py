@@ -117,10 +117,14 @@ class TestDagsterPlusResponse(BaseModel):
     ok: bool
     version: str | None = None
     detail: str | None = None
-    # When deployment is left blank at test time, we probe the org for
-    # its full deployment list so the dialog can show what's available
-    # and hint at the org's default. `default_deployment` is a heuristic
-    # (the sole PRODUCTION-typed entry, when there is exactly one).
+    # When deployment is left blank at test time, we enumerate the org's
+    # full deployment list so the dialog can show what's available.
+    # `default_deployment` is the org-level endpoint's redirect target
+    # (see probe_default_deployment) -- deploymentType is 'PRODUCTION'
+    # for every full deployment, so the list alone can't say which one
+    # Dagster+ treats as default; the redirect can. This is also exactly
+    # what connect_dagster_plus pins as the deployment when the field is
+    # left blank, so what's shown here matches what "Connect" will do.
     deployments: list[TestDagsterPlusDeploymentHint] = []
     default_deployment: str | None = None
 
@@ -132,8 +136,11 @@ async def test_dagster_plus_connection(request: ConnectDagsterPlusRequest):
     early ping/pong before we commit anything.
 
     On success, we also enumerate the org's deployments so the dialog
-    can show users what's available and hint at the default (avoids
-    guessing 'prod' when a given org uses e.g. 'data-eng-prod')."""
+    can show users what's available, and resolve the org's actual
+    default via the org-level endpoint's redirect target (see
+    probe_default_deployment) -- deploymentType is 'PRODUCTION' for
+    every full deployment, so the list alone can't tell us which one
+    Dagster+ treats as default."""
     from ..services.dagster_plus_client import (
         query, DagsterPlusError, PING_QUERY, DEPLOYMENTS_QUERY, probe_default_deployment,
     )
@@ -168,10 +175,9 @@ async def test_dagster_plus_connection(request: ConnectDagsterPlusRequest):
         # Not fatal -- ping succeeded, we just can't enrich.
         print(f"[dagster+] deployment enumeration during test failed: {e}", flush=True)
 
-    # Detect the org's actual default deployment via the org-level
-    # /graphql endpoint's 307 redirect. Dagster+'s deploymentType is
-    # 'PRODUCTION' for every non-branch deployment, so it can't tell us
-    # which one is the *default* -- the redirect target can.
+    # Resolve the org's actual default the same way connect_dagster_plus
+    # does when the deployment field is left blank, so what this dialog
+    # shows matches what "Connect" will actually pin.
     try:
         default_deployment = await probe_default_deployment(request.org, request.token)
     except Exception as e:
@@ -205,9 +211,10 @@ def _safe(s: str) -> str:
 @router.post("/dagster-plus/connect", response_model=Project, status_code=201)
 async def connect_dagster_plus(request: ConnectDagsterPlusRequest):
     """Create a new project record backed by a live Dagster+ deployment.
-    Validates the token first via a ping query; on success stores the
-    connection metadata and returns the new project."""
-    from ..services.dagster_plus_client import query, DagsterPlusError, PING_QUERY
+    Validates the token first via a ping query, resolves an explicit
+    deployment to pin, then stores the connection metadata and returns
+    the new project."""
+    from ..services.dagster_plus_client import query, DagsterPlusError, PING_QUERY, probe_default_deployment
 
     # Verify the token round-trips before we persist anything.
     try:
@@ -215,9 +222,26 @@ async def connect_dagster_plus(request: ConnectDagsterPlusRequest):
     except DagsterPlusError as e:
         raise HTTPException(status_code=400, detail=f"Couldn't connect to Dagster+: {e}")
 
+    deployment = (request.deployment or "").strip() or None
+    if not deployment:
+        # User left the field blank -- resolve the org's actual default
+        # via the org-level endpoint's redirect target (varies per org
+        # -- e.g. hooli's is `data-eng-prod`, not `prod`) and PIN it,
+        # rather than saving None. Saving None used to mean every
+        # single later GraphQL call (assets, repos, schedules x N,
+        # sensors x N) independently re-did this same redirect
+        # round-trip from scratch, which was slow -- and the deployment
+        # picker could only ever show a vague "org default" label
+        # instead of the actual deployment name in use. Resolving once,
+        # here, fixes both. If the org endpoint doesn't redirect (rare
+        # -- e.g. some Hybrid setups), this falls back to None exactly
+        # like before: still functional, just back to the slower,
+        # per-query resolution.
+        deployment = await probe_default_deployment(request.org, request.token)
+
     # Create a project record but flag it as a cloud connection.
     proj_create = ProjectCreate(
-        name=request.name.strip() or f"{request.org} ({request.deployment})",
+        name=request.name.strip() or f"{request.org} ({deployment or 'default'})",
         description=request.description,
     )
     project = project_service.create_project(proj_create)
@@ -225,12 +249,7 @@ async def connect_dagster_plus(request: ConnectDagsterPlusRequest):
     # since ProjectCreate doesn't carry them.
     project.is_dagster_plus = True
     project.dagster_plus_org = request.org.strip()
-    # Leave deployment None when user submits blank -- the client library
-    # then hits the org-level /graphql endpoint and follows Dagster+'s
-    # 307 redirect to the org's actual default (varies per org --
-    # hooli's is `data-eng-prod`, not `prod`). Forcing "prod" here made
-    # the picker misreport the current deployment and broke API calls.
-    project.dagster_plus_deployment = (request.deployment or "").strip() or None
+    project.dagster_plus_deployment = deployment
     project.dagster_plus_token = request.token
     project.dagster_plus_location = (request.location or "").strip() or None
     project_service._save_project(project)
@@ -407,16 +426,30 @@ async def switch_dagster_plus_deployment(project_id: str, request: SwitchDeploym
     if not project or not project.is_dagster_plus:
         raise HTTPException(status_code=404, detail="Not a Dagster+ project.")
     try:
-        project.dagster_plus_deployment = (request.deployment or "").strip() or None
+        deployment = (request.deployment or "").strip() or None
+        if not deployment:
+            # Same resolve-and-pin rule as connect_dagster_plus: don't
+            # leave this None (which would mean re-resolving the org's
+            # redirect target on every later query) -- pin the actual
+            # deployment name now.
+            from ..services.dagster_plus_client import probe_default_deployment
+            deployment = await probe_default_deployment(
+                project.dagster_plus_org or "", project.dagster_plus_token or ""
+            )
+        project.dagster_plus_deployment = deployment
         project_service._save_project(project)
         try:
             await _hydrate_cloud_graph(project)
+            project.dagster_plus_last_error = None
         except Exception as e:
             # Non-fatal: hydrate can fail if the new deployment is bad;
             # we still want the picker to update the pinned choice so
-            # the user can pick a different one without contorting.
+            # the user can pick a different one without contorting. But
+            # surface WHY so the UI doesn't just show an empty graph with
+            # no explanation.
             import traceback
             print(f"[dagster+] hydrate after switch failed: {e}\n{traceback.format_exc()}", flush=True)
+            project.dagster_plus_last_error = str(e)
         return _strip_token(project)
     except HTTPException:
         raise
@@ -548,9 +581,12 @@ async def get_project(project_id: str):
     if project.is_dagster_plus:
         try:
             await _hydrate_cloud_graph(project)
+            project.dagster_plus_last_error = None
         except Exception as e:
-            # Non-fatal — return the last known graph if the cloud call fails.
+            # Non-fatal — return the last known graph if the cloud call fails,
+            # but tell the frontend WHY so a stale/empty graph isn't silent.
             print(f"[dagster+] hydrate failed for {project.id}: {e}", flush=True)
+            project.dagster_plus_last_error = str(e)
 
     # Never leak the Dagster+ token to the frontend — server-side only.
     return _strip_token(project) if project.is_dagster_plus else project
@@ -630,8 +666,14 @@ async def _hydrate_cloud_graph(project: Project) -> None:
         return
 
     # Single query returns lineage + checks + schedule/sensor
-    # attribution per asset. Cheap enough to run every load.
-    assets_data = await query(org, dep, tok, ASSETS_QUERY)
+    # attribution per asset. Unpaginated, so a deployment with a large
+    # number of assets/checks can take meaningfully longer than the
+    # client's 30s default — give this specific call more headroom
+    # rather than risk aborting the whole hydrate on a real prod-sized
+    # deployment (this call isn't wrapped in try/except on purpose: if
+    # it fails there's no asset graph to build regardless, so we let it
+    # raise and the caller records it as project.dagster_plus_last_error).
+    assets_data = await query(org, dep, tok, ASSETS_QUERY, timeout=90.0)
     raw_assets = assets_data.get("assetNodes") or []
 
     from datetime import datetime as _dt, timezone as _tz
@@ -685,48 +727,69 @@ async def _hydrate_cloud_graph(project: Project) -> None:
 
     # Project-level schedule + sensor lists — enumerate repositories
     # first (both queries require a RepositorySelector) then run once
-    # per repo. Feeds the Automation tab's PrimitivesManager.
+    # per repo. Feeds the Automation tab's PrimitivesManager. Repos are
+    # fetched CONCURRENTLY (asyncio.gather) rather than one-at-a-time —
+    # a real prod deployment can have many code locations, and this
+    # loop used to run 2 sequential, individually-timed-out round trips
+    # per repo, which was the single biggest contributor to hydrate
+    # being slow (and to blowing past the per-query timeout) on larger
+    # deployments.
     all_schedules: list[dict] = []
     all_sensors: list[dict] = []
+
+    async def _fetch_repo_automations(selector: dict) -> tuple[list[dict], list[dict], dict[str, list[dict]]]:
+        repo_schedules: list[dict] = []
+        repo_sensors: list[dict] = []
+        repo_sensor_links: dict[str, list[dict]] = {}
+        repo_label = f"{selector['repositoryLocationName']}::{selector['repositoryName']}"
+        try:
+            s_data = await query(org, dep, tok, SCHEDULES_QUERY, variables={"repositorySelector": selector})
+            for s in (((s_data.get("schedulesOrError") or {}).get("results") or [])):
+                repo_schedules.append({
+                    "name": s.get("name"),
+                    "cron": s.get("cronSchedule"),
+                    "description": s.get("description"),
+                    "status": (s.get("scheduleState") or {}).get("status"),
+                    "pipeline_name": s.get("pipelineName"),
+                    "repository": repo_label,
+                })
+        except Exception as e:
+            print(f"[dagster+] schedules for {selector} failed: {e}", flush=True)
+        try:
+            sen_data = await query(org, dep, tok, SENSORS_QUERY, variables={"repositorySelector": selector})
+            for s in (((sen_data.get("sensorsOrError") or {}).get("results") or [])):
+                linked_keys = ["/".join(k.get("path") or []) for k in ((s.get("metadata") or {}).get("assetKeys") or [])]
+                repo_sensors.append({
+                    "name": s.get("name"),
+                    "description": s.get("description"),
+                    "sensor_type": s.get("sensorType"),
+                    "status": (s.get("sensorState") or {}).get("status"),
+                    "repository": repo_label,
+                    "linked_asset_keys": linked_keys,
+                })
+                # If the sensor names specific assets, attach it.
+                for k in linked_keys:
+                    repo_sensor_links.setdefault(k, []).append({"name": s.get("name"), "sensor_type": s.get("sensorType")})
+        except Exception as e:
+            print(f"[dagster+] sensors for {selector} failed: {e}", flush=True)
+        return repo_schedules, repo_sensors, repo_sensor_links
+
     try:
         repos_data = await query(org, dep, tok, REPOSITORIES_QUERY)
         repos = ((repos_data.get("repositoriesOrError") or {}).get("nodes") or [])
-        for repo in repos:
-            selector = {
+        selectors = [
+            {
                 "repositoryLocationName": ((repo.get("location") or {}).get("name") or ""),
                 "repositoryName": (repo.get("name") or ""),
             }
-            try:
-                s_data = await query(org, dep, tok, SCHEDULES_QUERY, variables={"repositorySelector": selector})
-                for s in (((s_data.get("schedulesOrError") or {}).get("results") or [])):
-                    all_schedules.append({
-                        "name": s.get("name"),
-                        "cron": s.get("cronSchedule"),
-                        "description": s.get("description"),
-                        "status": (s.get("scheduleState") or {}).get("status"),
-                        "pipeline_name": s.get("pipelineName"),
-                        "repository": f"{selector['repositoryLocationName']}::{selector['repositoryName']}",
-                    })
-            except Exception as e:
-                print(f"[dagster+] schedules for {selector} failed: {e}", flush=True)
-            try:
-                sen_data = await query(org, dep, tok, SENSORS_QUERY, variables={"repositorySelector": selector})
-                for s in (((sen_data.get("sensorsOrError") or {}).get("results") or [])):
-                    linked_keys = ["/".join(k.get("path") or []) for k in ((s.get("metadata") or {}).get("assetKeys") or [])]
-                    entry = {
-                        "name": s.get("name"),
-                        "description": s.get("description"),
-                        "sensor_type": s.get("sensorType"),
-                        "status": (s.get("sensorState") or {}).get("status"),
-                        "repository": f"{selector['repositoryLocationName']}::{selector['repositoryName']}",
-                        "linked_asset_keys": linked_keys,
-                    }
-                    all_sensors.append(entry)
-                    # If the sensor names specific assets, attach it.
-                    for k in linked_keys:
-                        per_asset_sensors.setdefault(k, []).append({"name": s.get("name"), "sensor_type": s.get("sensorType")})
-            except Exception as e:
-                print(f"[dagster+] sensors for {selector} failed: {e}", flush=True)
+            for repo in repos
+        ]
+        results = await asyncio.gather(*(_fetch_repo_automations(sel) for sel in selectors))
+        for repo_schedules, repo_sensors, repo_sensor_links in results:
+            all_schedules.extend(repo_schedules)
+            all_sensors.extend(repo_sensors)
+            for k, entries in repo_sensor_links.items():
+                per_asset_sensors.setdefault(k, []).extend(entries)
     except Exception as e:
         print(f"[dagster+] hydrate: repository enumeration failed: {e}", flush=True)
 
