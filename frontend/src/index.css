@@ -346,6 +346,30 @@ html.tauri body {
 .dark .to-gray-50\/50 { --tw-gradient-stops: hsl(233 35% 11%); }
 .dark .to-green-50 { --tw-gradient-stops: hsl(142 35% 11%); }
 .dark .to-indigo-50 { --tw-gradient-stops: hsl(239 35% 11%); }
+/* GroupNode's collapsed-group card (GraphEditor.tsx) pairs `from-indigo-50`
+   with a bare `to-white`, which no other component does -- `to-white` alone
+   is scoped narrower (`.from-indigo-50.to-white`, not a bare `.to-white`
+   override) so this doesn't also repaint DataPreviewModal's unrelated
+   `from-gray-50 to-white` footer bar. Without this, the card's background
+   stayed an unchanged light indigo-to-white gradient in dark mode while its
+   text/badge colors *did* get remapped to light pastel tones meant for a
+   dark background -- light text on a near-white card, i.e. invisible.
+   Forcing background-image off + a flat background-color with !important
+   instead of only overriding --tw-gradient-stops: overriding just the
+   custom property still leaves `background-image: linear-gradient(...)`
+   in place referencing it, and that turned out not to render as expected
+   here -- being fully explicit about both properties removes any doubt. */
+.dark .from-indigo-50.to-white {
+  --tw-gradient-stops: hsl(239 35% 11%) !important;
+  background-image: none !important;
+  background-color: hsl(239 35% 11%) !important;
+}
+.dark .from-indigo-50.to-white.hover\:from-indigo-100:hover,
+.dark .hover\:from-indigo-100:hover {
+  --tw-gradient-stops: hsl(239 38% 16%) !important;
+  background-image: none !important;
+  background-color: hsl(239 38% 16%) !important;
+}
 .dark .to-pink-50 { --tw-gradient-stops: hsl(330 35% 11%); }
 .dark .to-purple-50 { --tw-gradient-stops: hsl(271 35% 11%); }
 .dark .to-red-50 { --tw-gradient-stops: hsl(0 35% 11%); }
