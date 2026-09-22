@@ -461,6 +461,7 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
   // per group, edges aggregated. Auto-on for large cloud graphs
   // (>60 assets) so users see manageable structure by default.
   const [collapseToGroups, setCollapseToGroups] = useState(false);
+  const { screenToFlowPosition, getNodes, fitView } = useReactFlow();
   // Per-group opt-out from collapse. When collapseToGroups=true,
   // groups in this Set render their individual assets in place while
   // the rest remain aggregated. Cleared whenever the global collapse
@@ -472,15 +473,50 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
   // longest-path layout; after that first placement, subsequent renders
   // must keep whatever position the user has dragged the asset to. If
   // we re-applied the layout every render, drags would snap right back.
+  // groupedView itself is the one that ADDS a group here -- but only once
+  // every member's real measured height is known (see heightForAsset there);
+  // adding it eagerly the instant it's expanded would lock in a layout
+  // computed from guessed heights, before ReactFlow has ever measured the
+  // newly-mounted cards.
   const laidOutGroupsRef = useRef<Set<string>>(new Set());
   useEffect(() => {
-    // Only mutate the ref *after* the render has consumed its previous
-    // value (see groupedView memo). Sync-add newly-expanded groups so
-    // the next render treats them as "already placed"; drop groups that
-    // aren't expanded any more so they get fresh layout on re-expand.
+    // Only drop groups that aren't expanded any more here, so they get a
+    // fresh (measured) layout next time they're re-expanded.
     const next = new Set<string>();
-    for (const g of expandedGroups) next.add(g);
+    for (const g of laidOutGroupsRef.current) {
+      if (expandedGroups.has(g)) next.add(g);
+    }
     laidOutGroupsRef.current = next;
+  }, [expandedGroups]);
+  // Follow the camera on expand/collapse. groupedView recomputes node
+  // positions for the WHOLE visible node set via a fresh topological
+  // layout on every toggle (not just the group that changed), so the
+  // newly-revealed assets -- and often other still-collapsed group
+  // cards -- can land anywhere, frequently outside the current
+  // viewport. Without this, clicking a group card looks like it does
+  // nothing: the click, state update, and relayout all happen
+  // correctly, the result is just off-screen. Skip the very first run
+  // (initial mount) since <ReactFlow fitView> already handles that.
+  const isFirstExpandEffect = useRef(true);
+  useEffect(() => {
+    if (isFirstExpandEffect.current) {
+      isFirstExpandEffect.current = false;
+      return;
+    }
+    const raf = requestAnimationFrame(() => {
+      fitView({ padding: 0.2, duration: 300 });
+    });
+    return () => cancelAnimationFrame(raf);
+    // Deliberately depend on expandedGroups ONLY. fitView is supposed to
+    // be a stable function reference from useReactFlow() (memoized on
+    // [d3Zoom, d3Selection] internally) -- but including it here meant
+    // that if its reference ever changed for ANY reason, this effect
+    // would refire and kick off another animated fitView() call, which
+    // was contributing to the render-loop/flashing bug fixed elsewhere
+    // in this file. We only actually want this effect to run when the
+    // user expands/collapses a group, never merely because fitView's
+    // identity changed.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [expandedGroups]);
   // Stable callbacks so memoized GroupNode / AssetNode instances aren't
   // forced to re-render each time `groupedView` recomputes (the memo
@@ -533,7 +569,30 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
   // assets with connections grouped into their own sections.
   const [showAllInGraph, setShowAllInGraph] = useState(false);
   const { currentProject, updateGraph, setCurrentProject, isLoading } = useProjectStore();
-  const [nodes, setNodes, onNodesChange] = useNodesState([]);
+  const [nodes, setNodes, onNodesChangeRaw] = useNodesState([]);
+  // Collapsed-group placeholder nodes (id `__group__::<name>`) are
+  // synthetic -- built fresh by the groupedView memo below, never part
+  // of this raw `nodes` array. But ReactFlow still measures them (like
+  // any node) and reports the result through this same onNodesChange
+  // callback. Applying a `dimensions`/`position` change whose id isn't
+  // in `nodes` is a no-op AS FAR AS CONTENT GOES, but applyNodeChanges
+  // still returns a new array reference regardless -- so every one of
+  // these spurious changes was still causing a raw state update, which
+  // recomputed the (correctly memoized) perAssetDisplay/groupedView
+  // chain because `nodes` itself had "changed" by reference, which
+  // rebuilds the group placeholders as brand-new objects with no
+  // cached width/height, which ReactFlow re-measures, which reports
+  // another change here -- a self-sustaining loop with nothing left to
+  // break it once started. Filtering these out before they ever reach
+  // the raw state setter is what actually stops it, independent of
+  // (and in addition to) every render/memoization fix elsewhere in
+  // this file.
+  const onNodesChange = useCallback((changes: any[]) => {
+    const real = changes.filter((c) => !(typeof c.id === 'string' && c.id.startsWith('__group__::')));
+    if (real.length > 0) {
+      onNodesChangeRaw(real);
+    }
+  }, [onNodesChangeRaw]);
   const [edges, setEdges, onEdgesChange] = useEdgesState([]);
   const [selectedAssets, setSelectedAssets] = useState<string[]>([]);
   const [isMaterializing, setIsMaterializing] = useState(false);
@@ -541,7 +600,6 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
   const isInitialLoad = useRef(true);
   const hasTriggeredRegeneration = useRef(false);
   const lastSavedNodesHash = useRef<string>('');
-  const { screenToFlowPosition, getNodes } = useReactFlow();
 
   // Launchpad state
   const [showLaunchpad, setShowLaunchpad] = useState(false);
@@ -804,9 +862,31 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
 
   // Track if we should auto-arrange groups after load
   const shouldAutoArrange = useRef(false);
+  // Set right before this component's own save effect calls updateGraph(),
+  // and consumed here. Without this, ANY updateGraph() call -- even one
+  // that only wrote freshly-measured node dimensions, not a real content
+  // change -- gives currentProject.graph a new object reference, which
+  // this effect's dependency array (intentionally, for picking up
+  // externally-changed graphs) treats as "reload from scratch". A full
+  // reload recreates every node as a brand-new object with no cached
+  // width/height, so ReactFlow re-measures them, which re-fires
+  // onNodesChange, which the save effect sees as a change worth writing,
+  // which changes currentProject.graph's reference again -- an
+  // infinite load<->save loop (visible as the graph "flashing" and a
+  // rapidly climbing count of "Skipping graph save" log lines). This
+  // flag lets the load effect recognize "I already have this data, I
+  // just wrote it myself a moment ago" and skip the reload, while still
+  // reloading for genuinely external graph changes (project switch,
+  // another view mutating the graph, etc).
+  const isSelfInflictedGraphUpdate = useRef(false);
 
   // Load project graph (when project ID changes OR graph data changes)
   useEffect(() => {
+    if (isSelfInflictedGraphUpdate.current) {
+      isSelfInflictedGraphUpdate.current = false;
+      console.log('[GraphEditor] Skipping reload - graph change was our own save echoing back');
+      return;
+    }
     console.log('[GraphEditor] Loading graph for project:', currentProject?.id);
     isInitialLoad.current = true;
 
@@ -822,6 +902,20 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
       // this file. Filtering on `n.data.node_kind` here returned no assets
       // and the auto-arrange never fired.
       const assetNodes = currentProject.graph.nodes.filter((n: GraphNode) => n.node_kind === 'asset');
+      // Both auto-arrange triggers below predate groupedView's own
+      // per-group block layout (see the memo further down), which now lays
+      // out collapsed AND expanded groups correctly and reactively on its
+      // own -- height-aware, cycle-safe, never interleaving different
+      // groups' members. arrangeGroups() itself was never updated to match
+      // (still a flat NODE_H=100 guess) and, worse, operates on
+      // `getNodes()` -- whatever's CURRENTLY rendered, which is the
+      // collapsed group PLACEHOLDER cards once collapseToGroups is on, not
+      // the real underlying assets. Running it then computes a layout for
+      // the wrong node set and, in some cases, stomps positions groupedView
+      // had already gotten right. Only worth running when the view will
+      // actually stay in the flat (non-collapsed) mode groupedView doesn't
+      // cover.
+      const willBeGrouped = collapseToGroups || assetNodes.length > 60;
       const groupBoxes: Record<string, { minX: number; minY: number; maxX: number; maxY: number }> = {};
       const NODE_W = 220;
       const NODE_H = 100;
@@ -847,7 +941,7 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
           }
         }
       }
-      if (hasOverlap && names.length > 1) {
+      if (hasOverlap && names.length > 1 && !willBeGrouped) {
         console.log('[GraphEditor] Group boxes overlap — scheduling auto-arrange');
         shouldAutoArrange.current = true;
       }
@@ -856,7 +950,9 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
       // layout on the backend; that stacks large layers vertically and
       // looks bad. Schedule an auto-arrange on first render so users
       // see a properly grouped graph without clicking Arrange manually.
-      if ((currentProject as any).is_dagster_plus) {
+      // Skipped when the view will be grouped -- groupedView already
+      // produces a properly grouped layout on its own in that case.
+      if ((currentProject as any).is_dagster_plus && !willBeGrouped) {
         shouldAutoArrange.current = true;
       }
       // Wide graphs (local OR cloud) default to collapsed-to-groups
@@ -1434,6 +1530,7 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
     }));
 
     console.log('[GraphEditor] Calling updateGraph');
+    isSelfInflictedGraphUpdate.current = true;
     updateGraph(graphNodes, graphEdges);
 
     // Sync edges with DependencyGraphComponent
@@ -2105,19 +2202,34 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
 
   // Update nodes to show selection. When filtering, hide non-matching
   // assets entirely so the layout compresses to what's relevant.
-  const perAssetDisplay = nodes
-    .filter(matchesFilters)
-    .map((node) => {
-      const isSelected = node.selected !== undefined ? node.selected : selectedAssets.includes(node.id);
-      return {
-        ...node,
-        selected: isSelected,
-        data: {
-          ...node.data,
-          isSelected,
-        },
-      };
-    });
+  //
+  // Memoized on purpose -- this used to be a plain inline computation
+  // that produced a brand-new array (and brand-new node objects) on
+  // EVERY render, which meant `groupedView` below (memoized on this
+  // array's reference) never actually memoized anything either. That
+  // fed ReactFlow a "new" object for every collapsed group node on
+  // every render, none of which carry forward their previously
+  // measured width/height, so ReactFlow re-measured them and fired
+  // onNodesChange again -- forever, independent of (and in addition
+  // to) the load/save echo loop fixed elsewhere in this file. Visible
+  // as the graph "flashing" and onNodesChange firing hundreds of times
+  // a second even at rest.
+  const perAssetDisplay = React.useMemo(() => {
+    return nodes
+      .filter(matchesFilters)
+      .map((node) => {
+        const isSelected = node.selected !== undefined ? node.selected : selectedAssets.includes(node.id);
+        return {
+          ...node,
+          selected: isSelected,
+          data: {
+            ...node.data,
+            isSelected,
+          },
+        };
+      });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [nodes, selectedAssets, groupFilter, kindFilter, assetSearch, showAllInGraph, nodesWithDownstream]);
 
   // Group-collapse mode: replace individual assets with one node per
   // group_name (default: "ungrouped"). Edges collapse to inter-group
@@ -2166,47 +2278,193 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
       seen.set(k, (seen.get(k) || 0) + 1);
     }
 
-    // Longest-path DAG layout across the mixed node set (aggregated
-    // group placeholders + expanded individual assets). Every asset
-    // shows up as its "output id", so this handles the mixed case
-    // uniformly without special-casing.
-    const outputIds = new Set(idToOutputId.values());
-    const outAdj: Record<string, string[]> = Object.fromEntries(Array.from(outputIds).map(id => [id, []]));
-    const inDeg: Record<string, number> = Object.fromEntries(Array.from(outputIds).map(id => [id, 0]));
-    for (const k of seen.keys()) {
-      const [s, t] = k.split('||');
-      if (outAdj[s]) outAdj[s].push(t);
-      if (t in inDeg) inDeg[t] = (inDeg[t] || 0) + 1;
-    }
-    const layer: Record<string, number> = Object.fromEntries(Array.from(outputIds).map(id => [id, 0]));
-    const remaining = { ...inDeg };
-    const queue: string[] = Array.from(outputIds).filter(id => remaining[id] === 0);
-    while (queue.length) {
-      const id = queue.shift()!;
-      for (const t of outAdj[id] || []) {
-        layer[t] = Math.max(layer[t], layer[id] + 1);
-        remaining[t]--;
-        if (remaining[t] === 0) queue.push(t);
-      }
-    }
-    const byLayer: Record<number, string[]> = {};
-    for (const id of outputIds) (byLayer[layer[id]] ||= []).push(id);
-    // Deterministic vertical ordering by id inside each layer.
-    for (const L of Object.keys(byLayer)) byLayer[+L].sort();
+    // Two-level layout: each GROUP is laid out as its own cohesive block
+    // (intra-group longest-path layering, local coordinates), and blocks
+    // are then tiled against each other (inter-group longest-path
+    // layering, using each block's REAL total footprint). A single flat
+    // longest-path layering across every individual asset -- what this
+    // used to do -- works fine for exactly one expanded group (nothing
+    // else around to interleave with), but falls apart the moment a
+    // second group expands: assets from DIFFERENT groups land in the
+    // same shared column purely by their own DAG depth, so one group's
+    // members end up scattered between another's, and the group-outline
+    // boxes drawn around each group's (now scattered) members overlap
+    // into a mess. Blocks never interleave this way.
     const X_STEP = 380;
-    const Y_STEP = 180;
-    const posById: Record<string, { x: number; y: number }> = {};
-    for (const [L, ids] of Object.entries(byLayer)) {
-      const lyr = parseInt(L, 10);
-      for (let i = 0; i < ids.length; i++) {
-        posById[ids[i]] = { x: lyr * X_STEP, y: i * Y_STEP };
+    const V_GAP = 40;
+    // The node positions computed below only need to clear each OTHER --
+    // but GroupOverlay draws a decorative box around each expanded group
+    // that extends outward from its actual member nodes (-60/+60px
+    // horizontally, -80px above the top node for the label bar, +60px
+    // below the bottom one -- see its own bounding-box math). Two
+    // adjacently-stacked groups' node positions can have a perfectly
+    // clean gap between them and their BOXES still overlap if that gap is
+    // smaller than the boxes' combined reach (confirmed: an 80px node gap
+    // with an 80+60=140px box reach overlapped by 60px even though the
+    // cards themselves never touched). These gaps need to be at least
+    // that reach; arrangeGroups (the other, manual layout below) already
+    // uses 200/200 for the same reason, so match it here too.
+    const GROUP_H_GAP = 200;
+    const GROUP_V_GAP = 200;
+    const GROUP_CARD_WIDTH = 320;
+    const GROUP_CARD_FALLBACK_HEIGHT = 140;
+    // A flat guess sized for local-project asset cards clips into the next
+    // card for Dagster+ cloud ones -- their extra kind badges, checks
+    // count, and integration chips make them render 60-100px taller.
+    // Prefer each node's REAL measured height (set by ReactFlow once it's
+    // mounted) over a guess; the fallback only matters for the one frame
+    // before a freshly-expanded node has been measured yet (see the
+    // measured-lock logic below, which recomputes with real heights the
+    // moment they land).
+    const ASSET_NODE_FALLBACK_HEIGHT = 160;
+    const assetById = new Map(assets.map((a) => [a.id, a]));
+    const heightForAsset = (id: string): number => {
+      const h = assetById.get(id)?.height;
+      return typeof h === 'number' && h > 0 ? h : ASSET_NODE_FALLBACK_HEIGHT;
+    };
+
+    // Step 1: per-group local layout (collapsed groups are just a single
+    // fixed-size card; expanded groups get their own intra-group
+    // longest-path layering, same idea as the old flat one but scoped to
+    // edges within this group only).
+    const blocks: Record<string, { width: number; height: number; localPos: Map<string, { x: number; y: number }> }> = {};
+    for (const [g, info] of Object.entries(groupInfo)) {
+      if (!isGroupExpanded(g)) {
+        blocks[g] = { width: GROUP_CARD_WIDTH, height: GROUP_CARD_FALLBACK_HEIGHT, localPos: new Map() };
+        continue;
       }
+      const idsInGroup = new Set(info.assets.map((a) => a.id));
+      const intraPreds: Record<string, string[]> = {};
+      for (const a of info.assets) intraPreds[a.id] = [];
+      for (const e of edges) {
+        if (idsInGroup.has(e.source) && idsInGroup.has(e.target) && e.source !== e.target) {
+          intraPreds[e.target].push(e.source);
+        }
+      }
+      // Longest-path layer assignment via DFS with a cycle guard (matches
+      // arrangeGroups' own approach below) rather than Kahn's algorithm --
+      // a queue-based topological sort silently stalls on a cycle (nodes
+      // in it never reach in-degree 0, so they're never dequeued and stay
+      // stuck at layer 0 forever), which is a real risk here even though
+      // the underlying asset graph is acyclic.
+      const localLayer: Record<string, number> = {};
+      const visitingLocal = new Set<string>();
+      const computeLocal = (id: string): number => {
+        if (id in localLayer) return localLayer[id];
+        if (visitingLocal.has(id)) return 0;
+        visitingLocal.add(id);
+        const preds = intraPreds[id] || [];
+        const l = preds.length === 0 ? 0 : Math.max(...preds.map(computeLocal)) + 1;
+        visitingLocal.delete(id);
+        localLayer[id] = l;
+        return l;
+      };
+      for (const a of info.assets) computeLocal(a.id);
+      const byLocalLayer: Record<number, string[]> = {};
+      for (const a of info.assets) (byLocalLayer[localLayer[a.id]] ||= []).push(a.id);
+      for (const L of Object.keys(byLocalLayer)) byLocalLayer[+L].sort();
+      const localPos = new Map<string, { x: number; y: number }>();
+      let maxLocalLayer = 0;
+      let blockHeight = ASSET_NODE_FALLBACK_HEIGHT;
+      for (const [L, ids] of Object.entries(byLocalLayer)) {
+        const lyr = parseInt(L, 10);
+        maxLocalLayer = Math.max(maxLocalLayer, lyr);
+        let y = 0;
+        for (const id of ids) {
+          localPos.set(id, { x: lyr * X_STEP, y });
+          y += heightForAsset(id) + V_GAP;
+        }
+        blockHeight = Math.max(blockHeight, y - V_GAP);
+      }
+      blocks[g] = { width: (maxLocalLayer + 1) * X_STEP, height: blockHeight, localPos };
     }
 
+    // Step 2: inter-group layout -- longest-path layering over GROUPS
+    // (not individual assets), using only edges that cross a group
+    // boundary, then tile each column's blocks by their REAL width/height.
+    const groupNames = Object.keys(groupInfo);
+    const groupPreds: Record<string, Set<string>> = Object.fromEntries(groupNames.map((g) => [g, new Set<string>()]));
+    for (const e of edges) {
+      const sg = nodeToGroup.get(e.source);
+      const tg = nodeToGroup.get(e.target);
+      if (!sg || !tg || sg === tg) continue;
+      groupPreds[tg].add(sg);
+    }
+    // Same DFS-with-cycle-guard longest path as the intra-group layering
+    // above. This one matters even more: the underlying ASSET graph is
+    // acyclic, but projecting edges down to the GROUP level can easily
+    // introduce a cycle even when it doesn't exist at the asset level --
+    // e.g. group A's asset a1 depends on group B's b1, while a totally
+    // different asset in B (b2) depends on a different asset in A (a2). No
+    // cycle among the assets, but a real one between A and B once
+    // collapsed to group-level edges (A->B via a1<-b1, B->A via
+    // b2<-a2) -- and with every group expanded at once, this is common.
+    // Kahn's algorithm (queue + in-degree) would leave every group caught
+    // in a cycle stuck at its initial layer 0 forever, piling them all
+    // into the same column -- exactly what "expand all" was producing.
+    const groupLayer: Record<string, number> = {};
+    const visitingGroup = new Set<string>();
+    const computeGroupLayer = (g: string): number => {
+      if (g in groupLayer) return groupLayer[g];
+      if (visitingGroup.has(g)) return 0;
+      visitingGroup.add(g);
+      const preds = Array.from(groupPreds[g] || []);
+      const l = preds.length === 0 ? 0 : Math.max(...preds.map(computeGroupLayer)) + 1;
+      visitingGroup.delete(g);
+      groupLayer[g] = l;
+      return l;
+    };
+    for (const g of groupNames) computeGroupLayer(g);
+    const groupsByLayer: Record<number, string[]> = {};
+    for (const g of groupNames) (groupsByLayer[groupLayer[g]] ||= []).push(g);
+    for (const L of Object.keys(groupsByLayer)) groupsByLayer[+L].sort();
+    const sortedLayerKeys = Object.keys(groupsByLayer).map(Number).sort((a, b) => a - b);
+    // Column X = cumulative max block width of preceding columns + gap,
+    // so a column holding a deep, wide expanded group pushes everything
+    // after it over rather than clipping it.
+    const colX: Record<number, number> = {};
+    let cumX = 0;
+    for (const L of sortedLayerKeys) {
+      colX[L] = cumX;
+      cumX += Math.max(...groupsByLayer[L].map((g) => blocks[g].width)) + GROUP_H_GAP;
+    }
+    const groupOrigin: Record<string, { x: number; y: number }> = {};
+    for (const L of sortedLayerKeys) {
+      let y = 0;
+      for (const g of groupsByLayer[L]) {
+        groupOrigin[g] = { x: colX[L], y };
+        y += blocks[g].height + GROUP_V_GAP;
+      }
+    }
+    // Step 3: absolute positions = block origin + local offset.
+    const posById: Record<string, { x: number; y: number }> = {};
+    for (const [g, info] of Object.entries(groupInfo)) {
+      const origin = groupOrigin[g];
+      posById[`__group__::${g}`] = origin;
+      if (isGroupExpanded(g)) {
+        for (const a of info.assets) {
+          const local = blocks[g].localPos.get(a.id)!;
+          posById[a.id] = { x: origin.x + local.x, y: origin.y + local.y };
+        }
+      }
+    }
     // Build the actual React Flow nodes: aggregated group placeholders
     // for collapsed groups, individual asset nodes (with new positions)
     // for expanded ones.
     const outNodes: Node[] = [];
+    // `outNodes` is what actually renders (passed straight through as
+    // ReactFlow's controlled `nodes` prop), but it's never written back
+    // into the raw `nodes` state (see useNodesState above) -- so once a
+    // group locks (below) and starts trusting `n.position` instead of
+    // recomputing posById, that position read comes from raw state, which
+    // still has this asset's PRE-layout position (wherever it sat before
+    // ever being expanded). Expanding a second group re-renders this
+    // memo, and the already-locked first group's nodes would silently
+    // snap back to that stale position -- looking exactly like unrelated
+    // groups overlapping. Collected here and flushed into raw state by
+    // the effect right after this memo, so a locked node's remembered
+    // position actually matches what was last shown on screen.
+    const newlyLocked: { id: string; position: { x: number; y: number } }[] = [];
     const emittedGroupIds = new Set<string>();
     for (const [g, info] of Object.entries(groupInfo)) {
       if (isGroupExpanded(g)) continue;
@@ -2226,29 +2484,50 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
           isGroup: true,
           onExpand: () => handleExpandGroup(g),
         },
-        draggable: true,
+        // NOT draggable: ReactFlow's default nodeDragThreshold is 0, so a
+        // draggable node treats ANY pointer movement between mousedown and
+        // mouseup as a drag gesture and suppresses onNodeClick entirely --
+        // only a perfectly motionless click ever registered. These cards
+        // are click-to-expand only (no reason to reposition a collapsed
+        // group box), so removing draggable makes every click reliable.
+        draggable: false,
       });
     }
-    for (const n of assets) {
-      const g = groupOf(n);
+    for (const [g, info] of Object.entries(groupInfo)) {
       if (!isGroupExpanded(g)) continue;
-      // Only apply the DAG layout position on the *first* render after
-      // this group was expanded. Subsequent renders (including those
-      // triggered by the user dragging an asset) trust the node's own
-      // position so drags persist.
+      // Only apply the DAG layout position on renders before this group's
+      // members all have a real measured height yet. Subsequent renders
+      // (including those triggered by the user dragging an asset) trust
+      // the node's own position so drags persist. A freshly-expanded
+      // group's nodes aren't measured on the render that first shows them
+      // (see heightForAsset's fallback above), so lock only once every
+      // member has reported a real height -- that render's posById is the
+      // accurate one worth keeping.
       const alreadyLaidOut = laidOutGroupsRef.current.has(g);
-      outNodes.push({
-        ...n,
-        position: alreadyLaidOut ? n.position : (posById[n.id] || n.position),
-        data: {
-          ...n.data,
-          // Attach a per-asset "collapse this group" callback the
-          // AssetNode can surface (or a caller can wire up). We also
-          // put group_name here so a future group border can bracket
-          // these together visually.
-          onCollapseGroup: () => handleCollapseGroup(g),
-        },
-      });
+      let justLocked = false;
+      if (!alreadyLaidOut) {
+        const allMeasured = info.assets.every((a) => typeof a.height === 'number' && a.height > 0);
+        if (allMeasured) {
+          laidOutGroupsRef.current.add(g);
+          justLocked = true;
+        }
+      }
+      for (const n of info.assets) {
+        const resolvedPosition = alreadyLaidOut ? n.position : (posById[n.id] || n.position);
+        if (justLocked) newlyLocked.push({ id: n.id, position: resolvedPosition });
+        outNodes.push({
+          ...n,
+          position: resolvedPosition,
+          data: {
+            ...n.data,
+            // Attach a per-asset "collapse this group" callback the
+            // AssetNode can surface (or a caller can wire up). We also
+            // put group_name here so a future group border can bracket
+            // these together visually.
+            onCollapseGroup: () => handleCollapseGroup(g),
+          },
+        });
+      }
     }
 
     const outEdges: Edge[] = Array.from(seen.entries()).map(([k, count]) => {
@@ -2263,8 +2542,17 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
       } as Edge;
     });
 
-    return { nodes: outNodes, edges: outEdges };
+    return { nodes: outNodes, edges: outEdges, newlyLocked };
   }, [collapseToGroups, expandedGroups, perAssetDisplay, edges, handleExpandGroup, handleCollapseGroup]);
+
+  // Flush freshly-locked group layouts into raw node state (see
+  // `newlyLocked`'s comment above) so they survive the next unrelated
+  // re-render instead of snapping back to their pre-expand position.
+  useEffect(() => {
+    if (!groupedView?.newlyLocked?.length) return;
+    const byId = new Map(groupedView.newlyLocked.map((p) => [p.id, p.position]));
+    setNodes((nds) => nds.map((n) => (byId.has(n.id) ? { ...n, position: byId.get(n.id)! } : n)));
+  }, [groupedView, setNodes]);
 
   const displayNodes = groupedView ? groupedView.nodes : perAssetDisplay;
   const displayEdges = groupedView ? groupedView.edges : edges;
@@ -2409,6 +2697,26 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zM14 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z" />
                 </svg>
               </button>
+              {collapseToGroups && allGroups.length > 0 && (
+                <>
+                  <button
+                    onClick={() => setExpandedGroups(new Set(allGroups))}
+                    disabled={expandedGroups.size === allGroups.length}
+                    className="px-2 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-100 rounded disabled:opacity-40 disabled:hover:bg-transparent whitespace-nowrap"
+                    title="Expand every group at once"
+                  >
+                    Expand all
+                  </button>
+                  <button
+                    onClick={() => setExpandedGroups(new Set())}
+                    disabled={expandedGroups.size === 0}
+                    className="px-2 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-100 rounded disabled:opacity-40 disabled:hover:bg-transparent whitespace-nowrap"
+                    title="Collapse every group at once"
+                  >
+                    Collapse all
+                  </button>
+                </>
+              )}
             </>
           )}
         </div>
@@ -2841,15 +3149,21 @@ function GroupOverlay({ nodes, setNodes }: { nodes: Node[]; setNodes: React.Disp
     return groups;
   }, {} as Record<string, typeof nodes>);
 
-  // Compute bounding boxes for each group
+  // Compute bounding boxes for each group. Uses each node's REAL measured
+  // width/height (set by ReactFlow once mounted) rather than a fixed guess
+  // -- Dagster+ cloud cards run noticeably wider/taller than local ones
+  // (extra kind badges, checks count, integration chips), and a box sized
+  // for local cards doesn't reach far enough around a cloud card, letting
+  // the NEXT group's box start close enough to visually collide with it
+  // even though the underlying node positions themselves don't overlap.
   const groupBounds = Object.entries(assetGroups)
     .filter(([_, groupNodes]) => groupNodes.length > 0)
     .map(([groupName, groupNodes]) => {
       const positions = groupNodes.map((n) => ({
         x: n.position.x,
         y: n.position.y,
-        width: 280, // AssetNode max-width
-        height: 120, // Approximate height
+        width: typeof n.width === 'number' && n.width > 0 ? n.width : 280,
+        height: typeof n.height === 'number' && n.height > 0 ? n.height : 160,
       }));
 
       const minX = Math.min(...positions.map((p) => p.x)) - 60;
