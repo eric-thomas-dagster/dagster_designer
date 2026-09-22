@@ -26,7 +26,8 @@ import { SettingsHost } from './components/SettingsDialog';
 import { useProjectStore } from './hooks/useProject';
 import { useRunNotifications } from './hooks/useRunNotifications';
 import { setActiveTabGlobal } from './services/activeTab';
-import { onMenuAction, openExternalUrl, isTauri } from './services/tauri';
+import { onMenuAction, onQuitRequested, confirmQuit, openExternalUrl, isTauri } from './services/tauri';
+import { hasUnsavedChanges } from './hooks/useUnsavedChanges';
 import { Network, FileCode, Zap, Package, ExternalLink, Settings, Workflow, ChevronDown, Skull, AlertTriangle, X, Loader2, CheckCircle, XCircle, PanelLeftClose, PanelLeft, Clock, Play, Radar, Timer, Download, Database, ShieldCheck, Cloud, Bell } from 'lucide-react';
 import { IngestionsPanel } from './components/IngestionsPanel';
 import { DbtPanel } from './components/DbtPanel';
@@ -338,6 +339,25 @@ function App() {
     });
     return () => { unlistenPromise.then((unlisten) => unlisten()); };
   }, [currentProject]);
+
+  // Quitting (red button, Cmd+Q, Dock > Quit) is intercepted on the Rust
+  // side so it can ask first when there's unsaved work in the Code Editor,
+  // Env Vars panel, or a graph edit still in its autosave debounce window --
+  // otherwise it quits immediately, matching the old (nag-free) behavior.
+  useEffect(() => {
+    const unlistenPromise = onQuitRequested(async () => {
+      if (!hasUnsavedChanges()) {
+        confirmQuit();
+        return;
+      }
+      const ok = await confirmDialog(
+        'You have unsaved changes. Quit anyway?',
+        { title: 'Quit Dagster Designer', destructive: true }
+      );
+      if (ok) confirmQuit();
+    });
+    return () => { unlistenPromise.then((unlisten) => unlisten()); };
+  }, []);
 
   // Delay validation check by 2 seconds after project loads to avoid blocking UI
   useEffect(() => {

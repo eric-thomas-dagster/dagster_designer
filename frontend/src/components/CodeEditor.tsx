@@ -22,6 +22,7 @@ import { filesApi, type FileTreeNode } from '@/services/api';
 import { Terminal } from './Terminal';
 import { notify, confirmDialog } from './Notifications';
 import { useIsDarkMode } from '@/hooks/useIsDarkMode';
+import { useUnsavedChangesStore } from '@/hooks/useUnsavedChanges';
 
 interface CodeEditorProps {
   projectId: string;
@@ -39,6 +40,11 @@ export function CodeEditor({ projectId, fileToOpen, onFileOpened }: CodeEditorPr
   const isDark = useIsDarkMode();
   const [openFiles, setOpenFiles] = useState<OpenFile[]>([]);
   const [activeFilePath, setActiveFilePath] = useState<string | null>(null);
+  const setDirty = useUnsavedChangesStore((s) => s.setDirty);
+  useEffect(() => {
+    setDirty('codeEditor', openFiles.some((f) => f.isDirty));
+  }, [openFiles, setDirty]);
+  useEffect(() => () => setDirty('codeEditor', false), [setDirty]);
   const [expandedDirs, setExpandedDirs] = useState<Set<string>>(new Set(['/']));
   const [terminalOpen, setTerminalOpen] = useState(false);
   const [showNewFileModal, setShowNewFileModal] = useState(false);

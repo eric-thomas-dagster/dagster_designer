@@ -114,3 +114,32 @@ export async function onMenuAction(handler: (id: string) => void): Promise<() =>
     return () => {};
   }
 }
+
+/**
+ * Subscribes to "quit-requested" events, fired instead of quitting outright
+ * whenever the user closes the window / hits Cmd+Q / picks Dock > Quit (see
+ * src-tauri/src/main.rs) so the frontend gets a chance to confirm first when
+ * there are unsaved edits. No-op outside Tauri. Returns an unsubscribe
+ * function, mirroring `onMenuAction`.
+ */
+export async function onQuitRequested(handler: () => void): Promise<() => void> {
+  if (!isTauri) return () => {};
+  try {
+    const { listen } = await import('@tauri-apps/api/event');
+    const unlisten = await listen('quit-requested', () => handler());
+    return unlisten;
+  } catch {
+    return () => {};
+  }
+}
+
+/**
+ * Actually tears down the backend and exits -- the other half of
+ * quit-requested. Only call this once the frontend has decided it's safe to
+ * quit (nothing unsaved, or the user confirmed anyway).
+ */
+export async function confirmQuit(): Promise<void> {
+  if (!isTauri) return;
+  const { invoke } = await import('@tauri-apps/api/core');
+  await invoke('confirm_quit');
+}

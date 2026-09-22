@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import type { Project, GraphNode, GraphEdge, ComponentInstance } from '@/types';
 import { projectsApi } from '@/services/api';
 import api from '@/services/api';
+import { useUnsavedChangesStore } from '@/hooks/useUnsavedChanges';
 
 interface ProjectStore {
   currentProject: Project | null;
@@ -65,7 +66,18 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     }
     try {
       const project = await projectsApi.get(id);
-      set({ currentProject: project, isLoading: false });
+      // For Dagster+ projects, the backend hydrates project.graph from a
+      // live GraphQL call and swallows failures there (so a bad/slow
+      // deployment doesn't 500 the whole project load) -- but that means
+      // project.graph can silently be stale/empty with no indication why.
+      // Surface the specific reason via the existing `error` banner state
+      // instead of just showing an empty graph.
+      const cloudError = (project as any).is_dagster_plus && (project as any).dagster_plus_last_error;
+      set({
+        currentProject: project,
+        isLoading: false,
+        error: cloudError ? `Couldn't load data from Dagster+: ${cloudError}` : null,
+      });
     } catch (error) {
       set({ error: 'Failed to load project', isLoading: false });
     }
@@ -168,15 +180,24 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
 
     // Debounced auto-save to backend so node positions, custom edges, etc.
     // survive reloads. Coalesces rapid consecutive edits (e.g. drag events,
-    // arrangeGroups laying out dozens of nodes) into a single PUT.
+    // arrangeGroups laying out dozens of nodes) into a single PUT. Flagged
+    // as unsaved for the duration of the debounce so a quit during that
+    // ~1.5s window still trips the "quit anyway?" confirmation instead of
+    // silently dropping the pending save.
     if (_graphSaveTimer) clearTimeout(_graphSaveTimer);
+    useUnsavedChangesStore.getState().setDirty('graph', true);
     _graphSaveTimer = setTimeout(async () => {
       const latest = get().currentProject;
-      if (!latest || latest.id !== updatedProject.id) return;
+      if (!latest || latest.id !== updatedProject.id) {
+        useUnsavedChangesStore.getState().setDirty('graph', false);
+        return;
+      }
       try {
         await projectsApi.update(latest.id, { graph: latest.graph });
       } catch (e) {
         console.warn('[useProject] Failed to auto-save graph:', e);
+      } finally {
+        useUnsavedChangesStore.getState().setDirty('graph', false);
       }
     }, GRAPH_SAVE_DELAY_MS);
   },

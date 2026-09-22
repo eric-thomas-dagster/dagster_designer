@@ -2,6 +2,7 @@ import { useState, useEffect, useMemo, useRef } from 'react';
 import { Plus, Trash2, Eye, EyeOff, Save, RefreshCw, Cloud, HardDrive, LogIn, Loader2 } from 'lucide-react';
 import { envVarsApi, type EnvVariable , API_BASE } from '@/services/api';
 import { notify } from './Notifications';
+import { useUnsavedChangesStore } from '@/hooks/useUnsavedChanges';
 
 interface EnvVarsManagerProps {
   projectId: string;
@@ -51,6 +52,12 @@ export function EnvVarsManager({ projectId }: EnvVarsManagerProps) {
   const [signingIn, setSigningIn] = useState(false);
   const unmountedRef = useRef(false);
   useEffect(() => () => { unmountedRef.current = true; }, []);
+
+  const setDirty = useUnsavedChangesStore((s) => s.setDirty);
+  useEffect(() => {
+    setDirty('envVars', Object.values(scopeData).some((s) => s.hasChanges));
+  }, [scopeData, setDirty]);
+  useEffect(() => () => setDirty('envVars', false), [setDirty]);
 
   const activeKey = scopeKey(activeScope);
   const activeState = scopeData[activeKey] ?? emptyScopeState;
