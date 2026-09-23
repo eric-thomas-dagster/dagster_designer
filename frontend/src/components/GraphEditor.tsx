@@ -3227,6 +3227,21 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
         selectNodesOnDrag={false}
         minZoom={0.2}
         maxZoom={2}
+        // A fast double-click on a group header/card (see the local
+        // onDoubleClick handlers on those) looked exactly like the whole
+        // graph got filtered down to one group — it wasn't a filter at
+        // all, it was React Flow's own zoomOnDoubleClick (on by default)
+        // zooming the camera in tight on the click point, leaving every
+        // other group's nodes real but far outside the viewport. The
+        // local per-element `onDoubleClick={stopPropagation}` workarounds
+        // don't actually stop this: React Flow's zoom listener is a
+        // native addEventListener on the pane, an ancestor DOM node, and
+        // native bubbling reaches it before React's own root-delegated
+        // synthetic handler ever runs (React 17+ attaches synthetic
+        // listeners at the root, not per-element) — so calling
+        // stopPropagation() inside the synthetic handler is always too
+        // late. Disabling the feature outright is the actual fix.
+        zoomOnDoubleClick={false}
       >
         {/* Group bounding boxes:
              - Fully-expanded (collapseToGroups=false): draw boxes for
