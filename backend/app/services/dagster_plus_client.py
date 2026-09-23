@@ -159,6 +159,65 @@ def org_base_url(org: str, region: str | None = None) -> str:
     return f"https://{o}.{_region_host_suffix(region)}"
 
 
+# Field name per MetadataEntry.__typename -> the (type tag, value key) a
+# caller should read. Kept alongside METADATA_ENTRY_FIELDS (below) since
+# they have to stay in sync -- add a case here whenever a new inline
+# fragment is added there.
+_METADATA_TYPE_MAP: dict[str, tuple[str, str]] = {
+    "FloatMetadataEntry": ("float", "floatValue"),
+    "IntMetadataEntry": ("int", "intValue"),
+    "TextMetadataEntry": ("text", "text"),
+    "MarkdownMetadataEntry": ("markdown", "mdStr"),
+    "UrlMetadataEntry": ("url", "url"),
+    "PathMetadataEntry": ("path", "path"),
+    "JsonMetadataEntry": ("json", "jsonString"),
+    "BoolMetadataEntry": ("bool", "boolValue"),
+    "TimestampMetadataEntry": ("timestamp", "timestamp"),
+}
+
+
+def normalize_metadata_entries(raw_entries: list[dict] | None) -> list[dict]:
+    """Flattens the GraphQL union shape (queried via METADATA_ENTRY_FIELDS)
+    into {label, description, type, value} -- one shape the frontend can
+    render generically regardless of which of the ~20 MetadataEntry
+    variants it came from. Types not in _METADATA_TYPE_MAP (Table,
+    TableSchema, Notebook, PythonArtifact, Asset/Job/PipelineRun refs,
+    CodeReferences) come back as type='other' with value=None; the
+    label/description alone is still shown."""
+    out: list[dict] = []
+    for e in (raw_entries or []):
+        typename = e.get("__typename")
+        mapped = _METADATA_TYPE_MAP.get(typename)
+        entry_type, value = (mapped[0], e.get(mapped[1])) if mapped else ("other", None)
+        out.append({
+            "label": e.get("label") or "",
+            "description": e.get("description"),
+            "type": entry_type,
+            "value": value,
+        })
+    return out
+
+
+# Dagster's own standard instrumentation key, present on nearly every
+# check/materialization -- deprioritized below in favor of whatever
+# domain metric (row/null counts, ratios, etc.) the check actually
+# reported, since that's almost always the more interesting number.
+_LOW_PRIORITY_NUMERIC_LABELS = {"Execution Duration"}
+
+
+def numeric_metadata_value(raw_entries: list[dict] | None) -> tuple[float, str] | None:
+    """First float/int metadata entry, as (value, label) -- used to seed
+    a monitor/check's numeric-metric chart the same way a dbt test's
+    `failures` count does locally. Returns None if the check/materialization
+    didn't report any numeric metadata."""
+    numeric = [e for e in normalize_metadata_entries(raw_entries) if e["type"] in ("float", "int") and e["value"] is not None]
+    preferred = next((e for e in numeric if e["label"] not in _LOW_PRIORITY_NUMERIC_LABELS), None)
+    chosen = preferred or (numeric[0] if numeric else None)
+    if chosen is None:
+        return None
+    return float(chosen["value"]), (chosen["label"] or chosen["type"])
+
+
 # --- Query catalog ----------------------------------------------------------
 # Small library of common GraphQL queries we run against Dagster+.
 # They mirror the ones OSS Dagster's GraphiQL exposes, so users can
@@ -451,6 +510,28 @@ query DagsterPlusAssetNodes($checkLimit: Int) {
 """
 
 
+# Shared selection set for MetadataEntry -- Dagster's typed metadata
+# system (the same "attach a float/text/markdown/url/json/table value to
+# a materialization or check result" concept the real Dagster+ UI
+# renders). Covers the common scalar-ish types; anything else (Table,
+# TableSchema, Notebook, PythonArtifact, Asset/Job/PipelineRun refs,
+# CodeReferences) falls back to just label/description, which is still
+# informative even without the type-specific payload.
+METADATA_ENTRY_FIELDS = """
+    __typename
+    label
+    description
+    ... on FloatMetadataEntry { floatValue }
+    ... on IntMetadataEntry { intValue }
+    ... on TextMetadataEntry { text }
+    ... on MarkdownMetadataEntry { mdStr }
+    ... on UrlMetadataEntry { url }
+    ... on PathMetadataEntry { path }
+    ... on JsonMetadataEntry { jsonString }
+    ... on BoolMetadataEntry { boolValue }
+    ... on TimestampMetadataEntry { timestamp }
+"""
+
 ASSET_CHECK_HISTORY_QUERY = """
 query DagsterPlusAssetCheckHistory(
   $assetKey: AssetKeyInput!, $checkName: String!, $limit: Int!, $cursor: String
@@ -469,10 +550,7 @@ query DagsterPlusAssetCheckHistory(
       success
       severity
       description
-      metadataEntries {
-        __typename
-        label
-        description
+      metadataEntries {""" + METADATA_ENTRY_FIELDS + """
       }
     }
   }
@@ -728,6 +806,8 @@ query DagsterPlusAssetMaterializations($limit: Int!) {
     assetMaterializations(limit: $limit) {
       timestamp
       runId
+      metadataEntries {""" + METADATA_ENTRY_FIELDS + """
+      }
     }
   }
 }
@@ -762,6 +842,85 @@ query DagsterPlusAssetPartitionStatus($assetKey: AssetKeyInput!) {
         }
       }
     }
+  }
+}
+"""
+
+
+# Everything a "materialize this one partition" launch needs to resolve
+# a fully-qualified job selector, plus the two fields that answer "what
+# happened to this partition last" without re-fetching the whole matrix.
+ASSET_PARTITION_DETAIL_QUERY = """
+query DagsterPlusAssetPartitionDetail($assetKey: AssetKeyInput!, $partition: String!) {
+  assetNodeOrError(assetKey: $assetKey) {
+    __typename
+    ... on AssetNode {
+      jobNames
+      repository {
+        name
+        location { name }
+      }
+      latestRunForPartition(partition: $partition) {
+        runId
+        status
+        startTime
+        endTime
+      }
+      latestMaterializationByPartition(partitions: [$partition]) {
+        timestamp
+        runId
+      }
+    }
+  }
+}
+"""
+
+# Deploy-over-deploy diff history for one asset -- what changed about
+# its definition (code version, deps, tags, metadata, partitions def)
+# each time its code location was redeployed. Plan-gated in Dagster+, so
+# some orgs get a clean empty/error response rather than real data --
+# callers should treat that as "unavailable", not surface it as a hard
+# failure.
+ASSET_DIFF_HISTORY_QUERY = """
+query DagsterPlusAssetDiffHistory($assetKey: AssetKeyInput!, $limit: Int!) {
+  assetDiffHistory(assetKey: $assetKey, limit: $limit) {
+    locationName
+    codeLocationDataUploadTimestamp
+    gitCommitHash
+    lastLoadGitCommitHash
+    diffSinceLastLoad {
+      changeTypes
+      changeDiff {
+        codeVersion { old new }
+        partitionsDefinition { old new }
+        dependencies { addedKeys changedKeys removedKeys }
+        tags { addedKeys changedKeys removedKeys }
+        metadata { addedKeys changedKeys removedKeys }
+      }
+    }
+  }
+}
+"""
+
+# Launches a real run scoped to one asset + one partition. Used for
+# Dagster+ (cloud) -- local goes through `dg launch --partition`
+# instead, which needs no GraphQL mutation.
+LAUNCH_RUN_MUTATION = """
+mutation DagsterPlusLaunchPartitionRun($executionParams: ExecutionParams!) {
+  launchRun(executionParams: $executionParams) {
+    __typename
+    ... on LaunchRunSuccess { run { runId } }
+    ... on PythonError { message }
+    ... on RunConfigValidationInvalid { errors { message } }
+    ... on PipelineNotFoundError { message }
+    ... on RunConflict { message }
+    ... on UnauthorizedError { message }
+    ... on InvalidSubsetError { message }
+    ... on ConflictingExecutionParamsError { message }
+    ... on NoModeProvidedError { message }
+    ... on InvalidStepError { invalidStepKey }
+    ... on InvalidOutputError { stepKey invalidOutputName }
+    ... on PresetNotFoundError { message }
   }
 }
 """

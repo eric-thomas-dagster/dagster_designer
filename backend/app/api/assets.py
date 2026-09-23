@@ -238,6 +238,8 @@ async def _cloud_ingestion_events(project, limit: int) -> list[dict]:
         )
     except DagsterPlusError as e:
         raise HTTPException(status_code=502, detail=f"Failed to fetch materialization history from Dagster+: {e}")
+    from ..services.dagster_plus_client import normalize_metadata_entries
+
     events: list[dict] = []
     for node in (data.get("assetNodes") or []):
         asset_key = "/".join((node.get("assetKey") or {}).get("path") or [])
@@ -245,12 +247,22 @@ async def _cloud_ingestion_events(project, limit: int) -> list[dict]:
             ts_millis = m.get("timestamp")
             if not ts_millis:
                 continue
+            metadata = normalize_metadata_entries(m.get("metadataEntries"))
+            # Dagster's own reserved metadata key for row counts -- if the
+            # materialization reported one, use it the same way a local
+            # preview's real COUNT(*) populates `rows`.
+            rows = next(
+                (int(e["value"]) for e in metadata if e["label"] == "dagster/row_count" and e["value"] is not None),
+                None,
+            )
             events.append({
                 "ts": datetime.fromtimestamp(int(ts_millis) / 1000, tz=timezone.utc).isoformat(),
                 "type": "materialize",
                 "asset_key": asset_key,
                 "status": "success",
                 "run_id": m.get("runId"),
+                "rows": rows,
+                "metadata": metadata,
             })
     events.sort(key=lambda e: e["ts"], reverse=True)
     return events[:limit]
@@ -487,6 +499,106 @@ async def get_asset_insights_metrics(project_id: str, asset_key: str, days: int 
 
     metrics = [m for m in results if m is not None]
     return AssetInsightsResponse(asset_key=asset_key, window_days=days, metrics=metrics)
+
+
+class AssetChangeEntry(BaseModel):
+    timestamp: float
+    code_location: str
+    git_commit_hash: str | None = None
+    change_types: list[str] = []
+    code_version_old: str | None = None
+    code_version_new: str | None = None
+    partitions_definition_old: str | None = None
+    partitions_definition_new: str | None = None
+    dependencies_added: list[str] = []
+    dependencies_changed: list[str] = []
+    dependencies_removed: list[str] = []
+    tags_added: list[str] = []
+    tags_changed: list[str] = []
+    tags_removed: list[str] = []
+    metadata_added: list[str] = []
+    metadata_changed: list[str] = []
+    metadata_removed: list[str] = []
+
+
+class AssetChangeHistoryResponse(BaseModel):
+    asset_key: str
+    available: bool
+    entries: list[AssetChangeEntry] = []
+
+
+def _stringify_diff_value(v: Any) -> str | None:
+    if v is None:
+        return None
+    if isinstance(v, str):
+        return v
+    return json.dumps(v)
+
+
+@router.get("/{project_id}/{asset_key:path}/change-history", response_model=AssetChangeHistoryResponse)
+async def get_asset_change_history(project_id: str, asset_key: str, limit: int = 50):
+    """Deploy-over-deploy history for one asset's definition -- what
+    changed (code version, deps, tags, metadata, partitions def) each
+    time its code location was redeployed. Dagster+-only (no local
+    equivalent -- local projects don't have a distinct "deploy" step to
+    diff against) and plan-gated on Dagster+'s side, so a missing/empty
+    result is treated as "unavailable" rather than an error the user
+    has to interpret."""
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    if not getattr(project, "is_dagster_plus", False):
+        return AssetChangeHistoryResponse(asset_key=asset_key, available=False)
+
+    from ..services.dagster_plus_client import query as dp_query, ASSET_DIFF_HISTORY_QUERY
+
+    path = [seg for seg in asset_key.split("/") if seg]
+    try:
+        data = await dp_query(
+            project.dagster_plus_org or "", project.dagster_plus_deployment or "",
+            project.dagster_plus_token or "", ASSET_DIFF_HISTORY_QUERY,
+            variables={"assetKey": {"path": path}, "limit": max(1, min(limit, 200))},
+            region=project.dagster_plus_region,
+        )
+    except Exception:
+        # Plan-gated / not enabled for this org -- graceful "unavailable",
+        # not a 502 the frontend has to render as an error.
+        return AssetChangeHistoryResponse(asset_key=asset_key, available=False)
+
+    raw_entries = data.get("assetDiffHistory")
+    if raw_entries is None:
+        return AssetChangeHistoryResponse(asset_key=asset_key, available=False)
+
+    entries: list[AssetChangeEntry] = []
+    for e in raw_entries:
+        diff = (e.get("diffSinceLastLoad") or {})
+        change_diff = (diff.get("changeDiff") or {})
+        code_version = change_diff.get("codeVersion") or {}
+        partitions_def = change_diff.get("partitionsDefinition") or {}
+        deps = change_diff.get("dependencies") or {}
+        tags = change_diff.get("tags") or {}
+        metadata = change_diff.get("metadata") or {}
+        entries.append(AssetChangeEntry(
+            timestamp=e.get("codeLocationDataUploadTimestamp") or 0.0,
+            code_location=e.get("locationName") or "",
+            git_commit_hash=e.get("gitCommitHash"),
+            change_types=diff.get("changeTypes") or [],
+            code_version_old=_stringify_diff_value(code_version.get("old")),
+            code_version_new=_stringify_diff_value(code_version.get("new")),
+            partitions_definition_old=_stringify_diff_value(partitions_def.get("old")),
+            partitions_definition_new=_stringify_diff_value(partitions_def.get("new")),
+            dependencies_added=deps.get("addedKeys") or [],
+            dependencies_changed=deps.get("changedKeys") or [],
+            dependencies_removed=deps.get("removedKeys") or [],
+            tags_added=tags.get("addedKeys") or [],
+            tags_changed=tags.get("changedKeys") or [],
+            tags_removed=tags.get("removedKeys") or [],
+            metadata_added=metadata.get("addedKeys") or [],
+            metadata_changed=metadata.get("changedKeys") or [],
+            metadata_removed=metadata.get("removedKeys") or [],
+        ))
+
+    return AssetChangeHistoryResponse(asset_key=asset_key, available=True, entries=entries)
 
 
 # Deployment-level metrics -- same curated shape as the per-asset set

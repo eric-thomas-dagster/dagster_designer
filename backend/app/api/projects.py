@@ -603,7 +603,7 @@ async def _cloud_monitor_history(project: Project, monitor_id: str, limit: int) 
     the check key we set during hydration — "<asset_key>::<check_name>".
     Returns events in the same shape as the local monitor_events.jsonl
     reader so the endpoint's downstream code doesn't care."""
-    from ..services.dagster_plus_client import query, ASSET_CHECK_HISTORY_QUERY
+    from ..services.dagster_plus_client import query, ASSET_CHECK_HISTORY_QUERY, numeric_metadata_value, normalize_metadata_entries
     if '::' not in monitor_id:
         return []
     asset_key_str, check_name = monitor_id.rsplit('::', 1)
@@ -633,14 +633,20 @@ async def _cloud_monitor_history(project: Project, monitor_id: str, limit: int) 
                 ts_iso = datetime.fromtimestamp(float(ts_epoch), tz=timezone.utc).isoformat()
             except Exception:
                 ts_iso = str(ts_epoch)
-        events.append({
+        raw_metadata = evl.get("metadataEntries") if evl else None
+        numeric = numeric_metadata_value(raw_metadata)
+        event: dict = {
             "ts": ts_iso,
             "monitor_id": monitor_id,
             "kind": "asset_check",
             "status": (exec_.get("status") or "").lower() or "unknown",
             "message": evl.get("description") if evl else None,
             "run_id": exec_.get("runId"),
-        })
+            "metadata": normalize_metadata_entries(raw_metadata),
+        }
+        if numeric is not None:
+            event["value"], event["value_label"] = numeric
+        events.append(event)
     # Return chronological order to match local behavior.
     events.reverse()
     return events
@@ -2651,6 +2657,166 @@ async def get_asset_partition_status(project_id: str, asset_key: str):
         return PartitionStatusResponse(asset_key=asset_key, is_partitioned=False)
 
     return _build_partition_status_response(asset_key, node["partitionKeys"], node.get("assetPartitionStatuses"))
+
+
+class PartitionDetailResponse(BaseModel):
+    asset_key: str
+    partition: str
+    last_run_id: str | None = None
+    last_run_status: str | None = None
+    last_run_start_time: float | None = None
+    last_run_end_time: float | None = None
+    last_materialized_at: float | None = None
+    last_materialization_run_id: str | None = None
+
+
+class MaterializePartitionRequest(BaseModel):
+    partition: str
+
+
+class MaterializePartitionResponse(BaseModel):
+    success: bool
+    message: str
+    run_id: str | None = None
+
+
+async def _resolve_asset_job_selector_cloud(project: Project, path: list[str]) -> dict | None:
+    """Resolve the (repositoryName, repositoryLocationName, jobName)
+    triple a Dagster+ launchRun call needs for one asset -- mirrors
+    _resolve_job_selector in assets.py but keyed off an asset instead of
+    a job name, since callers here only know the asset."""
+    from ..services.dagster_plus_client import query as dp_query, ASSET_PARTITION_DETAIL_QUERY
+    # Re-use the detail query purely for its jobNames/repository fields --
+    # the partition arg is required by the query shape but unused here.
+    data = await dp_query(
+        project.dagster_plus_org or "", project.dagster_plus_deployment or "",
+        project.dagster_plus_token or "", ASSET_PARTITION_DETAIL_QUERY,
+        variables={"assetKey": {"path": path}, "partition": "__unused__"},
+        region=project.dagster_plus_region,
+    )
+    node = data.get("assetNodeOrError") or {}
+    if node.get("__typename") != "AssetNode":
+        return None
+    job_names = [j for j in (node.get("jobNames") or []) if not j.startswith("__")] or (node.get("jobNames") or [])
+    repo = node.get("repository") or {}
+    if not job_names or not repo.get("name") or not (repo.get("location") or {}).get("name"):
+        return None
+    return {
+        "jobName": job_names[0],
+        "repositoryName": repo["name"],
+        "repositoryLocationName": repo["location"]["name"],
+    }
+
+
+@router.get("/{project_id}/assets/{asset_key:path}/partitions/{partition}/detail", response_model=PartitionDetailResponse)
+async def get_asset_partition_detail(project_id: str, asset_key: str, partition: str):
+    """What happened to one specific partition last -- its most recent
+    run (with a link-able run id) and materialization timestamp. Kept
+    separate from the bulk status matrix since prefetching this for
+    every partition (sometimes thousands) would be far too expensive;
+    this is fetched on demand when a user clicks one cell."""
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    from ..services.dagster_plus_client import query as dp_query, DagsterPlusError, ASSET_PARTITION_DETAIL_QUERY
+
+    path = [seg for seg in asset_key.split("/") if seg]
+    variables = {"assetKey": {"path": path}, "partition": partition}
+
+    if getattr(project, "is_dagster_plus", False):
+        try:
+            data = await dp_query(
+                project.dagster_plus_org or "", project.dagster_plus_deployment or "",
+                project.dagster_plus_token or "", ASSET_PARTITION_DETAIL_QUERY,
+                variables=variables, region=project.dagster_plus_region,
+            )
+        except DagsterPlusError as e:
+            raise HTTPException(status_code=502, detail=f"Failed to fetch partition detail from Dagster+: {e}")
+        node = data.get("assetNodeOrError") or {}
+    else:
+        from .runs import _run_local_query
+        try:
+            data = await _run_local_query(3000, ASSET_PARTITION_DETAIL_QUERY, variables)
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=f"Couldn't reach local Dagster GraphQL. Is `dg dev` running? ({e})")
+        node = data.get("assetNodeOrError") or {}
+
+    if node.get("__typename") != "AssetNode":
+        raise HTTPException(status_code=404, detail=f"Asset '{asset_key}' not found.")
+
+    run = node.get("latestRunForPartition") or {}
+    mats = node.get("latestMaterializationByPartition") or []
+    mat = mats[0] if mats and mats[0] else None
+    # MaterializationEvent.timestamp is epoch millis (unlike Run's
+    # startTime/endTime, which are epoch seconds) -- normalize to
+    # seconds so the frontend can treat every timestamp field uniformly.
+    mat_ts = (mat or {}).get("timestamp")
+
+    return PartitionDetailResponse(
+        asset_key=asset_key,
+        partition=partition,
+        last_run_id=run.get("runId"),
+        last_run_status=(run.get("status") or "").lower() or None,
+        last_run_start_time=run.get("startTime"),
+        last_run_end_time=run.get("endTime"),
+        last_materialized_at=(float(mat_ts) / 1000) if mat_ts is not None else None,
+        last_materialization_run_id=(mat or {}).get("runId"),
+    )
+
+
+@router.post("/{project_id}/assets/{asset_key:path}/partitions/{partition}/materialize", response_model=MaterializePartitionResponse)
+async def materialize_asset_partition(project_id: str, asset_key: str, partition: str):
+    """Materialize one asset for one partition. Local reuses the
+    existing `dg launch --partition` flow (via /materialize) -- this
+    endpoint is really just for Dagster+, where it resolves the job
+    selector and fires a real launchRun mutation against the live
+    deployment. A one-click action that launches real production
+    compute, so keep it scoped to exactly one asset + one partition
+    rather than ever falling back to "materialize everything"."""
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    if not getattr(project, "is_dagster_plus", False):
+        raise HTTPException(status_code=400, detail="Use /materialize for local projects.")
+
+    from ..services.dagster_plus_client import query as dp_query, DagsterPlusError, LAUNCH_RUN_MUTATION
+
+    path = [seg for seg in asset_key.split("/") if seg]
+    selector = await _resolve_asset_job_selector_cloud(project, path)
+    if selector is None:
+        raise HTTPException(status_code=404, detail=f"Couldn't resolve a job for asset '{asset_key}' in Dagster+.")
+    # Scope the run to just this asset -- without assetSelection, the job's
+    # FULL asset selection would be materialized for this partition, not
+    # just the one the user clicked.
+    selector["assetSelection"] = [{"path": path}]
+
+    execution_params = {
+        "selector": selector,
+        "runConfigData": {},
+        "mode": "default",
+        "executionMetadata": {
+            "tags": [{"key": "dagster/partition", "value": partition}],
+        },
+    }
+    try:
+        data = await dp_query(
+            project.dagster_plus_org or "", project.dagster_plus_deployment or "",
+            project.dagster_plus_token or "", LAUNCH_RUN_MUTATION,
+            variables={"executionParams": execution_params}, region=project.dagster_plus_region,
+        )
+    except DagsterPlusError as e:
+        raise HTTPException(status_code=502, detail=f"Failed to launch run on Dagster+: {e}")
+
+    result = data.get("launchRun") or {}
+    typename = result.get("__typename")
+    if typename == "LaunchRunSuccess":
+        run_id = (result.get("run") or {}).get("runId")
+        return MaterializePartitionResponse(success=True, message=f"Launched run {run_id}.", run_id=run_id)
+    message = result.get("message") or "; ".join(
+        e.get("message", "") for e in (result.get("errors") or [])
+    ) or f"Dagster+ returned {typename}."
+    return MaterializePartitionResponse(success=False, message=message)
 
 
 @router.get("/{project_id}/assets/{asset_key:path}/partitions", response_model=PartitionInfoResponse)
@@ -6817,6 +6983,10 @@ class MonitorHistoryPoint(BaseModel):
     # populated for Dagster+ (cloud); local monitor_events.jsonl doesn't
     # track a run id per check execution.
     run_id: str | None = None
+    # Full typed metadata the check reported (row_count, a markdown
+    # summary, a link to a dashboard, etc.) -- cloud only; `value` above
+    # is just the first numeric one, pulled out for the chart.
+    metadata: list[dict] = []
 
 
 class MonitorHistoryResponse(BaseModel):

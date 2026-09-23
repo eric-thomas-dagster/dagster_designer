@@ -715,6 +715,7 @@ export const projectsApi = {
       expected_min: number | null;
       expected_max: number | null;
       run_id: string | null;
+      metadata: MetadataEntry[];
     }>;
     numeric_series: Array<{ ts: string; value: number; expected_min?: number | null; expected_max?: number | null }>;
     numeric_label: string | null;
@@ -2206,6 +2207,26 @@ export const partitionsApi = {
     );
     return response.data;
   },
+
+  /** What happened to one specific partition last -- its most recent
+   *  run and materialization timestamp. Fetched on click, not prefetched
+   *  for the whole matrix (too expensive for assets with 1000s of keys). */
+  getPartitionDetail: async (projectId: string, assetKey: string, partition: string): Promise<PartitionDetailResponse> => {
+    const response = await api.get<PartitionDetailResponse>(
+      `/projects/${projectId}/assets/${encodeURIComponent(assetKey)}/partitions/${encodeURIComponent(partition)}/detail`
+    );
+    return response.data;
+  },
+
+  /** Materialize one asset for one partition on Dagster+ (cloud). Local
+   *  projects should use launchBackfill/materialize instead -- this
+   *  fires a real launchRun mutation against the live deployment. */
+  materializePartitionCloud: async (projectId: string, assetKey: string, partition: string): Promise<MaterializePartitionResponse> => {
+    const response = await api.post<MaterializePartitionResponse>(
+      `/projects/${projectId}/assets/${encodeURIComponent(assetKey)}/partitions/${encodeURIComponent(partition)}/materialize`
+    );
+    return response.data;
+  },
 };
 
 export interface PartitionKeyStatus {
@@ -2224,6 +2245,23 @@ export interface PartitionStatusResponse {
   keys: PartitionKeyStatus[];
   truncated: boolean;
   supported: boolean;
+}
+
+export interface PartitionDetailResponse {
+  asset_key: string;
+  partition: string;
+  last_run_id: string | null;
+  last_run_status: string | null;
+  last_run_start_time: number | null;
+  last_run_end_time: number | null;
+  last_materialized_at: number | null;
+  last_materialization_run_id: string | null;
+}
+
+export interface MaterializePartitionResponse {
+  success: boolean;
+  message: string;
+  run_id: string | null;
 }
 
 // Assets API
@@ -2415,6 +2453,17 @@ export const assetsApi = {
     return response.data;
   },
 
+  /** Deploy-over-deploy diff history for one asset's definition.
+   *  Dagster+ only, and plan-gated on Dagster+'s side -- `available:
+   *  false` means "not offered for this org", not an error. */
+  getChangeHistory: async (projectId: string, assetKey: string, limit: number = 50): Promise<AssetChangeHistoryResponse> => {
+    const response = await api.get<AssetChangeHistoryResponse>(
+      `/assets/${projectId}/${encodeURIComponent(assetKey)}/change-history`,
+      { params: { limit } },
+    );
+    return response.data;
+  },
+
   /** Deployment-wide Insights metrics -- the top-level view before
    *  drilling into a specific asset. Direct MCP call, no LLM. */
   getDeploymentInsights: async (projectId: string, days: number = 30): Promise<DeploymentInsightsResponse> => {
@@ -2480,6 +2529,32 @@ export interface AssetInsightsResponse {
   asset_key: string;
   window_days: number;
   metrics: AssetInsightMetric[];
+}
+
+export interface AssetChangeEntry {
+  timestamp: number;
+  code_location: string;
+  git_commit_hash: string | null;
+  change_types: string[];
+  code_version_old: string | null;
+  code_version_new: string | null;
+  partitions_definition_old: string | null;
+  partitions_definition_new: string | null;
+  dependencies_added: string[];
+  dependencies_changed: string[];
+  dependencies_removed: string[];
+  tags_added: string[];
+  tags_changed: string[];
+  tags_removed: string[];
+  metadata_added: string[];
+  metadata_changed: string[];
+  metadata_removed: string[];
+}
+
+export interface AssetChangeHistoryResponse {
+  asset_key: string;
+  available: boolean;
+  entries: AssetChangeEntry[];
 }
 
 export interface DeploymentInsightsResponse {
@@ -2548,6 +2623,13 @@ export const INSIGHTS_JOB_BREAKDOWN_METRICS: Array<{ name: string; label: string
   { name: 'row_count', label: 'Row Count' },
 ];
 
+export interface MetadataEntry {
+  label: string;
+  description: string | null;
+  type: 'float' | 'int' | 'text' | 'markdown' | 'url' | 'path' | 'json' | 'bool' | 'timestamp' | 'other';
+  value: string | number | boolean | null;
+}
+
 export interface IngestionEvent {
   ts: string;                          // ISO-8601 UTC
   type: 'materialize' | 'preview';
@@ -2561,6 +2643,9 @@ export interface IngestionEvent {
    *  Dagster+ (cloud) materializations; local materializes aren't
    *  always wrapped in a full run. */
   run_id?: string;
+  /** Typed metadata Dagster attached to the materialization (row
+   *  counts, a markdown summary, a dashboard link, etc.) -- cloud only. */
+  metadata?: MetadataEntry[];
 }
 
 export interface AiProvidersStatus {

@@ -1184,17 +1184,36 @@ function formatRelative(ts: string): string {
 // Per-row status squares — last N materializes, green/red left→right.
 // Empty runs render as a light grey placeholder so the width is stable
 // across rows even when a source has never been materialized.
+/** Per-row trend -- bars vary by HEIGHT (rows ingested, or duration as
+ *  a fallback) not just color, so you can actually see "this run moved
+ *  more data" at a glance instead of a flat row of same-size squares. */
 function Sparkline({ runs, size = 8 }: { runs: IngestionEvent[]; size?: number }) {
   const N = 8;
   const recent = runs.slice(-N);
   const empty = N - recent.length;
+  const maxHeight = size * 2.5;
+  const minHeight = Math.max(3, size * 0.4);
+
+  const rowsValues = recent.map((e) => e.rows).filter((v): v is number => typeof v === 'number');
+  const durationValues = recent.map((e) => e.duration_ms).filter((v): v is number => typeof v === 'number');
+  const metric: 'rows' | 'duration_ms' | null = rowsValues.length > 0 ? 'rows' : durationValues.length > 0 ? 'duration_ms' : null;
+  const values = metric === 'rows' ? rowsValues : metric === 'duration_ms' ? durationValues : [];
+  const maxValue = values.length > 0 ? Math.max(...values) : 0;
+
+  const barHeight = (e: IngestionEvent): number => {
+    if (!metric) return size;
+    const v = e[metric];
+    if (typeof v !== 'number' || maxValue <= 0) return minHeight;
+    return minHeight + (v / maxValue) * (maxHeight - minHeight);
+  };
+
   return (
-    <div className="flex items-end gap-0.5" title={`Last ${recent.length} runs`}>
+    <div className="flex items-end gap-0.5" style={{ height: maxHeight }} title={`Last ${recent.length} runs`}>
       {Array.from({ length: empty }).map((_, i) => (
         <div
           key={`e${i}`}
           style={{ width: size, height: size }}
-          className="rounded-sm bg-gray-100"
+          className="rounded-sm bg-gray-100 self-end"
         />
       ))}
       {recent.map((e, i) => {
@@ -1202,12 +1221,17 @@ function Sparkline({ runs, size = 8 }: { runs: IngestionEvent[]; size?: number }
           e.status === 'success' ? 'bg-emerald-400'
           : e.status === 'failure' ? 'bg-rose-400'
           : 'bg-gray-300';
+        const valueLabel = metric === 'rows' && typeof e.rows === 'number'
+          ? `${e.rows.toLocaleString()} rows`
+          : metric === 'duration_ms' && typeof e.duration_ms === 'number'
+            ? `${(e.duration_ms / 1000).toFixed(1)}s`
+            : null;
         return (
           <div
             key={i}
-            style={{ width: size, height: size }}
-            className={`rounded-sm ${color}`}
-            title={`${new Date(e.ts).toLocaleString()} — ${e.status}${e.duration_ms != null ? ` (${(e.duration_ms / 1000).toFixed(1)}s)` : ''}`}
+            style={{ width: size, height: barHeight(e) }}
+            className={`rounded-sm ${color} self-end`}
+            title={`${new Date(e.ts).toLocaleString()} — ${e.status}${valueLabel ? ` · ${valueLabel}` : ''}`}
           />
         );
       })}

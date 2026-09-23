@@ -1,5 +1,5 @@
 import React, { useState, useMemo } from 'react';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   Play, ChevronRight, ChevronDown, Layers as LayersIcon, Database, CheckCircle2, AlertTriangle,
   Book, Filter as FilterIcon, Clock, Zap, Timer, Users as UsersIcon,
@@ -7,11 +7,12 @@ import {
   History, Calendar, ArrowUpRight, ArrowDownRight, Ban, Download, BarChart3, MinusCircle,
 } from 'lucide-react';
 import { useProjectStore } from '@/hooks/useProject';
-import { projectsApi, assetsApi, partitionsApi, dagsterPlusOrgBaseUrl, type BackfillRequest } from '@/services/api';
-import { classifyStatus } from '@/lib/status';
+import { projectsApi, assetsApi, partitionsApi, dagsterPlusOrgBaseUrl, type BackfillRequest, type AssetChangeEntry } from '@/services/api';
+import { classifyStatus, statusTextClass } from '@/lib/status';
 import { notify } from './Notifications';
 import { PartitionBackfill } from './PartitionBackfill';
 import { InsightMetricCard } from './InsightMetricCard';
+import { MetadataEntryList } from './MetadataEntryList';
 import type { GraphNode, ComponentInstance } from '@/types';
 
 const isDbtComponentType = (t: string | undefined | null): boolean => !!t && /\bdbt[_.]|^dbt/i.test(t);
@@ -183,17 +184,9 @@ export function AssetDetailPage({ nodeId, onClose, onNewPrimitiveForAsset, onNav
         {activeTab === 'checks' && <ChecksTab node={node} projectId={currentProject.id} onOpenRun={onOpenRun} />}
         {activeTab === 'lineage' && <LineageTab node={node} currentProject={currentProject} onNavigate={onNavigate} />}
         {activeTab === 'events' && <EventsTab node={node} projectId={currentProject.id} onOpenRun={onOpenRun} />}
-        {activeTab === 'partitions' && <PartitionsTab node={node} isCloud={isCloud} projectId={currentProject.id} currentProject={currentProject} />}
+        {activeTab === 'partitions' && <PartitionsTab node={node} isCloud={isCloud} projectId={currentProject.id} currentProject={currentProject} onOpenRun={onOpenRun} />}
         {activeTab === 'insights' && <InsightsTab node={node} isCloud={isCloud} projectId={currentProject.id} />}
-        {activeTab === 'change_history' && (
-          <div className="p-12 text-center text-gray-500">
-            <div className="inline-flex items-center gap-2 text-sm">
-              <Clock className="w-4 h-4" />
-              <span>The <span className="font-medium">Change history</span> tab isn't wired up yet.</span>
-            </div>
-            <p className="text-xs mt-2 text-gray-400">Coming soon.</p>
-          </div>
-        )}
+        {activeTab === 'change_history' && <ChangeHistoryTab node={node} isCloud={isCloud} projectId={currentProject.id} />}
       </div>
     </div>
   );
@@ -302,27 +295,30 @@ function CheckDetailRow({
                 {history.events.slice().reverse().map((e, i) => {
                   const ec = classifyStatus(e.status);
                   return (
-                    <li key={i} className="py-1.5 flex items-center gap-2 text-xs">
-                      {ec === 'success' ? <CheckCircle2 className="w-3 h-3 text-emerald-500 flex-shrink-0" />
-                        : ec === 'failure' ? <AlertTriangle className="w-3 h-3 text-rose-500 flex-shrink-0" />
-                        : ec === 'skipped' ? <MinusCircle className="w-3 h-3 text-gray-400 flex-shrink-0" />
-                        : <span className="w-3 h-3 flex-shrink-0 inline-block rounded-full border border-gray-300" />}
-                      <span className="text-gray-500 tabular-nums flex-shrink-0">{formatRelative(e.ts)}</span>
-                      {e.value != null && (
-                        <span className="text-gray-700 font-mono flex-shrink-0">
-                          {formatMetricValue(e.value)} {e.value_label ?? ''}
-                        </span>
-                      )}
-                      {e.message && <span className="text-gray-600 truncate">{e.message}</span>}
-                      {e.run_id && onOpenRun && (
-                        <button
-                          onClick={() => onOpenRun(e.run_id!)}
-                          className="ml-auto flex-shrink-0 text-indigo-600 hover:text-indigo-800 hover:underline font-mono"
-                          title={`Open run ${e.run_id}`}
-                        >
-                          view run
-                        </button>
-                      )}
+                    <li key={i} className="py-1.5 text-xs">
+                      <div className="flex items-center gap-2">
+                        {ec === 'success' ? <CheckCircle2 className="w-3 h-3 text-emerald-500 flex-shrink-0" />
+                          : ec === 'failure' ? <AlertTriangle className="w-3 h-3 text-rose-500 flex-shrink-0" />
+                          : ec === 'skipped' ? <MinusCircle className="w-3 h-3 text-gray-400 flex-shrink-0" />
+                          : <span className="w-3 h-3 flex-shrink-0 inline-block rounded-full border border-gray-300" />}
+                        <span className="text-gray-500 tabular-nums flex-shrink-0">{formatRelative(e.ts)}</span>
+                        {e.value != null && (
+                          <span className="text-gray-700 font-mono flex-shrink-0">
+                            {formatMetricValue(e.value)} {e.value_label ?? ''}
+                          </span>
+                        )}
+                        {e.message && <span className="text-gray-600 truncate">{e.message}</span>}
+                        {e.run_id && onOpenRun && (
+                          <button
+                            onClick={() => onOpenRun(e.run_id!)}
+                            className="ml-auto flex-shrink-0 text-indigo-600 hover:text-indigo-800 hover:underline font-mono"
+                            title={`Open run ${e.run_id}`}
+                          >
+                            view run
+                          </button>
+                        )}
+                      </div>
+                      <MetadataEntryList entries={e.metadata} />
                     </li>
                   );
                 })}
@@ -557,24 +553,27 @@ function EventsTab({ node, projectId, onOpenRun }: { node: GraphNode; projectId:
           const ok = e.status === 'success';
           const bad = e.status === 'failure';
           return (
-            <li key={i} className="px-3 py-2.5 flex items-center gap-3 text-sm">
-              {ok ? <CheckCircle2 className="w-4 h-4 text-emerald-500 flex-shrink-0" />
-                : bad ? <AlertTriangle className="w-4 h-4 text-rose-500 flex-shrink-0" />
-                : <Loader2 className="w-4 h-4 text-blue-500 flex-shrink-0" />}
-              <span className="text-gray-900 font-medium flex-shrink-0">{e.type === 'preview' ? 'Preview' : 'Materialize'}</span>
-              <span className="text-gray-500 tabular-nums flex-shrink-0">{formatRelative(e.ts)}</span>
-              {typeof e.rows === 'number' && <span className="text-gray-500 flex-shrink-0">{e.rows.toLocaleString()} rows</span>}
-              {typeof e.duration_ms === 'number' && <span className="text-gray-400 flex-shrink-0">{(e.duration_ms / 1000).toFixed(1)}s</span>}
-              {e.component && <span className="text-gray-400 truncate font-mono text-xs">{e.component}</span>}
-              {e.run_id && onOpenRun && (
-                <button
-                  onClick={() => onOpenRun(e.run_id!)}
-                  className="ml-auto flex-shrink-0 text-[11px] text-indigo-600 hover:text-indigo-800 hover:underline font-mono"
-                  title={`Open run ${e.run_id}`}
-                >
-                  view run
-                </button>
-              )}
+            <li key={i} className="px-3 py-2.5 text-sm">
+              <div className="flex items-center gap-3">
+                {ok ? <CheckCircle2 className="w-4 h-4 text-emerald-500 flex-shrink-0" />
+                  : bad ? <AlertTriangle className="w-4 h-4 text-rose-500 flex-shrink-0" />
+                  : <Loader2 className="w-4 h-4 text-blue-500 flex-shrink-0" />}
+                <span className="text-gray-900 font-medium flex-shrink-0">{e.type === 'preview' ? 'Preview' : 'Materialize'}</span>
+                <span className="text-gray-500 tabular-nums flex-shrink-0">{formatRelative(e.ts)}</span>
+                {typeof e.rows === 'number' && <span className="text-gray-500 flex-shrink-0">{e.rows.toLocaleString()} rows</span>}
+                {typeof e.duration_ms === 'number' && <span className="text-gray-400 flex-shrink-0">{(e.duration_ms / 1000).toFixed(1)}s</span>}
+                {e.component && <span className="text-gray-400 truncate font-mono text-xs">{e.component}</span>}
+                {e.run_id && onOpenRun && (
+                  <button
+                    onClick={() => onOpenRun(e.run_id!)}
+                    className="ml-auto flex-shrink-0 text-[11px] text-indigo-600 hover:text-indigo-800 hover:underline font-mono"
+                    title={`Open run ${e.run_id}`}
+                  >
+                    view run
+                  </button>
+                )}
+              </div>
+              <MetadataEntryList entries={e.metadata} />
             </li>
           );
         })}
@@ -593,16 +592,18 @@ const PARTITION_STATUS_TONE: Record<string, string> = {
 };
 
 function PartitionsTab({
-  node, isCloud, projectId, currentProject,
+  node, isCloud, projectId, currentProject, onOpenRun,
 }: {
   node: GraphNode;
   isCloud: boolean;
   projectId: string;
   currentProject: any;
+  onOpenRun?: (runId: string) => void;
 }) {
   const data = node.data as any;
   const assetKey = (data.asset_key as string) || node.id;
   const [backfillOpen, setBackfillOpen] = useState(false);
+  const [selectedPartition, setSelectedPartition] = useState<string | null>(null);
 
   // Static definition (type/cadence/cron/timezone) -- local only, no
   // Dagster+ GraphQL equivalent surfaced yet.
@@ -700,7 +701,7 @@ function PartitionsTab({
                 Showing the most recent {status.keys.length.toLocaleString()} of {status.total.toLocaleString()} partitions.
               </p>
             )}
-            <PartitionHeatmap keys={status.keys} />
+            <PartitionHeatmap keys={status.keys} onSelect={setSelectedPartition} />
             <div className="flex items-center gap-4 mt-3 text-[11px] text-gray-500">
               {(['materialized', 'failed', 'materializing', 'missing'] as const).map((s) => (
                 <span key={s} className="inline-flex items-center gap-1">
@@ -711,6 +712,16 @@ function PartitionsTab({
           </>
         )}
       </Section>
+      {selectedPartition && (
+        <PartitionDetailPanel
+          projectId={projectId}
+          assetKey={assetKey}
+          partition={selectedPartition}
+          isCloud={isCloud}
+          onClose={() => setSelectedPartition(null)}
+          onOpenRun={onOpenRun}
+        />
+      )}
       {backfillOpen && (
         <PartitionBackfill
           open={backfillOpen}
@@ -733,27 +744,128 @@ function PartitionsTab({
  *  Flat wrapping grid rather than a calendar layout since partition
  *  cadence varies (daily/hourly/static) and a generic grid reads fine
  *  for all of them without needing to know the cadence. */
-function PartitionHeatmap({ keys }: { keys: Array<{ key: string; status: string }> }) {
+function PartitionHeatmap({
+  keys, onSelect,
+}: {
+  keys: Array<{ key: string; status: string }>;
+  onSelect: (key: string) => void;
+}) {
   const [hovered, setHovered] = useState<{ key: string; status: string } | null>(null);
   return (
     <div>
       {hovered && (
         <div className="text-xs text-gray-700 font-mono mb-1.5 h-4">
-          {hovered.key} · <span className="capitalize">{hovered.status}</span>
+          {hovered.key} · <span className="capitalize">{hovered.status}</span> · click for details
         </div>
       )}
       <div className="flex flex-wrap gap-[3px] max-h-64 overflow-y-auto">
         {keys.map((p) => (
-          <span
+          <button
             key={p.key}
             onMouseEnter={() => setHovered(p)}
             onMouseLeave={() => setHovered((h) => (h?.key === p.key ? null : h))}
-            className={`inline-block w-3 h-3 rounded-sm cursor-default ${PARTITION_STATUS_TONE[p.status] || 'bg-gray-200'}`}
+            onClick={() => onSelect(p.key)}
+            className={`inline-block w-3 h-3 rounded-sm cursor-pointer hover:ring-2 hover:ring-offset-1 hover:ring-gray-400 ${PARTITION_STATUS_TONE[p.status] || 'bg-gray-200'}`}
             title={`${p.key} · ${p.status}`}
           />
         ))}
       </div>
     </div>
+  );
+}
+
+/** Click-through detail for one partition -- last run (linkable) + last
+ *  materialization timestamp, plus a "materialize this partition"
+ *  action. Fetched on demand (see getPartitionDetail) rather than
+ *  prefetched for the whole matrix. */
+function PartitionDetailPanel({
+  projectId, assetKey, partition, isCloud, onClose, onOpenRun,
+}: {
+  projectId: string;
+  assetKey: string;
+  partition: string;
+  isCloud: boolean;
+  onClose: () => void;
+  onOpenRun?: (runId: string) => void;
+}) {
+  const [materializing, setMaterializing] = useState(false);
+  const queryClient = useQueryClient();
+  const { data: detail, isLoading, error } = useQuery({
+    queryKey: ['partition-detail', projectId, assetKey, partition],
+    queryFn: () => partitionsApi.getPartitionDetail(projectId, assetKey, partition),
+    staleTime: 10_000,
+    retry: false,
+  });
+
+  const handleMaterialize = async () => {
+    setMaterializing(true);
+    try {
+      if (isCloud) {
+        const r = await partitionsApi.materializePartitionCloud(projectId, assetKey, partition);
+        if (r.success) notify.success(r.message);
+        else notify.error(r.message);
+      } else {
+        const r = await projectsApi.materialize(projectId, [assetKey], undefined, undefined, partition);
+        if (r.success) notify.success(`Materialized ${assetKey} for ${partition}.`);
+        else notify.error(r.message || r.stderr || 'Materialization failed.');
+      }
+      queryClient.invalidateQueries({ queryKey: ['partition-status', projectId, assetKey] });
+      queryClient.invalidateQueries({ queryKey: ['partition-detail', projectId, assetKey, partition] });
+    } catch (e: any) {
+      notify.error(e?.response?.data?.detail || e?.message || String(e));
+    } finally {
+      setMaterializing(false);
+    }
+  };
+
+  return (
+    <Section
+      title={`Partition: ${partition}`}
+      icon={<Calendar className="w-4 h-4 text-gray-500" />}
+      headerRight={
+        <button onClick={onClose} className="p-1 text-gray-400 hover:text-gray-700 rounded hover:bg-gray-100">
+          <X className="w-3.5 h-3.5" />
+        </button>
+      }
+    >
+      {isLoading ? (
+        <div className="py-4 text-center"><Loader2 className="w-4 h-4 mx-auto animate-spin text-gray-400" /></div>
+      ) : error ? (
+        <p className="text-xs text-rose-600">{(error as any)?.response?.data?.detail || (error as any)?.message || 'Failed to load partition detail.'}</p>
+      ) : (
+        <div className="space-y-3">
+          <div className="grid grid-cols-2 gap-4 text-sm">
+            <div>
+              <div className="text-[10px] uppercase tracking-wider text-gray-400 font-medium mb-0.5">Last run</div>
+              {detail?.last_run_id ? (
+                <div className="flex items-center gap-2">
+                  <span className={`text-xs font-medium ${statusTextClass(detail.last_run_status)}`}>{detail.last_run_status || 'unknown'}</span>
+                  {onOpenRun && (
+                    <button onClick={() => onOpenRun(detail.last_run_id!)} className="text-xs text-indigo-600 hover:text-indigo-800 hover:underline font-mono">
+                      view run
+                    </button>
+                  )}
+                </div>
+              ) : <span className="text-xs text-gray-400 italic">no runs yet</span>}
+            </div>
+            <div>
+              <div className="text-[10px] uppercase tracking-wider text-gray-400 font-medium mb-0.5">Last materialized</div>
+              <span className="text-xs text-gray-700">
+                {detail?.last_materialized_at ? new Date(detail.last_materialized_at * 1000).toLocaleString() : <span className="text-gray-400 italic">never</span>}
+              </span>
+            </div>
+          </div>
+          <button
+            onClick={handleMaterialize}
+            disabled={materializing}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-primary text-primary-foreground rounded-md hover:bg-accent disabled:opacity-50"
+          >
+            {materializing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Play className="w-3.5 h-3.5" />}
+            {materializing ? 'Materializing…' : `Materialize this partition${isCloud ? ' (Dagster+)' : ''}`}
+          </button>
+        </div>
+      )}
+    </Section>
   );
 }
 
@@ -1219,6 +1331,156 @@ function OverviewTab({ node, isCloud, onNewPrimitiveForAsset, onNavigate }: {
   function buildDagsterPlusUrl(assetKey: string): string {
     return buildDagsterPlusAssetUrl(currentProject, assetKey);
   }
+}
+
+// ---------- Change history tab ----------
+//
+// Deploy-over-deploy diffs for this asset's definition (code version,
+// dependencies, tags, metadata, partitions def) -- Dagster+ only, and
+// plan-gated on Dagster+'s own side, so some orgs simply don't have
+// this data. Local has no equivalent (no distinct "deploy" step to
+// diff against), so this tab is Dagster+-only.
+
+const CHANGE_TYPE_LABEL: Record<string, string> = {
+  NEW: 'New asset',
+  CODE_VERSION: 'Code version',
+  DEPENDENCIES: 'Dependencies',
+  PARTITIONS_DEFINITION: 'Partitions definition',
+  TAGS: 'Tags',
+  METADATA: 'Metadata',
+  REMOVED: 'Removed',
+};
+
+function ChangeHistoryTab({ node, isCloud, projectId }: { node: GraphNode; isCloud: boolean; projectId: string }) {
+  const data = node.data as any;
+  const assetKey = (data.asset_key as string) || node.id;
+
+  const { data: history, isLoading } = useQuery({
+    queryKey: ['asset-change-history', projectId, assetKey],
+    queryFn: () => assetsApi.getChangeHistory(projectId, assetKey, 50),
+    enabled: isCloud,
+    staleTime: 60_000,
+    retry: false,
+  });
+
+  if (!isCloud) {
+    return (
+      <div className="p-12 text-center text-gray-500">
+        <Clock className="w-8 h-8 mx-auto mb-2 text-gray-300" />
+        <p className="text-sm">Change history is a Dagster+ feature.</p>
+        <p className="text-xs mt-2 text-gray-400 max-w-md mx-auto">
+          It's a deploy-over-deploy diff of this asset's definition, tied to Dagster+'s code-location
+          deploy history -- local projects don't have a distinct "deploy" step to diff against.
+        </p>
+      </div>
+    );
+  }
+  if (isLoading) {
+    return <div className="p-12 text-center text-gray-500"><Loader2 className="w-5 h-5 mx-auto animate-spin" /></div>;
+  }
+  if (!history?.available || history.entries.length === 0) {
+    return (
+      <div className="p-12 text-center text-gray-500">
+        <Clock className="w-8 h-8 mx-auto mb-2 text-gray-300" />
+        <p className="text-sm">No change history recorded for this asset.</p>
+        <p className="text-xs mt-2 text-gray-400 max-w-md mx-auto">
+          {history?.available === false
+            ? "This org either hasn't redeployed this asset's code location yet, or doesn't have change history enabled."
+            : 'Nothing recorded yet.'}
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="p-6 max-w-[800px] mx-auto space-y-3">
+      {history.entries.map((entry, i) => (
+        <ChangeHistoryEntryRow key={i} entry={entry} />
+      ))}
+    </div>
+  );
+}
+
+function ChangeHistoryEntryRow({ entry }: { entry: AssetChangeEntry }) {
+  const [expanded, setExpanded] = useState(false);
+  const hasDetail = !!(
+    entry.code_version_old || entry.code_version_new
+    || entry.partitions_definition_old || entry.partitions_definition_new
+    || entry.dependencies_added.length || entry.dependencies_changed.length || entry.dependencies_removed.length
+    || entry.tags_added.length || entry.tags_changed.length || entry.tags_removed.length
+    || entry.metadata_added.length || entry.metadata_changed.length || entry.metadata_removed.length
+  );
+  return (
+    <div className="bg-white border border-gray-200 rounded-lg overflow-hidden">
+      <button
+        onClick={() => hasDetail && setExpanded((v) => !v)}
+        className={`w-full flex items-start gap-3 p-3 text-left ${hasDetail ? 'hover:bg-gray-50/50 cursor-pointer' : 'cursor-default'}`}
+      >
+        <Clock className="w-4 h-4 text-gray-400 mt-0.5 flex-shrink-0" />
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="text-xs text-gray-500 tabular-nums">{new Date(entry.timestamp * 1000).toLocaleString()}</span>
+            <span className="text-xs font-mono text-gray-400">· {entry.code_location}</span>
+            {entry.git_commit_hash && (
+              <span className="text-[10px] font-mono px-1.5 py-0.5 bg-gray-50 border border-gray-200 rounded text-gray-600">
+                {entry.git_commit_hash.slice(0, 7)}
+              </span>
+            )}
+          </div>
+          <div className="flex items-center gap-1.5 flex-wrap mt-1.5">
+            {entry.change_types.map((t) => (
+              <span key={t} className="inline-flex items-center px-1.5 py-0.5 text-[10px] font-medium rounded bg-indigo-50 text-indigo-700 border border-indigo-200">
+                {CHANGE_TYPE_LABEL[t] || t}
+              </span>
+            ))}
+          </div>
+        </div>
+        {hasDetail && (
+          <ChevronDown className={`w-4 h-4 text-gray-400 mt-0.5 flex-shrink-0 transition-transform ${expanded ? 'rotate-180' : ''}`} />
+        )}
+      </button>
+      {expanded && hasDetail && (
+        <div className="border-t border-gray-100 px-3 py-2.5 bg-gray-50/50 space-y-2 text-xs">
+          {(entry.code_version_old || entry.code_version_new) && (
+            <ChangeHistoryDiffRow label="Code version" oldValue={entry.code_version_old} newValue={entry.code_version_new} />
+          )}
+          {(entry.partitions_definition_old || entry.partitions_definition_new) && (
+            <ChangeHistoryDiffRow label="Partitions definition" oldValue={entry.partitions_definition_old} newValue={entry.partitions_definition_new} />
+          )}
+          <ChangeHistoryKeysRow label="Dependencies" added={entry.dependencies_added} changed={entry.dependencies_changed} removed={entry.dependencies_removed} />
+          <ChangeHistoryKeysRow label="Tags" added={entry.tags_added} changed={entry.tags_changed} removed={entry.tags_removed} />
+          <ChangeHistoryKeysRow label="Metadata" added={entry.metadata_added} changed={entry.metadata_changed} removed={entry.metadata_removed} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ChangeHistoryDiffRow({ label, oldValue, newValue }: { label: string; oldValue: string | null; newValue: string | null }) {
+  return (
+    <div>
+      <div className="text-[10px] uppercase tracking-wider text-gray-400 font-medium mb-0.5">{label}</div>
+      <div className="flex items-center gap-2 font-mono">
+        {oldValue && <span className="text-rose-600 line-through">{oldValue}</span>}
+        {oldValue && newValue && <span className="text-gray-400">→</span>}
+        {newValue && <span className="text-emerald-700">{newValue}</span>}
+      </div>
+    </div>
+  );
+}
+
+function ChangeHistoryKeysRow({ label, added, changed, removed }: { label: string; added: string[]; changed: string[]; removed: string[] }) {
+  if (added.length === 0 && changed.length === 0 && removed.length === 0) return null;
+  return (
+    <div>
+      <div className="text-[10px] uppercase tracking-wider text-gray-400 font-medium mb-0.5">{label}</div>
+      <div className="flex flex-wrap gap-1">
+        {added.map((k) => <span key={`a-${k}`} className="font-mono px-1.5 py-0.5 text-[10px] rounded bg-emerald-50 text-emerald-700 border border-emerald-200">+ {k}</span>)}
+        {changed.map((k) => <span key={`c-${k}`} className="font-mono px-1.5 py-0.5 text-[10px] rounded bg-amber-50 text-amber-700 border border-amber-200">~ {k}</span>)}
+        {removed.map((k) => <span key={`r-${k}`} className="font-mono px-1.5 py-0.5 text-[10px] rounded bg-rose-50 text-rose-700 border border-rose-200">− {k}</span>)}
+      </div>
+    </div>
+  );
 }
 
 // ---------- Definition section (editable) ----------
