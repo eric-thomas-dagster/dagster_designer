@@ -14,9 +14,15 @@ interface GitCommitDialogProps {
   subpath?: string;
   /** Sensible default commit message to pre-fill. */
   defaultMessage?: string;
+  /** Pre-fills the "create GitHub repo" name when there's no repo yet.
+   *  Sanitized into a slug; the user can still edit it. */
+  defaultRepoName?: string;
 }
 
-export function GitCommitDialog({ open, onOpenChange, projectId, subpath, defaultMessage }: GitCommitDialogProps) {
+const slugify = (s: string): string =>
+  s.trim().toLowerCase().replace(/[^a-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '') || 'dagster-project';
+
+export function GitCommitDialog({ open, onOpenChange, projectId, subpath, defaultMessage, defaultRepoName }: GitCommitDialogProps) {
   const [status, setStatus] = useState<{
     is_git_repo: boolean;
     branch: string | null;
@@ -32,27 +38,57 @@ export function GitCommitDialog({ open, onOpenChange, projectId, subpath, defaul
   const [pushToRemote, setPushToRemote] = useState(true);
   const [selectedFiles, setSelectedFiles] = useState<Set<string>>(new Set());
   const [saving, setSaving] = useState(false);
+  const [repoName, setRepoName] = useState('');
+  const [repoPrivate, setRepoPrivate] = useState(true);
+  const [creatingRemote, setCreatingRemote] = useState(false);
 
-  useEffect(() => {
-    if (!open) return;
-    let cancelled = false;
+  const refreshStatus = () => {
     setLoading(true);
-    projectsApi.projectGitStatus(projectId, subpath).then((r) => {
-      if (cancelled) return;
+    return projectsApi.projectGitStatus(projectId, subpath).then((r) => {
       setStatus(r);
       // Pre-select every dirty file so the common case (commit everything)
       // is one click. Users deselect anything they want to leave behind.
       setSelectedFiles(new Set([...r.modified, ...r.untracked, ...r.staged]));
       setLoading(false);
-    }).catch((e) => {
+      return r;
+    });
+  };
+
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    refreshStatus().catch((e) => {
       if (cancelled) return;
       notify.error(`git status failed: ${e?.message ?? e}`);
       setLoading(false);
     });
     return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, projectId, subpath]);
 
   useEffect(() => { setMessage(defaultMessage || ''); }, [defaultMessage, open]);
+  useEffect(() => { setRepoName(slugify(defaultRepoName || '')); }, [defaultRepoName, open]);
+
+  const handleCreateRemote = async () => {
+    if (!repoName.trim()) return;
+    setCreatingRemote(true);
+    try {
+      const r = await projectsApi.projectGitCreateRemote(projectId, {
+        subpath: subpath || null,
+        repo_name: repoName.trim(),
+        private: repoPrivate,
+        token: token.trim() || null,
+      });
+      notify.success(r.created ? `Created ${r.html_url} and set it as origin.` : `Connected existing ${r.html_url} as origin.`);
+      await refreshStatus();
+    } catch (e: any) {
+      const msg = e?.response?.data?.detail || e?.message || String(e);
+      notify.error(`Couldn't create GitHub repo: ${msg}`);
+      setLoading(false);
+    } finally {
+      setCreatingRemote(false);
+    }
+  };
 
   const toggle = (f: string) => {
     setSelectedFiles((prev) => {
@@ -119,7 +155,46 @@ export function GitCommitDialog({ open, onOpenChange, projectId, subpath, defaul
               </div>
             )}
             {!loading && status?.is_git_repo === false && (
-              <Notice>This directory isn't a git repository — no origin to push to.</Notice>
+              <div className="space-y-3">
+                <Notice>This directory isn't a git repository yet — create a GitHub repo to push to, or connect one below.</Notice>
+                <div>
+                  <label className="text-[10px] uppercase tracking-wider text-gray-500 mb-1 block">GitHub repo name</label>
+                  <input
+                    type="text"
+                    value={repoName}
+                    onChange={(e) => setRepoName(e.target.value)}
+                    placeholder="my-dagster-project"
+                    className="w-full px-2 py-1.5 text-sm font-mono border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  />
+                </div>
+                <label className="flex items-center gap-2 cursor-pointer text-sm text-gray-700">
+                  <input
+                    type="checkbox"
+                    checked={repoPrivate}
+                    onChange={(e) => setRepoPrivate(e.target.checked)}
+                    className="w-4 h-4"
+                  />
+                  Private repository
+                </label>
+                <div>
+                  <label className="text-[10px] uppercase tracking-wider text-gray-500 mb-1 block">GitHub token</label>
+                  <input
+                    type="password"
+                    value={token}
+                    onChange={(e) => setToken(e.target.value)}
+                    placeholder="ghp_… — leave blank to use the configured token"
+                    className="w-full px-2 py-1.5 text-sm font-mono border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  />
+                </div>
+                <button
+                  onClick={handleCreateRemote}
+                  disabled={creatingRemote || !repoName.trim()}
+                  className="px-4 py-1.5 text-sm font-medium bg-primary text-primary-foreground rounded hover:bg-accent disabled:opacity-50 disabled:cursor-not-allowed inline-flex items-center gap-1.5"
+                >
+                  {creatingRemote ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <GitBranch className="w-3.5 h-3.5" />}
+                  {creatingRemote ? 'Creating…' : 'Initialize & create GitHub repo'}
+                </button>
+              </div>
             )}
             {!loading && status?.is_git_repo && (
               <>

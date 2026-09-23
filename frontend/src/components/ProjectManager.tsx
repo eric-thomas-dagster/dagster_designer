@@ -3,6 +3,7 @@ import { useProjectStore } from '@/hooks/useProject';
 import { codegenApi, projectsApi, filesApi, pipelinesApi } from '@/services/api';
 import { DbtCloudImportModal } from './DbtCloudImportModal';
 import { ConnectDagsterPlusDialog } from './ConnectDagsterPlusDialog';
+import { GitCommitDialog } from './GitCommitDialog';
 import { Launchpad } from './Launchpad';
 import { notify, confirmDialog } from './Notifications';
 import { onMenuAction, isTauri, pickDirectory } from '@/services/tauri';
@@ -56,6 +57,7 @@ export function ProjectManager() {
   const [, setMaterializeAllResult] = useState<{ success: boolean; message: string } | null>(null);
   const [showProjectMenu, setShowProjectMenu] = useState(false);
   const [showActionsMenu, setShowActionsMenu] = useState(false);
+  const [showGitCommitDialog, setShowGitCommitDialog] = useState(false);
   const [isRegeneratingLineage, setIsRegeneratingLineage] = useState(false);
   const [isValidating, setIsValidating] = useState(false);
   const [isDiscoveringComponents, setIsDiscoveringComponents] = useState(false);
@@ -766,6 +768,17 @@ export function ProjectManager() {
                     <Download className="w-4 h-4" />
                     <span>Export Project</span>
                   </button>
+                  <div className="border-t border-gray-200 my-1" />
+                  <button
+                    onClick={() => {
+                      setShowGitCommitDialog(true);
+                      setShowActionsMenu(false);
+                    }}
+                    className="w-full flex items-center space-x-2 px-4 py-2 text-sm text-gray-700 hover:bg-gray-50"
+                  >
+                    <GitBranch className="w-4 h-4" />
+                    <span>Push to GitHub</span>
+                  </button>
                 </div>
               </>
             )}
@@ -1200,6 +1213,19 @@ export function ProjectManager() {
           loadProject(proj.id);
         }}
       />
+
+      {/* Git commit/push — general project-level action, distinct from
+          the dbt-editing one in PropertyPanel (targets project root,
+          not a nested dbt repo). */}
+      {currentProject && (
+        <GitCommitDialog
+          open={showGitCommitDialog}
+          onOpenChange={setShowGitCommitDialog}
+          projectId={currentProject.id}
+          defaultMessage="Update from Dagster Designer"
+          defaultRepoName={currentProject.name}
+        />
+      )}
 
       {/* Launchpad */}
       {currentProject && (

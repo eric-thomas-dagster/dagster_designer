@@ -7,6 +7,7 @@ import subprocess
 from pathlib import Path
 from typing import Any, Literal
 
+import httpx
 from fastapi import APIRouter, HTTPException, BackgroundTasks
 from pydantic import BaseModel, Field
 
@@ -19,6 +20,8 @@ from ..models.project import (
 )
 from ..services.project_service import project_service
 from ..services.asset_introspection_service import asset_introspection_service
+from ..services.git_service import git_service
+from ..services import promotion_config
 
 router = APIRouter(prefix="/projects", tags=["projects"])
 
@@ -8297,3 +8300,94 @@ async def project_git_commit_push(project_id: str, request: GitCommitPushRequest
         )
     except GitCommandError as e:
         raise HTTPException(status_code=500, detail=f"git failed: {e}")
+
+
+class GitCreateRemoteRequest(BaseModel):
+    subpath: str | None = None
+    repo_name: str
+    private: bool = True
+    token: str | None = None
+
+
+class GitCreateRemoteResponse(BaseModel):
+    success: bool
+    repo_url: str
+    html_url: str
+    created: bool
+    detail: str | None = None
+
+
+@router.post('/{project_id}/git/create-remote', response_model=GitCreateRemoteResponse)
+async def project_git_create_remote(project_id: str, request: GitCreateRemoteRequest):
+    """Create a GitHub repo (or reuse one of the same name the token
+    already owns) and wire it up as `origin`. Inits the local repo
+    first if it doesn't have one yet, so this also covers a
+    from-scratch project that predates git auto-init, or any project
+    that just never had a repo (e.g. imported without one)."""
+    from git import Repo, InvalidGitRepositoryError
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    root = project_service._get_project_dir(project)
+    target = (root / request.subpath).resolve() if request.subpath else root
+    if not request.repo_name.strip():
+        raise HTTPException(status_code=400, detail="repo_name is required")
+
+    try:
+        Repo(target, search_parent_directories=True)
+    except InvalidGitRepositoryError:
+        git_service.init_repo(target)
+
+    token = request.token or promotion_config.get_github_token()
+    if not token:
+        raise HTTPException(status_code=400, detail="No GitHub token configured. Add one in settings or paste one here.")
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    async with httpx.AsyncClient(timeout=15) as client:
+        try:
+            r = await client.post(
+                "https://api.github.com/user/repos",
+                headers=headers,
+                json={"name": request.repo_name, "private": request.private},
+            )
+        except httpx.HTTPError as e:
+            raise HTTPException(status_code=502, detail=f"Network error contacting GitHub: {e}")
+
+        created = True
+        if r.status_code == 201:
+            data = r.json()
+        elif r.status_code == 422:
+            # Name collision -- most likely this is a retry against a
+            # repo the same token already created. Reuse it as origin
+            # instead of failing outright.
+            created = False
+            user_r = await client.get("https://api.github.com/user", headers=headers)
+            if user_r.status_code != 200:
+                raise HTTPException(status_code=502, detail=f"'{request.repo_name}' already exists on GitHub and the owner couldn't be resolved to reuse it.")
+            owner = user_r.json().get("login")
+            existing_r = await client.get(f"https://api.github.com/repos/{owner}/{request.repo_name}", headers=headers)
+            if existing_r.status_code != 200:
+                raise HTTPException(status_code=422, detail=f"'{request.repo_name}' already exists and isn't accessible with this token.")
+            data = existing_r.json()
+        elif r.status_code == 401:
+            raise HTTPException(status_code=401, detail="GitHub rejected the token.")
+        else:
+            raise HTTPException(status_code=502, detail=f"GitHub returned {r.status_code}: {r.text[:200]}")
+
+    remote_url = data["clone_url"]
+    try:
+        git_service.set_remote(target, remote_url)
+    except ValueError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    return GitCreateRemoteResponse(
+        success=True,
+        repo_url=remote_url,
+        html_url=data.get("html_url", remote_url),
+        created=created,
+        detail=None if created else "Repo already existed on GitHub -- reused it as origin.",
+    )

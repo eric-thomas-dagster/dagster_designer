@@ -3,7 +3,7 @@
 import shutil
 import re
 from pathlib import Path
-from git import Repo, GitCommandError
+from git import Repo, GitCommandError, InvalidGitRepositoryError
 
 from ..core.config import settings
 
@@ -144,6 +144,47 @@ class GitService:
 
         except GitCommandError as e:
             raise ValueError(f"Failed to pull: {e}")
+
+    def init_repo(self, repo_path: Path, message: str = "Initial commit") -> None:
+        """Initialize a fresh git repo at `repo_path` with a first commit
+        of whatever's already there. No-op if `repo_path` already has a
+        `.git`. No `origin` is set up here -- that happens later via
+        `set_remote`, once the caller has somewhere to push to.
+        """
+        try:
+            Repo(repo_path)
+            return
+        except InvalidGitRepositoryError:
+            pass
+
+        repo = Repo.init(repo_path)
+
+        # A from-scratch project may run on a machine with no global git
+        # identity configured yet; fall back to a local one so the
+        # initial commit doesn't fail with "please tell me who you are".
+        try:
+            repo.config_reader().get_value("user", "email")
+        except Exception:
+            with repo.config_writer() as cw:
+                cw.set_value("user", "name", "Dagster Designer")
+                cw.set_value("user", "email", "designer@dagsterlabs.com")
+
+        repo.git.add(A=True)
+        if repo.index.entries:
+            repo.index.commit(message)
+
+    def set_remote(self, repo_path: Path, remote_url: str, name: str = "origin") -> None:
+        """Point a remote at `remote_url`, creating it if it doesn't
+        already exist on this repo."""
+        try:
+            repo = Repo(repo_path)
+            existing = {r.name for r in repo.remotes}
+            if name in existing:
+                repo.remote(name=name).set_url(remote_url)
+            else:
+                repo.create_remote(name, remote_url)
+        except (GitCommandError, InvalidGitRepositoryError) as e:
+            raise ValueError(f"Failed to set remote: {e}")
 
     def get_repo_status(self, repo_path: Path) -> dict:
         """Get repository status.

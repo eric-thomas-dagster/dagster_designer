@@ -460,6 +460,19 @@ class ProjectService:
         else:
             print(f"ℹ️  Skipping scaffolding steps - using existing Dagster project as-is")
 
+        # From-scratch projects (no git_repo) don't come with a .git of
+        # their own the way cloned/imported ones do -- init one now so
+        # the project is push-able later without a separate "why isn't
+        # this a repo" surprise. Best-effort: a missing git binary or
+        # similar shouldn't fail project creation.
+        if not project.git_repo:
+            from .git_service import git_service as _git_service
+            try:
+                print(f"🔧 Initializing git repository...")
+                _git_service.init_repo(self._get_project_dir(project), message="Initial commit from Dagster Designer")
+            except Exception as e:
+                print(f"⚠️  Failed to initialize git repo: {e}")
+
         print(f"✅ Project {project.name} created successfully!")
         print(f"{'='*60}\n")
         return project

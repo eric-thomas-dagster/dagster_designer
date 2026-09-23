@@ -966,6 +966,19 @@ export const projectsApi = {
     return response.data as any;
   },
 
+  projectGitCreateRemote: async (
+    projectId: string,
+    body: {
+      subpath?: string | null;
+      repo_name: string;
+      private?: boolean;
+      token?: string | null;
+    },
+  ): Promise<{ success: boolean; repo_url: string; html_url: string; created: boolean; detail?: string | null }> => {
+    const response = await api.post(`/projects/${projectId}/git/create-remote`, body);
+    return response.data as any;
+  },
+
   exportYAML: async (projectId: string) => {
     const response = await api.get<{ yaml_content: string; filename: string }>(
       `/projects/${projectId}/export-yaml`
