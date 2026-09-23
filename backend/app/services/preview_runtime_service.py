@@ -27,9 +27,7 @@ import psutil
 from . import promotion_config
 from . import drafts_service
 from . import preview_git_service
-
-
-UV_PATH = "/Users/ericthomas/.local/bin/uv"
+from ..core.uv_binary import find_uv_binary
 
 PORT_START = 4200
 PORT_END = 4299
@@ -137,7 +135,7 @@ def _uv_sync(state: PreviewState) -> None:
     _log(state, "uv sync")
     assert state.worktree is not None
     result = subprocess.run(
-        [UV_PATH, "sync"],
+        [find_uv_binary("uv"), "sync"],
         cwd=str(state.worktree),
         capture_output=True,
         text=True,
@@ -159,7 +157,7 @@ def _dagster_dev_cmd(worktree: Path) -> list[str]:
     if dagster.exists():
         return [str(dagster), "dev", "--host", "127.0.0.1"]
     # Last resort: `uv run dagster dev`
-    return [UV_PATH, "run", "dagster", "dev", "--host", "127.0.0.1"]
+    return [find_uv_binary("uv"), "run", "dagster", "dev", "--host", "127.0.0.1"]
 
 
 def _start_process(state: PreviewState, env_overrides: dict[str, str]) -> None:

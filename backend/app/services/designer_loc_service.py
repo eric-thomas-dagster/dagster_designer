@@ -25,9 +25,7 @@ from typing import Literal
 import httpx
 import psutil
 
-
-UVX_PATH = "/Users/ericthomas/.local/bin/uvx"
-UV_PATH = "/Users/ericthomas/.local/bin/uv"
+from ..core.uv_binary import find_uv_binary
 
 DESIGNER_LOCS_ROOT = Path.home() / ".dagster-designer" / "designer-locs"
 DESIGNER_LOCS_ROOT.mkdir(parents=True, exist_ok=True)
@@ -170,7 +168,7 @@ def _scaffold(state: DesignerLocState) -> None:
     _log(state, f"create-dagster -> {state.dir()}")
     # create-dagster is interactive; feed default "y" answers.
     result = subprocess.run(
-        [UVX_PATH, "create-dagster", "project", str(state.dir()), "--no-uv-sync"],
+        [find_uv_binary("uvx"), "create-dagster", "project", str(state.dir()), "--no-uv-sync"],
         input="y\ny\ny\ny\n",
         capture_output=True,
         text=True,
@@ -190,7 +188,7 @@ def _install(state: DesignerLocState) -> None:
     state.status = "installing"
     _log(state, "uv sync")
     result = subprocess.run(
-        [UV_PATH, "sync"],
+        [find_uv_binary("uv"), "sync"],
         cwd=str(state.dir()),
         capture_output=True,
         text=True,
@@ -418,7 +416,7 @@ async def install_community_component(project_id: str, component_id: str) -> dic
         if reqs:
             _log(state, f"uv add (from requirements.txt): {' '.join(reqs)}")
             add_result = subprocess.run(
-                [UV_PATH, "add", *reqs],
+                [find_uv_binary("uv"), "add", *reqs],
                 cwd=str(state.dir()),
                 capture_output=True,
                 text=True,
@@ -481,7 +479,7 @@ async def scaffold_component(
     if package_name and not _package_installed(state, package_name):
         _log(state, f"uv add {package_name}")
         result = subprocess.run(
-            [UV_PATH, "add", package_name],
+            [find_uv_binary("uv"), "add", package_name],
             cwd=str(state.dir()),
             capture_output=True,
             text=True,
