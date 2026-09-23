@@ -158,14 +158,31 @@ def snapshot_dbt_run_results(project_dir: Path, run_results: dict[str, Any]) -> 
         this_ts = completed or ts_iso
         if seen.get(uid) == this_ts:
             continue
+        # Numeric chart series: prefer `failures` when present (row-count
+        # style tests where it varies over time is the most useful signal),
+        # otherwise fall back to `execution_time` in seconds so we still
+        # get a chart on tests that only report pass/fail + timing.
+        exec_time = r.get("execution_time")
+        failures_val = r.get("failures") if isinstance(r.get("failures"), int) else None
+        if failures_val is not None:
+            value: float | None = float(failures_val)
+            value_label: str | None = "failures"
+        elif isinstance(exec_time, (int, float)):
+            value = float(exec_time)
+            value_label = "execution_time_s"
+        else:
+            value = None
+            value_label = None
         record_event(
             project_dir,
             monitor_id=uid,
             kind="dbt_test",
             status=(r.get("status") or "unknown"),
-            duration_ms=(int(r.get("execution_time", 0) * 1000) if r.get("execution_time") is not None else None),
-            failures=(r.get("failures") if isinstance(r.get("failures"), int) else None),
+            duration_ms=(int(exec_time * 1000) if isinstance(exec_time, (int, float)) else None),
+            failures=failures_val,
             message=(r.get("message") or None),
+            value=value,
+            value_label=value_label,
             ts=this_ts,
         )
         written += 1

@@ -978,3 +978,345 @@ async def create_transformer_asset(project_id: str, request: CreateTransformerRe
     print(f"[Create Transformer] Custom lineage count: {len(updated_project.custom_lineage)}", flush=True)
 
     return updated_project if updated_project else project
+
+
+# ============================================================================
+# Asset events (materialization / observation) -- powers the Activity tab
+# ============================================================================
+
+
+ASSET_EVENTS_QUERY = """
+query AssetEvents($assetKey: AssetKeyInput!, $limit: Int!) {
+  assetOrError(assetKey: $assetKey) {
+    __typename
+    ... on Asset {
+      assetMaterializations(limit: $limit) {
+        timestamp
+        partition
+        runId
+        stepKey
+        label
+        description
+        metadataEntries {
+          __typename
+          label
+          description
+          ... on IntMetadataEntry { intValue intRepr }
+          ... on FloatMetadataEntry { floatValue }
+          ... on TextMetadataEntry { text }
+          ... on BoolMetadataEntry { boolValue }
+          ... on UrlMetadataEntry { url }
+          ... on PathMetadataEntry { path }
+          ... on JsonMetadataEntry { jsonString }
+          ... on MarkdownMetadataEntry { mdStr }
+        }
+      }
+      assetObservations(limit: $limit) {
+        timestamp
+        partition
+        runId
+        stepKey
+        label
+        description
+      }
+    }
+  }
+}
+"""
+
+
+def _metadata_entries_to_dict(entries: list) -> list[dict]:
+    """Flatten a Dagster GraphQL metadataEntries list into simple dicts
+    with `label`, `type`, and `value` (native Python types where possible)."""
+    out: list[dict] = []
+    for me in (entries or []):
+        tn = me.get("__typename") if isinstance(me, dict) else None
+        label = me.get("label") if isinstance(me, dict) else None
+        val: Any = None
+        if tn == "IntMetadataEntry":
+            v = me.get("intValue")
+            if v is None and me.get("intRepr"):
+                try: v = int(me["intRepr"])
+                except Exception: v = None
+            val = v
+        elif tn == "FloatMetadataEntry":
+            val = me.get("floatValue")
+        elif tn == "TextMetadataEntry":
+            val = me.get("text")
+        elif tn == "BoolMetadataEntry":
+            val = me.get("boolValue")
+        elif tn == "UrlMetadataEntry":
+            val = me.get("url")
+        elif tn == "PathMetadataEntry":
+            val = me.get("path")
+        elif tn == "JsonMetadataEntry":
+            val = me.get("jsonString")
+        elif tn == "MarkdownMetadataEntry":
+            val = me.get("mdStr")
+        out.append({
+            "label": label,
+            "type": tn,
+            "value": val,
+            "description": me.get("description") if isinstance(me, dict) else None,
+        })
+    return out
+
+
+class AssetEvent(BaseModel):
+    ts: str                     # ISO-8601
+    kind: str                   # "materialization" | "observation"
+    message: str | None = None
+    run_id: str | None = None
+    partition: str | None = None
+    step_key: str | None = None
+
+
+class AssetEventsResponse(BaseModel):
+    events: list[AssetEvent]
+
+
+@router.get("/{project_id}/{asset_key:path}/events", response_model=AssetEventsResponse)
+async def get_asset_events(project_id: str, asset_key: str, limit: int = 200):
+    """Materialization + observation history for an asset. Dispatches
+    to Dagster+ (cloud) or local `dg dev` GraphQL (OSS) transparently."""
+    from .projects import _run_dagster_graphql
+    from datetime import datetime, timezone
+
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    key_path = asset_key.split("/")
+    variables = {"assetKey": {"path": key_path}, "limit": max(1, min(limit, 500))}
+    data = await _run_dagster_graphql(project, ASSET_EVENTS_QUERY, variables)
+    if data is None:
+        return AssetEventsResponse(events=[])
+
+    node = data.get("assetOrError") or {}
+    if node.get("__typename") != "Asset":
+        return AssetEventsResponse(events=[])
+
+    def _to_iso(ts_val) -> str:
+        # Dagster timestamps come back as either a float epoch (Dagster+
+        # convention) or a millisecond int (OSS convention). Handle both.
+        if ts_val is None:
+            return ""
+        try:
+            n = float(ts_val)
+            # If it looks like ms (larger than year 2500 in seconds),
+            # divide by 1000.
+            if n > 1_000_000_000_000:
+                n = n / 1000.0
+            return datetime.fromtimestamp(n, tz=timezone.utc).isoformat()
+        except Exception:
+            return str(ts_val)
+
+    events: list[AssetEvent] = []
+    for m in (node.get("assetMaterializations") or []):
+        events.append(AssetEvent(
+            ts=_to_iso(m.get("timestamp")),
+            kind="materialization",
+            message=m.get("description") or m.get("label"),
+            run_id=m.get("runId"),
+            partition=m.get("partition"),
+            step_key=m.get("stepKey"),
+        ))
+    for o in (node.get("assetObservations") or []):
+        events.append(AssetEvent(
+            ts=_to_iso(o.get("timestamp")),
+            kind="observation",
+            message=o.get("description") or o.get("label"),
+            run_id=o.get("runId"),
+            partition=o.get("partition"),
+            step_key=o.get("stepKey"),
+        ))
+    # Newest first for a familiar activity-log feel.
+    events.sort(key=lambda e: e.ts or "", reverse=True)
+    return AssetEventsResponse(events=events)
+
+
+# ============================================================================
+# Asset partitions -- powers the Partitions tab
+# ============================================================================
+
+
+ASSET_PARTITIONS_QUERY = """
+query AssetPartitions($assetKey: AssetKeyInput!) {
+  assetNodeOrError(assetKey: $assetKey) {
+    __typename
+    ... on AssetNode {
+      partitionKeys
+      partitionStats {
+        numPartitions
+        numMaterialized
+        numFailed
+      }
+    }
+  }
+}
+"""
+
+
+ASSET_PARTITION_STATUS_QUERY = """
+query AssetPartitionStatuses($assetKey: AssetKeyInput!) {
+  assetNodeOrError(assetKey: $assetKey) {
+    __typename
+    ... on AssetNode {
+      assetPartitionStatuses {
+        __typename
+        ... on TimePartitionStatuses {
+          ranges {
+            startKey
+            endKey
+            status
+          }
+        }
+        ... on DefaultPartitionStatuses {
+          materializedPartitions
+          failedPartitions
+          unmaterializedPartitions
+        }
+      }
+    }
+  }
+}
+"""
+
+
+class AssetPartition(BaseModel):
+    key: str
+    status: str | None = None       # materialized | missing | failed
+    last_materialization_ts: str | None = None
+    run_id: str | None = None       # run that most recently materialized this partition
+    step_key: str | None = None
+    label: str | None = None
+    description: str | None = None
+    metadata: list[dict] = []       # [{label, type, value, description}]
+
+
+class AssetPartitionsResponse(BaseModel):
+    """Full partition list + separate counts. Frontend renders the
+    health strip from `partitions` (which is capped at `limit`, newest
+    first) and shows totals from `stats` -- so a 5000-partition asset
+    can still show accurate "42 failed" numbers even if we only ship
+    the newest 500 rows."""
+    partitions: list[AssetPartition]
+    total_count: int = 0
+    materialized_count: int = 0
+    missing_count: int = 0
+    failed_count: int = 0
+
+
+@router.get("/{project_id}/{asset_key:path}/partitions", response_model=AssetPartitionsResponse)
+async def get_asset_partitions(project_id: str, asset_key: str, limit: int = 500):
+    """List partitions with per-key status + run linkage. Two queries:
+    (1) `partitionKeys` for the full set and totals, (2) recent
+    `assetMaterializations` for per-partition run/timestamp enrichment.
+    Works for both Dagster+ and local `dg dev`."""
+    from .projects import _run_dagster_graphql
+    from datetime import datetime, timezone
+
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    key_path = asset_key.split("/")
+    variables = {"assetKey": {"path": key_path}}
+
+    keys_data = await _run_dagster_graphql(project, ASSET_PARTITIONS_QUERY, variables)
+    if keys_data is None:
+        return AssetPartitionsResponse(partitions=[])
+    keys_node = keys_data.get("assetNodeOrError") or {}
+    partition_keys = keys_node.get("partitionKeys") or []
+    if not partition_keys:
+        return AssetPartitionsResponse(partitions=[])
+
+    status_data = await _run_dagster_graphql(project, ASSET_PARTITION_STATUS_QUERY, variables)
+    materialized: set[str] = set()
+    failed: set[str] = set()
+    if status_data is not None:
+        s = (status_data.get("assetNodeOrError") or {}).get("assetPartitionStatuses") or {}
+        tn = s.get("__typename")
+        if tn == "DefaultPartitionStatuses":
+            materialized = set(s.get("materializedPartitions") or [])
+            failed = set(s.get("failedPartitions") or [])
+        elif tn == "TimePartitionStatuses":
+            for r in (s.get("ranges") or []):
+                st = (r.get("status") or "").upper()
+                start, end = r.get("startKey"), r.get("endKey")
+                if start:
+                    (materialized if st == "MATERIALIZED" else failed if st == "FAILED" else materialized).add(start)
+                if end and end != start:
+                    (materialized if st == "MATERIALIZED" else failed if st == "FAILED" else materialized).add(end)
+
+    # Compute totals BEFORE we page down to `limit`, so hundreds-of-
+    # partitions assets still get accurate stat numbers.
+    total = len(partition_keys)
+    matz = sum(1 for k in partition_keys if k in materialized and k not in failed)
+    fld = sum(1 for k in partition_keys if k in failed)
+    missing = total - matz - fld
+
+    # Fetch recent materializations to enrich each partition with its
+    # last run id + timestamp. Dagster returns materializations newest-
+    # first; we keep the FIRST occurrence per partition so the "latest
+    # run for this partition" wins even if the asset was rerun.
+    mat_data = await _run_dagster_graphql(
+        project,
+        ASSET_EVENTS_QUERY,
+        {"assetKey": {"path": key_path}, "limit": max(500, min(2000, limit * 4))},
+    )
+    per_partition_mat: dict[str, dict] = {}
+    if mat_data is not None:
+        node = mat_data.get("assetOrError") or {}
+        if node.get("__typename") == "Asset":
+            for m in (node.get("assetMaterializations") or []):
+                part = m.get("partition")
+                if not part or part in per_partition_mat:
+                    continue
+                ts_val = m.get("timestamp")
+                ts_iso: str | None
+                try:
+                    n = float(ts_val) if ts_val is not None else None
+                    if n is not None and n > 1_000_000_000_000:
+                        n = n / 1000.0
+                    ts_iso = datetime.fromtimestamp(n, tz=timezone.utc).isoformat() if n is not None else None
+                except Exception:
+                    ts_iso = None
+                per_partition_mat[part] = {
+                    "run_id": m.get("runId"),
+                    "ts_iso": ts_iso,
+                    "step_key": m.get("stepKey"),
+                    "label": m.get("label"),
+                    "description": m.get("description"),
+                    "metadata": _metadata_entries_to_dict(m.get("metadataEntries") or []),
+                }
+
+    # Cap the visible rows -- backend still reports total_count so
+    # frontend can show "500 of 3141".
+    ordered = list(reversed(partition_keys))[:limit]
+    partitions: list[AssetPartition] = []
+    for k in ordered:
+        if k in failed:
+            status = "failed"
+        elif k in materialized:
+            status = "materialized"
+        else:
+            status = "missing"
+        m = per_partition_mat.get(k) or {}
+        partitions.append(AssetPartition(
+            key=k,
+            status=status,
+            run_id=m.get("run_id"),
+            last_materialization_ts=m.get("ts_iso"),
+            step_key=m.get("step_key"),
+            label=m.get("label"),
+            description=m.get("description"),
+            metadata=m.get("metadata") or [],
+        ))
+    return AssetPartitionsResponse(
+        partitions=partitions,
+        total_count=total,
+        materialized_count=matz,
+        missing_count=missing,
+        failed_count=fld,
+    )

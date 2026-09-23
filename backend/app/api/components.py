@@ -67,6 +67,7 @@ async def get_component(component_type: str, project_id: str | None = None):
     if not component and project_id:
         # Check for installed community component
         from ..services.project_service import project_service
+        from ..services.designer_loc_service import get_state as _get_sandbox_state
         from pathlib import Path
         import yaml
 
@@ -77,24 +78,62 @@ async def get_component(component_type: str, project_id: str | None = None):
             # The directory name includes the project ID prefix (e.g., project_acaa97f2_my_test_project)
             directory_name = project.directory_name
 
-            # Try both flat and src layouts
-            flat_components_dir = project_dir / directory_name / "components"
-            src_components_dir = project_dir / "src" / directory_name / "components"
+            # Community components installed via `dagster-component add` land
+            # in the Designer sandbox (`~/.dagster-designer/designer-locs/ds_<pid>/`),
+            # NOT the project backend dir. Check the sandbox first — a fresh
+            # install lives there and only there until it's promoted to the
+            # project repo. Falling back to the project dir catches the case
+            # where the user has already promoted the component into their repo.
+            sandbox_dir = _get_sandbox_state(project_id).dir()
+            sandbox_module = sandbox_dir.name
+            sandbox_components_dir = sandbox_dir / "src" / sandbox_module / "components"
 
             components_dir = None
-            if flat_components_dir.exists():
-                components_dir = flat_components_dir
-            elif src_components_dir.exists():
-                components_dir = src_components_dir
+            if sandbox_components_dir.exists():
+                components_dir = sandbox_components_dir
+            elif (flat := project_dir / directory_name / "components").exists():
+                components_dir = flat
+            elif (src := project_dir / "src" / directory_name / "components").exists():
+                components_dir = src
 
             if components_dir:
-                # Extract component_id from component_type
-                # e.g., "dagster_snowflake_dbt_demo.components.rest_api_fetcher.RestApiFetcher" -> "rest_api_fetcher"
+                # Locate the component's directory. Two supported shapes:
+                #   1. Fully-qualified module path, e.g.
+                #      "<pkg>.components.rest_api_fetcher.RestApiFetcher"
+                #      → `component_id = "rest_api_fetcher"`
+                #   2. Community catalog type, e.g.
+                #      "dagster_component_templates.CronScheduleComponent"
+                #      → no `.components.` segment; match against each
+                #        installed component's `schema.json[component_type]`.
+                # The second case is how the community palette exposes types,
+                # so it's the common path for anything installed via
+                # `dagster-component add`.
+                import json as _json
                 parts = component_type.split('.')
+                component_id: str | None = None
+
                 if 'components' in parts:
                     idx = parts.index('components')
                     if idx + 1 < len(parts):
                         component_id = parts[idx + 1]
+
+                if component_id is None and components_dir.exists():
+                    for candidate in components_dir.iterdir():
+                        if not candidate.is_dir():
+                            continue
+                        schema_file = candidate / "schema.json"
+                        if not schema_file.exists():
+                            continue
+                        try:
+                            with open(schema_file, 'r') as f:
+                                schema_probe = _json.load(f)
+                        except Exception:
+                            continue
+                        if schema_probe.get('component_type') == component_type:
+                            component_id = candidate.name
+                            break
+
+                if component_id:
                         component_dir = components_dir / component_id
 
                         # First check if schema.json exists (from installed community component)

@@ -534,26 +534,62 @@ async def get_project(project_id: str):
     return _strip_token(project) if project.is_dagster_plus else project
 
 
-async def _cloud_monitor_history(project: Project, monitor_id: str, limit: int) -> list[dict]:
-    """Fetch monitor run history live from Dagster+. `monitor_id` is
-    the check key we set during hydration — "<asset_key>::<check_name>".
-    Returns events in the same shape as the local monitor_events.jsonl
-    reader so the endpoint's downstream code doesn't care."""
-    from ..services.dagster_plus_client import query, ASSET_CHECK_HISTORY_QUERY
+async def _run_dagster_graphql(project: Project, query_str: str, variables: dict) -> dict | None:
+    """Dispatch a Dagster GraphQL query to the right endpoint --
+    Dagster+ for cloud projects, local `dg dev` (localhost:3000) for
+    OSS. Returns the `data` dict on success, or None on any failure
+    (network, timeout, non-2xx, GraphQL errors)."""
+    if project.is_dagster_plus:
+        from ..services.dagster_plus_client import query as dp_query
+        try:
+            return await dp_query(
+                project.dagster_plus_org or "",
+                project.dagster_plus_deployment or "",
+                project.dagster_plus_token or "",
+                query_str,
+                variables=variables,
+                timeout=10.0,
+            )
+        except Exception as e:
+            print(f"[monitors] cloud graphql failed for {project.id}: {e}", flush=True)
+            return None
+    # Local `dg dev` -- exposes the same GraphQL surface at
+    # localhost:3000 as Dagster+, so the same queries just work.
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.post(
+                "http://localhost:3000/graphql",
+                json={"query": query_str, "variables": variables},
+                headers={"content-type": "application/json"},
+            )
+        if r.status_code >= 400:
+            return None
+        body = r.json()
+        if body.get("errors"):
+            print(f"[monitors] local graphql errors: {body['errors'][:1]}", flush=True)
+            return None
+        return body.get("data") or {}
+    except Exception:
+        # `dg dev` not running or unreachable -- monitors surface
+        # falls back to jsonl-based history for local.
+        return None
+
+
+async def _asset_check_history(project: Project, monitor_id: str, limit: int) -> list[dict]:
+    """Fetch asset check execution history from Dagster's GraphQL --
+    Dagster+ for cloud projects, local `dagster dev` for OSS. Same
+    query shape either way (`assetCheckExecutions`), so the caller
+    doesn't need to know which endpoint served the response.
+    `monitor_id` is "<asset_key>::<check_name>"."""
+    from ..services.dagster_plus_client import ASSET_CHECK_HISTORY_QUERY
     if '::' not in monitor_id:
         return []
     asset_key_str, check_name = monitor_id.rsplit('::', 1)
     asset_key = {"path": asset_key_str.split('/')}
-    try:
-        data = await query(
-            project.dagster_plus_org or "",
-            project.dagster_plus_deployment or "",
-            project.dagster_plus_token or "",
-            ASSET_CHECK_HISTORY_QUERY,
-            variables={"assetKey": asset_key, "checkName": check_name, "limit": max(1, min(limit, 500)), "cursor": None},
-        )
-    except Exception as e:
-        print(f"[dagster+] check history for {monitor_id} failed: {e}", flush=True)
+    variables = {"assetKey": asset_key, "checkName": check_name, "limit": max(1, min(limit, 500)), "cursor": None}
+    data = await _run_dagster_graphql(project, ASSET_CHECK_HISTORY_QUERY, variables)
+    if data is None:
         return []
 
     events: list[dict] = []
@@ -568,12 +604,50 @@ async def _cloud_monitor_history(project: Project, monitor_id: str, limit: int) 
                 ts_iso = datetime.fromtimestamp(float(ts_epoch), tz=timezone.utc).isoformat()
             except Exception:
                 ts_iso = str(ts_epoch)
+        # Extract the first numeric metadata entry as this run's `value`
+        # (drives the time-series chart). Also stash all metadata for
+        # future per-run detail views.
+        value: float | None = None
+        value_label: str | None = None
+        metadata: list[dict] = []
+        for me in (evl.get("metadataEntries") or []):
+            tn = me.get("__typename")
+            label = me.get("label")
+            entry: dict = {"label": label, "type": tn, "description": me.get("description")}
+            if tn == "IntMetadataEntry":
+                v = me.get("intValue")
+                if v is None and me.get("intRepr"):
+                    # Values > 2^53 come back as `intRepr` (string).
+                    try:
+                        v = int(me["intRepr"])
+                    except Exception:
+                        v = None
+                entry["value"] = v
+                if value is None and v is not None:
+                    value = float(v)
+                    value_label = label
+            elif tn == "FloatMetadataEntry":
+                v = me.get("floatValue")
+                entry["value"] = v
+                if value is None and v is not None:
+                    value = float(v)
+                    value_label = label
+            elif tn == "TextMetadataEntry":
+                entry["value"] = me.get("text")
+            elif tn == "BoolMetadataEntry":
+                entry["value"] = me.get("boolValue")
+            elif tn == "JsonMetadataEntry":
+                entry["value"] = me.get("jsonString")
+            metadata.append(entry)
         events.append({
             "ts": ts_iso,
             "monitor_id": monitor_id,
             "kind": "asset_check",
             "status": (exec_.get("status") or "").lower() or "unknown",
             "message": evl.get("description") if evl else None,
+            "value": value,
+            "value_label": value_label,
+            "metadata": metadata,
         })
     # Return chronological order to match local behavior.
     events.reverse()
@@ -949,6 +1023,11 @@ async def _hydrate_cloud_graph(project: Project) -> None:
                     "source": None,
                     "is_partitioned": defn.get("isPartitioned", False),
                     "partition_config": defn.get("partitionDefinition"),
+                    # Code location + repository the asset lives in.
+                    # Powers the header code-location picker's filter
+                    # so users can narrow the graph to just one location.
+                    "location_name": (((defn.get("repository") or {}).get("location") or {}).get("name") or None),
+                    "repository_name": ((defn.get("repository") or {}).get("name") or None),
                 },
                 position={"x": float(layer * X), "y": float(i * Y)},
                 source_component="dagster_plus",
@@ -1209,16 +1288,34 @@ async def delete_component_instance(project_id: str, component_id: str):
     elif src_defs_dir.exists():
         component_instance_dir = src_defs_dir
 
-    if not component_instance_dir:
+    # NOTE: don't 404 if the on-disk folder is missing. The `components`
+    # list in the project JSON is the authoritative record of what
+    # Designer knows about — an entry there without a matching folder is
+    # a real state to clean up (happens when regeneration collides,
+    # earlier delete attempts partially succeeded, etc.). Treating it as
+    # "not found" leaves the JSON permanently corrupted with no user
+    # path to fix it.
+    has_folder = component_instance_dir is not None
+    has_component_entry = any(c.id == component_id for c in (project.components or []))
+    if not has_folder and not has_component_entry:
         raise HTTPException(
             status_code=404,
-            detail=f"Component instance '{component_id}' not found"
+            detail=f"Component instance '{component_id}' not found on disk or in project JSON"
         )
 
     try:
-        # Delete the component instance directory
-        shutil.rmtree(component_instance_dir)
-        print(f"[Delete Component Instance] Deleted {component_instance_dir}")
+        # Delete the on-disk folder if present.
+        if component_instance_dir:
+            shutil.rmtree(component_instance_dir)
+            print(f"[Delete Component Instance] Deleted {component_instance_dir}")
+        else:
+            print(f"[Delete Component Instance] No on-disk folder for '{component_id}' — JSON-only cleanup")
+
+        # Scrub the entry from the project's components list — the graph
+        # nodes get rebuilt from introspection below, but `components` is
+        # a top-level JSON list that isn't touched by introspection, so
+        # stale entries accumulate here otherwise.
+        project.components = [c for c in (project.components or []) if c.id != component_id]
 
         # Clear the asset introspection cache to force fresh introspection
         asset_introspection_service.clear_cache(project.id)
@@ -1258,8 +1355,13 @@ async def delete_component_instance(project_id: str, component_id: str):
         # Convert edge map back to list
         project.graph.edges = list(edge_map.values())
 
-        # Save updated project
-        updated_project = project_service.update_project(project_id, ProjectUpdate(graph=project.graph))
+        # Save updated project — persist BOTH the refreshed graph AND the
+        # pruned components list (previously only `graph` was saved, so
+        # stale `components` entries accumulated forever).
+        updated_project = project_service.update_project(
+            project_id,
+            ProjectUpdate(graph=project.graph, components=project.components),
+        )
 
         if not updated_project:
             raise HTTPException(
@@ -4416,6 +4518,44 @@ class MonitorsResponse(BaseModel):
     stats: dict[str, int]               # total / passing / failing / warn / never_run
 
 
+async def _enrich_recent_statuses_via_graphql(project: Project, monitors: list["Monitor"]) -> None:
+    """Fan out per-monitor `assetCheckExecutions` queries to populate
+    `recent_statuses` on each row's Trend sparkline. Works against
+    Dagster+ (cloud) or local `dg dev` -- `_run_dagster_graphql`
+    picks the right endpoint. Runs everything in parallel via
+    asyncio.gather so ~50 monitors resolve in one effective
+    round-trip. Failures per monitor are swallowed (the sparkline
+    stays empty for that row)."""
+    import asyncio
+    from ..services.dagster_plus_client import ASSET_CHECK_HISTORY_QUERY
+
+    async def _one(monitor: "Monitor") -> None:
+        if "::" not in monitor.id:
+            return
+        asset_key_str, check_name = monitor.id.rsplit("::", 1)
+        asset_key = {"path": asset_key_str.split("/")}
+        data = await _run_dagster_graphql(
+            project,
+            ASSET_CHECK_HISTORY_QUERY,
+            {"assetKey": asset_key, "checkName": check_name, "limit": 20, "cursor": None},
+        )
+        if not data:
+            return
+        execs = data.get("assetCheckExecutions") or []
+        # Newest-first from Dagster; reverse to chronological so the
+        # sparkline reads left-to-right (oldest -> newest).
+        statuses = [(e.get("status") or "").lower() for e in execs if e.get("status")]
+        statuses.reverse()
+        monitor.recent_statuses = statuses[-20:]
+
+    # Only asset-check monitors have `<asset>::<check>` ids that map
+    # to Dagster's `assetCheckExecutions` query.
+    targets = [m for m in monitors if m.kind == "asset_check" and "::" in m.id]
+    if not targets:
+        return
+    await asyncio.gather(*(_one(m) for m in targets), return_exceptions=True)
+
+
 def _finalize_monitors_response(monitors: list["Monitor"]) -> "MonitorsResponse":
     """Compute bucket stats + sort monitors for the response. Extracted
     so the cloud path (no local dbt / no monitor history file) can bail
@@ -4514,6 +4654,10 @@ async def list_monitors(project_id: str):
     # already came from the graph above via the cloud hydrate.
     root = project_service._get_project_dir(project)
     if project.is_dagster_plus:
+        # Fan-out recent-status fetches so the row Trend sparkline
+        # renders. One `assetCheckExecutions` query per asset-check
+        # monitor, in parallel via asyncio.gather.
+        await _enrich_recent_statuses_via_graphql(project, monitors)
         # Wrap up early -- everything below (dbt walk + monitor history)
         # depends on a local project directory that cloud projects lack.
         return _finalize_monitors_response(monitors)
@@ -6038,6 +6182,145 @@ async def generate_monitors(project_id: str, request: GenerateMonitorsRequest):
     return GenerateMonitorsResponse(asset_key=request.asset_key, proposals=proposals)
 
 
+class CoverageRecommendation(BaseModel):
+    asset_key: str
+    label: str | None = None
+    current_monitor_count: int
+    downstream_count: int          # assets that depend on this one
+    upstream_count: int
+    has_freshness_check: bool
+    has_row_count_check: bool
+    has_null_check: bool
+    score: float                    # higher = more urgent to monitor
+    reasons: list[str]              # user-visible explanations for the rank
+
+
+class CoverageRecommendationsResponse(BaseModel):
+    recommendations: list[CoverageRecommendation]
+    total_assets: int
+    unmonitored_asset_count: int
+
+
+@router.get('/{project_id}/monitors/coverage-recommendations', response_model=CoverageRecommendationsResponse)
+async def coverage_recommendations(project_id: str, limit: int = 10):
+    """Rank the project's assets by "how much they need a monitor".
+
+    Cheap-to-compute heuristic (no LLM call — this is the *pre-*step
+    before "Generate with AI"). For each asset we combine:
+      • Zero monitors → strong signal
+      • Downstream fan-out — an asset with many downstream deps is a
+        higher blast radius when it breaks
+      • Absence of specific check families (freshness / row-count /
+        null) — a monitored asset without a freshness check still has
+        a gap
+      • Upstream depth — root sources are especially worth guarding
+
+    Returns top `limit` assets with the reasons rendered as short
+    explanatory bullets the UI can show below each candidate."""
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    # Load current monitor list to compute coverage per asset.
+    try:
+        monitors_resp = await list_monitors(project_id)   # reuse existing endpoint
+        monitors = monitors_resp.monitors
+    except Exception:
+        monitors = []
+
+    per_asset_monitors: dict[str, list] = {}
+    for m in monitors:
+        for k in m.target_asset_keys or []:
+            per_asset_monitors.setdefault(k, []).append(m)
+
+    # Build a downstream count per asset from the project graph edges.
+    downstream: dict[str, int] = {}
+    upstream: dict[str, int] = {}
+    id_to_key: dict[str, str] = {}
+    for n in project.graph.nodes:
+        if n.node_kind == 'asset':
+            k = n.data.get('asset_key') or n.data.get('label') or n.id
+            id_to_key[n.id] = k
+    for e in project.graph.edges or []:
+        src = id_to_key.get(e.source)
+        tgt = id_to_key.get(e.target)
+        if src and tgt:
+            downstream[src] = downstream.get(src, 0) + 1
+            upstream[tgt] = upstream.get(tgt, 0) + 1
+
+    def _has_check(mlist: list, needles: tuple[str, ...]) -> bool:
+        for m in mlist:
+            hay = f"{getattr(m, 'check_kind', '') or ''} {getattr(m, 'label', '') or ''}".lower()
+            if any(needle in hay for needle in needles):
+                return True
+        return False
+
+    recs: list[CoverageRecommendation] = []
+    total_assets = 0
+    unmonitored = 0
+    for n in project.graph.nodes:
+        if n.node_kind != 'asset':
+            continue
+        total_assets += 1
+        key = n.data.get('asset_key') or n.data.get('label') or n.id
+        mlist = per_asset_monitors.get(key, [])
+        current = len(mlist)
+        if current == 0:
+            unmonitored += 1
+        down = downstream.get(key, 0)
+        up = upstream.get(key, 0)
+        has_fresh = _has_check(mlist, ('fresh', 'stale', 'lag'))
+        has_row = _has_check(mlist, ('row_count', 'rowcount', 'volume', 'nonempty'))
+        has_null = _has_check(mlist, ('null', 'missing'))
+
+        # Score composition — tuned by hand for demo readability:
+        #   +50 if unmonitored, +5 per downstream, +3 for missing
+        #   freshness on a table with any downstream, +2 for missing
+        #   row-count, +1 for missing null-check.
+        score = 0.0
+        reasons: list[str] = []
+        if current == 0:
+            score += 50
+            reasons.append("no monitors yet")
+        else:
+            reasons.append(f"{current} monitor{'s' if current != 1 else ''} today")
+        if down > 0:
+            score += down * 5
+            reasons.append(f"{down} downstream asset{'s' if down != 1 else ''} depend on it")
+        if up == 0 and down > 0:
+            score += 10
+            reasons.append("root source (no upstream) — data quality issues cascade")
+        if not has_fresh and down > 0:
+            score += 3
+            reasons.append("missing freshness check")
+        if not has_row:
+            score += 2
+            reasons.append("missing row-count / volume check")
+        if not has_null:
+            score += 1
+            reasons.append("missing null-rate check")
+
+        recs.append(CoverageRecommendation(
+            asset_key=key,
+            label=n.data.get('label'),
+            current_monitor_count=current,
+            downstream_count=down,
+            upstream_count=up,
+            has_freshness_check=has_fresh,
+            has_row_count_check=has_row,
+            has_null_check=has_null,
+            score=score,
+            reasons=reasons,
+        ))
+
+    recs.sort(key=lambda r: -r.score)
+    return CoverageRecommendationsResponse(
+        recommendations=recs[:limit],
+        total_assets=total_assets,
+        unmonitored_asset_count=unmonitored,
+    )
+
+
 class DeleteMonitorRequest(BaseModel):
     """Delete a monitor. Behavior depends on the monitor's kind:
       • enhanced_check → deletes the src/<project>/defs/monitors/<name>/
@@ -6225,11 +6508,18 @@ class MonitorHistoryPoint(BaseModel):
     expected_max: float | None = None
 
 
+class NumericMetricSeries(BaseModel):
+    label: str                              # metadata entry label
+    points: list[dict]                      # [{ts, value}] chronological
+    is_default: bool = False                # highlighted / pre-selected in UI
+
+
 class MonitorHistoryResponse(BaseModel):
     monitor_id: str
     events: list[MonitorHistoryPoint]
-    numeric_series: list[dict]      # [{ts, value}] pruned for chart-readiness
-    numeric_label: str | None       # y-axis label if the monitor emits a numeric value
+    numeric_series: list[dict]              # legacy: primary metric points
+    numeric_label: str | None               # legacy: y-axis label for primary metric
+    numeric_metrics: list[NumericMetricSeries] = []  # every numeric metadata metric found in history
 
 
 @router.get('/{project_id}/monitors/history', response_model=MonitorHistoryResponse)
@@ -6251,29 +6541,73 @@ async def get_monitor_history(project_id: str, monitor_id: str, limit: int = 200
         raise HTTPException(status_code=404, detail="Project not found")
 
     if project.is_dagster_plus:
-        events = await _cloud_monitor_history(project, monitor_id, limit)
+        # Cloud: authoritative source is Dagster+ GraphQL.
+        events = await _asset_check_history(project, monitor_id, limit)
+    elif "::" in monitor_id:
+        # Local asset-check monitor -- try `dg dev` GraphQL first so we
+        # get the same rich metadata (numeric values, timestamps,
+        # descriptions) as cloud. Fall back to the local jsonl history
+        # if `dg dev` isn't running or has no data yet.
+        events = await _asset_check_history(project, monitor_id, limit)
+        if not events:
+            root = project_service._get_project_dir(project)
+            events = read_events(root, monitor_id=monitor_id, limit=limit)
     else:
+        # Local dbt test / enhanced check -- history lives in jsonl.
         root = project_service._get_project_dir(project)
         events = read_events(root, monitor_id=monitor_id, limit=limit)
     points = [MonitorHistoryPoint(**{k: v for k, v in e.items() if k in MonitorHistoryPoint.model_fields}) for e in events]
-    # Filter to numeric points for the chart (drop nulls, keep ts).
-    # Include expected_min/max when present so the chart can render
-    # per-point Sifflet-style bounds instead of a rolling window.
-    numeric_series = [
-        {
-            "ts": e.get("ts"),
-            "value": e.get("value"),
-            "expected_min": e.get("expected_min"),
-            "expected_max": e.get("expected_max"),
-        }
-        for e in events if isinstance(e.get("value"), (int, float))
+
+    # Collect every numeric metadata entry across all events, keyed by
+    # label. Each entry in `event.metadata` looks like {label, type,
+    # value, description} — we filter to numeric-value types.
+    metrics_by_label: dict[str, list[dict]] = {}
+    for e in events:
+        ts = e.get("ts")
+        for me in (e.get("metadata") or []):
+            label = me.get("label")
+            v = me.get("value")
+            if not label or not isinstance(v, (int, float)):
+                continue
+            metrics_by_label.setdefault(label, []).append({"ts": ts, "value": float(v)})
+    # `event.value`/`value_label` — the legacy single-metric fallback,
+    # used by locally-recorded dbt-test events which don't have a
+    # `metadata` list. Keep it in the map so those series still render.
+    for e in events:
+        vl = e.get("value_label")
+        v = e.get("value")
+        if vl and isinstance(v, (int, float)) and vl not in metrics_by_label:
+            metrics_by_label.setdefault(vl, []).append({"ts": e.get("ts"), "value": float(v)})
+
+    # Pick a default: prefer things that read as data-quality signals
+    # (row counts, null ratios, failures) over Dagster-auto metadata
+    # like "Execution Duration". Case-insensitive substring match.
+    def _score(lbl: str) -> int:
+        low = lbl.lower()
+        if any(k in low for k in ("failed_row", "failure_row", "failures")): return 0
+        if any(k in low for k in ("row_count", "record_count", "null_ratio",
+                                   "null_count", "distinct", "unique")): return 1
+        if any(k in low for k in ("freshness", "age")): return 2
+        if "duration" in low or "execution_time" in low: return 9
+        return 5
+    default_label = min(metrics_by_label.keys(), key=_score) if metrics_by_label else None
+
+    numeric_metrics = [
+        NumericMetricSeries(
+            label=label,
+            points=points_,
+            is_default=(label == default_label),
+        )
+        for label, points_ in sorted(metrics_by_label.items(), key=lambda kv: _score(kv[0]))
     ]
-    numeric_label = next((e.get("value_label") for e in events if e.get("value_label")), None)
+    # Legacy fields: default metric's series (preserves existing chart).
+    default_series = metrics_by_label.get(default_label) if default_label else []
     return MonitorHistoryResponse(
         monitor_id=monitor_id,
         events=points,
-        numeric_series=numeric_series,
-        numeric_label=numeric_label,
+        numeric_series=default_series or [],
+        numeric_label=default_label,
+        numeric_metrics=numeric_metrics,
     )
 
 

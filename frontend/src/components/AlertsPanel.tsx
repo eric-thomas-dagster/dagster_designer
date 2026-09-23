@@ -77,21 +77,6 @@ export function AlertsPanel() {
     }
   };
 
-  if (isCloudProject) {
-    return (
-      <div className="h-full flex items-center justify-center bg-gray-50">
-        <div className="text-center max-w-md p-6">
-          <Cloud className="w-10 h-10 mx-auto mb-3 text-blue-500" />
-          <h3 className="text-base font-semibold text-gray-900">Alerts live in the repo, not the cloud connection</h3>
-          <p className="text-sm text-gray-600 mt-2">
-            Alert policies are authored as YAML that gets committed to your Dagster project's repo.
-            Open the local project (not this Dagster+ connection) to author or sync alerts.
-          </p>
-        </div>
-      </div>
-    );
-  }
-
   return (
     <div className="h-full flex flex-col overflow-hidden">
       {/* Slim ribbon -- matches the Automation tab: no big page title
@@ -99,39 +84,60 @@ export function AlertsPanel() {
           on the left and action buttons on the right. */}
       <div className="flex-shrink-0 bg-white border-b border-gray-200 px-4 py-2 flex items-center justify-between gap-4">
         <div className="text-xs text-gray-500 min-w-0 truncate">
-          {state?.path && <>YAML: <span className="font-mono">{state.path}</span></>}
+          {isCloudProject ? (
+            <>
+              <Cloud className="w-3.5 h-3.5 inline-block mr-1 -mt-0.5 text-blue-500" />
+              Live from Dagster+ deployment
+            </>
+          ) : (
+            state?.path && <>YAML: <span className="font-mono">{state.path}</span></>
+          )}
           {state?.policies?.length !== undefined && (
             <span className="ml-2">· {state.policies.length} {state.policies.length === 1 ? 'policy' : 'policies'}</span>
           )}
         </div>
         <div className="flex items-center gap-2 flex-shrink-0">
-          <button
-            onClick={() => setSyncOpen(true)}
-            disabled={!state || state.policies.length === 0}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm text-gray-700 border border-gray-300 rounded hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
-            title="Push local alerts to Dagster+ (destructive) or pull from Dagster+ into the local YAML"
-          >
-            <Upload className="w-4 h-4" />
-            Sync with Dagster+
-          </button>
-          <button
-            onClick={() => setWizardMode({ mode: 'create' })}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-primary-foreground bg-primary rounded-md hover:bg-accent"
-          >
-            <Plus className="w-4 h-4" />
-            Create alert policy
-          </button>
+          {!isCloudProject && (
+            <>
+              <button
+                onClick={() => setSyncOpen(true)}
+                disabled={!state || state.policies.length === 0}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm text-gray-700 border border-gray-300 rounded hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                title="Push local alerts to Dagster+ (destructive) or pull from Dagster+ into the local YAML"
+              >
+                <Upload className="w-4 h-4" />
+                Sync with Dagster+
+              </button>
+              <button
+                onClick={() => setWizardMode({ mode: 'create' })}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-primary-foreground bg-primary rounded-md hover:bg-accent"
+              >
+                <Plus className="w-4 h-4" />
+                Create alert policy
+              </button>
+            </>
+          )}
         </div>
       </div>
 
-      {/* OSS disclaimer */}
-      <div className="mx-4 mt-3 px-3 py-2 bg-amber-50 border border-amber-200 rounded text-xs text-amber-900 flex items-start gap-2">
-        <Info className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" />
-        <div>
-          <strong>Alerts are only enforced on Dagster+ deployments.</strong> You can still author policies here for version control,
-          but OSS Dagster ignores them at runtime.
+      {/* OSS / read-only disclaimer */}
+      {isCloudProject ? (
+        <div className="mx-4 mt-3 px-3 py-2 bg-blue-50 border border-blue-200 rounded text-xs text-blue-900 flex items-start gap-2">
+          <Info className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" />
+          <div>
+            <strong>Read-only.</strong> Alert policies currently configured on this Dagster+ deployment.
+            To make changes, author them in the local project's <span className="font-mono">alert_policies.yaml</span> and push with <span className="font-mono">dg api alert-policy sync</span>.
+          </div>
         </div>
-      </div>
+      ) : (
+        <div className="mx-4 mt-3 px-3 py-2 bg-amber-50 border border-amber-200 rounded text-xs text-amber-900 flex items-start gap-2">
+          <Info className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" />
+          <div>
+            <strong>Alerts are only enforced on Dagster+ deployments.</strong> You can still author policies here for version control,
+            but OSS Dagster ignores them at runtime.
+          </div>
+        </div>
+      )}
 
       {/* Body */}
       <div className="flex-1 overflow-y-auto p-6">
@@ -142,20 +148,25 @@ export function AlertsPanel() {
             <Bell className="w-12 h-12 mx-auto mb-4 text-gray-300" />
             <p className="text-base font-medium text-gray-700">No alert policies yet</p>
             <p className="text-sm text-gray-500 mt-1 mb-6">
-              Create your first policy to get notified when assets fail, runs error out, agents go down, etc.
+              {isCloudProject
+                ? 'This Dagster+ deployment has no alert policies configured. Open the local project to author them and push with Sync.'
+                : 'Create your first policy to get notified when assets fail, runs error out, agents go down, etc.'}
             </p>
-            <button
-              onClick={() => setWizardMode({ mode: 'create' })}
-              className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-md"
-            >
-              <Plus className="w-4 h-4" />
-              Create alert policy
-            </button>
+            {!isCloudProject && (
+              <button
+                onClick={() => setWizardMode({ mode: 'create' })}
+                className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-md"
+              >
+                <Plus className="w-4 h-4" />
+                Create alert policy
+              </button>
+            )}
           </div>
         )}
         {!loading && !error && state && state.policies.length > 0 && (
           <PoliciesTable
             policies={state.policies}
+            readOnly={isCloudProject}
             onEdit={(p) => setWizardMode({ mode: 'edit', policy: p })}
             onDelete={handleDelete}
           />
@@ -187,10 +198,11 @@ export function AlertsPanel() {
 
 // ---------------------------------------------------------------------------
 
-function PoliciesTable({ policies, onEdit, onDelete }: {
+function PoliciesTable({ policies, onEdit, onDelete, readOnly = false }: {
   policies: AlertPolicy[];
   onEdit: (p: AlertPolicy) => void;
   onDelete: (name: string) => void;
+  readOnly?: boolean;
 }) {
   return (
     <div className="bg-white border border-gray-200 rounded-lg overflow-hidden">
@@ -207,7 +219,7 @@ function PoliciesTable({ policies, onEdit, onDelete }: {
         </thead>
         <tbody>
           {policies.map((p) => (
-            <tr key={p.name} className="border-b border-gray-50 last:border-0 hover:bg-gray-50/50">
+            <tr key={p.name} className={`border-b border-gray-50 last:border-0 ${readOnly ? '' : 'hover:bg-gray-50/50'}`}>
               <td className="px-4 py-2">
                 <div className="font-mono text-xs text-gray-900">{p.name}</div>
                 {p.description && <div className="text-[11px] text-gray-500 mt-0.5">{p.description}</div>}
@@ -221,14 +233,16 @@ function PoliciesTable({ policies, onEdit, onDelete }: {
                   : <span className="text-emerald-700">enabled</span>}
               </td>
               <td className="px-4 py-2 text-right">
-                <div className="flex items-center justify-end gap-1">
-                  <button onClick={() => onEdit(p)} className="p-1.5 text-gray-500 hover:text-blue-600 hover:bg-blue-50 rounded" title="Edit">
-                    <Edit3 className="w-3.5 h-3.5" />
-                  </button>
-                  <button onClick={() => onDelete(p.name)} className="p-1.5 text-gray-500 hover:text-rose-600 hover:bg-rose-50 rounded" title="Delete">
-                    <Trash2 className="w-3.5 h-3.5" />
-                  </button>
-                </div>
+                {!readOnly && (
+                  <div className="flex items-center justify-end gap-1">
+                    <button onClick={() => onEdit(p)} className="p-1.5 text-gray-500 hover:text-blue-600 hover:bg-blue-50 rounded" title="Edit">
+                      <Edit3 className="w-3.5 h-3.5" />
+                    </button>
+                    <button onClick={() => onDelete(p.name)} className="p-1.5 text-gray-500 hover:text-rose-600 hover:bg-rose-50 rounded" title="Delete">
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                )}
               </td>
             </tr>
           ))}

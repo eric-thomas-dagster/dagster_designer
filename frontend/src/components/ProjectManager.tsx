@@ -84,7 +84,24 @@ export function ProjectManager() {
 
     try {
       setIsCreating(true);
-      await createProject(newProjectName, undefined, newProjectGitRepo || undefined, newProjectGitBranch);
+      const created = await createProject(newProjectName, undefined, newProjectGitRepo || undefined, newProjectGitBranch);
+
+      // No manual post-setup for the Jaffle Shop template: the store's
+      // `createProject` -> `pollDependencyStatus` -> `checkAssets` chain
+      // (in useProject.ts) already handles the full sequence: it polls
+      // dependency-status until installation completes, then polls the
+      // project for assets, then calls `loadProject` to refresh the
+      // graph. Our earlier polling loop here duplicated that work and
+      // raced it — both would call `loadProject` at overlapping times
+      // and the final render wasn't guaranteed.
+      //
+      // If the user still sees an empty graph after ~60s, they can hit
+      // the "Regenerate assets" button in the project header to force
+      // a re-introspect + reload.
+      if (selectedTemplate === 'jaffle') {
+        notify.info('Setting up Jaffle Shop… this takes 30–60s. The graph will populate automatically.');
+      }
+
       setNewProjectName('');
       setNewProjectGitRepo('');
       setNewProjectGitBranch('main');

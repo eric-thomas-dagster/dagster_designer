@@ -28,6 +28,9 @@ import ReactFlow, {
 import 'reactflow/dist/style.css';
 import { ComponentNode } from './nodes/ComponentNode';
 import { AssetNode } from './nodes/AssetNode';
+import { DraftNode } from './DraftNode';
+import { useDrafts } from '@/hooks/useDrafts';
+import { usePreviews } from '@/hooks/usePreviews';
 import { Launchpad } from './Launchpad';
 import { DataPreviewModal } from './DataPreviewModal';
 import { AssetIOPanel } from './AssetIOPanel';
@@ -103,6 +106,9 @@ const nodeTypes: NodeTypes = {
   // wraps it in a default dashed outer container -- register under a
   // custom name so our card renders alone.
   assetGroup: GroupNode,
+  // Draft components pending PR promotion — rendered as amber dashed
+  // cards to signal "not in prod yet."
+  draft: DraftNode,
 };
 
 // Custom edge component that shows delete button when clicked for custom edges
@@ -460,12 +466,19 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
   // per group, edges aggregated. Auto-on for large cloud graphs
   // (>60 assets) so users see manageable structure by default.
   const [collapseToGroups, setCollapseToGroups] = useState(false);
+  // Prod / preview toggle for cloud projects. When true, drafts render
+  // as "would-be-promoted" instead of "pending" — so leadership can
+  // see the graph state that a PR merge would produce, without any
+  // fake runtime data. Real preview execution (sandboxed subprocess
+  // against the customer's repo) lands in M3 proper once git is wired.
+  const [previewMode, setPreviewMode] = useState(false);
   // Per-group opt-out from collapse. When collapseToGroups=true,
   // groups in this Set render their individual assets in place while
   // the rest remain aggregated. Cleared whenever the global collapse
   // toggle flips so users don't get stuck with a mixed view they
   // didn't expect.
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
+
   // Groups whose expanded-view layout has already been applied. When a
   // group is freshly expanded we lay out its assets via the mixed-DAG
   // longest-path layout; after that first placement, subsequent renders
@@ -532,6 +545,8 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
   // assets with connections grouped into their own sections.
   const [showAllInGraph, setShowAllInGraph] = useState(false);
   const { currentProject, updateGraph, setCurrentProject, isLoading } = useProjectStore();
+  // Read-only whenever the project is a Dagster+ connection.
+  const readOnlyMode = !!(currentProject as any)?.is_dagster_plus;
   const [nodes, setNodes, onNodesChange] = useNodesState([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState([]);
   const [selectedAssets, setSelectedAssets] = useState<string[]>([]);
@@ -761,18 +776,45 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
   }, [currentProject]);
 
   // Handle node deletion (used for keyboard shortcuts)
-  const handleDeleteNode = useCallback((nodeId: string) => {
+  const handleDeleteNode = useCallback(async (nodeId: string) => {
     console.log('[GraphEditor] Deleting node:', nodeId);
 
-    // Remove the node
+    // Optimistic UI: remove locally so the pointer/keyboard delete
+    // feels instant.
     setNodes((nds) => nds.filter((node) => node.id !== nodeId));
-
-    // Remove all edges connected to this node
     setEdges((eds) => eds.filter((edge) => edge.source !== nodeId && edge.target !== nodeId));
-
-    // Deselect if this was the selected node
     onNodeSelect(null);
-  }, [setNodes, setEdges, onNodeSelect]);
+
+    // Persist to backend: (a) delete the on-disk `defs/<id>/defs.yaml`
+    // so the file doesn't linger and collide with a future regenerate,
+    // (b) update the project JSON so reload doesn't bring the node
+    // back. Without both, keyboard-Delete looked like it worked but
+    // left orphaned components on disk — same footgun as the button-
+    // level delete.
+    if (!currentProject) return;
+    const nodeObj = nodes.find((n) => n.id === nodeId);
+    const componentId = (nodeObj?.data as any)?.component_id || nodeId;
+    try {
+      await projectsApi.deleteComponentInstance(currentProject.id, componentId);
+    } catch (e: any) {
+      if (e?.response?.status !== 404) {
+        console.error('[GraphEditor] deleteComponentInstance failed:', e);
+      }
+    }
+    try {
+      const updatedNodes = currentProject.graph.nodes.filter((n) => n.id !== nodeId);
+      const updatedEdges = currentProject.graph.edges.filter(
+        (e) => e.source !== nodeId && e.target !== nodeId,
+      );
+      const updatedComponents = currentProject.components.filter((c) => c.id !== nodeId);
+      await projectsApi.update(currentProject.id, {
+        components: updatedComponents,
+        graph: { nodes: updatedNodes, edges: updatedEdges },
+      });
+    } catch (e) {
+      console.error('[GraphEditor] persist-after-delete failed:', e);
+    }
+  }, [setNodes, setEdges, onNodeSelect, currentProject, nodes]);
 
   // Handle keyboard delete
   useEffect(() => {
@@ -867,7 +909,9 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
         setCollapseToGroups(true);
       }
 
-      const flowNodes: Node[] = currentProject.graph.nodes.map((node: GraphNode) => {
+      const visibleGraphNodes = currentProject.graph.nodes;
+
+      const flowNodes: Node[] = visibleGraphNodes.map((node: GraphNode) => {
         // Use IO metadata from node.data if available (from backend), otherwise extract from schema cache
         const ioMetadata = (node.data.io_output_type || node.data.io_input_type)
           ? {
@@ -1380,7 +1424,6 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
       console.log('[GraphEditor] Skipping graph save - isInitialLoad:', isInitialLoad.current);
       return;
     }
-
     // Create a hash of nodes and edges excluding the 'selected' property to avoid saving on selection changes
     const nodesForHash = nodes.map((node) => {
       // eslint-disable-next-line @typescript-eslint/no-unused-vars
@@ -2265,8 +2308,45 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
     return { nodes: outNodes, edges: outEdges };
   }, [collapseToGroups, expandedGroups, perAssetDisplay, edges, handleExpandGroup, handleCollapseGroup]);
 
-  const displayNodes = groupedView ? groupedView.nodes : perAssetDisplay;
+  const baseDisplayNodes = groupedView ? groupedView.nodes : perAssetDisplay;
   const displayEdges = groupedView ? groupedView.edges : edges;
+
+  // Fetch drafts + inject them as synthetic nodes at the top-left so
+  // they hover "above" the real graph. Cloud-loc drafts only — sandbox
+  // authorings are real files that already show up via subprocess
+  // hydration (M3 will merge those into the graph too).
+  const { drafts: allDrafts } = useDrafts(currentProject?.id ?? null);
+  const { forDraft: previewForDraft } = usePreviews(currentProject?.id ?? null);
+  const draftNodes: Node[] = React.useMemo(() => {
+    if (!allDrafts || allDrafts.length === 0) return [];
+    let minX = 0;
+    let minY = 0;
+    for (const n of baseDisplayNodes) {
+      if (typeof n.position?.x === 'number' && n.position.x < minX) minX = n.position.x;
+      if (typeof n.position?.y === 'number' && n.position.y < minY) minY = n.position.y;
+    }
+    return allDrafts.map((d, i) => {
+      const preview = previewForDraft(d.deployment_name, d.location_name);
+      return {
+        id: `draft:${d.id}`,
+        type: 'draft',
+        position: { x: minX + i * 240, y: minY - 180 },
+        data: {
+          draft: d,
+          previewMode,
+          // When the preview for this draft's (deployment, location) is
+          // running, the node shows an emerald "PREVIEW LIVE" chip so
+          // users see at a glance which drafts have a runtime behind them.
+          previewLive: preview?.status === 'ready',
+          previewUrl: preview?.webserver_url ?? null,
+        },
+        draggable: true,
+        selectable: true,
+      };
+    });
+  }, [allDrafts, baseDisplayNodes, previewMode, previewForDraft]);
+
+  const displayNodes = draftNodes.length > 0 ? [...baseDisplayNodes, ...draftNodes] : baseDisplayNodes;
 
   return (
     <div className="w-full h-full flex flex-col">
@@ -2279,7 +2359,6 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
           panel), we portal the ribbon there so its width doesn't shift
           when the property panel opens. */}
       {(() => {
-        const isCloud = !!(currentProject as any)?.is_dagster_plus;
         const inGraph = viewMode === 'graph';
         const ribbonJsx = (
       <div className="flex-shrink-0 bg-white border-b border-gray-200 px-3 py-2 flex items-center justify-between gap-2">
@@ -2365,15 +2444,39 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
               </button>
             </>
           )}
-          <button
-            onClick={() => setAddDataOpen(true)}
-            disabled={isCloud}
-            className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium bg-primary text-primary-foreground rounded-md hover:bg-accent disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-primary"
-            title={isCloud ? 'Not available on Dagster+ (read-only)' : 'Connect a database, warehouse, SaaS app, file, or API'}
-          >
-            <Plus className="w-4 h-4" />
-            <span>Add data</span>
-          </button>
+          {/* Add data button - only in Graph view (Catalog is read-only). */}
+          {inGraph && (
+            <button
+              onClick={() => setAddDataOpen(true)}
+              disabled={readOnlyMode}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium bg-primary text-primary-foreground rounded-md hover:bg-accent disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-primary"
+              title={readOnlyMode ? 'Not available on Dagster+ (read-only)' : 'Connect a database, warehouse, SaaS app, file, or API'}
+            >
+              <Plus className="w-4 h-4" />
+              <span>Add data</span>
+            </button>
+          )}
+          {/* Prod / Preview toggle — cloud projects only, and only
+              once at least one draft exists (otherwise the button has
+              nothing to preview). Flips the visual state of every
+              draft node on the canvas. */}
+          {inGraph && readOnlyMode && allDrafts.length > 0 && (
+            <button
+              onClick={() => setPreviewMode(!previewMode)}
+              className={`inline-flex items-center gap-1.5 px-2.5 h-8 rounded text-xs font-medium border ${
+                previewMode
+                  ? 'bg-emerald-50 border-emerald-300 text-emerald-800 hover:bg-emerald-100'
+                  : 'bg-white border-gray-300 text-gray-700 hover:bg-gray-50'
+              }`}
+              title={
+                previewMode
+                  ? 'Currently showing preview state — what the graph would look like after promoting all drafts. Click to return to prod view.'
+                  : 'Preview: see what the graph would look like after promoting all drafts.'
+              }
+            >
+              {previewMode ? 'Preview: drafts promoted' : 'Preview drafts'}
+            </button>
+          )}
           {inGraph && (
             <>
               <button
@@ -2509,10 +2612,11 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
                 {n.data?.description || <span className="text-gray-400 italic">—</span>}
               </td>
               <td className="px-2 py-2 text-right whitespace-nowrap">
-                {/* Auto coverage per-row shortcut. Hidden on cloud
-                    (read-only). stopPropagation so the click doesn't
-                    also open the detail page. */}
-                {!(currentProject as any)?.is_dagster_plus && (
+                {/* Auto coverage per-row shortcut. Hidden when the
+                    project is read-only (control-plane view). Enable
+                    Cloud Dev to unlock. stopPropagation so the click
+                    doesn't also open the detail page. */}
+                {!readOnlyMode && (
                   <button
                     onClick={(e) => {
                       e.stopPropagation();

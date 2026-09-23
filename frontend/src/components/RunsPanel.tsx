@@ -47,6 +47,7 @@ export function RunsPanel() {
   const [codeLocationOptions, setCodeLocationOptions] = useState<string[]>([]);
   const [tagKeyOptions, setTagKeyOptions] = useState<string[]>([]);
   const [tagValueOptions, setTagValueOptions] = useState<string[]>([]);
+  const [jobNameOptions, setJobNameOptions] = useState<string[]>([]);
 
   const isCloud = !!(currentProject as any)?.is_dagster_plus;
 
@@ -61,6 +62,9 @@ export function RunsPanel() {
     runsApi.tagKeys(currentProject.id)
       .then((r) => { if (alive) setTagKeyOptions(r.tag_keys || []); })
       .catch(() => { if (alive) setTagKeyOptions([]); });
+    runsApi.jobNames(currentProject.id)
+      .then((r) => { if (alive) setJobNameOptions(r.job_names || []); })
+      .catch(() => { if (alive) setJobNameOptions([]); });
     return () => { alive = false; };
   }, [currentProject?.id]);
 
@@ -184,14 +188,31 @@ export function RunsPanel() {
                 </button>
               )}
             </div>
-            <div className="relative w-52">
+            <div className="relative w-56">
               <Search className="w-3.5 h-3.5 text-gray-400 absolute left-2 top-1/2 -translate-y-1/2 pointer-events-none" />
               <input
                 value={jobFilter}
                 onChange={(e) => setJobFilter(e.target.value)}
-                placeholder="Filter by job name…"
+                placeholder={jobNameOptions.length > 0 ? `Filter by job (${jobNameOptions.length} known)` : 'Filter by job name…'}
+                list="runs-job-name-options"
                 className="w-full pl-7 pr-2 py-1 text-xs border border-gray-300 rounded"
               />
+              {/* Datalist gives users the dropdown of real job names +
+                  autocomplete, while still allowing free-text (useful for
+                  jobs that only exist in an in-flight preview and haven't
+                  materialized yet). */}
+              <datalist id="runs-job-name-options">
+                {jobNameOptions.map((n) => <option key={n} value={n} />)}
+              </datalist>
+              {jobFilter && (
+                <button
+                  onClick={() => setJobFilter('')}
+                  className="absolute right-1 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-700 text-[11px] px-1"
+                  title="Clear job filter"
+                >
+                  ×
+                </button>
+              )}
             </div>
             <button
               onClick={() => setShowAdvanced((v) => !v)}
@@ -496,7 +517,7 @@ function RunDetailPage({ runId, onBack }: { runId: string; onBack: () => void })
           </button>
           <div className="flex items-center gap-3">
             <h1 className="text-lg font-bold text-gray-900 flex items-center gap-2">
-              <span className="font-mono">{detail.run_id.slice(0, 12)}</span>
+              <span className="font-mono" title={detail.run_id}>{detail.run_id.slice(0, 8)}</span>
               <button
                 onClick={() => { navigator.clipboard.writeText(detail.run_id); notify.success('Run id copied'); }}
                 className="p-1 text-gray-400 hover:text-gray-700 hover:bg-gray-100 rounded"

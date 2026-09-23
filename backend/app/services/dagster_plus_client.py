@@ -165,6 +165,7 @@ query DagsterPlusAssets {
     isObservable
     jobNames
     hasAssetChecks
+    repository { name location { name } }
     tags { key value }
     owners {
       __typename
@@ -426,6 +427,11 @@ query DagsterPlusAssetCheckHistory(
         __typename
         label
         description
+        ... on IntMetadataEntry { intValue intRepr }
+        ... on FloatMetadataEntry { floatValue }
+        ... on TextMetadataEntry { text }
+        ... on BoolMetadataEntry { boolValue }
+        ... on JsonMetadataEntry { jsonString }
       }
     }
   }
@@ -454,6 +460,130 @@ query DagsterRuns($limit: Int!, $cursor: String, $filter: RunsFilter) {
       }
     }
     ... on PythonError { message stack }
+  }
+}
+"""
+
+
+# Alert policies configured on a Dagster+ deployment. The field name
+# and shape have changed across versions -- we try the most common
+# `alertPoliciesOrError`, and rely on `__typename` on each union to
+# stay resilient to schema drift. Fields we know exist on all recent
+# versions: name, description, enabled, alertType, eventTypes,
+# notificationService.
+ALERT_POLICIES_QUERY = """
+query AlertConfiguration {
+  alertPolicies {
+    id
+    name
+    description
+    enabled
+    eventTypes
+    tags { key value }
+    notificationService {
+      __typename
+      ... on EmailAlertPolicyNotification { emailAddresses }
+      ... on EmailOwnersAlertPolicyNotification { defaultEmailAddresses }
+      ... on SlackAlertPolicyNotification { slackWorkspaceName slackChannelName }
+      ... on MicrosoftTeamsAlertPolicyNotification { webhookUrl }
+      ... on PagerdutyAlertPolicyNotification { integrationKey }
+      ... on WebhookAlertPolicyNotification { webhookUrl }
+    }
+    alertTargets {
+      __typename
+      ... on AssetGroupTarget { assetGroup locationName repoName }
+      ... on AssetKeyTarget { assetKey { path } }
+      ... on AssetSelectionTarget { assetSelectionString }
+      ... on RunResultTarget { tags { key value } codeLocationNames jobs { __typename } }
+      ... on LongRunningJobThresholdTarget { thresholdSeconds tags { key value } codeLocationNames jobs { __typename } }
+      ... on ScheduleSensorTarget { codeLocationNames schedulesSensors { __typename } types }
+      ... on CodeLocationTarget { codeLocationNames }
+      ... on InsightsDeploymentThresholdTarget { metricName threshold operator }
+      ... on CreditLimitTarget { creditLimit }
+    }
+    policyOptions {
+      consecutiveFailureThreshold
+      renotifyIntervalMinutes
+      includeDescriptionInNotification
+    }
+  }
+}
+"""
+
+
+# Introspect the AlertPolicy type. Dagster+'s alert schema varies
+# across releases, so we probe the actual fields once and hand-craft
+# a broader query from there.
+ALERT_POLICIES_INTROSPECT_QUERY = """
+query AlertPolicyIntrospect {
+  ns: __type(name: "AlertPolicyNotification") { name kind possibleTypes { name fields { name type { kind name ofType { kind name } } } } }
+  po: __type(name: "AlertPolicyOptions") { name kind fields { name type { kind name ofType { kind name } } } }
+  at: __type(name: "AlertTarget") { name kind possibleTypes { name fields { name } } }
+  et: __type(name: "AlertPolicyEventType") { name kind enumValues { name } }
+}
+"""
+
+
+METRIC_INTROSPECT_QUERY = """
+query MetricIntrospect {
+  utin: __type(name: "ReportingUnitType") { kind enumValues { name } }
+  ccm: __type(name: "CreateCustomMetricSuccess") { fields { name type { kind name ofType { kind name } } } }
+}
+"""
+
+
+# List all custom metrics defined on the deployment. Response shape
+# matches the mutation return type -- one CustomMetric per row.
+CUSTOM_METRICS_LIST_QUERY = """
+query CustomMetricsList {
+  customMetrics {
+    id
+    metadataKey
+    displayName
+    description
+    unitType
+  }
+}
+"""
+
+
+# Create a new custom metric. We infer the input args from the response
+# shape the Dagster+ UI returns: {metadataKey, displayName, description,
+# unitType}. Kept as top-level args (not wrapped in an input object)
+# since that's the mutation style Dagster GraphQL uses elsewhere.
+# Create-or-update an alert policy by pushing its YAML/JSON document.
+# Same mutation the Dagster+ UI uses when editing an alert policy --
+# `document` is a YAML string in the shape of `alert_policies.yaml`.
+CREATE_OR_UPDATE_ALERT_POLICY_MUTATION = """
+mutation CreateOrUpdateAlertPolicyFromDocument($document: GenericScalar!) {
+  createOrUpdateAlertPolicyFromDocument(document: $document) {
+    __typename
+    ... on AlertPolicy {
+      id
+      name
+      enabled
+      eventTypes
+    }
+    ... on InvalidAlertPolicyError { message }
+    ... on UnauthorizedError { message }
+    ... on PythonError { message stack }
+  }
+}
+"""
+
+
+CREATE_CUSTOM_METRIC_MUTATION = """
+mutation CreateCustomMetric($customMetricInput: CustomMetricInput!) {
+  createCustomMetric(customMetricInput: $customMetricInput) {
+    __typename
+    ... on CreateCustomMetricSuccess {
+      customMetric {
+        id
+        metadataKey
+        displayName
+        unitType
+      }
+    }
   }
 }
 """

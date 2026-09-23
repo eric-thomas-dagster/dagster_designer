@@ -1,12 +1,16 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
+import ReactFlow, { Background, BackgroundVariant, Controls, MiniMap, Handle, Position } from 'reactflow';
+import 'reactflow/dist/style.css';
 import {
   Play, ChevronRight, Layers as LayersIcon, Database, CheckCircle2, AlertTriangle,
   Book, Filter as FilterIcon, Clock, Zap, Timer, Users as UsersIcon,
   ExternalLink, Copy, GitBranch, Tag as TagIcon, Pencil, X, Check, Loader2,
+  Activity as ActivityIcon,
 } from 'lucide-react';
 import { useProjectStore } from '@/hooks/useProject';
 import { projectsApi, assetsApi } from '@/services/api';
 import { notify } from './Notifications';
+import { BigTimeSeriesChart } from './MonitorDetailPage';
 import type { GraphNode, ComponentInstance } from '@/types';
 
 const isDbtComponentType = (t: string | undefined | null): boolean => !!t && /\bdbt[_.]|^dbt/i.test(t);
@@ -34,16 +38,20 @@ interface AssetDetailPageProps {
   ) => void;
 }
 
-type Tab = 'overview' | 'partitions' | 'events' | 'checks' | 'lineage' | 'insights' | 'change_history';
+type Tab = 'overview' | 'activity' | 'quality' | 'lineage' | 'partitions' | 'insights';
 
+// Tab set follows the "jobs to be done" reorg: Overview (what is this?),
+// Activity (what happened?), Quality (is it healthy?), Lineage (how
+// does it connect?), Partitions (per-partition status), Insights
+// (Dagster+ metric dashboards, still parked). "Change history" is
+// merged into Activity once the backend concept exists.
 const TABS: { id: Tab; label: string }[] = [
-  { id: 'overview',       label: 'Overview' },
-  { id: 'partitions',     label: 'Partitions' },
-  { id: 'events',         label: 'Events' },
-  { id: 'checks',         label: 'Checks' },
-  { id: 'lineage',        label: 'Lineage' },
-  { id: 'insights',       label: 'Insights' },
-  { id: 'change_history', label: 'Change history' },
+  { id: 'overview',   label: 'Overview' },
+  { id: 'activity',   label: 'Activity' },
+  { id: 'quality',    label: 'Quality' },
+  { id: 'lineage',    label: 'Lineage' },
+  { id: 'partitions', label: 'Partitions' },
+  { id: 'insights',   label: 'Insights' },
 ];
 
 export function AssetDetailPage({ nodeId, onClose, onNewPrimitiveForAsset }: AssetDetailPageProps) {
@@ -152,13 +160,19 @@ export function AssetDetailPage({ nodeId, onClose, onNewPrimitiveForAsset }: Ass
       {/* Content */}
       <div className="flex-1 overflow-y-auto bg-gray-50">
         {activeTab === 'overview' && <OverviewTab node={node} isCloud={isCloud} onNewPrimitiveForAsset={onNewPrimitiveForAsset} />}
-        {activeTab !== 'overview' && (
+        {activeTab === 'activity' && <ActivityTab node={node} isCloud={isCloud} projectId={currentProject?.id ?? ''} />}
+        {activeTab === 'quality' && <QualityTab node={node} isCloud={isCloud} projectId={currentProject?.id ?? ''} />}
+        {activeTab === 'lineage' && <LineageTab node={node} />}
+        {activeTab === 'partitions' && <PartitionsTab node={node} isCloud={isCloud} projectId={currentProject?.id ?? ''} />}
+        {activeTab === 'insights' && (
           <div className="p-12 text-center text-gray-500">
             <div className="inline-flex items-center gap-2 text-sm">
               <Clock className="w-4 h-4" />
-              <span>The <span className="font-medium">{TABS.find((t) => t.id === activeTab)?.label}</span> tab isn't wired up yet.</span>
+              <span>Insights is Dagster+ only and parked pending the check-metric aggregation resolution.</span>
             </div>
-            <p className="text-xs mt-2 text-gray-400">Coming soon.</p>
+            <p className="text-xs mt-2 text-gray-400">
+              Coming after Dagster+ backend picks up asset-check metadata in Insights rollups.
+            </p>
           </div>
         )}
       </div>
@@ -1414,4 +1428,902 @@ function formatRelative(iso: string): string {
   } catch {
     return iso;
   }
+}
+
+
+// ============================================================================
+// Lineage tab -- React Flow graph focused on THIS asset, showing N hops
+// upstream + N hops downstream. Data is walked from the already-loaded
+// project graph so no new backend call is needed.
+// ============================================================================
+
+interface LineageNodeRec { id: string; assetKey: string; hop: number; direction: 'up' | 'down' | 'self' }
+interface LineageEdgeRec { from: string; to: string }
+
+function LineageTab({ node }: { node: GraphNode }) {
+  const { currentProject } = useProjectStore();
+  const [hops, setHops] = useState(2);
+  const rootKey = ((node.data as any).asset_key as string) || node.id;
+
+  const { nodes, edges } = useMemo(() => {
+    if (!currentProject) return { nodes: [] as any[], edges: [] as any[] };
+    // Map: asset_key -> project graph node. Walk both directions BFS.
+    const byKey = new Map<string, GraphNode>();
+    for (const n of currentProject.graph.nodes) {
+      const k = ((n.data as any).asset_key as string) || n.id;
+      byKey.set(k, n as GraphNode);
+    }
+    const visited = new Map<string, LineageNodeRec>();
+    const edgeSet = new Set<string>();
+    const edgesArr: LineageEdgeRec[] = [];
+    visited.set(rootKey, { id: rootKey, assetKey: rootKey, hop: 0, direction: 'self' });
+
+    // Upstream walk.
+    const queueUp: Array<{ key: string; hop: number }> = [{ key: rootKey, hop: 0 }];
+    while (queueUp.length) {
+      const { key, hop } = queueUp.shift()!;
+      if (hop >= hops) continue;
+      const gn = byKey.get(key);
+      const deps: string[] = Array.isArray(gn?.data?.deps) ? (gn!.data.deps as string[]) : [];
+      for (const dep of deps) {
+        const edgeKey = `${dep}->${key}`;
+        if (!edgeSet.has(edgeKey)) { edgeSet.add(edgeKey); edgesArr.push({ from: dep, to: key }); }
+        if (!visited.has(dep)) {
+          visited.set(dep, { id: dep, assetKey: dep, hop: hop + 1, direction: 'up' });
+          queueUp.push({ key: dep, hop: hop + 1 });
+        }
+      }
+    }
+    // Downstream walk.
+    const queueDown: Array<{ key: string; hop: number }> = [{ key: rootKey, hop: 0 }];
+    while (queueDown.length) {
+      const { key, hop } = queueDown.shift()!;
+      if (hop >= hops) continue;
+      // Downstream is anything whose deps include this key.
+      for (const n of currentProject.graph.nodes) {
+        const nKey = ((n.data as any).asset_key as string) || n.id;
+        const nDeps: string[] = Array.isArray((n.data as any).deps) ? (n.data as any).deps as string[] : [];
+        if (nDeps.includes(key)) {
+          const edgeKey = `${key}->${nKey}`;
+          if (!edgeSet.has(edgeKey)) { edgeSet.add(edgeKey); edgesArr.push({ from: key, to: nKey }); }
+          if (!visited.has(nKey)) {
+            visited.set(nKey, { id: nKey, assetKey: nKey, hop: hop + 1, direction: 'down' });
+            queueDown.push({ key: nKey, hop: hop + 1 });
+          }
+        }
+      }
+    }
+
+    // Longest-path column layout so upstream flows left-to-right into root.
+    const inDeg = new Map<string, number>();
+    const outAdj = new Map<string, string[]>();
+    for (const [k] of visited) { inDeg.set(k, 0); outAdj.set(k, []); }
+    for (const e of edgesArr) {
+      outAdj.get(e.from)!.push(e.to);
+      inDeg.set(e.to, (inDeg.get(e.to) || 0) + 1);
+    }
+    const layer = new Map<string, number>();
+    for (const k of visited.keys()) layer.set(k, 0);
+    const remaining = new Map(inDeg);
+    const queue: string[] = Array.from(visited.keys()).filter((k) => (inDeg.get(k) || 0) === 0);
+    while (queue.length) {
+      const k = queue.shift()!;
+      for (const t of outAdj.get(k) || []) {
+        layer.set(t, Math.max(layer.get(t) || 0, (layer.get(k) || 0) + 1));
+        remaining.set(t, (remaining.get(t) || 0) - 1);
+        if (remaining.get(t) === 0) queue.push(t);
+      }
+    }
+    const byLayer = new Map<number, string[]>();
+    for (const k of visited.keys()) {
+      const L = layer.get(k) || 0;
+      if (!byLayer.has(L)) byLayer.set(L, []);
+      byLayer.get(L)!.push(k);
+    }
+    const X = 260, Y = 74;
+    const pos: Record<string, { x: number; y: number }> = {};
+    for (const [L, keys] of byLayer) {
+      keys.sort();
+      keys.forEach((k, i) => { pos[k] = { x: L * X, y: i * Y }; });
+    }
+    const rfNodes = Array.from(visited.values()).map((rec) => ({
+      id: rec.assetKey,
+      type: 'assetLineage',
+      position: pos[rec.assetKey] || { x: 0, y: 0 },
+      data: {
+        assetKey: rec.assetKey,
+        isRoot: rec.direction === 'self',
+        direction: rec.direction,
+        hop: rec.hop,
+        node: byKey.get(rec.assetKey),
+      },
+      sourcePosition: Position.Right,
+      targetPosition: Position.Left,
+    }));
+    const rfEdges = edgesArr.map((e) => ({
+      id: `${e.from}__${e.to}`,
+      source: e.from,
+      target: e.to,
+      type: 'default',
+      style: { stroke: '#9ca3af', strokeWidth: 1.5 },
+      animated: e.to === rootKey || e.from === rootKey,
+    }));
+    return { nodes: rfNodes, edges: rfEdges };
+  }, [currentProject, rootKey, hops]);
+
+  return (
+    <div className="p-6 max-w-[1600px] mx-auto">
+      <div className="bg-white border border-gray-200 rounded-lg overflow-hidden">
+        <div className="px-4 py-2.5 border-b border-gray-100 flex items-center justify-between">
+          <div>
+            <div className="text-sm font-semibold text-gray-900">Lineage</div>
+            <div className="text-[11px] text-gray-500">Focused on <span className="font-mono">{rootKey}</span> · {nodes.length} nodes, {edges.length} edges</div>
+          </div>
+          <label className="text-[11px] text-gray-600 inline-flex items-center gap-2">
+            Hops
+            <select
+              value={hops}
+              onChange={(e) => setHops(parseInt(e.target.value, 10))}
+              className="text-xs border border-gray-300 rounded px-1 py-0.5 bg-white"
+            >
+              {[1, 2, 3, 5].map((h) => <option key={h} value={h}>{h}</option>)}
+            </select>
+          </label>
+        </div>
+        <div style={{ height: 640 }}>
+          <ReactFlow
+            nodes={nodes}
+            edges={edges}
+            nodeTypes={LINEAGE_NODE_TYPES}
+            fitView
+            fitViewOptions={{ padding: 0.15 }}
+            nodesDraggable={false}
+            nodesConnectable={false}
+            proOptions={{ hideAttribution: true }}
+          >
+            <Background variant={BackgroundVariant.Dots} gap={16} size={1} />
+            <Controls showInteractive={false} />
+            <MiniMap pannable zoomable />
+          </ReactFlow>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function LineageAssetNode({ data }: { data: any }) {
+  const isRoot = data.isRoot;
+  const dir = data.direction as 'up' | 'down' | 'self';
+  const gnData = (data.node?.data ?? {}) as any;
+  const checks: any[] = Array.isArray(gnData.checks) ? gnData.checks : [];
+  const failing = checks.some((c) => {
+    const s = (c.last_status || '').toLowerCase();
+    return s === 'fail' || s === 'error' || s === 'failed';
+  });
+  const tone = isRoot
+    ? 'border-blue-500 bg-blue-50'
+    : failing
+    ? 'border-rose-400 bg-rose-50'
+    : 'border-gray-300 bg-white';
+  return (
+    <div className={`rounded-md border-2 ${tone} px-2 py-1.5 min-w-[200px] max-w-[240px] shadow-sm`}>
+      <Handle type="target" position={Position.Left} isConnectable={false} style={{ background: '#9ca3af' }} />
+      <div className="flex items-center gap-1.5">
+        {failing && !isRoot && <AlertTriangle className="w-3 h-3 text-rose-500 flex-shrink-0" />}
+        {isRoot && <span className="text-[9px] uppercase tracking-wider text-blue-700 font-bold flex-shrink-0">this asset</span>}
+        {dir !== 'self' && (
+          <span className="text-[9px] uppercase tracking-wider text-gray-500 flex-shrink-0">
+            {dir === 'up' ? `↑ ${data.hop}` : `↓ ${data.hop}`}
+          </span>
+        )}
+      </div>
+      <div className="font-mono text-[11px] text-gray-800 truncate mt-0.5" title={data.assetKey}>
+        {data.assetKey}
+      </div>
+      <Handle type="source" position={Position.Right} isConnectable={false} style={{ background: '#9ca3af' }} />
+    </div>
+  );
+}
+
+const LINEAGE_NODE_TYPES = { assetLineage: LineageAssetNode };
+
+
+// ============================================================================
+// Quality tab -- checks with per-check history charts + Auto Coverage + Freshness
+// ============================================================================
+
+function QualityTab({ node, isCloud, projectId }: { node: GraphNode; isCloud: boolean; projectId: string }) {
+  const data = node.data as any;
+  const checks: any[] = Array.isArray(data.checks) ? data.checks : [];
+  const [coverageOpen, setCoverageOpen] = useState(false);
+  const [expandedCheck, setExpandedCheck] = useState<string | null>(null);
+
+  const passing = checks.filter((c) => {
+    const s = (c.last_status || '').toLowerCase();
+    return s === 'pass' || s === 'success' || s === 'succeeded';
+  }).length;
+  const failing = checks.filter((c) => {
+    const s = (c.last_status || '').toLowerCase();
+    return s === 'fail' || s === 'error' || s === 'failed';
+  }).length;
+
+  return (
+    <div className="p-6 max-w-[1600px] mx-auto space-y-6">
+      {/* KPI band */}
+      <Section title="Health at a glance" icon={<ShieldPill />}>
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+          <Kpi label="Checks" value={checks.length} />
+          <Kpi label="Passing" value={passing} tone={passing > 0 ? 'success' : 'neutral'} />
+          <Kpi label="Failing" value={failing} tone={failing > 0 ? 'error' : 'neutral'} />
+          <Kpi label="Coverage"
+            value={checks.length === 0 ? 'None' : failing === 0 ? 'Healthy' : 'Attention'}
+            tone={checks.length === 0 ? 'warning' : failing === 0 ? 'success' : 'error'} />
+        </div>
+      </Section>
+
+      {/* Check list -- expandable to show per-check history via GraphQL */}
+      <Section
+        title={`Checks (${checks.length})`}
+        icon={<CheckCircle2 className="w-4 h-4 text-gray-500" />}
+        headerRight={
+          !isCloud ? (
+            <button
+              onClick={() => setCoverageOpen(true)}
+              className="inline-flex items-center gap-1 px-2 py-1 text-[11px] font-medium text-blue-700 bg-blue-50 border border-blue-200 rounded hover:bg-blue-100"
+            >
+              <Zap className="w-3 h-3" />
+              Auto coverage
+            </button>
+          ) : null
+        }
+      >
+        {checks.length === 0 ? (
+          <p className="text-sm text-gray-500 italic">
+            No checks on this asset yet.{!isCloud && ' Click "Auto coverage" to get a suggested baseline.'}
+          </p>
+        ) : (
+          <ul className="divide-y divide-gray-100">
+            {checks.map((c: any, i: number) => {
+              const monitorId = c.key || `${(data.asset_key as string) || node.id}::${c.name}`;
+              const isOpen = expandedCheck === monitorId;
+              const s = (c.last_status || '').toLowerCase();
+              const ok = s === 'pass' || s === 'success' || s === 'succeeded';
+              const bad = s === 'fail' || s === 'error' || s === 'failed';
+              return (
+                <li key={monitorId || i} className="py-2">
+                  <button
+                    onClick={() => setExpandedCheck(isOpen ? null : monitorId)}
+                    className="w-full flex items-start gap-2 text-left hover:bg-gray-50 -mx-2 px-2 py-1 rounded"
+                  >
+                    {ok ? <CheckCircle2 className="w-4 h-4 text-emerald-500 mt-0.5 flex-shrink-0" />
+                      : bad ? <AlertTriangle className="w-4 h-4 text-rose-500 mt-0.5 flex-shrink-0" />
+                      : <span className="w-4 h-4 mt-0.5 inline-block rounded-full border border-gray-300 flex-shrink-0" />}
+                    <div className="flex-1 min-w-0">
+                      <div className="text-sm font-medium text-gray-900 truncate">{c.name || 'check'}</div>
+                      {c.description && <div className="text-xs text-gray-500 mt-0.5">{c.description}</div>}
+                    </div>
+                    <div className="text-[10px] text-gray-500 tabular-nums flex-shrink-0">
+                      {c.last_status ? c.last_status.toLowerCase() : 'never run'}
+                    </div>
+                    <ChevronRight className={`w-4 h-4 text-gray-400 flex-shrink-0 transition-transform ${isOpen ? 'rotate-90' : ''}`} />
+                  </button>
+                  {isOpen && (
+                    <div className="mt-2 pl-6">
+                      <CheckHistoryPanel projectId={projectId} monitorId={monitorId} />
+                    </div>
+                  )}
+                </li>
+              );
+            })}
+          </ul>
+        )}
+      </Section>
+
+      {/* Freshness placeholder */}
+      <Section title="Freshness" icon={<Timer className="w-4 h-4 text-gray-500" />} compact>
+        <p className="text-xs text-gray-500 italic">
+          Freshness policy details aren't fetched yet -- backend plumbing pending.
+        </p>
+      </Section>
+
+      {coverageOpen && (
+        <AutoCoverageModal assetKey={(data.asset_key as string) || node.id} onClose={() => setCoverageOpen(false)} />
+      )}
+    </div>
+  );
+}
+
+function ShieldPill() {
+  return <CheckCircle2 className="w-4 h-4 text-gray-500" />;
+}
+
+/**
+ * Per-check history strip + best-effort chart. Reuses the /monitors/history
+ * endpoint which now works for both Dagster+ AND local `dg dev` (via the
+ * shared GraphQL dispatcher we built during the Monitors work).
+ */
+function CheckHistoryPanel({ projectId, monitorId }: { projectId: string; monitorId: string }) {
+  const [loading, setLoading] = useState(true);
+  const [history, setHistory] = useState<Awaited<ReturnType<typeof projectsApi.getMonitorHistory>> | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const [selectedMetricLabel, setSelectedMetricLabel] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!projectId || !monitorId) return;
+    let alive = true;
+    setLoading(true);
+    projectsApi.getMonitorHistory(projectId, monitorId, 100)
+      .then((r) => { if (alive) { setHistory(r); setLoading(false); } })
+      .catch((e) => { if (alive) { setErr(e?.response?.data?.detail || e?.message || 'Failed'); setLoading(false); } });
+    return () => { alive = false; };
+  }, [projectId, monitorId]);
+
+  if (loading) return <div className="text-[11px] text-gray-500"><Loader2 className="w-3 h-3 animate-spin inline" /> Loading…</div>;
+  if (err) return <div className="text-[11px] text-rose-700">{err}</div>;
+  if (!history || history.events.length === 0) {
+    return <p className="text-[11px] text-gray-500 italic">No history recorded for this check yet.</p>;
+  }
+  const events = history.events;
+  const metrics = history.numeric_metrics || [];
+  const activeLabel = selectedMetricLabel ?? metrics.find((m) => m.is_default)?.label ?? metrics[0]?.label ?? null;
+  const active = metrics.find((m) => m.label === activeLabel);
+  return (
+    <div className="space-y-2">
+      {/* Pass/fail strip */}
+      <div className="flex items-center gap-[2px] h-6" title={`Last ${events.length} runs, oldest → newest`}>
+        {events.map((e, i) => {
+          const s = (e.status || '').toLowerCase();
+          const tone = s === 'pass' || s === 'success' || s === 'succeeded' ? 'bg-emerald-500'
+            : s === 'fail' || s === 'error' || s === 'failed' ? 'bg-rose-500'
+            : s === 'warn' ? 'bg-amber-500'
+            : 'bg-gray-300';
+          return <div key={i} className={`${tone} flex-1 min-w-[2px] rounded-sm`} title={`${s} · ${new Date(e.ts).toLocaleString()}`} />;
+        })}
+      </div>
+      {active && active.points.length > 1 && (
+        <div className="border border-gray-200 rounded bg-white p-3">
+          <div className="flex items-center gap-2 mb-2">
+            <span className="text-[10px] uppercase tracking-wider text-gray-500 flex-1 truncate">
+              {active.label} · last {active.points.length} runs · green band = expected range
+            </span>
+            {metrics.length > 1 && (
+              <select
+                value={active.label}
+                onChange={(e) => setSelectedMetricLabel(e.target.value)}
+                className="text-[10px] border border-gray-300 rounded px-1 py-0.5 bg-white"
+                title="Switch metric"
+              >
+                {metrics.map((m) => (
+                  <option key={m.label} value={m.label}>{m.label}</option>
+                ))}
+              </select>
+            )}
+          </div>
+          <BigTimeSeriesChart points={active.points} />
+        </div>
+      )}
+      <div className="text-[10px] text-gray-500">
+        {events.length} events · latest {new Date(events[events.length - 1].ts).toLocaleString()}
+      </div>
+    </div>
+  );
+}
+
+
+
+// ============================================================================
+// Activity tab -- materialization events + change history placeholder
+// ============================================================================
+
+function ActivityTab({ node, isCloud, projectId }: { node: GraphNode; isCloud: boolean; projectId: string }) {
+  const data = node.data as any;
+  const assetKey = (data.asset_key as string) || node.id;
+  const [events, setEvents] = useState<Array<{ ts: string; kind: string; message?: string | null; run_id?: string | null; partition?: string | null }> | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [err, setErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!projectId || !assetKey) return;
+    let alive = true;
+    setLoading(true);
+    assetsApi.getAssetEvents(projectId, assetKey, 200)
+      .then((r) => { if (alive) { setEvents(r.events || []); setLoading(false); } })
+      .catch((e) => { if (alive) { setErr(e?.response?.data?.detail || e?.message || 'Failed'); setLoading(false); } });
+    return () => { alive = false; };
+  }, [projectId, assetKey]);
+
+  return (
+    <div className="p-6 max-w-[1600px] mx-auto space-y-6">
+      <Section title="Materialization events" icon={<ActivityIcon className="w-4 h-4 text-gray-500" />}>
+        {loading && <div className="text-xs text-gray-500"><Loader2 className="w-3 h-3 animate-spin inline" /> Loading…</div>}
+        {err && <div className="text-xs text-rose-700 bg-rose-50 border border-rose-200 rounded p-2">{err}</div>}
+        {events && events.length === 0 && (
+          <p className="text-sm text-gray-500 italic">
+            No materialization events recorded yet.{isCloud ? '' : ' Trigger the asset from Dagster to populate.'}
+          </p>
+        )}
+        {events && events.length > 0 && (
+          <ul className="divide-y divide-gray-100 text-xs">
+            {events.map((e, i) => (
+              <li key={i} className="py-2 flex items-start gap-3">
+                <div className="w-1.5 h-1.5 mt-1.5 rounded-full bg-emerald-500 flex-shrink-0" />
+                <div className="flex-1 min-w-0">
+                  <div className="text-gray-900 font-medium">
+                    {e.kind === 'materialization' ? 'Materialized' : e.kind}
+                    {e.partition && <span className="ml-2 text-[10px] font-mono text-gray-500">partition: {e.partition}</span>}
+                  </div>
+                  {e.message && <div className="text-gray-600 mt-0.5 truncate" title={e.message}>{e.message}</div>}
+                  {e.run_id && (
+                    <div className="text-[10px] text-gray-400 font-mono mt-0.5">run {e.run_id.slice(0, 8)}</div>
+                  )}
+                </div>
+                <div className="text-[10px] text-gray-500 tabular-nums flex-shrink-0">
+                  {new Date(e.ts).toLocaleString()}
+                </div>
+              </li>
+            ))}
+          </ul>
+        )}
+      </Section>
+
+      <Section title="Change history" icon={<Clock className="w-4 h-4 text-gray-500" />} compact>
+        <p className="text-xs text-gray-500 italic">
+          Change history (schema / dependencies / definition edits over time) is parked pending backend design.
+        </p>
+      </Section>
+    </div>
+  );
+}
+
+
+// ============================================================================
+// Partitions tab -- backend endpoint + status list
+// ============================================================================
+
+function PartitionsTab({ node, isCloud, projectId }: { node: GraphNode; isCloud: boolean; projectId: string }) {
+  const { currentProject } = useProjectStore();
+  const data = node.data as any;
+  const assetKey = (data.asset_key as string) || node.id;
+  const isPartitioned = !!data.is_partitioned;
+  const [resp, setResp] = useState<Awaited<ReturnType<typeof assetsApi.getAssetPartitions>> | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const [statusFilter, setStatusFilter] = useState<'all' | 'materialized' | 'missing' | 'failed'>('all');
+  const [search, setSearch] = useState('');
+  const [selectedPartition, setSelectedPartition] = useState<string | null>(null);
+  const [limit, setLimit] = useState(500);
+
+  useEffect(() => {
+    if (!isPartitioned || !projectId || !assetKey) return;
+    let alive = true;
+    setLoading(true);
+    assetsApi.getAssetPartitions(projectId, assetKey, limit)
+      .then((r) => { if (alive) { setResp(r); setLoading(false); } })
+      .catch((e) => { if (alive) { setErr(e?.response?.data?.detail || e?.message || 'Failed'); setLoading(false); } });
+    return () => { alive = false; };
+  }, [isPartitioned, projectId, assetKey, limit]);
+
+  if (!isPartitioned) {
+    return (
+      <div className="p-6 max-w-[1600px] mx-auto">
+        <Section title="Partitions" icon={<LayersIcon className="w-4 h-4 text-gray-500" />}>
+          <p className="text-sm text-gray-500 italic">This asset isn't partitioned.</p>
+        </Section>
+      </div>
+    );
+  }
+
+  const partitions = resp?.partitions ?? [];
+  // Health strip renders in the ORIGINAL chronological order (oldest at
+  // the left, newest at the right) so users read left-to-right. Backend
+  // returns newest-first, so we reverse a copy.
+  const chronological = [...partitions].reverse();
+
+  const searchLower = search.trim().toLowerCase();
+  const filtered = partitions.filter((p) => {
+    if (statusFilter !== 'all' && (p.status || '').toLowerCase() !== statusFilter) return false;
+    if (searchLower && !p.key.toLowerCase().includes(searchLower)) return false;
+    return true;
+  });
+
+  const totalCount = resp?.total_count ?? 0;
+  const materialized = resp?.materialized_count ?? 0;
+  const missing = resp?.missing_count ?? 0;
+  const failed = resp?.failed_count ?? 0;
+
+  // Build the correct Dagster UI URL for a run id. Cloud projects hit
+  // their org's Dagster+ deployment; local projects hit `dg dev` on
+  // localhost:3000. Previously we hard-coded localhost which broke
+  // for cloud users.
+  const runUrl = (runId: string): string => {
+    if (isCloud && currentProject) {
+      const org = ((currentProject as any).dagster_plus_org || '').replace(/\.dagster\.(cloud|plus)$/i, '').split('.')[0];
+      const dep = (currentProject as any).dagster_plus_deployment || '';
+      if (org) {
+        return dep
+          ? `https://${org}.dagster.cloud/${dep}/runs/${runId}`
+          : `https://${org}.dagster.cloud/runs/${runId}`;
+      }
+    }
+    return `http://localhost:3000/runs/${runId}`;
+  };
+  const openRun = (runId: string) => window.open(runUrl(runId), '_blank');
+
+  const activePartition = selectedPartition
+    ? partitions.find((p) => p.key === selectedPartition)
+    : (filtered[0] ?? partitions[0]);
+
+  return (
+    <div className="p-6 max-w-[1600px] mx-auto space-y-6">
+      <Section title="Partition health" icon={<LayersIcon className="w-4 h-4 text-gray-500" />}>
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+          <Kpi label="Total" value={totalCount} />
+          <Kpi label="Materialized" value={materialized} tone={materialized > 0 ? 'success' : 'neutral'} />
+          <Kpi label="Missing" value={missing} tone={missing > 0 ? 'warning' : 'neutral'} />
+          <Kpi label="Failed" value={failed} tone={failed > 0 ? 'error' : 'neutral'} />
+        </div>
+        {/* Health strip -- one colored cell per partition, oldest at the
+            left. Hover to inspect, click to filter the table below. */}
+        {chronological.length > 0 && (
+          <div className="mt-4">
+            <div className="text-[10px] uppercase tracking-wider text-gray-500 mb-1.5 flex items-center justify-between">
+              <span>Timeline · oldest → newest ({chronological.length}{totalCount > chronological.length ? ` of ${totalCount}` : ''})</span>
+              {selectedPartition && (
+                <button
+                  onClick={() => setSelectedPartition(null)}
+                  className="text-gray-500 hover:text-gray-900 normal-case tracking-normal underline decoration-dotted"
+                >
+                  clear selection
+                </button>
+              )}
+            </div>
+            <PartitionHealthStrip
+              partitions={chronological}
+              selectedKey={selectedPartition}
+              onSelect={(k) => setSelectedPartition(selectedPartition === k ? null : k)}
+            />
+          </div>
+        )}
+      </Section>
+
+      {/* Two-column: partition list on the left, detail panel on the
+          right. Mirrors Dagster's native partition page -- users can
+          scan status without leaving to see per-partition metadata. */}
+      <div className="grid grid-cols-1 lg:grid-cols-5 gap-6">
+        {/* LEFT: filter row + list */}
+        <div className="lg:col-span-2 space-y-3">
+          <div className="bg-white border border-gray-200 rounded-lg p-2 flex items-center gap-2 flex-wrap">
+            <div className="relative flex-1 min-w-[180px]">
+              <FilterIcon className="w-3 h-3 text-gray-400 absolute left-2 top-1/2 -translate-y-1/2 pointer-events-none" />
+              <input
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder="Search partition key..."
+                className="w-full pl-6 pr-2 py-1 text-xs border border-gray-200 rounded focus:outline-none focus:ring-1 focus:ring-blue-500"
+              />
+            </div>
+            <div className="inline-flex gap-1">
+              {(['all', 'materialized', 'missing', 'failed'] as const).map((s) => (
+                <button
+                  key={s}
+                  onClick={() => setStatusFilter(s)}
+                  className={`px-2 py-0.5 text-[10px] rounded border ${
+                    statusFilter === s ? 'bg-blue-50 border-blue-400 text-blue-800' : 'bg-white border-gray-300 text-gray-600 hover:border-gray-400'
+                  }`}
+                >
+                  {s}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div className="bg-white border border-gray-200 rounded-lg overflow-hidden">
+            <div className="px-3 py-2 border-b border-gray-100 flex items-center justify-between">
+              <div className="text-[10px] uppercase tracking-wider text-gray-500">
+                Partitions{filtered.length !== partitions.length ? ` · ${filtered.length} of ${partitions.length}` : ` · ${partitions.length}`}
+              </div>
+              {totalCount > partitions.length && (
+                <button
+                  onClick={() => setLimit(limit === 500 ? 2000 : 500)}
+                  className="text-[10px] text-gray-500 hover:text-gray-900 underline decoration-dotted"
+                >
+                  {limit === 500 ? `load more (of ${totalCount})` : 'show latest 500'}
+                </button>
+              )}
+            </div>
+            {loading && <div className="text-xs text-gray-500 p-4"><Loader2 className="w-3 h-3 animate-spin inline" /> Loading partitions…</div>}
+            {err && <div className="text-xs text-rose-700 bg-rose-50 border border-rose-200 rounded p-2 m-2">{err}</div>}
+            {resp && filtered.length === 0 && !loading && (
+              <p className="text-xs text-gray-500 italic p-4">
+                No partitions match {searchLower ? `"${search}"` : 'the current filter'}.
+              </p>
+            )}
+            {filtered.length > 0 && (
+              <ul className="divide-y divide-gray-100 max-h-[600px] overflow-y-auto">
+                {filtered.map((p) => {
+                  const status = (p.status || '').toLowerCase();
+                  const dot = status === 'materialized' ? 'bg-emerald-500'
+                    : status === 'failed' ? 'bg-rose-500'
+                    : status === 'missing' ? 'bg-amber-400'
+                    : 'bg-gray-300';
+                  const isSel = selectedPartition ? selectedPartition === p.key : activePartition?.key === p.key;
+                  return (
+                    <li key={p.key}>
+                      <button
+                        onClick={() => setSelectedPartition(p.key)}
+                        className={`w-full text-left px-3 py-2 flex items-center gap-2 hover:bg-gray-50 ${isSel ? 'bg-blue-50/60' : ''}`}
+                      >
+                        <span className={`w-2 h-2 rounded-full ${dot} flex-shrink-0`} />
+                        <span className="flex-1 min-w-0 font-mono text-xs text-gray-900 truncate" title={p.key}>{p.key}</span>
+                        <span className="text-[10px] text-gray-500 tabular-nums flex-shrink-0">
+                          {p.last_materialization_ts ? new Date(p.last_materialization_ts).toLocaleDateString() : '—'}
+                        </span>
+                      </button>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+          </div>
+        </div>
+
+        {/* RIGHT: detail panel for the selected partition */}
+        <div className="lg:col-span-3">
+          {activePartition ? (
+            <PartitionDetailPanel partition={activePartition} runUrl={runUrl} onOpenRun={openRun} />
+          ) : (
+            <div className="bg-white border border-gray-200 rounded-lg p-8 text-center text-sm text-gray-500 italic">
+              Pick a partition on the left to see its details.
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
+/**
+ * Right-column detail for the currently-selected partition. Shows the
+ * status pill, the run that materialized it (linkable), step key, and
+ * any metadata entries the check/materialization emitted (row counts,
+ * durations, arbitrary user-defined metadata).
+ */
+function PartitionDetailPanel({ partition, runUrl, onOpenRun }: {
+  partition: {
+    key: string;
+    status?: string | null;
+    last_materialization_ts?: string | null;
+    run_id?: string | null;
+    step_key?: string | null;
+    label?: string | null;
+    description?: string | null;
+    metadata?: Array<{ label: string; type: string; value: any; description?: string | null }>;
+  };
+  runUrl: (runId: string) => string;
+  onOpenRun: (runId: string) => void;
+}) {
+  const status = (partition.status || '').toLowerCase();
+  const tone = status === 'materialized' ? 'bg-emerald-50 border-emerald-200 text-emerald-700'
+    : status === 'failed' ? 'bg-rose-50 border-rose-200 text-rose-700'
+    : status === 'missing' ? 'bg-amber-50 border-amber-200 text-amber-700'
+    : 'bg-gray-50 border-gray-200 text-gray-600';
+  const metadata = partition.metadata || [];
+  return (
+    <div className="bg-white border border-gray-200 rounded-lg overflow-hidden">
+      <div className="px-4 py-3 border-b border-gray-100">
+        <div className="text-[10px] uppercase tracking-wider text-gray-500 mb-1">Partition</div>
+        <div className="font-mono text-sm text-gray-900 break-all">{partition.key}</div>
+        <div className="mt-2 flex items-center gap-3 flex-wrap">
+          <span className={`inline-flex items-center gap-1 px-2 py-0.5 text-[11px] rounded border ${tone}`}>
+            {partition.status || 'unknown'}
+          </span>
+          {partition.last_materialization_ts && (
+            <span className="text-[11px] text-gray-500 tabular-nums">
+              {new Date(partition.last_materialization_ts).toLocaleString()}
+            </span>
+          )}
+        </div>
+      </div>
+
+      <div className="p-4 space-y-4">
+        {/* Run + step */}
+        {(partition.run_id || partition.step_key) && (
+          <div>
+            <div className="text-[10px] uppercase tracking-wider text-gray-500 mb-2">Run</div>
+            <div className="space-y-1.5">
+              {partition.run_id && (
+                <div className="flex items-center justify-between gap-2">
+                  <a
+                    href={runUrl(partition.run_id)}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    onClick={(e) => { e.preventDefault(); onOpenRun(partition.run_id!); }}
+                    className="inline-flex items-center gap-1.5 font-mono text-xs text-blue-600 hover:text-blue-800"
+                    title={`Open run ${partition.run_id}`}
+                  >
+                    {partition.run_id}
+                    <ExternalLink className="w-3 h-3" />
+                  </a>
+                  <button
+                    onClick={() => { navigator.clipboard.writeText(partition.run_id!); notify.success('Run id copied'); }}
+                    className="p-1 text-gray-400 hover:text-gray-700"
+                    title="Copy full run id"
+                  >
+                    <Copy className="w-3 h-3" />
+                  </button>
+                </div>
+              )}
+              {partition.step_key && (
+                <div className="text-[11px] text-gray-600">
+                  <span className="uppercase tracking-wider text-[10px] text-gray-500 mr-2">Step</span>
+                  <span className="font-mono">{partition.step_key}</span>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Description */}
+        {(partition.description || partition.label) && (
+          <div>
+            <div className="text-[10px] uppercase tracking-wider text-gray-500 mb-1">Description</div>
+            <p className="text-xs text-gray-700 whitespace-pre-wrap">{partition.description || partition.label}</p>
+          </div>
+        )}
+
+        {/* Metadata entries */}
+        <div>
+          <div className="text-[10px] uppercase tracking-wider text-gray-500 mb-2">
+            Metadata{metadata.length > 0 ? ` (${metadata.length})` : ''}
+          </div>
+          {metadata.length === 0 ? (
+            <p className="text-xs text-gray-500 italic">
+              {status === 'materialized'
+                ? 'No metadata was emitted for this materialization.'
+                : status === 'failed'
+                ? 'This partition failed — no metadata was recorded.'
+                : 'This partition hasn\'t been materialized yet.'}
+            </p>
+          ) : (
+            <ul className="divide-y divide-gray-100 border border-gray-100 rounded">
+              {metadata.map((m, i) => (
+                <PartitionMetadataRow key={i} entry={m} />
+              ))}
+            </ul>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
+function PartitionMetadataRow({ entry }: {
+  entry: { label: string; type: string; value: any; description?: string | null };
+}) {
+  const label = entry.label || '(unlabeled)';
+  const val = entry.value;
+  const typeTag = (entry.type || '').replace(/MetadataEntry$/, '');
+
+  // Render URLs / paths as links, longer text as pre, everything else
+  // as an inline mono span.
+  let display: React.ReactNode;
+  if (entry.type === 'UrlMetadataEntry' && typeof val === 'string') {
+    display = <a href={val} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:text-blue-800 font-mono text-[11px] break-all inline-flex items-center gap-1">{val}<ExternalLink className="w-3 h-3 flex-shrink-0" /></a>;
+  } else if (entry.type === 'MarkdownMetadataEntry' && typeof val === 'string') {
+    display = <pre className="text-[11px] text-gray-700 whitespace-pre-wrap max-h-40 overflow-y-auto bg-gray-50 border border-gray-100 rounded p-1.5">{val}</pre>;
+  } else if (entry.type === 'JsonMetadataEntry' && typeof val === 'string') {
+    display = <pre className="text-[11px] text-gray-700 whitespace-pre-wrap font-mono max-h-40 overflow-y-auto bg-gray-50 border border-gray-100 rounded p-1.5">{val}</pre>;
+  } else if (typeof val === 'number') {
+    display = <span className="font-mono text-xs text-gray-900 tabular-nums">{Number.isInteger(val) ? val.toLocaleString() : val.toLocaleString(undefined, { maximumFractionDigits: 6 })}</span>;
+  } else if (typeof val === 'boolean') {
+    display = <span className={`font-mono text-xs ${val ? 'text-emerald-700' : 'text-rose-700'}`}>{String(val)}</span>;
+  } else if (val == null) {
+    display = <span className="text-gray-400 italic text-xs">—</span>;
+  } else {
+    display = <span className="font-mono text-xs text-gray-900 break-all">{String(val)}</span>;
+  }
+  return (
+    <li className="px-3 py-2">
+      <div className="flex items-baseline justify-between gap-3">
+        <div className="min-w-0">
+          <div className="text-xs font-medium text-gray-700 truncate" title={label}>{label}</div>
+          {entry.description && (
+            <div className="text-[10px] text-gray-500 mt-0.5">{entry.description}</div>
+          )}
+        </div>
+        {typeTag && <span className="text-[9px] uppercase tracking-wider text-gray-400 flex-shrink-0">{typeTag}</span>}
+      </div>
+      <div className="mt-1">{display}</div>
+    </li>
+  );
+}
+
+
+/**
+ * Filled stacked-bar showing partition status oldest→newest. Each
+ * partition is one flex-1 slice colored by status. Hover shows the
+ * partition key + status + run id; clicking pins the selection which
+ * filters the table below. For huge partition sets (>1500) we bucket
+ * adjacent partitions into pixel-sized cells so the strip stays
+ * legible without horizontal scroll.
+ */
+function PartitionHealthStrip({ partitions, selectedKey, onSelect }: {
+  partitions: Array<{ key: string; status?: string | null; run_id?: string | null }>;
+  selectedKey: string | null;
+  onSelect: (key: string) => void;
+}) {
+  const [hoverIdx, setHoverIdx] = useState<number | null>(null);
+  const total = partitions.length;
+  // Above ~1500 cells the individual slivers become sub-pixel and hover
+  // is useless. Bucket them: each cell represents ceil(total / MAX)
+  // adjacent partitions; status = worst of the bucket (failed >
+  // missing > materialized). Store the anchor partition (the newest in
+  // the bucket) as the click target.
+  const MAX_CELLS = 1500;
+  const bucketSize = Math.max(1, Math.ceil(total / MAX_CELLS));
+  const cells: Array<{ status: string; anchor: typeof partitions[number]; count: number }> = [];
+  for (let i = 0; i < total; i += bucketSize) {
+    const slice = partitions.slice(i, i + bucketSize);
+    let worst: string = 'materialized';
+    for (const p of slice) {
+      const s = (p.status || '').toLowerCase();
+      if (s === 'failed') { worst = 'failed'; break; }
+      if (s === 'missing' && worst !== 'failed') worst = 'missing';
+    }
+    cells.push({ status: worst, anchor: slice[slice.length - 1], count: slice.length });
+  }
+
+  const toneFor = (s: string) => s === 'materialized' ? 'bg-emerald-500'
+    : s === 'failed' ? 'bg-rose-500'
+    : s === 'missing' ? 'bg-amber-400'
+    : 'bg-gray-300';
+
+  const hovered = hoverIdx != null ? cells[hoverIdx] : null;
+
+  return (
+    <div>
+      <div className="relative w-full h-8 flex items-stretch rounded overflow-hidden border border-gray-200 bg-white">
+        {cells.map((c, i) => {
+          const isSelected = selectedKey && c.anchor.key === selectedKey;
+          return (
+            <button
+              key={i}
+              onMouseEnter={() => setHoverIdx(i)}
+              onMouseLeave={() => setHoverIdx(null)}
+              onClick={() => onSelect(c.anchor.key)}
+              className={`${toneFor(c.status)} flex-1 min-w-[2px] transition-opacity ${
+                isSelected ? 'ring-2 ring-blue-600 ring-inset z-10' : 'hover:opacity-80'
+              }`}
+              style={{ borderRight: i === cells.length - 1 ? undefined : '1px solid rgba(255,255,255,0.15)' }}
+              aria-label={`${c.anchor.key} · ${c.anchor.status}`}
+            />
+          );
+        })}
+      </div>
+      {/* Hover detail line -- sits BELOW the bar so it doesn't jitter
+          the layout when the mouse enters/leaves cells. */}
+      <div className="mt-1.5 text-[11px] text-gray-600 h-4">
+        {hovered ? (
+          <span>
+            <span className="font-mono text-gray-900">{hovered.anchor.key}</span>
+            <span className="mx-1 text-gray-400">·</span>
+            <span className={
+              hovered.status === 'failed' ? 'text-rose-700'
+              : hovered.status === 'missing' ? 'text-amber-700'
+              : 'text-emerald-700'
+            }>{hovered.status}</span>
+            {bucketSize > 1 && (
+              <span className="ml-1 text-gray-400">(anchor of {hovered.count})</span>
+            )}
+            {hovered.anchor.run_id && (
+              <span className="ml-2 font-mono text-gray-500">run {hovered.anchor.run_id.slice(0, 8)}</span>
+            )}
+          </span>
+        ) : (
+          <span className="text-gray-400 italic">Hover to inspect · click to filter the table below</span>
+        )}
+      </div>
+    </div>
+  );
 }

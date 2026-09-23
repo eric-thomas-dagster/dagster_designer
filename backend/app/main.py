@@ -20,7 +20,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from .core.config import settings
-from .api import components, projects, git, codegen, dagster, files, templates, primitives, dagster_webserver, dbt_adapters, integrations, env_vars, pipelines, templates_registry, dbt_cloud, assets, dependencies, pipeline_templates, genie, alerts, runs
+from .api import components, projects, git, codegen, dagster, files, templates, primitives, dagster_webserver, dbt_adapters, integrations, env_vars, pipelines, templates_registry, dbt_cloud, assets, dependencies, pipeline_templates, genie, alerts, runs, designer_loc, drafts, authored, promotion, preview
 
 # Create FastAPI app
 app = FastAPI(
@@ -59,6 +59,11 @@ app.include_router(pipeline_templates.router, prefix=settings.api_prefix)  # New
 app.include_router(genie.router, prefix=settings.api_prefix)  # New: Genie NL planner
 app.include_router(alerts.router, prefix=settings.api_prefix)  # New: Alert policies (Dagster+)
 app.include_router(runs.router, prefix=settings.api_prefix)  # New: Runs history (local dagster dev + Dagster+)
+app.include_router(designer_loc.router, prefix=settings.api_prefix)  # New: Designer-managed code location subprocess
+app.include_router(drafts.router, prefix=settings.api_prefix)  # New: Draft components (pending PR promotion)
+app.include_router(authored.router, prefix=settings.api_prefix)  # New: Locations + component types for authoring
+app.include_router(promotion.router, prefix=settings.api_prefix)  # New: Promotion config (GitHub token + repo mappings)
+app.include_router(preview.router, prefix=settings.api_prefix)  # New: Preview (git-backed sandbox worktree for M6)
 
 
 @app.get("/")
