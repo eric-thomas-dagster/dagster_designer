@@ -1,5 +1,15 @@
 """Main FastAPI application."""
 
+# Force UTF-8 stdout/stderr before anything else can print. Windows'
+# console defaults to the system code page (cp1252 observed) rather than
+# UTF-8, and this codebase prints plenty of emoji (see: nearly every
+# print() in project_service.py) -- the first one crashes the whole
+# request with UnicodeEncodeError the moment it's hit. Harmless
+# everywhere else (already UTF-8 on macOS/Linux).
+import sys as _sys
+_sys.stdout.reconfigure(encoding="utf-8")
+_sys.stderr.reconfigure(encoding="utf-8")
+
 # Load .env early so API keys (OPENAI_API_KEY, ANTHROPIC_API_KEY, etc.) picked
 # up via os.getenv further down get populated. Looks first at the backend
 # directory's own .env, then the repo root's .env. Missing files are OK —
