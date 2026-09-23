@@ -20,6 +20,7 @@ import {
 } from 'lucide-react';
 import { filesApi, type FileTreeNode } from '@/services/api';
 import { Terminal } from './Terminal';
+import { DagsterExpertPanel } from './DagsterExpertPanel';
 import { notify, confirmDialog } from './Notifications';
 import { useIsDarkMode } from '@/hooks/useIsDarkMode';
 import { useUnsavedChangesStore } from '@/hooks/useUnsavedChanges';
@@ -54,6 +55,7 @@ export function CodeEditor({ projectId, fileToOpen, onFileOpened }: CodeEditorPr
   const [hasSelection, setHasSelection] = useState(false);
   const [editorInstance, setEditorInstance] = useState<any>(null);
   const [aiPanelOpen, setAiPanelOpen] = useState(false);
+  const [aiPanelPendingQuestion, setAiPanelPendingQuestion] = useState<string | null>(null);
   const [sidebarWidth, setSidebarWidth] = useState(256);
   const [isResizing, setIsResizing] = useState(false);
   const [renamingPath, setRenamingPath] = useState<string | null>(null);
@@ -89,87 +91,6 @@ export function CodeEditor({ projectId, fileToOpen, onFileOpened }: CodeEditorPr
       return next;
     });
   };
-
-  // Customize the ScoutOS widget: hide expand button and inject close button
-  useEffect(() => {
-    if (!aiPanelOpen) return;
-
-    const customizeWidget = () => {
-      const copilot = document.querySelector('#dagster-ai-panel scout-copilot');
-      if (!copilot?.shadowRoot) {
-        // Shadow root not ready, try again
-        setTimeout(customizeWidget, 100);
-        return;
-      }
-
-      // Find and hide the expand/fullscreen button
-      const expandButton = copilot.shadowRoot.querySelector('[title*="xpand"]') ||
-                          copilot.shadowRoot.querySelector('[aria-label*="xpand"]') ||
-                          copilot.shadowRoot.querySelector('button[class*="expand"]') ||
-                          copilot.shadowRoot.querySelector('button[class*="fullscreen"]') ||
-                          copilot.shadowRoot.querySelector('button[class*="Expand"]') ||
-                          copilot.shadowRoot.querySelector('button[class*="Fullscreen"]');
-
-      if (expandButton && expandButton instanceof HTMLElement) {
-        expandButton.style.display = 'none';
-        console.log('✅ Hidden expand button');
-      }
-
-      // Try to inject our close button into the widget's header
-      const header = copilot.shadowRoot.querySelector('header') ||
-                    copilot.shadowRoot.querySelector('[class*="header"]') ||
-                    copilot.shadowRoot.querySelector('[class*="Header"]');
-
-      if (header && !header.querySelector('#custom-close-btn')) {
-        const closeBtn = document.createElement('button');
-        closeBtn.id = 'custom-close-btn';
-        closeBtn.innerHTML = '×';
-        closeBtn.style.cssText = `
-          position: absolute;
-          right: 8px;
-          top: 50%;
-          transform: translateY(-50%);
-          background: none;
-          border: none;
-          font-size: 24px;
-          color: #9ca3af;
-          cursor: pointer;
-          padding: 4px 8px;
-          line-height: 1;
-        `;
-        closeBtn.onmouseover = () => { closeBtn.style.color = '#4b5563'; };
-        closeBtn.onmouseout = () => { closeBtn.style.color = '#9ca3af'; };
-        closeBtn.onclick = () => setAiPanelOpen(false);
-
-        header.style.position = 'relative';
-        header.appendChild(closeBtn);
-        console.log('✅ Injected close button into widget header');
-      }
-    };
-
-    // Initial customization
-    setTimeout(customizeWidget, 500);
-
-    // Keep trying to hide expand button if it appears
-    const interval = setInterval(() => {
-      const copilot = document.querySelector('#dagster-ai-panel scout-copilot');
-      if (copilot?.shadowRoot) {
-        const expandButton = copilot.shadowRoot.querySelector('[title*="xpand"]') ||
-                            copilot.shadowRoot.querySelector('[aria-label*="xpand"]') ||
-                            copilot.shadowRoot.querySelector('button[class*="expand"]') ||
-                            copilot.shadowRoot.querySelector('button[class*="fullscreen"]') ||
-                            copilot.shadowRoot.querySelector('button[class*="Expand"]') ||
-                            copilot.shadowRoot.querySelector('button[class*="Fullscreen"]');
-        if (expandButton && expandButton instanceof HTMLElement && expandButton.style.display !== 'none') {
-          expandButton.style.display = 'none';
-        }
-      }
-    }, 1000);
-
-    return () => {
-      clearInterval(interval);
-    };
-  }, [aiPanelOpen]);
 
   // Cmd/Ctrl+P → open quick file picker
   useEffect(() => {
@@ -543,52 +464,12 @@ export function CodeEditor({ projectId, fileToOpen, onFileOpened }: CodeEditorPr
     // Format a concise prompt - just send the code with minimal context
     const prompt = `Explain this code:\n\`\`\`${fileExt}\n${selectedText}\n\`\`\``;
 
-    // Open the AI panel
+    // Open the AI panel and hand it the question directly — DagsterExpertPanel
+    // is a real React component we own now (not a third-party widget reached
+    // into via shadow-DOM polling + a private handleSubmit API), so this is
+    // just a prop instead of a retry loop against the DOM.
     setAiPanelOpen(true);
-
-    // Wait for React to render the panel, then find and submit to copilot
-    const findAndSubmit = (attempt = 0) => {
-      const copilotElement = document.querySelector('#dagster-ai-panel scout-copilot') as any;
-
-      if (!copilotElement) {
-        if (attempt < 20) {
-          // Panel not rendered yet, retry after 100ms (up to 2 seconds total)
-          setTimeout(() => findAndSubmit(attempt + 1), 100);
-        } else {
-          console.error('Dagster AI panel not found');
-          navigator.clipboard.writeText(prompt);
-          notify.info('Code copied to clipboard! Paste it into the Dagster AI chat.');
-        }
-        return;
-      }
-
-      // Function to submit the prompt using the official API
-      const submitPrompt = (submitAttempt = 0) => {
-        if (typeof copilotElement.handleSubmit === 'function') {
-          try {
-            copilotElement.handleSubmit({
-              detail: { user_input_value: prompt }
-            });
-          } catch (err) {
-            console.error('Failed to submit prompt:', err);
-            navigator.clipboard.writeText(prompt);
-            notify.info('Code copied to clipboard! Paste it into the Dagster AI chat.');
-          }
-        } else if (submitAttempt < 10) {
-          // handleSubmit not available yet, retry after 200ms
-          setTimeout(() => submitPrompt(submitAttempt + 1), 200);
-        } else {
-          // Fallback to clipboard after 2 seconds
-          navigator.clipboard.writeText(prompt);
-          notify.info('Code copied to clipboard! Paste it into the Dagster AI chat.');
-        }
-      };
-
-      submitPrompt();
-    };
-
-    // Wait 300ms for React to render, then try to find and submit
-    setTimeout(() => findAndSubmit(), 300);
+    setAiPanelPendingQuestion(prompt);
   };
 
   // Resize handlers for sidebar
@@ -1277,12 +1158,11 @@ export function CodeEditor({ projectId, fileToOpen, onFileOpened }: CodeEditorPr
             flexBasis: '400px'
           }}
         >
-          <scout-copilot
-            copilot_id="copilot_cm69wb08t000j0ds6rxdnung4"
-            embedded="true"
-            width="100%"
-            height="100%"
-          ></scout-copilot>
+          <DagsterExpertPanel
+            onClose={() => setAiPanelOpen(false)}
+            pendingQuestion={aiPanelPendingQuestion}
+            onPendingQuestionConsumed={() => setAiPanelPendingQuestion(null)}
+          />
         </div>
       )}
 

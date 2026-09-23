@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 from typing import Any
 
 from dotenv import set_key, unset_key
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from ..services.genie_service import (
@@ -15,6 +17,7 @@ from ..services.genie_service import (
     GenieError,
     plan,
 )
+from ..services import dagster_ai_service
 from .assets import get_known_schemas
 
 router = APIRouter(prefix="/ai", tags=["ai"])
@@ -152,3 +155,77 @@ async def genie_plan(req: GeniePlanRequest) -> GeniePlanResponse:
         tokens_completion=result.tokens_completion,
         notes=result.notes,
     )
+
+
+# --- "Ask Dagster AI" panel ---------------------------------------------
+#
+# Separate from the /plan endpoint above (Genie): that one needs a
+# strictly-parseable JSON response to programmatically build the canvas,
+# so it stays on its own narrow, tuned prompt. This is free-form Q&A —
+# a much more natural fit for routing through the real dagster-expert
+# Claude Code skill when it's available, with a direct-API fallback
+# otherwise. See dagster_ai_service.py's module docstring for the tiers.
+
+class DagsterAiStatusResponse(BaseModel):
+    cli_available: bool
+    dagster_expert_installed: bool
+    openai_available: bool
+    anthropic_available: bool
+
+
+@router.get("/dagster-expert/status", response_model=DagsterAiStatusResponse)
+async def dagster_expert_status() -> DagsterAiStatusResponse:
+    return DagsterAiStatusResponse(**await dagster_ai_service.status())
+
+
+@router.post("/dagster-expert/install")
+async def dagster_expert_install():
+    """Best-effort auto-install of the dagster-expert skill into the
+    user's own Claude Code setup. Only called when cli_available is
+    already true (checked by the frontend from /status first) — this
+    doesn't install Claude Code CLI itself, only adds a plugin to an
+    already-installed one."""
+    try:
+        return await dagster_ai_service.ensure_dagster_expert_installed()
+    except RuntimeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+class DagsterExpertChatRequest(BaseModel):
+    question: str
+    history: list[dict[str, str]] | None = None
+
+
+@router.post("/dagster-expert/chat-stream")
+async def dagster_expert_chat_stream(req: DagsterExpertChatRequest):
+    """Tier 1: streams raw stream-json lines from a headless `claude -p
+    "/dagster-expert <question>"` invocation. Newline-delimited JSON,
+    not SSE — the frontend reads this with a plain fetch() stream
+    reader, not EventSource (which can't send a POST body)."""
+    if not req.question.strip():
+        raise HTTPException(status_code=400, detail="Empty question")
+
+    async def _gen():
+        try:
+            async for line in dagster_ai_service.stream_cli_chat(req.question):
+                yield line + "\n"
+        except RuntimeError as e:
+            yield json.dumps({"type": "designer_error", "detail": str(e)}) + "\n"
+
+    return StreamingResponse(_gen(), media_type="application/x-ndjson")
+
+
+class DagsterExpertFallbackResponse(BaseModel):
+    answer: str
+
+
+@router.post("/dagster-expert/chat-fallback", response_model=DagsterExpertFallbackResponse)
+async def dagster_expert_chat_fallback(req: DagsterExpertChatRequest) -> DagsterExpertFallbackResponse:
+    """Tier 2: direct API call, no Claude Code involved."""
+    if not req.question.strip():
+        raise HTTPException(status_code=400, detail="Empty question")
+    try:
+        answer = await dagster_ai_service.fallback_chat(req.question, req.history)
+    except RuntimeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return DagsterExpertFallbackResponse(answer=answer)
