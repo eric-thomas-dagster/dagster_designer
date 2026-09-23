@@ -736,6 +736,11 @@ async def _hydrate_cloud_graph(project: Project, force: bool = False) -> None:
         and (hydrate_started_at - last_hydrate) < _CLOUD_HYDRATE_TTL_SECONDS
         and project.graph and project.graph.nodes
     ):
+        # Cloud side is fresh enough to skip re-fetching, but the sandbox
+        # is a local subprocess whose state changes independently (e.g.
+        # right after a component install) — always re-merge it in
+        # memory rather than letting it go stale for the TTL window too.
+        await _merge_sandbox_graph(project)
         return
 
     # Single query returns lineage + checks + schedule/sensor
@@ -1201,10 +1206,121 @@ async def _hydrate_cloud_graph(project: Project, force: bool = False) -> None:
     # Every endpoint currently reloads the project from disk on each
     # request, so without this the discovered_primitives + graph
     # populated above vanish the moment this function returns.
+    #
+    # Saved BEFORE the sandbox merge below on purpose: the sandbox is a
+    # local subprocess that can be stopped/restarted/reinstalled between
+    # requests, so its nodes are fetched fresh every time and never
+    # written to disk. If they were saved here, a later request where
+    # the sandbox is down (or has since removed a component) would keep
+    # showing stale sandbox nodes pulled back off disk.
     try:
         project_service._save_project(project)
     except Exception as e:
         print(f"[dagster+] save after hydrate failed: {e}", flush=True)
+
+    await _merge_sandbox_graph(project)
+
+
+async def _merge_sandbox_graph(project: Project) -> None:
+    """Merge the Designer sandbox's live assets into `project.graph` as a
+    peer data source, matching the "merges into the graph as a peer data
+    source" behavior the sandbox's own orientation copy promises.
+
+    In-memory only — never persisted (see the comment above this call).
+    Best-effort: the sandbox is commonly not running, and that's a normal
+    state, not an error, so any failure here just means no sandbox nodes
+    this request rather than breaking the whole project load.
+    """
+    from ..services import designer_loc_service
+    from .authored import SANDBOX_LOCATION_NAME, SANDBOX_GRAPH_ASSET_NODES_QUERY
+    from ..models.graph import GraphNode, GraphEdge
+
+    state = designer_loc_service.get_state(project.id)
+    if state.status != "ready" or not state.is_proc_alive():
+        return
+
+    try:
+        r = await designer_loc_service.proxy_graphql(project.id, SANDBOX_GRAPH_ASSET_NODES_QUERY, None)
+    except Exception as e:
+        print(f"[sandbox] asset fetch for graph merge failed: {e}", flush=True)
+        return
+
+    raw_nodes = ((r or {}).get("data") or {}).get("assetNodes") or []
+    if not raw_nodes:
+        return
+
+    # Drop any sandbox nodes/edges from a previous merge on this same
+    # in-memory project instance before re-adding — keeps this function
+    # idempotent no matter how many times it's called per request.
+    existing_nodes = [n for n in (project.graph.nodes if project.graph else []) if n.source_component != "sandbox"]
+    existing_edges = [e for e in (project.graph.edges if project.graph else []) if not e.id.startswith("sandbox::")]
+
+    key_to_id: dict[str, str] = {}
+    sandbox_nodes: list[GraphNode] = []
+    for i, n in enumerate(raw_nodes):
+        key = "/".join((n.get("assetKey") or {}).get("path") or [])
+        if not key:
+            continue
+        node_id = f"sandbox::{key}"
+        key_to_id[key] = node_id
+        tags = n.get("tags") or []
+        kinds = [t.get("value") or t.get("key", "").split("/")[-1] for t in tags if (t.get("key") or "").startswith("dagster/kind/")]
+        sandbox_nodes.append(GraphNode(
+            id=node_id,
+            type="asset",
+            node_kind="asset",
+            data={
+                "label": key.split("/")[-1] or key,
+                "asset_key": key,
+                "name": key,
+                "description": n.get("description") or "",
+                "group_name": n.get("groupName"),
+                "code_location": SANDBOX_LOCATION_NAME,
+                "location_name": SANDBOX_LOCATION_NAME,
+                "repository_name": (n.get("repository") or {}).get("name"),
+                "kinds": kinds or ([n.get("computeKind")] if n.get("computeKind") else []),
+                "tags": [{"key": t.get("key"), "value": t.get("value")} for t in tags],
+                "is_executable": bool(n.get("isExecutable")),
+                "is_materializable": bool(n.get("isMaterializable")),
+                "is_observable": bool(n.get("isObservable")),
+                "is_partitioned": bool(n.get("isPartitioned")),
+                "deps": [],
+                "checks": [],
+                "jobs": [],
+                "schedules": [],
+                "sensors": [],
+                "component_icon": "flask-conical",
+                "component_attributes": {},
+                "component_type": None,
+                "component_id": "sandbox",
+                "source": "sandbox",
+            },
+            position={"x": float(i % 6) * 260.0, "y": float(i // 6) * 160.0},
+            source_component="sandbox",
+        ))
+
+    sandbox_edges: list[GraphEdge] = []
+    for n in raw_nodes:
+        key = "/".join((n.get("assetKey") or {}).get("path") or [])
+        if key not in key_to_id:
+            continue
+        for dep in (n.get("dependencyKeys") or []):
+            dep_key = "/".join(dep.get("path") or [])
+            if dep_key in key_to_id:
+                sandbox_edges.append(GraphEdge(
+                    id=f"sandbox::edge::{dep_key}__{key}",
+                    source=key_to_id[dep_key],
+                    target=key_to_id[key],
+                    source_handle=None,
+                    target_handle=None,
+                    is_custom=False,
+                ))
+
+    from ..models.graph import PipelineGraph
+    project.graph = PipelineGraph(
+        nodes=existing_nodes + sandbox_nodes,
+        edges=existing_edges + sandbox_edges,
+    )
 
 
 class DagsterCloudLocation(BaseModel):

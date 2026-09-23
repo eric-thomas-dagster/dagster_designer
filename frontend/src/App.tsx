@@ -1888,6 +1888,25 @@ function App() {
                       ? `Installed ${r.package ?? 'component'} + wrote defs.yaml. Sandbox restarting…`
                       : `Wrote defs.yaml — sandbox hot-reloading`,
                   );
+                  // The canvas merges sandbox assets from a live query
+                  // against the (possibly just-restarted) subprocess —
+                  // reload now for the hot-reload case, then poll for
+                  // "ready" and reload again so a restart's new asset
+                  // shows up without the user having to navigate away
+                  // and back.
+                  useProjectStore.getState().loadProject(currentProject.id);
+                  if (r.restarted) {
+                    const deadline = Date.now() + 60_000;
+                    while (Date.now() < deadline) {
+                      await new Promise((res) => setTimeout(res, 2000));
+                      try {
+                        const s = await designerLocApi.status(currentProject.id);
+                        if (s.status === 'ready') break;
+                        if (s.status === 'error') return;
+                      } catch { /* keep polling */ }
+                    }
+                    useProjectStore.getState().loadProject(currentProject.id);
+                  }
                 } else {
                   const { draftsApi, previewApi } = await import('./services/api');
                   await draftsApi.create(currentProject.id, {

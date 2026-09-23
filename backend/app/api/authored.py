@@ -129,6 +129,31 @@ query DesignerAssetNodes {
 """
 
 
+# Richer than ASSET_NODES_QUERY — enough to render sandbox assets as real
+# canvas nodes (lineage, description, kind) rather than just picker
+# entries. Deliberately OSS-schema-only (no internalFreshnessPolicy /
+# freshnessStatusInfo / etc.) since this runs against the sandbox's own
+# local dg dev webserver, not Dagster+.
+SANDBOX_GRAPH_ASSET_NODES_QUERY = """
+query DesignerSandboxGraphAssets {
+  assetNodes(loadMaterializations: false) {
+    assetKey { path }
+    groupName
+    description
+    computeKind
+    repository { name location { name } }
+    isPartitioned
+    isExecutable
+    isMaterializable
+    isObservable
+    dependencyKeys { path }
+    dependedByKeys { path }
+    tags { key value }
+  }
+}
+"""
+
+
 # Jobs / schedules / sensors — pulled together in one round trip
 # because they all live under the same locationEntries shape and the
 # form uses them for adjacent field pickers (`job_name`,
