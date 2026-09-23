@@ -7287,15 +7287,26 @@ async def get_monitor_history(project_id: str, monitor_id: str, limit: int = 200
     # Collect every numeric metadata entry across all events, keyed by
     # label. Each entry in `event.metadata` looks like {label, type,
     # value, description} — we filter to numeric-value types.
+    # `status` rides along on every point -- the chart marks a point
+    # anomalous when EITHER its value falls outside the expected band
+    # OR the run's own status was a failure/warning, matching exactly
+    # what the Datapoint Summary list below uses. Without this, a check
+    # that fails on every run (a chronic issue, not a rare glitch --
+    # e.g. assert_total_order_non_zero here) shows almost nothing
+    # flagged on the chart, because its failed_row_count barely moves
+    # run to run and so rarely leaves its own recent-history band, while
+    # the list (status-only) flags every single point -- two "anomaly"
+    # views of the same data visibly disagreeing with each other.
     metrics_by_label: dict[str, list[dict]] = {}
     for e in events:
         ts = e.get("ts")
+        status = e.get("status")
         for me in (e.get("metadata") or []):
             label = me.get("label")
             v = me.get("value")
             if not label or not isinstance(v, (int, float)):
                 continue
-            metrics_by_label.setdefault(label, []).append({"ts": ts, "value": float(v)})
+            metrics_by_label.setdefault(label, []).append({"ts": ts, "value": float(v), "status": status})
     # `event.value`/`value_label` — the legacy single-metric fallback,
     # used by locally-recorded dbt-test events which don't have a
     # `metadata` list. Keep it in the map so those series still render.
@@ -7303,7 +7314,7 @@ async def get_monitor_history(project_id: str, monitor_id: str, limit: int = 200
         vl = e.get("value_label")
         v = e.get("value")
         if vl and isinstance(v, (int, float)) and vl not in metrics_by_label:
-            metrics_by_label.setdefault(vl, []).append({"ts": e.get("ts"), "value": float(v)})
+            metrics_by_label.setdefault(vl, []).append({"ts": e.get("ts"), "value": float(v), "status": e.get("status")})
 
     # Pick a default: prefer things that read as data-quality signals
     # (row counts, null ratios, failures) over Dagster-auto metadata

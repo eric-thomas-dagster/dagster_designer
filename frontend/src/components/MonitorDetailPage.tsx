@@ -588,7 +588,7 @@ function formatValue(v: number): string {
  * band. Band is computed from a rolling 7-run mean ± 2σ so it looks
  * proper on unfamiliar metrics without any config.
  */
-export interface NumericPoint { ts: string; value: number; expected_min?: number | null; expected_max?: number | null }
+export interface NumericPoint { ts: string; value: number; expected_min?: number | null; expected_max?: number | null; status?: string | null }
 
 export function BigTimeSeriesChart({ points }: { points: NumericPoint[] }) {
   const [hover, setHover] = useState<number | null>(null);
@@ -660,13 +660,15 @@ export function BigTimeSeriesChart({ points }: { points: NumericPoint[] }) {
           later-index circles clobbered earlier tooltips). */}
       {points.map((p, i) => {
         const bx = x(i), by = y(p.value);
-        const outside = by < bandUpper[i].y || by > bandLower[i].y;
+        const outsideBand = by < bandUpper[i].y || by > bandLower[i].y;
+        const badStatus = classifyStatus(p.status) === 'failure' || classifyStatus(p.status) === 'warning';
+        const anomalous = outsideBand || badStatus;
         return (
           <g key={i} onMouseEnter={() => setHover(i)} onMouseLeave={() => setHover(null)}>
             {/* Invisible hit area — makes hovering forgiving even when
                 the point circle is small. */}
             <rect x={bx - stepX / 2} y={padT} width={Math.max(stepX, 8)} height={height - padT - padB} fill="transparent" />
-            <circle cx={bx} cy={by} r={outside ? 4 : 3} fill={outside ? 'rgb(244, 63, 94)' : 'rgb(16, 185, 129)'} stroke="white" strokeWidth="1.5" />
+            <circle cx={bx} cy={by} r={anomalous ? 4 : 3} fill={anomalous ? 'rgb(244, 63, 94)' : 'rgb(16, 185, 129)'} stroke="white" strokeWidth="1.5" />
           </g>
         );
       })}
@@ -676,7 +678,17 @@ export function BigTimeSeriesChart({ points }: { points: NumericPoint[] }) {
       {hover != null && (() => {
         const p = points[hover];
         const bx = x(hover), by = y(p.value);
-        const outside = by < bandUpper[hover].y || by > bandLower[hover].y;
+        const outsideBand = by < bandUpper[hover].y || by > bandLower[hover].y;
+        const badStatus = classifyStatus(p.status) === 'failure' || classifyStatus(p.status) === 'warning';
+        const anomalous = outsideBand || badStatus;
+        // Say WHY it's anomalous -- a chronically-failing check (status
+        // bad every run, value steady) and a one-off value spike (status
+        // fine, value unusual) both render as red dots, but they're very
+        // different situations and the tooltip should say which.
+        const reason = badStatus && outsideBand ? '⚠ Failed · unusual value'
+          : badStatus ? '⚠ Failed'
+          : outsideBand ? '⚠ Unusual value'
+          : '✓ In range';
         const boxW = 200;
         const boxH = 72;
         // Flip to the left of the point when the default (right-of-point)
@@ -689,8 +701,8 @@ export function BigTimeSeriesChart({ points }: { points: NumericPoint[] }) {
           <g pointerEvents="none">
             <line x1={bx} x2={bx} y1={padT} y2={height - padB} stroke="#9ca3af" strokeDasharray="2 3" />
             <rect x={boxX} y={boxY} rx="6" width={boxW} height={boxH} fill="rgba(17, 24, 39, 0.96)" stroke="rgba(255,255,255,0.06)" />
-            <text x={boxX + 10} y={boxY + 16} fill={outside ? '#f87171' : '#6ee7b7'} fontSize="10" fontWeight="600">
-              {outside ? '⚠ Anomaly' : '✓ In range'}
+            <text x={boxX + 10} y={boxY + 16} fill={anomalous ? '#f87171' : '#6ee7b7'} fontSize="10" fontWeight="600">
+              {reason}
             </text>
             <text x={boxX + 10} y={boxY + 34} fill="white" fontSize="13" fontWeight="600">{formatValue(p.value)}</text>
             {(p.expected_min != null && p.expected_max != null) && (
