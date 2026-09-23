@@ -3327,6 +3327,16 @@ export const designerLocApi = {
     });
     return r.data as any;
   },
+  // Every authored component instance currently in the sandbox — reads
+  // straight off each defs.yaml. Powers "Promote to PR": the sandbox
+  // has no target repo of its own, so promoting means creating a Draft
+  // against a REAL (deployment, location) using one of these.
+  listComponents: async (
+    projectId: string,
+  ): Promise<{ components: { component_id: string; component_type: string; attributes_yaml: string }[] }> => {
+    const r = await api.get(`/projects/${projectId}/designer-loc/components`);
+    return r.data as any;
+  },
 };
 
 export default api;

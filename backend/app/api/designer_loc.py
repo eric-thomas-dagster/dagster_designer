@@ -101,3 +101,13 @@ async def install_community(project_id: str, component_id: str):
         return await svc.install_community_component(project_id, component_id)
     except RuntimeError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.get("/components")
+async def list_components(project_id: str):
+    """Every authored component instance in the sandbox. Powers the
+    "Promote to PR" picker — a component authored here has no path to
+    a real deployment until the user explicitly picks a target and
+    promotes it (see POST /projects/{id}/drafts + /drafts/{id}/promote)."""
+    _require_dagster_plus(project_id)
+    return {"components": svc.list_components(project_id)}

@@ -29,6 +29,7 @@ from git import Repo, GitCommandError
 
 from ..core.config import settings
 from . import promotion_config
+from . import community_installer_service
 from .drafts_service import Draft
 
 
@@ -187,17 +188,48 @@ def remove_worktree(project_id: str, owner_repo: str, base_branch: str, deployme
 
 # --- draft application -------------------------------------------------------
 
-def apply_drafts(worktree: Path, defs_subdir: str, drafts: list[Draft]) -> list[str]:
+def apply_drafts(
+    worktree: Path,
+    defs_subdir: str,
+    drafts: list[Draft],
+    catalog_rewrites: dict[str, tuple[str, str]] | None = None,
+) -> list[str]:
     """Write each draft as `<defs_subdir>/<slug>/defs.yaml` in the
     worktree. Returns paths (relative to the worktree) so callers can
-    surface a diff / confirm."""
+    surface a diff / confirm.
+
+    `catalog_rewrites` is `{component_type: (catalog_id, canonical_type)}`
+    (see `community_installer_service.resolve_catalog_rewrites`, resolved
+    by the async caller before handing off to this sync/executor-thread
+    function). For a draft whose type matches, the worktree needs two
+    things it wouldn't otherwise get: the `type:` line rewritten to the
+    catalog's canonical form (a sandbox-local or unresolved type isn't
+    importable here), and the community_component_installer bootstrapped
+    so `dagster dev` can actually load it — previously this only happened
+    at PR-promote time, so previewing a brand-new community component
+    against a real branch deployment worktree failed to load at all.
+    """
     written: list[str] = []
     for d in drafts:
         slug = _sanitize_folder(d.component_id)
         target_dir = worktree / defs_subdir / slug
         target_dir.mkdir(parents=True, exist_ok=True)
         defs_yaml = target_dir / "defs.yaml"
-        defs_yaml.write_text(d.attributes)
+
+        attributes = d.attributes
+        rewrite = (catalog_rewrites or {}).get(d.component_type)
+        if rewrite:
+            catalog_id, canonical_type = rewrite
+            attributes = community_installer_service.rewrite_defs_yaml_type(attributes, canonical_type)
+            try:
+                installer_files = community_installer_service.ensure_community_installer(
+                    repo_root=worktree, defs_subdir=defs_subdir, catalog_id=catalog_id,
+                )
+                written.extend(installer_files)
+            except Exception as e:
+                print(f"[preview] community installer bootstrap errored (non-fatal): {e}")
+
+        defs_yaml.write_text(attributes)
         written.append(str(defs_yaml.relative_to(worktree)))
     return written
 
@@ -211,6 +243,7 @@ def prepare_preview(
     deployment_name: str,
     defs_subdir: str,
     drafts: list[Draft],
+    catalog_rewrites: dict[str, tuple[str, str]] | None = None,
 ) -> dict:
     """One-shot: ensure clone + worktree + apply drafts.
 
@@ -218,7 +251,7 @@ def prepare_preview(
     (M6.2 sandbox lifecycle) take this path and boot `dagster dev` on
     top of it."""
     worktree = ensure_worktree(project_id, owner_repo, base_branch, deployment_name)
-    files = apply_drafts(worktree, defs_subdir, drafts)
+    files = apply_drafts(worktree, defs_subdir, drafts, catalog_rewrites)
     return {
         "worktree_path": str(worktree),
         "base_branch": base_branch,

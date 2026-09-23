@@ -567,6 +567,42 @@ async def scaffold_component(
     }
 
 
+def list_components(project_id: str) -> list[dict]:
+    """Every authored component instance in the sandbox -- one entry per
+    `defs/<slug>/defs.yaml`. Powers the "Promote to PR" picker: unlike
+    the canvas (which only sees ASSETS, via live GraphQL), this reads
+    `type:`/`attributes:` straight off disk, which is what a promote
+    actually needs to build a Draft.
+    """
+    import yaml as _yaml
+
+    state = get_state(project_id)
+    if not state.is_scaffolded():
+        return []
+
+    module_name = state.dir().name
+    defs_dir = state.dir() / "src" / module_name / "defs"
+    if not defs_dir.exists():
+        return []
+
+    out: list[dict] = []
+    for comp_dir in sorted(defs_dir.iterdir()):
+        defs_yaml = comp_dir / "defs.yaml"
+        if not comp_dir.is_dir() or not defs_yaml.exists():
+            continue
+        raw = defs_yaml.read_text()
+        try:
+            doc = _yaml.safe_load(raw) or {}
+        except Exception:
+            doc = {}
+        out.append({
+            "component_id": comp_dir.name,
+            "component_type": doc.get("type") or "",
+            "attributes_yaml": raw,
+        })
+    return out
+
+
 async def proxy_graphql(project_id: str, query: str, variables: dict | None) -> dict:
     """Forward a GraphQL request to this project's Designer-managed loc."""
     state = get_state(project_id)

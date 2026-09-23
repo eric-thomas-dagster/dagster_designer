@@ -1033,7 +1033,14 @@ function App() {
                 {!!(currentProject as any)?.is_dagster_plus && (
                   <>
                     <span className="text-xs text-gray-400 ml-2">·</span>
-                    <SandboxStatusPill projectId={currentProject.id} isDagsterPlus />
+                    <SandboxStatusPill
+                      projectId={currentProject.id}
+                      isDagsterPlus
+                      onPromoted={() => {
+                        refreshDrafts();
+                        setDraftsPanelOpen(true);
+                      }}
+                    />
                     <DropdownMenu.Root>
                       <DropdownMenu.Trigger asChild>
                         <button

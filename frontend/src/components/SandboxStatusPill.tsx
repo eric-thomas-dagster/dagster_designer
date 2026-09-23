@@ -1,6 +1,14 @@
 import { useEffect, useRef, useState } from 'react';
-import { Boxes, Loader2, AlertTriangle, CheckCircle2, ChevronDown } from 'lucide-react';
+import { Boxes, Loader2, AlertTriangle, CheckCircle2, ChevronDown, GitPullRequestArrow } from 'lucide-react';
 import { useDesignerLoc } from '@/hooks/useDesignerLoc';
+import {
+  designerLocApi,
+  authoredApi,
+  draftsApi,
+  type AuthoredDeployment,
+  type AuthoredLocation,
+} from '@/services/api';
+import { notify } from './Notifications';
 
 /**
  * SandboxStatusPill — a small header indicator for the Designer-managed
@@ -14,12 +22,70 @@ import { useDesignerLoc } from '@/hooks/useDesignerLoc';
 interface SandboxStatusPillProps {
   projectId: string | null;
   isDagsterPlus: boolean;
+  /** Fired after a sandbox component is successfully turned into a
+   *  Draft against a real target — caller opens the Drafts panel so
+   *  the user lands somewhere that shows what just happened. */
+  onPromoted?: () => void;
 }
 
-export function SandboxStatusPill({ projectId, isDagsterPlus }: SandboxStatusPillProps) {
+export function SandboxStatusPill({ projectId, isDagsterPlus, onPromoted }: SandboxStatusPillProps) {
   const { status } = useDesignerLoc(projectId, isDagsterPlus);
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
+
+  // "Promote to PR" — turns a sandbox-authored component instance into
+  // a Draft against a REAL (deployment, location). The sandbox itself
+  // has no target repo; this is the bridge. Lazily loaded only when the
+  // promote section is opened, not on every pill render.
+  const [promoteOpen, setPromoteOpen] = useState(false);
+  const [components, setComponents] = useState<{ component_id: string; component_type: string; attributes_yaml: string }[] | null>(null);
+  const [selectedComponentId, setSelectedComponentId] = useState('');
+  const [deployments, setDeployments] = useState<AuthoredDeployment[] | null>(null);
+  const [selectedDeployment, setSelectedDeployment] = useState('');
+  const [locations, setLocations] = useState<AuthoredLocation[] | null>(null);
+  const [selectedLocation, setSelectedLocation] = useState('');
+  const [promoting, setPromoting] = useState(false);
+
+  useEffect(() => {
+    if (!promoteOpen || !projectId) return;
+    designerLocApi.listComponents(projectId).then((r) => setComponents(r.components)).catch(() => setComponents([]));
+    authoredApi.deployments(projectId).then((r) => setDeployments(r.deployments)).catch(() => setDeployments([]));
+  }, [promoteOpen, projectId]);
+
+  useEffect(() => {
+    if (!projectId || !selectedDeployment) { setLocations(null); setSelectedLocation(''); return; }
+    setSelectedLocation('');
+    authoredApi.locations(projectId, selectedDeployment)
+      .then((r) => setLocations(r.locations.filter((l) => l.source !== 'sandbox')))
+      .catch(() => setLocations([]));
+  }, [projectId, selectedDeployment]);
+
+  const handlePromote = async () => {
+    if (!projectId || !selectedComponentId || !selectedDeployment || !selectedLocation) return;
+    const comp = components?.find((c) => c.component_id === selectedComponentId);
+    if (!comp) return;
+    setPromoting(true);
+    try {
+      await draftsApi.create(projectId, {
+        location_name: selectedLocation,
+        deployment_name: selectedDeployment,
+        component_type: comp.component_type,
+        attributes: comp.attributes_yaml,
+        component_id: comp.component_id,
+      });
+      notify.success(`Draft created against ${selectedLocation} — open the Drafts panel to review + promote.`);
+      setPromoteOpen(false);
+      setSelectedComponentId('');
+      setSelectedDeployment('');
+      setSelectedLocation('');
+      setOpen(false);
+      onPromoted?.();
+    } catch (e: any) {
+      notify.error(`Couldn't create draft: ${e?.response?.data?.detail || e?.message || String(e)}`);
+    } finally {
+      setPromoting(false);
+    }
+  };
 
   // Click-outside dismiss.
   useEffect(() => {
@@ -83,6 +149,75 @@ export function SandboxStatusPill({ projectId, isDagsterPlus }: SandboxStatusPil
             <div className="mt-2 rounded bg-red-50 border border-red-200 text-red-700 p-2">
               <div className="font-semibold text-[11px] mb-0.5">Error</div>
               <div className="whitespace-pre-wrap break-words">{status.error}</div>
+            </div>
+          )}
+          {s === 'ready' && (
+            <div className="mt-2 pt-2 border-t border-gray-200">
+              <button
+                onClick={() => setPromoteOpen((v) => !v)}
+                className="w-full flex items-center gap-1.5 text-[11px] font-medium text-gray-700 hover:text-gray-900"
+              >
+                <GitPullRequestArrow className="w-3.5 h-3.5" />
+                Promote a component to PR
+                <ChevronDown className={`w-3 h-3 opacity-60 ml-auto transition-transform ${promoteOpen ? 'rotate-180' : ''}`} />
+              </button>
+              {promoteOpen && (
+                <div className="mt-2 space-y-2">
+                  <p className="text-gray-500">
+                    Sandbox components aren't tied to a repo. Pick one, pick where it should
+                    land, and Designer opens a PR — bootstrapping the community-component
+                    installer into that repo first if it's not there yet.
+                  </p>
+                  {components === null ? (
+                    <div className="flex items-center gap-1.5 text-gray-500"><Loader2 className="w-3 h-3 animate-spin" /> Loading components…</div>
+                  ) : components.length === 0 ? (
+                    <p className="text-gray-500 italic">No components authored in the sandbox yet.</p>
+                  ) : (
+                    <>
+                      <select
+                        value={selectedComponentId}
+                        onChange={(e) => setSelectedComponentId(e.target.value)}
+                        className="w-full px-2 py-1 text-[11px] border border-gray-300 rounded"
+                      >
+                        <option value="">Select a component…</option>
+                        {components.map((c) => (
+                          <option key={c.component_id} value={c.component_id}>{c.component_id}</option>
+                        ))}
+                      </select>
+                      <select
+                        value={selectedDeployment}
+                        onChange={(e) => setSelectedDeployment(e.target.value)}
+                        className="w-full px-2 py-1 text-[11px] border border-gray-300 rounded"
+                        disabled={!deployments}
+                      >
+                        <option value="">{deployments ? 'Select a deployment…' : 'Loading deployments…'}</option>
+                        {(deployments ?? []).map((d) => (
+                          <option key={d.name} value={d.name}>{d.display_name}{d.type === 'BRANCH' ? ' (branch)' : ''}</option>
+                        ))}
+                      </select>
+                      <select
+                        value={selectedLocation}
+                        onChange={(e) => setSelectedLocation(e.target.value)}
+                        className="w-full px-2 py-1 text-[11px] border border-gray-300 rounded"
+                        disabled={!selectedDeployment}
+                      >
+                        <option value="">{!selectedDeployment ? 'Pick a deployment first…' : locations ? 'Select a code location…' : 'Loading locations…'}</option>
+                        {(locations ?? []).map((l) => (
+                          <option key={l.name} value={l.name}>{l.name}</option>
+                        ))}
+                      </select>
+                      <button
+                        onClick={handlePromote}
+                        disabled={promoting || !selectedComponentId || !selectedDeployment || !selectedLocation}
+                        className="w-full flex items-center justify-center gap-1.5 px-2 py-1 text-[11px] font-medium rounded bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
+                        {promoting ? <Loader2 className="w-3 h-3 animate-spin" /> : <GitPullRequestArrow className="w-3 h-3" />}
+                        Create draft
+                      </button>
+                    </>
+                  )}
+                </div>
+              )}
             </div>
           )}
           {status?.log_tail && status.log_tail.length > 0 && (

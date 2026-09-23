@@ -27,6 +27,7 @@ import psutil
 from . import promotion_config
 from . import drafts_service
 from . import preview_git_service
+from . import community_installer_service
 from ..core.uv_binary import find_uv_binary
 
 PORT_START = 4200
@@ -279,6 +280,16 @@ async def boot_preview(
                 d for d in drafts_service.list_drafts(project_id)
                 if d.location_name == location_name and d.deployment_name == deployment_name
             ]
+            # Resolved here (async, before the executor handoff below) so
+            # a draft referencing a brand-new community component — never
+            # before registered in this location's code — gets its type
+            # rewritten to the catalog's canonical form and the installer
+            # bootstrapped into the worktree, instead of writing an
+            # unresolvable type and failing to load.
+            catalog_rewrites = await community_installer_service.resolve_catalog_rewrites(
+                [d.component_type for d in scoped_drafts]
+            )
+
             def _prepare():
                 return preview_git_service.prepare_preview(
                     project_id=project_id,
@@ -287,6 +298,7 @@ async def boot_preview(
                     deployment_name=deployment_name,
                     defs_subdir=mapping.defs_subdir,
                     drafts=scoped_drafts,
+                    catalog_rewrites=catalog_rewrites,
                 )
             prep = await loop.run_in_executor(None, _prepare)
             state.worktree = Path(prep["worktree_path"])

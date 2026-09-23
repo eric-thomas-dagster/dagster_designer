@@ -82,10 +82,19 @@ def find_mapping(org: str, location: str) -> Optional[RepoMapping]:
       1. User-saved config
       2. Env-var overrides (kept for scripted setups)
       3. Hardcoded defaults (hooli)
+
+    Org comparison is case-insensitive: Dagster+'s GraphQL returns the
+    org's display name (e.g. "Hooli"), but mappings are naturally typed
+    in lowercase (matching the org slug used everywhere else, e.g. in
+    URLs) -- an exact-match compare here silently failed to resolve
+    even the hardcoded hooli default. Location names are real Dagster
+    code-location names, which ARE case-sensitive, so those still
+    compare exactly.
     """
+    org_lower = org.lower()
     cfg = load()
     for m in cfg.mappings:
-        if m.org == org and m.location == location:
+        if m.org.lower() == org_lower and m.location == location:
             return m
 
     # Env-var single-mapping override.
@@ -100,7 +109,7 @@ def find_mapping(org: str, location: str) -> Optional[RepoMapping]:
         )
 
     for m in _HARDCODED_DEFAULTS:
-        if m.org == org and m.location == location:
+        if m.org.lower() == org_lower and m.location == location:
             return m
     return None
 

@@ -29,6 +29,7 @@ from ..services.project_service import project_service
 from .drafts_service import Draft, update_draft
 from . import promotion_config
 from . import dagster_plus_preview_service
+from . import community_installer_service
 
 
 GITHUB_API = "https://api.github.com"
@@ -44,138 +45,6 @@ def _sanitize_folder(component_id: str) -> str:
         elif ch in ("[", "]", " "):
             out.append("_")
     return "".join(out).strip("_") or "component"
-
-
-_INSTALLER_RAW_BASE = (
-    "https://raw.githubusercontent.com/eric-thomas-dagster/"
-    "dagster-component-templates/main/assets/infrastructure/community_component_installer"
-)
-_INSTALLER_SOURCE_FILES = ("component.py", "__init__.py", "schema.json", "requirements.txt")
-
-
-def _fetch_installer_source_files() -> dict[str, str]:
-    """Fetch the installer's source files from the community-templates repo.
-
-    Returns `{filename: content}` for every file that was retrievable.
-    Best-effort — a missing file is skipped, not fatal. Cached in
-    memory across calls in the same process for demo repeatability."""
-    import httpx as _httpx
-    out: dict[str, str] = {}
-    for fname in _INSTALLER_SOURCE_FILES:
-        try:
-            r = _httpx.get(f"{_INSTALLER_RAW_BASE}/{fname}", timeout=15.0)
-            if r.status_code == 200:
-                out[fname] = r.text
-        except _httpx.HTTPError as e:
-            print(f"[promote] installer source fetch failed for {fname}: {e}")
-    return out
-
-
-def _components_root(repo_root: Path, defs_subdir: str) -> Path:
-    """Given the defs-subdir where component instances live (e.g.
-    `hooli-data-eng/src/hooli_data_eng/defs`), return the sibling
-    `components/` dir where component SOURCE lives (`.../components/`).
-
-    Convention across the community catalog + hooli + jaffle: components
-    live in `<pkg>/components/<id>/component.py` and instances in
-    `<pkg>/defs/<slug>/defs.yaml`. So swapping `/defs` for `/components`
-    in the subdir gives the source directory."""
-    parts = Path(defs_subdir).parts
-    # Replace the LAST occurrence of "defs" with "components". If the
-    # subdir doesn't contain "defs", drop back to a sibling of the tree.
-    for i in range(len(parts) - 1, -1, -1):
-        if parts[i] == "defs":
-            new_parts = list(parts[:i]) + ["components"] + list(parts[i + 1:])
-            return repo_root / Path(*new_parts)
-    # Fallback: parallel to defs_subdir root.
-    return repo_root / defs_subdir.split("/")[0] / "components"
-
-
-def _ensure_community_installer(repo_root: Path, defs_subdir: str, catalog_id: str) -> list[str]:
-    """Bootstrap community-component installation into the target repo.
-
-    Idempotent — safe to call for every promote.
-
-    Effects:
-      1. Copy the installer's Python source (component.py, __init__.py,
-         schema.json, requirements.txt) into
-         `<components-root>/community_component_installer/` when missing,
-         so the target deployment has the class it needs to load the
-         installer's `defs.yaml` on the very first refresh — no separate
-         pip install step.
-      2. Create or update `<defs_subdir>/community_component_installer/defs.yaml`
-         to include `catalog_id` in its `components:` list (deduplicated).
-
-    Returns the list of newly-written / modified files (repo-relative
-    paths) so the caller can `repo.index.add(...)` them.
-
-    Rationale: instead of copying every community component's Python
-    source into the target repo on every promote, we install a single
-    `StateBackedComponent` — the community_component_installer — and
-    let IT fetch the source at refresh-state time. Future promotes to
-    the same target just append to the installer's `components:` list.
-    Users can still update / pin versions declaratively via the YAML.
-    """
-    import yaml as _yaml
-
-    written: list[str] = []
-
-    # (1) Ensure the installer's Python SOURCE is in the target repo.
-    # Without this, on first refresh the target has a defs.yaml pointing
-    # at `dagster_component_templates.CommunityComponentInstallerComponent`
-    # but no Python class of that name — location fails to load. Fetch
-    # from the community-templates raw URL and drop into the standard
-    # sibling `components/community_component_installer/` folder.
-    components_root = _components_root(repo_root, defs_subdir)
-    installer_src_dir = components_root / "community_component_installer"
-    if not (installer_src_dir / "component.py").exists():
-        source_files = _fetch_installer_source_files()
-        if source_files.get("component.py"):
-            installer_src_dir.mkdir(parents=True, exist_ok=True)
-            for fname, content in source_files.items():
-                p = installer_src_dir / fname
-                p.write_text(content)
-                written.append(str(p.relative_to(repo_root)))
-        else:
-            print(f"[promote] could not fetch installer source — installer will fail to load")
-
-    installer_defs_dir = repo_root / defs_subdir / "community_component_installer"
-    installer_yaml = installer_defs_dir / "defs.yaml"
-
-    if installer_yaml.exists():
-        try:
-            doc = _yaml.safe_load(installer_yaml.read_text()) or {}
-        except Exception as e:
-            print(f"[promote] existing installer defs.yaml unparseable: {e} — overwriting")
-            doc = {}
-    else:
-        doc = {}
-
-    if not doc:
-        doc = {
-            "type": "dagster_component_templates.CommunityComponentInstallerComponent",
-            "attributes": {
-                "components": [],
-                "install_pip_requirements": True,
-            },
-        }
-
-    # Ensure the shape is what we expect; the installer's schema requires
-    # `attributes.components` as a list of strings.
-    attrs = doc.setdefault("attributes", {})
-    components = attrs.setdefault("components", [])
-    if not isinstance(components, list):
-        # Existing file had a broken shape — reset defensively.
-        components = []
-        attrs["components"] = components
-
-    if catalog_id not in components:
-        components.append(catalog_id)
-
-    installer_defs_dir.mkdir(parents=True, exist_ok=True)
-    installer_yaml.write_text(_yaml.safe_dump(doc, sort_keys=False, default_flow_style=False))
-    written.append(str(installer_yaml.relative_to(repo_root)))
-    return written
 
 
 def _repos_root() -> Path:
@@ -310,12 +179,21 @@ async def promote_draft(project_id: str, draft: Draft, dagster_plus_org: str, to
 
     # Write the draft's YAML to <defs_subdir>/<slug>/defs.yaml. Two
     # transforms before writing:
-    #   1. `type:` — rewrite the state-registry form (e.g.
-    #      `hooli_data_eng.hooli_data_eng.components.ScheduledJobComponent`)
-    #      to the actual Python import path
-    #      (`hooli_data_eng.components.ScheduledJobComponent`) so
-    #      `importlib.import_module` can load it. Dagster+ exposes the
-    #      correct string via each ComponentType's `example` field.
+    #   1. `type:` — rewrite whatever form the draft stored it in to the
+    #      form that's actually importable in the TARGET repo. Two
+    #      mutually-exclusive cases:
+    #        a. Community-catalog component (matched below): the draft's
+    #           type is either a sandbox-local module path
+    #           (`ds_<id>.components.foo.component.FooComponent`) or
+    #           already-canonical — neither is guaranteed importable in
+    #           the target, so it's rewritten to the catalog's own
+    #           canonical form (`dagster_component_templates.FooComponent`),
+    #           which the community_component_installer (bootstrapped
+    #           below) knows how to load.
+    #        b. Customer's own component: rewrite the state-registry form
+    #           (e.g. `hooli_data_eng.hooli_data_eng.components.X`) to the
+    #           actual Python import path (`hooli_data_eng.components.X`)
+    #           via cloud introspection, same as before.
     #   2. `asset_selection:` — rewrite comma-joined lists to the DSL
     #      `or`-joined form. `AssetSelection.from_string` treats `,` as
     #      a hard parse error, so old drafts stored under `, ` need
@@ -324,7 +202,21 @@ async def promote_draft(project_id: str, draft: Draft, dagster_plus_org: str, to
     project = project_service.get_project(project_id)
     yaml_body = draft.attributes
     rewrote_type: str | None = None
-    if project and draft.deployment_name:
+
+    matched_catalog_id: str | None = None
+    try:
+        from . import genie_service as _genie
+        _manifest = await _genie.fetch_manifest()
+        _catalog_ids = {c.get("id") for c in (_manifest.get("components") or []) if c.get("id")}
+        matched_catalog_id = community_installer_service.match_catalog_id(draft.component_type, _catalog_ids)
+        if matched_catalog_id == "community_component_installer":
+            matched_catalog_id = None  # don't self-reference the installer
+    except Exception as e:
+        print(f"[promote] catalog lookup errored (non-fatal): {e}")
+
+    if matched_catalog_id:
+        correct_type = await community_installer_service.resolve_catalog_component_type(matched_catalog_id)
+    elif project and draft.deployment_name:
         try:
             correct_type = await dagster_plus_preview_service.resolve_defs_yaml_type(
                 project=project,
@@ -335,19 +227,12 @@ async def promote_draft(project_id: str, draft: Draft, dagster_plus_org: str, to
         except Exception as e:
             print(f"[promote] type resolution errored (non-fatal): {e}")
             correct_type = None
-        if correct_type and correct_type != draft.component_type:
-            new_lines: list[str] = []
-            for line in yaml_body.splitlines():
-                stripped = line.strip()
-                if stripped.startswith("type:"):
-                    indent = line[: len(line) - len(line.lstrip())]
-                    new_lines.append(f"{indent}type: {correct_type}")
-                    rewrote_type = correct_type
-                else:
-                    new_lines.append(line)
-            yaml_body = "\n".join(new_lines)
-            if not yaml_body.endswith("\n"):
-                yaml_body += "\n"
+    else:
+        correct_type = None
+
+    if correct_type and correct_type != draft.component_type:
+        yaml_body = community_installer_service.rewrite_defs_yaml_type(yaml_body, correct_type)
+        rewrote_type = correct_type
 
     # Normalize `asset_selection`: comma-joined → ` or `-joined.
     # Parse+re-dump so we don't have to reason about the raw text.
@@ -368,38 +253,22 @@ async def promote_draft(project_id: str, draft: Draft, dagster_plus_org: str, to
     files_written = [str(defs_yaml_path.relative_to(repo_root))]
 
     # Community-component bootstrap: if the promoted draft references a
-    # community-catalog component, ensure the target repo has the
-    # `community_component_installer` set up + register the promoted
-    # component in its `components:` list. Once the PR merges the
-    # deployment's refresh-state will download the community component
-    # source automatically — no manual pip install or code copy needed.
-    #
-    # Skipped when the draft's component isn't in the community catalog
-    # (e.g. the customer's own local component); in that case the PR
-    # ships only the user's defs.yaml as before.
+    # community-catalog component (matched above, while resolving the
+    # type), ensure the target repo has the `community_component_installer`
+    # set up + register the promoted component in its `components:` list.
+    # Once the PR merges the deployment's refresh-state will download the
+    # community component source automatically — no manual pip install
+    # or code copy needed.
     installer_extra_files: list[str] = []
-    try:
-        from . import genie_service as _genie
-        _manifest = await _genie.fetch_manifest()
-        _catalog_ids = {c.get("id"): c for c in (_manifest.get("components") or [])}
-        # A draft's component_type is a Python import path
-        # (`<pkg>.components.<id>.<Class>`); the catalog ID appears as
-        # one dotted segment. Search from most-specific to least so
-        # `parametric_data_generator` beats `data_generator`.
-        _matched_catalog_id: str | None = None
-        for seg in draft.component_type.split("."):
-            if seg in _catalog_ids:
-                _matched_catalog_id = seg
-                break
-        # Don't reference the installer itself in its own components list.
-        if _matched_catalog_id and _matched_catalog_id != "community_component_installer":
-            installer_extra_files = _ensure_community_installer(
+    if matched_catalog_id:
+        try:
+            installer_extra_files = community_installer_service.ensure_community_installer(
                 repo_root=repo_root,
                 defs_subdir=defs_subdir,
-                catalog_id=_matched_catalog_id,
+                catalog_id=matched_catalog_id,
             )
-    except Exception as e:
-        print(f"[promote] community installer bootstrap errored (non-fatal): {e}")
+        except Exception as e:
+            print(f"[promote] community installer bootstrap errored (non-fatal): {e}")
 
     files_written.extend(installer_extra_files)
 
