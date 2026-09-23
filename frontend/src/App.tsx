@@ -33,7 +33,7 @@ import { SettingsHost } from './components/SettingsDialog';
 import { useProjectStore } from './hooks/useProject';
 import { useRunNotifications } from './hooks/useRunNotifications';
 import { setActiveTabGlobal } from './services/activeTab';
-import { onMenuAction, onQuitRequested, confirmQuit, openExternalUrl, isTauri } from './services/tauri';
+import { onMenuAction, onQuitRequested, confirmQuit, openExternalUrl, openInVSCode, getProjectsDir, isTauri } from './services/tauri';
 import { hasUnsavedChanges } from './hooks/useUnsavedChanges';
 import { Network, FileCode, Zap, Package, ExternalLink, Settings, Workflow, ChevronDown, Skull, AlertTriangle, X, Loader2, CheckCircle, XCircle, PanelLeftClose, PanelLeft, Clock, Play, Radar, Timer, Download, Database, ShieldCheck, Cloud, Bell, BarChart3 } from 'lucide-react';
 import { IngestionsPanel } from './components/IngestionsPanel';
@@ -568,6 +568,26 @@ function App() {
     setFileToOpen(filePath);
   };
 
+  // "Open in VS Code" -- hands the local project (or one file within it)
+  // off to VS Code for engineer-mode editing, complementing the visual
+  // builder rather than duplicating it. `relativeFilePath` is relative to
+  // the project root, same shape CodeEditor.tsx already tracks.
+  const handleOpenInVSCode = async (relativeFilePath?: string) => {
+    if (!currentProject?.directory_name) return;
+    const projectsDir = await getProjectsDir();
+    if (!projectsDir) {
+      notify.error("Couldn't resolve the projects folder -- only available in the desktop app.");
+      return;
+    }
+    const projectPath = `${projectsDir}/${currentProject.directory_name}`;
+    const target = relativeFilePath ? `${projectPath}/${relativeFilePath}` : projectPath;
+    try {
+      await openInVSCode(target);
+    } catch {
+      notify.error("Couldn't open VS Code -- is it installed?");
+    }
+  };
+
   // Handler to open visual editor (data preview) for an asset
   const handleOpenVisualEditor = (upstreamAssetKey: string) => {
     // Find the upstream node in the graph to get the display name
@@ -1052,6 +1072,15 @@ function App() {
                 <span className="text-sm text-gray-600">
                   {navItems.find((n) => n.value === activeMainTab)?.label ?? activeMainTab}
                 </span>
+                {isTauri && (
+                  <button
+                    onClick={() => handleOpenInVSCode()}
+                    className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium border border-gray-200 bg-white text-gray-700 hover:bg-gray-50"
+                    title="Open this project in VS Code"
+                  >
+                    Open in VS Code
+                  </button>
+                )}
                 {!(currentProject as any)?.is_dagster_plus && (
                   <>
                     <span className="text-xs text-gray-400 ml-2">·</span>
@@ -1551,6 +1580,7 @@ function App() {
             <div className="h-full">
               <CodeEditor
                 projectId={currentProject.id}
+                projectDirectoryName={currentProject.directory_name}
                 fileToOpen={fileToOpen}
                 onFileOpened={() => setFileToOpen(null)}
               />
