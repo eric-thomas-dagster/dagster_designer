@@ -598,31 +598,14 @@ async def get_project(project_id: str):
     return _strip_token(project) if project.is_dagster_plus else project
 
 
-async def _cloud_monitor_history(project: Project, monitor_id: str, limit: int) -> list[dict]:
-    """Fetch monitor run history live from Dagster+. `monitor_id` is
-    the check key we set during hydration — "<asset_key>::<check_name>".
-    Returns events in the same shape as the local monitor_events.jsonl
-    reader so the endpoint's downstream code doesn't care."""
-    from ..services.dagster_plus_client import query, ASSET_CHECK_HISTORY_QUERY, numeric_metadata_value, normalize_metadata_entries
-    if '::' not in monitor_id:
-        return []
-    asset_key_str, check_name = monitor_id.rsplit('::', 1)
-    asset_key = {"path": asset_key_str.split('/')}
-    try:
-        data = await query(
-            project.dagster_plus_org or "",
-            project.dagster_plus_deployment or "",
-            project.dagster_plus_token or "",
-            ASSET_CHECK_HISTORY_QUERY,
-            region=project.dagster_plus_region,
-            variables={"assetKey": asset_key, "checkName": check_name, "limit": max(1, min(limit, 500)), "cursor": None},
-        )
-    except Exception as e:
-        print(f"[dagster+] check history for {monitor_id} failed: {e}", flush=True)
-        return []
+def _parse_check_history_response(data: dict, monitor_id: str) -> list[dict]:
+    """Shared parser for assetCheckExecutions -- same Dagster GraphQL
+    shape whether it came from Dagster+ or a local `dagster dev`
+    instance, so cloud and local both funnel through this."""
+    from ..services.dagster_plus_client import numeric_metadata_value, normalize_metadata_entries
+    from datetime import datetime, timezone
 
     events: list[dict] = []
-    from datetime import datetime, timezone
     for exec_ in (data.get("assetCheckExecutions") or []):
         evl = exec_.get("evaluation") or {}
         ts_epoch = exec_.get("timestamp") or evl.get("timestamp")
@@ -650,6 +633,54 @@ async def _cloud_monitor_history(project: Project, monitor_id: str, limit: int) 
     # Return chronological order to match local behavior.
     events.reverse()
     return events
+
+
+async def _cloud_monitor_history(project: Project, monitor_id: str, limit: int) -> list[dict]:
+    """Fetch monitor run history live from Dagster+. `monitor_id` is
+    the check key we set during hydration — "<asset_key>::<check_name>".
+    Returns events in the same shape as the local monitor_events.jsonl
+    reader so the endpoint's downstream code doesn't care."""
+    from ..services.dagster_plus_client import query, ASSET_CHECK_HISTORY_QUERY
+    if '::' not in monitor_id:
+        return []
+    asset_key_str, check_name = monitor_id.rsplit('::', 1)
+    asset_key = {"path": asset_key_str.split('/')}
+    try:
+        data = await query(
+            project.dagster_plus_org or "",
+            project.dagster_plus_deployment or "",
+            project.dagster_plus_token or "",
+            ASSET_CHECK_HISTORY_QUERY,
+            region=project.dagster_plus_region,
+            variables={"assetKey": asset_key, "checkName": check_name, "limit": max(1, min(limit, 500)), "cursor": None},
+        )
+    except Exception as e:
+        print(f"[dagster+] check history for {monitor_id} failed: {e}", flush=True)
+        return []
+    return _parse_check_history_response(data, monitor_id)
+
+
+async def _local_native_check_history(monitor_id: str, limit: int) -> list[dict]:
+    """Native @asset_check/AssetCheckSpec executions have no JSONL log
+    the way dbt tests do (nothing currently writes one) -- but `dagster
+    dev` tracks this itself, in the same assetCheckExecutions shape
+    Dagster+ exposes, since it's the same product schema. Queried live
+    rather than left permanently historyless; returns [] (not an error)
+    if dev isn't running or the check has no history yet."""
+    from ..services.dagster_plus_client import ASSET_CHECK_HISTORY_QUERY
+    from .runs import _run_local_query
+    if '::' not in monitor_id:
+        return []
+    asset_key_str, check_name = monitor_id.rsplit('::', 1)
+    asset_key = {"path": asset_key_str.split('/')}
+    try:
+        data = await _run_local_query(
+            3000, ASSET_CHECK_HISTORY_QUERY,
+            {"assetKey": asset_key, "checkName": check_name, "limit": max(1, min(limit, 500)), "cursor": None},
+        )
+    except Exception:
+        return []
+    return _parse_check_history_response(data, monitor_id)
 
 
 _CLOUD_HYDRATE_TTL_SECONDS = 20
@@ -7019,6 +7050,13 @@ async def get_monitor_history(project_id: str, monitor_id: str, limit: int = 200
     else:
         root = project_service._get_project_dir(project)
         events = read_events(root, monitor_id=monitor_id, limit=limit)
+        # Native asset checks (monitor_id shaped "<asset_key>::<check_name>")
+        # have no JSONL log the way dbt tests do -- ask the project's own
+        # `dagster dev` for its live execution history instead of leaving
+        # these permanently historyless. A dbt test's unique_id always
+        # starts with "test." so this can't misfire on those.
+        if not events and '::' in monitor_id and not monitor_id.startswith('test.'):
+            events = await _local_native_check_history(monitor_id, limit)
     points = [MonitorHistoryPoint(**{k: v for k, v in e.items() if k in MonitorHistoryPoint.model_fields}) for e in events]
     # Filter to numeric points for the chart (drop nulls, keep ts).
     # Include expected_min/max when present so the chart can render

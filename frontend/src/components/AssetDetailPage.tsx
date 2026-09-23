@@ -7,7 +7,7 @@ import {
   History, Calendar, ArrowUpRight, ArrowDownRight, Ban, Download, BarChart3, MinusCircle,
 } from 'lucide-react';
 import { useProjectStore } from '@/hooks/useProject';
-import { projectsApi, assetsApi, partitionsApi, dagsterPlusOrgBaseUrl, type BackfillRequest, type AssetChangeEntry } from '@/services/api';
+import { projectsApi, assetsApi, partitionsApi, primitivesApi, dagsterPlusOrgBaseUrl, type BackfillRequest, type AssetChangeEntry } from '@/services/api';
 import { classifyStatus, statusTextClass } from '@/lib/status';
 import { notify } from './Notifications';
 import { PartitionBackfill } from './PartitionBackfill';
@@ -976,6 +976,21 @@ function OverviewTab({ node, isCloud, onNewPrimitiveForAsset, onNavigate }: {
   const schedules: any[] = Array.isArray(data.schedules) ? data.schedules : [];
   const sensors: any[] = Array.isArray(data.sensors) ? data.sensors : [];
   const jobs: any[] = Array.isArray(data.jobs) ? data.jobs : [];
+
+  // Cloud hydration already puts freshness_policy/status/last_materialized
+  // directly on the node -- no fetch needed there. Local has no such
+  // node-level field (it's only ever surfaced through the primitives
+  // list), so this is the one fetch that placeholder actually needed.
+  const { data: localFreshness } = useQuery({
+    queryKey: ['freshness-primitives', currentProject?.id],
+    queryFn: () => primitivesApi.list(currentProject!.id, 'freshness_policy'),
+    enabled: !isCloud && !!currentProject,
+    staleTime: 30_000,
+  });
+  const localFreshnessPolicy = localFreshness?.primitives.find((p: any) => p.asset_key === assetKey);
+  const freshnessPolicy = isCloud ? data.freshness_policy : localFreshnessPolicy?.policy;
+  const freshnessStatus = isCloud ? data.freshness_status : localFreshnessPolicy?.status;
+  const freshnessLastMaterialized = isCloud ? data.freshness_last_materialized : null;
   // owners/tags/kinds now consumed by DefinitionSection; keep only
   // what the left column still uses.
   const deps: string[] = Array.isArray(data.deps) ? data.deps : [];
@@ -1280,11 +1295,60 @@ function OverviewTab({ node, isCloud, onNewPrimitiveForAsset, onNavigate }: {
           onNewPrimitiveForAsset={onNewPrimitiveForAsset}
         />
 
-        {/* Freshness (placeholder for now — we don't fetch this yet) */}
         <Section title="Freshness policy" icon={<Timer className="w-4 h-4 text-gray-500" />} compact>
-          <p className="text-xs text-gray-500 italic">
-            Freshness policy details aren't fetched yet in this pass.
-          </p>
+          {!freshnessPolicy ? (
+            <p className="text-xs text-gray-500 italic">No freshness policy set on this asset.</p>
+          ) : (
+            <dl className="space-y-2 text-xs">
+              {freshnessStatus && (
+                <div className="flex items-center justify-between">
+                  <dt className="text-gray-500">Status</dt>
+                  <dd className={`font-medium ${
+                    freshnessStatus === 'HEALTHY' ? 'text-emerald-600'
+                      : freshnessStatus === 'DEGRADED' ? 'text-rose-600'
+                      : freshnessStatus === 'WARNING' ? 'text-amber-600'
+                      : 'text-gray-600'
+                  }`}>
+                    {freshnessStatus}
+                  </dd>
+                </div>
+              )}
+              <div className="flex items-center justify-between">
+                <dt className="text-gray-500">Type</dt>
+                <dd className="text-gray-800">{freshnessPolicy.type === 'time_window' ? 'Time window' : 'Cron deadline'}</dd>
+              </div>
+              {freshnessPolicy.fail_window_seconds != null && (
+                <div className="flex items-center justify-between">
+                  <dt className="text-gray-500">Fails after</dt>
+                  <dd className="text-gray-800">{formatFreshnessDuration(freshnessPolicy.fail_window_seconds)} stale</dd>
+                </div>
+              )}
+              {freshnessPolicy.warn_window_seconds != null && (
+                <div className="flex items-center justify-between">
+                  <dt className="text-gray-500">Warns after</dt>
+                  <dd className="text-gray-800">{formatFreshnessDuration(freshnessPolicy.warn_window_seconds)} stale</dd>
+                </div>
+              )}
+              {freshnessPolicy.deadline_cron && (
+                <div className="flex items-center justify-between">
+                  <dt className="text-gray-500">Deadline cron</dt>
+                  <dd className="text-gray-800 font-mono">{freshnessPolicy.deadline_cron}</dd>
+                </div>
+              )}
+              {freshnessPolicy.timezone && (
+                <div className="flex items-center justify-between">
+                  <dt className="text-gray-500">Timezone</dt>
+                  <dd className="text-gray-800">{freshnessPolicy.timezone}</dd>
+                </div>
+              )}
+              {freshnessLastMaterialized != null && (
+                <div className="flex items-center justify-between">
+                  <dt className="text-gray-500">Last materialized</dt>
+                  <dd className="text-gray-800">{new Date(Number(freshnessLastMaterialized) * 1000).toLocaleString()}</dd>
+                </div>
+              )}
+            </dl>
+          )}
         </Section>
 
         {/* Ingestions tab tagging -- the automatic heuristic (component
@@ -2406,4 +2470,14 @@ function formatRelative(iso: string): string {
   } catch {
     return iso;
   }
+}
+
+function formatFreshnessDuration(seconds: number): string {
+  const days = Math.floor(seconds / 86400);
+  const hours = Math.floor((seconds % 86400) / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  if (days > 0) return `${days}d${hours > 0 ? ` ${hours}h` : ''}`;
+  if (hours > 0) return `${hours}h${minutes > 0 ? ` ${minutes}m` : ''}`;
+  if (minutes > 0) return `${minutes}m`;
+  return `${Math.round(seconds)}s`;
 }
