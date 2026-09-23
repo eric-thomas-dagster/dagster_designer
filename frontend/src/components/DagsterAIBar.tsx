@@ -2,7 +2,7 @@ import { useState, useRef, useEffect, useMemo } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { Sparkles, ArrowUp, Loader2, ChevronDown, X, Check } from 'lucide-react';
 import { useProjectStore } from '@/hooks/useProject';
-import { notify } from './Notifications';
+import { notify, confirmDialog } from './Notifications';
 import { API_BASE, aiApi, type AiProvidersStatus } from '@/services/api';
 import { openSettings, onAiProvidersChanged } from './SettingsDialog';
 
@@ -12,6 +12,10 @@ interface AIPick {
   upstream_asset_names: string[];
   config: Record<string, any>;
   reason: string;
+  /** "add" (default, omitted on older cached plans) installs a new
+   *  component. "edit" merges `config` into an existing instance's
+   *  attributes. "remove" deletes an existing instance outright. */
+  action?: 'add' | 'edit' | 'remove';
 }
 
 interface AIPlanResponse {
@@ -105,6 +109,11 @@ export function DagsterAIBar() {
         .map((n) => ({
           name: n.data?.asset_key || n.data?.label || n.id,
           component_type: n.data?.component_type,
+          // Not sent to the model (kept out of the prompt payload build
+          // below only in spirit — it's harmless context either way),
+          // but apply() needs this to resolve an edit/remove pick's
+          // asset_name back to a real component instance to act on.
+          component_id: n.data?.component_id || n.id,
         }));
 
       const body: Record<string, any> = {
@@ -141,13 +150,76 @@ export function DagsterAIBar() {
     }
   };
 
+  // For "edit"/"remove" picks, resolve the target asset_name back to a
+  // real component instance id — the plan only carries names (what the
+  // model reasons about), same fields used to build `existing` in submit().
+  const resolveComponentId = (assetName: string): string | null => {
+    const node = currentProject?.graph.nodes.find(
+      (n) => (n.data?.asset_key || n.data?.label || n.id) === assetName,
+    );
+    return node ? ((node.data as any)?.component_id || node.id) : null;
+  };
+
   const apply = async () => {
     if (!plan || !currentProject || applying) return;
+    const toRemove = plan.picks.filter((p) => p.action === 'remove');
+    if (toRemove.length > 0) {
+      const ok = await confirmDialog(
+        `This will permanently delete ${toRemove.length === 1 ? 'this component instance' : `these ${toRemove.length} component instances`} from the project: ${toRemove.map((p) => p.asset_name).join(', ')}.`,
+        { title: 'Remove component(s)?', destructive: true },
+      );
+      if (!ok) return;
+    }
     setApplying(true);
     let installed = 0;
     let failed = 0;
     try {
       for (const pick of plan.picks) {
+        const action = pick.action || 'add';
+
+        if (action === 'remove') {
+          const componentId = resolveComponentId(pick.asset_name);
+          if (!componentId) {
+            failed++;
+            console.warn(`[DagsterAI] Could not resolve existing asset '${pick.asset_name}' to remove`);
+            continue;
+          }
+          try {
+            const { projectsApi } = await import('@/services/api');
+            await projectsApi.deleteComponentInstance(currentProject.id, componentId);
+            installed++;
+          } catch (e) {
+            failed++;
+            console.warn(`[DagsterAI] Failed to remove ${pick.asset_name}:`, e);
+          }
+          continue;
+        }
+
+        if (action === 'edit') {
+          const componentId = resolveComponentId(pick.asset_name);
+          if (!componentId) {
+            failed++;
+            console.warn(`[DagsterAI] Could not resolve existing asset '${pick.asset_name}' to edit`);
+            continue;
+          }
+          try {
+            const res = await fetch(`${API_BASE}/templates/component-instance/${componentId}/attributes`, {
+              method: 'PATCH',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ project_id: currentProject.id, attributes: pick.config }),
+            });
+            if (!res.ok) {
+              const body = await res.json().catch(() => ({} as any));
+              throw new Error(body.detail || `HTTP ${res.status}`);
+            }
+            installed++;
+          } catch (e) {
+            failed++;
+            console.warn(`[DagsterAI] Failed to edit ${pick.asset_name}:`, e);
+          }
+          continue;
+        }
+
         // pick.component_type is actually the manifest component_id (e.g.
         // "unique_dedup"). Pass the AI's proposed attrs as `attributes` so the
         // CLI-based endpoint merges them into the stub defs.yaml — otherwise
@@ -202,8 +274,12 @@ export function DagsterAIBar() {
       // the first `dg list defs` misses the fresh picks and downstream assets
       // "eventually show up" on manual refresh. Poll until either all
       // expected asset names are present or we've exhausted retries.
+      // "remove" picks should NOT be waited on — the asset is meant to
+      // disappear, not (re)appear, so including it here would just waste
+      // retries waiting for something that's never coming back.
       const expectedNames = new Set(
         plan.picks
+          .filter((p) => (p.action || 'add') !== 'remove')
           .map((p) => (p.config?.asset_name as string) || p.asset_name)
           .filter(Boolean),
       );
@@ -302,14 +378,24 @@ export function DagsterAIBar() {
               const configEntries = Object.entries(pick.config || {})
                 .filter(([k]) => k !== 'asset_name' && k !== 'upstream_asset_keys')
                 .filter(([, v]) => v !== null && v !== undefined && v !== '');
+              const action = pick.action || 'add';
+              const actionTone =
+                action === 'remove' ? 'text-red-700 bg-red-50 border-red-200'
+                : action === 'edit' ? 'text-amber-700 bg-amber-50 border-amber-200'
+                : 'text-emerald-700 bg-emerald-50 border-emerald-200';
               return (
                 <div key={i} className="px-4 py-2.5 border-b border-gray-100 last:border-b-0 text-sm">
                   <div className="flex items-baseline gap-2">
                     <span className="text-xs text-gray-400 font-mono w-5 flex-shrink-0">{i + 1}.</span>
-                    <span className="font-medium text-gray-900">{pick.asset_name}</span>
-                    <span className="text-[10px] uppercase tracking-wide text-gray-400 bg-gray-100 px-1.5 py-0.5 rounded">
-                      {pick.component_type}
+                    <span className={`text-[10px] uppercase tracking-wide font-semibold border px-1.5 py-0.5 rounded ${actionTone}`}>
+                      {action}
                     </span>
+                    <span className="font-medium text-gray-900">{pick.asset_name}</span>
+                    {action === 'add' && (
+                      <span className="text-[10px] uppercase tracking-wide text-gray-400 bg-gray-100 px-1.5 py-0.5 rounded">
+                        {pick.component_type}
+                      </span>
+                    )}
                   </div>
                   {pick.upstream_asset_names.length > 0 && (
                     <div className="mt-1 pl-7 text-xs text-gray-500">

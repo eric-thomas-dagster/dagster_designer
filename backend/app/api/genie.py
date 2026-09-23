@@ -100,6 +100,7 @@ class GeniePickResponse(BaseModel):
     upstream_asset_names: list[str]
     config: dict[str, Any]
     reason: str
+    action: str = "add"
 
 
 class GeniePlanResponse(BaseModel):
@@ -146,6 +147,7 @@ async def genie_plan(req: GeniePlanRequest) -> GeniePlanResponse:
                 upstream_asset_names=p.upstream_asset_names,
                 config=p.config,
                 reason=p.reason,
+                action=p.action,
             )
             for p in result.picks
         ],

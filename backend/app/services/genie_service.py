@@ -70,6 +70,12 @@ class GeniePick:
     upstream_asset_names: list[str]
     config: dict[str, Any]
     reason: str
+    # "add" (default) installs a new component instance, matching every
+    # pick before this field existed. "edit" merges `config` into an
+    # EXISTING instance's attributes (asset_name must match one in
+    # existing_assets). "remove" deletes an existing instance outright
+    # (config is ignored).
+    action: str = "add"
 
 
 @dataclass
@@ -419,17 +425,31 @@ def _catalog_lines(components: list[dict[str, Any]], description_max: int = 240)
 
 SYSTEM_PROMPT = (
     "You are a Dagster pipeline planner. Given a user task and a catalog of available "
-    "components, produce a JSON plan of assets to add to the graph. Chain them by "
-    "referencing upstream asset names.\n\n"
+    "components, produce a JSON plan of picks that add, edit, or remove assets in the "
+    "graph. Chain new assets by referencing upstream asset names.\n\n"
     "Output ONLY a JSON object with this shape:\n"
     '  {"picks": [\n'
-    '     {"component_type": "<EXACT id from catalog>", "asset_name": "<unique snake_case>", '
+    '     {"action": "add", "component_type": "<EXACT id from catalog>", "asset_name": "<unique snake_case>", '
     '"upstream_asset_names": ["<prior asset_name>", ...], '
     '"config": {"<field>": "<value>"}, '
     '"reason": "<why this step>"},\n'
     '     ...\n'
     '  ]}\n\n'
-    "RULES (strict):\n"
+    "EDITING OR REMOVING EXISTING ASSETS (critical): the task isn't always "
+    "additive. If the user asks to change, reconfigure, or fix something about "
+    "an EXISTING asset (one listed under Existing assets below), emit "
+    '{"action": "edit", "asset_name": "<the EXISTING asset\'s exact name>", '
+    '"config": {"<field>": "<new value>", ...}, "reason": "..."} — config here '
+    "holds ONLY the fields to change, merged into that asset's current "
+    "attributes (not a full replacement, and omit component_type/"
+    "upstream_asset_names entirely). If the user asks to delete, remove, get "
+    "rid of, or says they didn't want an existing asset, emit "
+    '{"action": "remove", "asset_name": "<the EXISTING asset\'s exact name>", '
+    '"reason": "..."} — no config, no component_type. asset_name for edit/'
+    "remove MUST exactly match a name from Existing assets — never invent one "
+    "or target something not in that list. Default action is \"add\" when "
+    "omitted, matching every rule below (which all describe add behavior).\n\n"
+    "RULES (strict, apply to \"add\" picks):\n"
     "- component_type MUST be an EXACT string that appears as `id=\"…\"` in the "
     "  catalog below. Do NOT shorten, singularize, or invent names. If none fits, "
     "  return {\"picks\": []}.\n"
@@ -931,6 +951,35 @@ async def plan(
         return f"{name}_v{n}"
 
     for i, p in enumerate(raw_picks):
+        action = p.get("action") or "add"
+        if action in ("edit", "remove"):
+            # Targets an EXISTING asset by name -- component_type isn't a
+            # catalog id here (skip catalog resolution entirely), and the
+            # name is SUPPOSED to collide with existing_names (skip
+            # dedup/rename, which exists for "add" picks proposing a new
+            # name that happens to clash).
+            target_name = (p.get("asset_name") or "").strip()
+            if not target_name:
+                notes.append(f"⚠︎ Pick #{i + 1} ({action}) is missing an asset name — skipped.")
+                continue
+            if target_name not in existing_names:
+                notes.append(
+                    f"⚠︎ Pick #{i + 1} ({action}) references unknown existing asset "
+                    f"'{target_name}' — skipped."
+                )
+                continue
+            picks.append(
+                GeniePick(
+                    component_type=p.get("component_type") or "",
+                    asset_name=target_name,
+                    upstream_asset_names=[],
+                    config=p.get("config") or {},
+                    reason=p.get("reason") or "",
+                    action=action,
+                )
+            )
+            continue
+
         component_type = p.get("component_type") or ""
         if component_type == "noop":
             notes.append(p.get("reason") or "planner could not build from catalog")

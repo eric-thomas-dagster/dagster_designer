@@ -1242,3 +1242,117 @@ async def install_component_via_cli(
         "component_type": component_type,
         "defs_yaml": str(final_defs_yaml_path.relative_to(project_dir)),
     }
+
+
+class UpdateComponentAttributesRequest(BaseModel):
+    project_id: str
+    attributes: dict
+
+
+@router.patch("/component-instance/{instance_id}/attributes")
+async def update_component_instance_attributes(instance_id: str, request: UpdateComponentAttributesRequest):
+    """Merge new attributes into an EXISTING component instance's
+    defs.yaml -- doesn't touch its type, doesn't re-run the install CLI,
+    just edits the instance in place. Filters against schema.json with
+    the same alias-mapping install_component_via_cli uses on create, so
+    an LLM-authored edit (Dagster AI's "edit" picks) doesn't land
+    near-miss field names that fail component validation.
+    """
+    project = project_service.get_project(request.project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    project_dir = project_service._get_project_dir(project)
+    if not project_dir.is_absolute():
+        project_dir = project_dir.resolve()
+
+    candidates = [
+        *project_dir.glob(f"src/*/defs/{instance_id}/defs.yaml"),
+        *project_dir.glob(f"*/defs/{instance_id}/defs.yaml"),
+    ]
+    defs_yaml_path = next(iter(candidates), None)
+    if defs_yaml_path is None:
+        raise HTTPException(status_code=404, detail=f"No component instance '{instance_id}' found under {project_dir}")
+
+    try:
+        parsed = yaml.safe_load(defs_yaml_path.read_text()) or {}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to parse {defs_yaml_path}: {e}")
+
+    component_type = parsed.get("type") or ""
+    # Derive the catalog component_id (for schema.json lookup) from the
+    # `type:` string's dotted path -- same convention used elsewhere in
+    # this codebase (e.g. backend/app/api/components.py's get_component):
+    # `<module>.components.<component_id>.<ClassName>`.
+    type_parts = component_type.split(".")
+    schema_component_id = None
+    if "components" in type_parts:
+        idx = type_parts.index("components")
+        if idx + 1 < len(type_parts):
+            schema_component_id = type_parts[idx + 1]
+
+    allowed_keys: Optional[set] = None
+    alias_map = {
+        'path': 'file_path',
+        'upstream_asset_keys': 'upstream_asset_key',
+        'upstream_asset_key': 'upstream_asset_keys',
+        'output_path': 'file_path',
+        'input_asset': 'upstream_asset_key',
+    }
+    if schema_component_id:
+        try:
+            schema_candidates = list(project_dir.glob(f"src/*/components/{schema_component_id}/schema.json")) + \
+                list(project_dir.glob(f"*/components/{schema_component_id}/schema.json"))
+            if schema_candidates:
+                import json as _json
+                schema = _json.loads(schema_candidates[0].read_text())
+                props = schema.get('properties') or schema.get('attributes') or {}
+                if isinstance(props, dict):
+                    allowed_keys = set(props.keys())
+        except Exception as e:
+            print(f"[Update Attributes] Warning: couldn't read schema.json for {schema_component_id}: {e}")
+
+    existing_attrs = parsed.get("attributes") or {}
+    if not isinstance(existing_attrs, dict):
+        existing_attrs = {}
+    merged = {**existing_attrs}
+    dropped: list[str] = []
+    for k, v in request.attributes.items():
+        if allowed_keys is None or k in allowed_keys:
+            merged[k] = v
+            continue
+        aliased = alias_map.get(k)
+        if aliased and aliased in allowed_keys:
+            merged[aliased] = v
+            continue
+        dropped.append(k)
+    if dropped:
+        print(f"[Update Attributes] Dropped unknown attributes for {instance_id}: {dropped} (schema keys: {sorted(allowed_keys or [])})")
+
+    parsed["attributes"] = merged
+    try:
+        defs_yaml_path.write_text(yaml.safe_dump(parsed, sort_keys=False))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to write {defs_yaml_path}: {e}")
+
+    # Keep the Project Components sidebar in sync -- install_component_via_cli
+    # registers a ComponentInstance entry on create; if one exists for this
+    # instance, its attributes are now stale unless updated too.
+    try:
+        from ..models.project import ProjectUpdate
+        existing_component = next((c for c in project.components if c.id == instance_id), None)
+        if existing_component is not None:
+            updated_components = [
+                c.model_copy(update={"attributes": merged}) if c.id == instance_id else c
+                for c in project.components
+            ]
+            project_service.update_project(request.project_id, ProjectUpdate(components=updated_components))
+    except Exception as e:
+        print(f"[Update Attributes] Warning: could not sync project.components for {instance_id}: {e}")
+
+    return {
+        "success": True,
+        "component_id": instance_id,
+        "component_type": component_type,
+        "attributes": merged,
+        "dropped": dropped,
+    }
