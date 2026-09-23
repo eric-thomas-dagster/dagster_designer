@@ -8252,6 +8252,14 @@ class GitCommitPushRequest(BaseModel):
     message: str
     token: str | None = None
     push: bool = True
+    # When true: commit on a NEW branch off the current one, push that
+    # branch, and open a PR against the branch you started on — instead
+    # of pushing straight to whatever's currently checked out. Also
+    # plays well with Dagster's own GitHub Actions CI template (which
+    # runs on PRs / branch deployments), unlike a direct push to main.
+    open_pr: bool = False
+    pr_title: str | None = None
+    branch_name: str | None = None
 
 
 class GitCommitPushResponse(BaseModel):
@@ -8259,14 +8267,31 @@ class GitCommitPushResponse(BaseModel):
     committed_sha: str | None = None
     pushed: bool = False
     detail: str | None = None
+    branch: str | None = None
+    pr_url: str | None = None
+
+
+def _owner_repo_from_remote_url(url: str) -> str | None:
+    """Extract `owner/repo` from a git remote URL — handles the plain
+    https form, one with an embedded token
+    (`https://TOKEN@github.com/owner/repo.git`), and the ssh form
+    (`git@github.com:owner/repo.git`)."""
+    import re
+    m = re.search(r'github\.com[:/]([^/]+)/([^/]+?)(?:\.git)?/?$', url)
+    if not m:
+        return None
+    return f"{m.group(1)}/{m.group(2)}"
 
 
 @router.post('/{project_id}/git/commit-push', response_model=GitCommitPushResponse)
 async def project_git_commit_push(project_id: str, request: GitCommitPushRequest):
     """Stage a chosen file list, commit with a message, optionally push
-    to the remote. Uses a token if provided by rewriting the origin
-    URL — the token itself isn't persisted. Works for both the project
-    root repo and any nested cloned dbt repo (via `subpath`)."""
+    to the remote — either straight to the current branch, or (with
+    `open_pr`) onto a fresh branch with a PR opened against wherever you
+    started. Uses a token if provided, else falls back to the same
+    stored PAT promotion/create-remote already use — the token itself
+    isn't persisted onto the repo's remote URL. Works for both the
+    project root repo and any nested cloned dbt repo (via `subpath`)."""
     from git import Repo, InvalidGitRepositoryError, GitCommandError
     project = project_service.get_project(project_id)
     if not project:
@@ -8278,25 +8303,69 @@ async def project_git_commit_push(project_id: str, request: GitCommitPushRequest
     except InvalidGitRepositoryError:
         raise HTTPException(status_code=400, detail=f"{target} is not a git repository")
 
+    token = request.token or promotion_config.get_github_token()
+
     try:
+        if not request.files:
+            raise HTTPException(status_code=400, detail="No files to commit")
+
+        base_branch: str | None = None
+        branch_name: str | None = None
+        if request.open_pr:
+            if not request.push:
+                raise HTTPException(status_code=400, detail="open_pr requires push=true")
+            if not token:
+                raise HTTPException(status_code=400, detail="No GitHub token configured. Add one in settings or paste one here.")
+            base_branch = repo.active_branch.name
+            import time as _time
+            branch_name = request.branch_name or f"designer/update-{_time.strftime('%Y%m%d-%H%M%S')}"
+            repo.git.checkout('-b', branch_name)
+
         # Stage everything the caller asked for. Files are paths
         # relative to the repo root; both existing and untracked land
         # in the index with `add`.
-        if not request.files:
-            raise HTTPException(status_code=400, detail="No files to commit")
         repo.index.add(request.files)
-        commit = repo.index.commit(request.message or 'Update dbt models')
+        commit = repo.index.commit(request.message or 'Update from Dagster Designer')
+
         pushed = False
+        pr_url: str | None = None
         if request.push and repo.remotes:
             origin = repo.remote(name='origin')
-            if request.token and 'github.com' in origin.url and f"{request.token}@" not in origin.url:
-                origin.set_url(origin.url.replace('https://', f'https://{request.token}@'))
-            origin.push()
+            if token and 'github.com' in origin.url and f"{token}@" not in origin.url:
+                origin.set_url(origin.url.replace('https://', f'https://{token}@'))
+            push_branch = branch_name or repo.active_branch.name
+            origin.push(refspec=f'{push_branch}:{push_branch}', set_upstream=True)
             pushed = True
+
+            if request.open_pr:
+                owner_repo = _owner_repo_from_remote_url(origin.url)
+                if not owner_repo:
+                    raise HTTPException(status_code=500, detail=f"Couldn't parse owner/repo from remote URL")
+                async with httpx.AsyncClient(timeout=30.0) as client:
+                    r = await client.post(
+                        f"https://api.github.com/repos/{owner_repo}/pulls",
+                        headers={
+                            "Authorization": f"Bearer {token}",
+                            "Accept": "application/vnd.github+json",
+                            "X-GitHub-Api-Version": "2022-11-28",
+                        },
+                        json={
+                            "title": request.pr_title or request.message or "Update from Dagster Designer",
+                            "body": f"{request.message}\n\n---\n_Opened from Dagster Designer._",
+                            "head": branch_name,
+                            "base": base_branch,
+                        },
+                    )
+                if r.status_code >= 300:
+                    raise HTTPException(status_code=502, detail=f"GitHub PR create failed ({r.status_code}): {r.text[:400]}")
+                pr_url = r.json().get("html_url")
+
         return GitCommitPushResponse(
             success=True,
             committed_sha=commit.hexsha[:12],
             pushed=pushed,
+            branch=branch_name or (repo.active_branch.name if pushed else None),
+            pr_url=pr_url,
         )
     except GitCommandError as e:
         raise HTTPException(status_code=500, detail=f"git failed: {e}")

@@ -36,6 +36,13 @@ export function GitCommitDialog({ open, onOpenChange, projectId, subpath, defaul
   const [message, setMessage] = useState(defaultMessage || '');
   const [token, setToken] = useState('');
   const [pushToRemote, setPushToRemote] = useState(true);
+  // 'direct' = push straight to whatever's checked out (usually main) —
+  // fine when you have write access and don't need review. 'pr' = branch
+  // off, push the branch, open a PR against the branch you started on.
+  // Also what plays nicely with Dagster's own GitHub Actions CI template,
+  // which runs on PRs (branch deployment checks etc.) — a direct push to
+  // main skips all of that.
+  const [pushMode, setPushMode] = useState<'direct' | 'pr'>('direct');
   const [selectedFiles, setSelectedFiles] = useState<Set<string>>(new Set());
   const [saving, setSaving] = useState(false);
   const [repoName, setRepoName] = useState('');
@@ -100,6 +107,7 @@ export function GitCommitDialog({ open, onOpenChange, projectId, subpath, defaul
 
   const handleCommit = async () => {
     if (!status?.is_git_repo || selectedFiles.size === 0 || !message.trim()) return;
+    const openPr = pushToRemote && pushMode === 'pr';
     setSaving(true);
     try {
       const r = await projectsApi.projectGitCommitPush(projectId, {
@@ -108,9 +116,13 @@ export function GitCommitDialog({ open, onOpenChange, projectId, subpath, defaul
         message,
         token: token.trim() || null,
         push: pushToRemote,
+        open_pr: openPr,
       });
-      if (r.pushed) {
-        notify.success(`Committed ${r.committed_sha} and pushed to origin.`);
+      if (r.pr_url) {
+        notify.success(`Committed ${r.committed_sha} and opened a PR from ${r.branch}.`);
+        window.open(r.pr_url, '_blank', 'noopener,noreferrer');
+      } else if (r.pushed) {
+        notify.success(`Committed ${r.committed_sha} and pushed to ${r.branch ?? 'origin'}.`);
       } else {
         notify.success(`Committed ${r.committed_sha} locally.`);
       }
@@ -242,7 +254,7 @@ export function GitCommitDialog({ open, onOpenChange, projectId, subpath, defaul
                   />
                 </div>
 
-                {/* Push toggle + token */}
+                {/* Push toggle + mode + token */}
                 <label className="flex items-center gap-2 cursor-pointer text-sm text-gray-700">
                   <input
                     type="checkbox"
@@ -254,20 +266,51 @@ export function GitCommitDialog({ open, onOpenChange, projectId, subpath, defaul
                 </label>
 
                 {pushToRemote && (
-                  <div>
-                    <label className="text-[10px] uppercase tracking-wider text-gray-500 mb-1 block">
-                      GitHub token (needed for private repos)
-                    </label>
-                    <input
-                      type="password"
-                      value={token}
-                      onChange={(e) => setToken(e.target.value)}
-                      placeholder="ghp_… — leave blank for public repos or configured SSH"
-                      className="w-full px-2 py-1.5 text-sm font-mono border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
-                    />
-                    <p className="text-[10px] text-gray-500 mt-0.5">
-                      Not persisted anywhere — used once for this push and dropped.
-                    </p>
+                  <div className="pl-6 space-y-2">
+                    <div className="flex flex-col gap-1.5">
+                      <label className="flex items-start gap-2 cursor-pointer text-sm text-gray-700">
+                        <input
+                          type="radio"
+                          checked={pushMode === 'direct'}
+                          onChange={() => setPushMode('direct')}
+                          className="w-4 h-4 mt-0.5"
+                        />
+                        <span>
+                          Push directly to <code className="bg-gray-100 px-1 rounded">{status.branch ?? 'the current branch'}</code>
+                          <span className="block text-xs text-gray-500">No review step — use when you have write access and this is safe to land as-is.</span>
+                        </span>
+                      </label>
+                      <label className="flex items-start gap-2 cursor-pointer text-sm text-gray-700">
+                        <input
+                          type="radio"
+                          checked={pushMode === 'pr'}
+                          onChange={() => setPushMode('pr')}
+                          className="w-4 h-4 mt-0.5"
+                        />
+                        <span>
+                          Open a pull request
+                          <span className="block text-xs text-gray-500">
+                            Branches off {status.branch ?? 'the current branch'}, pushes there, and opens a PR — runs any
+                            GitHub Actions CI the repo has configured before it lands.
+                          </span>
+                        </span>
+                      </label>
+                    </div>
+                    <div>
+                      <label className="text-[10px] uppercase tracking-wider text-gray-500 mb-1 block">
+                        GitHub token (needed for private repos{pushMode === 'pr' ? ' and opening the PR' : ''})
+                      </label>
+                      <input
+                        type="password"
+                        value={token}
+                        onChange={(e) => setToken(e.target.value)}
+                        placeholder="ghp_… — leave blank to use the configured token"
+                        className="w-full px-2 py-1.5 text-sm font-mono border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      />
+                      <p className="text-[10px] text-gray-500 mt-0.5">
+                        Not persisted anywhere — used once for this push and dropped.
+                      </p>
+                    </div>
                   </div>
                 )}
               </>
@@ -284,7 +327,11 @@ export function GitCommitDialog({ open, onOpenChange, projectId, subpath, defaul
               className="px-4 py-1.5 text-sm font-medium bg-primary text-primary-foreground rounded hover:bg-accent disabled:opacity-50 disabled:cursor-not-allowed inline-flex items-center gap-1.5"
             >
               {saving ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <GitCommit className="w-3.5 h-3.5" />}
-              {saving ? 'Committing…' : pushToRemote ? 'Commit & push' : 'Commit'}
+              {saving
+                ? (pushMode === 'pr' && pushToRemote ? 'Opening PR…' : 'Committing…')
+                : pushToRemote
+                  ? (pushMode === 'pr' ? 'Commit & open PR' : 'Commit & push')
+                  : 'Commit'}
             </button>
           </div>
         </Dialog.Content>

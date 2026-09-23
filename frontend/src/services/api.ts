@@ -960,8 +960,21 @@ export const projectsApi = {
       message: string;
       token?: string | null;
       push?: boolean;
+      /** Branch off the current branch, push that, and open a PR against
+       *  where you started — instead of pushing straight to the current
+       *  branch. Requires push=true and a GitHub token. */
+      open_pr?: boolean;
+      pr_title?: string | null;
+      branch_name?: string | null;
     },
-  ): Promise<{ success: boolean; committed_sha: string | null; pushed: boolean; detail?: string | null }> => {
+  ): Promise<{
+    success: boolean;
+    committed_sha: string | null;
+    pushed: boolean;
+    detail?: string | null;
+    branch?: string | null;
+    pr_url?: string | null;
+  }> => {
     const response = await api.post(`/projects/${projectId}/git/commit-push`, body);
     return response.data as any;
   },
