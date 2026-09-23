@@ -781,76 +781,74 @@ export function PropertyPanel({ nodeId, onConfigureComponent, onOpenFile, onNewP
                   </DropdownMenu.Portal>
                 </DropdownMenu.Root>
               )}
-              <div className="relative">
-                <button
-                  onClick={() => setShowMaterializeMenu(!showMaterializeMenu)}
-                  disabled={isMaterializing || !!(currentProject as any)?.is_dagster_plus}
-                  title={(currentProject as any)?.is_dagster_plus ? "Not available on Dagster+ (read-only)" : undefined}
-                  className="flex items-center space-x-1 px-3 py-1.5 text-sm bg-emerald-600 text-white rounded-md hover:bg-emerald-700 disabled:bg-gray-400 disabled:cursor-not-allowed"
-                >
-                  <Play className="w-4 h-4" />
-                  <span>{isMaterializing ? 'Materializing...' : 'Materialize'}</span>
-                  <ChevronDown className="w-3 h-3" />
-                </button>
-                {showMaterializeMenu && (
-                  <>
-                    <div
-                      className="fixed inset-0 z-10"
-                      onClick={() => setShowMaterializeMenu(false)}
-                    />
-                    <div className="absolute right-0 mt-1 w-48 bg-white border border-gray-200 rounded-md shadow-lg z-20">
-                      {!isPartitioned && (
-                        <button
-                          onClick={() => {
-                            handleMaterialize();
-                            setShowMaterializeMenu(false);
-                          }}
-                          className="w-full flex items-center gap-2 px-4 py-2 text-sm text-gray-700 hover:bg-gray-50 text-left"
-                        >
-                          <Play className="w-4 h-4" />
-                          Materialize
-                        </button>
-                      )}
-                      <button
-                        onClick={handleOpenLaunchpad}
-                        className="w-full flex items-center gap-2 px-4 py-2 text-sm text-gray-700 hover:bg-gray-50 text-left"
+              <DropdownMenu.Root open={showMaterializeMenu} onOpenChange={setShowMaterializeMenu}>
+                <DropdownMenu.Trigger asChild>
+                  <button
+                    disabled={isMaterializing || !!(currentProject as any)?.is_dagster_plus}
+                    title={(currentProject as any)?.is_dagster_plus ? "Not available on Dagster+ (read-only)" : undefined}
+                    className="flex items-center space-x-1 px-3 py-1.5 text-sm bg-emerald-600 text-white rounded-md hover:bg-emerald-700 disabled:bg-gray-400 disabled:cursor-not-allowed"
+                  >
+                    <Play className="w-4 h-4" />
+                    <span>{isMaterializing ? 'Materializing...' : 'Materialize'}</span>
+                    <ChevronDown className="w-3 h-3" />
+                  </button>
+                </DropdownMenu.Trigger>
+                <DropdownMenu.Portal>
+                  {/* Was a hand-rolled `absolute right-0` div with no
+                      viewport-collision handling — reported rendering
+                      off-screen when this panel's Materialize button sits
+                      near a window edge. Radix's DropdownMenu.Content
+                      auto-flips/shifts to stay in view (same mechanism
+                      already used for the "+ Add" dropdown above), so
+                      switching to it fixes this for free instead of
+                      hand-rolling collision detection. */}
+                  <DropdownMenu.Content
+                    className="min-w-[192px] bg-white border border-gray-200 rounded-md shadow-lg z-20 p-1"
+                    sideOffset={4}
+                    align="end"
+                  >
+                    {!isPartitioned && (
+                      <DropdownMenu.Item
+                        onSelect={handleMaterialize}
+                        className="flex items-center gap-2 px-3 py-2 text-sm text-gray-700 rounded hover:bg-gray-100 cursor-pointer outline-none"
                       >
-                        <FileCode className="w-4 h-4" />
-                        Open Launchpad
-                      </button>
-                      {isPartitioned && (
-                        <button
-                          onClick={handleOpenBackfill}
-                          className="w-full flex items-center gap-2 px-4 py-2 text-sm text-gray-700 hover:bg-gray-50 text-left"
-                        >
-                          <Calendar className="w-4 h-4" />
-                          Launch Backfill
-                        </button>
-                      )}
-                      <button
-                        onClick={() => {
-                          setShowDataPreview(true);
-                          setShowMaterializeMenu(false);
-                        }}
-                        className="w-full flex items-center gap-2 px-4 py-2 text-sm text-gray-700 hover:bg-gray-50 text-left"
+                        <Play className="w-4 h-4" />
+                        Materialize
+                      </DropdownMenu.Item>
+                    )}
+                    <DropdownMenu.Item
+                      onSelect={handleOpenLaunchpad}
+                      className="flex items-center gap-2 px-3 py-2 text-sm text-gray-700 rounded hover:bg-gray-100 cursor-pointer outline-none"
+                    >
+                      <FileCode className="w-4 h-4" />
+                      Open Launchpad
+                    </DropdownMenu.Item>
+                    {isPartitioned && (
+                      <DropdownMenu.Item
+                        onSelect={handleOpenBackfill}
+                        className="flex items-center gap-2 px-3 py-2 text-sm text-gray-700 rounded hover:bg-gray-100 cursor-pointer outline-none"
                       >
-                        <Table className="w-4 h-4" />
-                        View Data
-                      </button>
-                      <button
-                        onClick={() => {
-                          setShowColumnLineage(true);
-                          setShowMaterializeMenu(false);
-                        }}
-                        className="w-full flex items-center gap-2 px-4 py-2 text-sm text-gray-700 hover:bg-gray-50 text-left"
-                      >
-                        <Radar className="w-4 h-4" />
-                        Column lineage
-                      </button>
-                    </div>
-                  </>
-                )}
-              </div>
+                        <Calendar className="w-4 h-4" />
+                        Launch Backfill
+                      </DropdownMenu.Item>
+                    )}
+                    <DropdownMenu.Item
+                      onSelect={() => setShowDataPreview(true)}
+                      className="flex items-center gap-2 px-3 py-2 text-sm text-gray-700 rounded hover:bg-gray-100 cursor-pointer outline-none"
+                    >
+                      <Table className="w-4 h-4" />
+                      View Data
+                    </DropdownMenu.Item>
+                    <DropdownMenu.Item
+                      onSelect={() => setShowColumnLineage(true)}
+                      className="flex items-center gap-2 px-3 py-2 text-sm text-gray-700 rounded hover:bg-gray-100 cursor-pointer outline-none"
+                    >
+                      <Radar className="w-4 h-4" />
+                      Column lineage
+                    </DropdownMenu.Item>
+                  </DropdownMenu.Content>
+                </DropdownMenu.Portal>
+              </DropdownMenu.Root>
               <button
                 onClick={handleSaveMetadata}
                 disabled={isSaving}

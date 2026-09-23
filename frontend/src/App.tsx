@@ -22,6 +22,7 @@ import { RunsPanel } from './components/RunsPanel';
 import { DataPreviewModal } from './components/DataPreviewModal';
 import { DagsterCloudChip } from './components/DagsterCloudChip';
 import { SandboxStatusPill } from './components/SandboxStatusPill';
+import { GitCommitDialog } from './components/GitCommitDialog';
 import { AddComponentModal, type ConfigureAuthoringPayload } from './components/AddComponentModal';
 import { DraftsPanel } from './components/DraftsPanel';
 import { useDrafts } from './hooks/useDrafts';
@@ -296,6 +297,12 @@ function App() {
   const [addComponentOpen, setAddComponentOpen] = useState(false);
   const [addComponentProducesFilter, setAddComponentProducesFilter] = useState<any[] | undefined>(undefined);
   const [draftsPanelOpen, setDraftsPanelOpen] = useState(false);
+  // Header-level "Deploy"/"Push to GitHub" — reported as hidden when
+  // buried in ProjectManager's "..." Actions menu (local projects) and
+  // inside the Sandbox pill's popover (Dagster+ serverless publish).
+  // Surfaced as its own always-visible header control instead.
+  const [headerGitCommitOpen, setHeaderGitCommitOpen] = useState(false);
+  const [publishingServerless, setPublishingServerless] = useState(false);
   // Set when the user clicks "Continue" in the picker — triggers
   // ComponentConfigModal to open in draft mode with the picked schema
   // and target. Reused across sandbox + cloud-loc paths.
@@ -1028,6 +1035,13 @@ function App() {
                   <>
                     <span className="text-xs text-gray-400 ml-2">·</span>
                     <DagsterCloudChip projectId={currentProject.id} />
+                    <button
+                      onClick={() => setHeaderGitCommitOpen(true)}
+                      className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium border border-gray-200 bg-white text-gray-700 hover:bg-gray-50"
+                      title="Commit and push this project to GitHub"
+                    >
+                      Push to GitHub
+                    </button>
                   </>
                 )}
                 {!!(currentProject as any)?.is_dagster_plus && (
@@ -1079,6 +1093,57 @@ function App() {
                         </span>
                       )}
                     </button>
+                    <DropdownMenu.Root>
+                      <DropdownMenu.Trigger asChild>
+                        <button
+                          className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium border border-gray-200 bg-white text-gray-700 hover:bg-gray-50"
+                          title="Land a sandbox component somewhere real"
+                        >
+                          Publish
+                          <ChevronDown className="w-3 h-3 opacity-70" />
+                        </button>
+                      </DropdownMenu.Trigger>
+                      <DropdownMenu.Portal>
+                        <DropdownMenu.Content
+                          className="min-w-[260px] bg-white rounded-md shadow-lg border border-gray-200 p-1 z-50"
+                          sideOffset={5}
+                          align="start"
+                        >
+                          <DropdownMenu.Item
+                            onSelect={() => setDraftsPanelOpen(true)}
+                            className="flex flex-col items-start gap-0.5 px-2.5 py-1.5 text-sm text-gray-700 rounded hover:bg-gray-100 cursor-pointer outline-none"
+                          >
+                            <span className="font-medium">Promote to PR</span>
+                            <span className="text-[11px] text-gray-500">Review drafts, open a pull request against your repo — the recommended path.</span>
+                          </DropdownMenu.Item>
+                          <DropdownMenu.Separator className="h-px bg-gray-200 my-1" />
+                          <DropdownMenu.Item
+                            disabled={publishingServerless}
+                            onSelect={async () => {
+                              const ok = await confirmDialog(
+                                'Pushes the sandbox straight to a Serverless deployment — no commit, no PR, no review. Anyone else on this deployment will see it immediately.',
+                                { title: 'Publish directly to Serverless?', destructive: true },
+                              );
+                              if (!ok) return;
+                              setPublishingServerless(true);
+                              try {
+                                const { designerLocApi } = await import('./services/api');
+                                const r = await designerLocApi.publishServerless(currentProject.id);
+                                notify.success(`Published to Serverless location "${r.location_name}" on ${r.deployment}.`);
+                              } catch (e: any) {
+                                notify.error(`Publish failed: ${e?.response?.data?.detail || e?.message || String(e)}`);
+                              } finally {
+                                setPublishingServerless(false);
+                              }
+                            }}
+                            className="flex flex-col items-start gap-0.5 px-2.5 py-1.5 text-sm text-amber-800 rounded hover:bg-amber-50 cursor-pointer outline-none data-[disabled]:opacity-50 data-[disabled]:cursor-not-allowed"
+                          >
+                            <span className="font-medium">{publishingServerless ? 'Publishing…' : 'Publish sandbox directly to Serverless'}</span>
+                            <span className="text-[11px] text-amber-700">Skips git entirely — no review, no history. For a demo you'll throw away.</span>
+                          </DropdownMenu.Item>
+                        </DropdownMenu.Content>
+                      </DropdownMenu.Portal>
+                    </DropdownMenu.Root>
                   </>
                 )}
               </>
@@ -1804,6 +1869,20 @@ function App() {
           assetName={dataPreviewAssetName}
           existingComponentAttributes={dataPreviewComponentAttributes}
           existingComponentId={dataPreviewComponentId}
+        />
+      )}
+
+      {/* Header-level "Push to GitHub" for local projects — reported as
+          hidden when it only lived inside ProjectManager's "..." Actions
+          menu. This is a second trigger for the same dialog, not a
+          replacement; that one still works too. */}
+      {currentProject && !(currentProject as any)?.is_dagster_plus && (
+        <GitCommitDialog
+          open={headerGitCommitOpen}
+          onOpenChange={setHeaderGitCommitOpen}
+          projectId={currentProject.id}
+          defaultMessage="Update from Dagster Designer"
+          defaultRepoName={currentProject.name}
         />
       )}
 

@@ -1,9 +1,10 @@
 import { useEffect, useState } from 'react';
-import { X, KeyRound, ExternalLink, CheckCircle2, FolderCog } from 'lucide-react';
-import { aiApi, projectsApi, type AiProvidersStatus } from '@/services/api';
+import { X, KeyRound, ExternalLink, CheckCircle2, FolderCog, Github } from 'lucide-react';
+import { aiApi, projectsApi, promotionApi, type AiProvidersStatus } from '@/services/api';
 import { notify, confirmDialog } from './Notifications';
 import { isTauri, getProjectsDir, setProjectsDir, pickDirectory } from '@/services/tauri';
 import { useProjectStore } from '@/hooks/useProject';
+import { PromotionSettingsModal } from './PromotionSettingsModal';
 
 // Lightweight module-level pub-sub, same pattern as Notifications.tsx's
 // toast/confirm queues -- avoids threading "is settings open" state through
@@ -139,6 +140,8 @@ function SettingsDialog({ onClose }: { onClose: () => void }) {
         </div>
 
         {isTauri && <ProjectsFolderSection />}
+
+        <GitHubSection />
 
         <div className="flex justify-end gap-2 mt-6">
           <button
@@ -309,6 +312,58 @@ function ProjectsFolderSection() {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+/** GitHub token + repo mappings live in their own established modal
+ *  (PromotionSettingsModal, reachable from the Drafts drawer) — this
+ *  isn't a duplicate of that form, just a discoverable summary + link
+ *  into it, so "where do I configure GitHub" has an answer from the one
+ *  place people already look for settings, without risking the
+ *  existing (larger, working) form by merging it in wholesale. */
+function GitHubSection() {
+  const [tokenPresent, setTokenPresent] = useState<boolean | null>(null);
+  const [mappingCount, setMappingCount] = useState(0);
+  const [modalOpen, setModalOpen] = useState(false);
+
+  const refresh = () => {
+    promotionApi.getConfig()
+      .then((c: any) => {
+        setTokenPresent(!!c.github_token_present);
+        setMappingCount((c.mappings || []).length);
+      })
+      .catch(() => { setTokenPresent(null); setMappingCount(0); });
+  };
+  useEffect(refresh, []);
+  useEffect(() => { if (!modalOpen) refresh(); }, [modalOpen]);
+
+  return (
+    <div className="mt-6 pt-4 border-t border-gray-200">
+      <div className="flex items-center gap-2 mb-1">
+        <Github className="w-4 h-4 text-primary" />
+        <h3 className="text-sm font-semibold text-gray-900">GitHub</h3>
+      </div>
+      <p className="text-xs text-gray-500 mb-2">
+        Token and repo mappings used for pushing local projects and promoting Dagster+ drafts to a PR.
+      </p>
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-xs text-gray-600">
+          {tokenPresent === null ? 'Loading…' : tokenPresent ? (
+            <span className="inline-flex items-center gap-1 text-emerald-700"><CheckCircle2 className="w-3.5 h-3.5" /> Token configured</span>
+          ) : (
+            <span className="text-amber-700">No token configured yet</span>
+          )}
+          {' · '}{mappingCount} repo mapping{mappingCount === 1 ? '' : 's'}
+        </span>
+        <button
+          onClick={() => setModalOpen(true)}
+          className="px-3 py-1.5 text-sm text-gray-700 border border-gray-300 rounded-md hover:bg-gray-100"
+        >
+          Configure…
+        </button>
+      </div>
+      <PromotionSettingsModal open={modalOpen} onOpenChange={setModalOpen} />
     </div>
   );
 }
