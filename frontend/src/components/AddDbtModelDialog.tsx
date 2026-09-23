@@ -164,7 +164,10 @@ export function AddDbtModelDialog({ open, onOpenChange, projectId, onCreated }: 
                   <p className="text-[11px] text-amber-700 mt-1">
                     No <code className="bg-gray-100 px-1 rounded">dbt_project.yml</code> found in this project.
                     <br />
-                    If you know you have a dbt project here, try restarting the backend so the new dbt endpoints load.
+                    This writes a file straight into a dbt project's local <code className="bg-gray-100 px-1 rounded">models/</code> folder,
+                    so it only works when one is physically present here (e.g. cloned in at project creation, like the Jaffle Shop
+                    starter). If your dbt models live in a remote git repo Designer hasn't cloned — common for a Dagster+ Cloud
+                    project — there's nothing local for this to write to.
                   </p>
                 )}
               </div>

@@ -385,6 +385,59 @@ def _try_dbt_show_preview(asset_key: str, row_limit: int = 100):
     }
 
 
+def _try_metadata_table_preview(result, row_limit: int = 100):
+    """Pull a table straight out of a MaterializeResult/Output/
+    ObserveResult's own metadata, if the asset attached one via
+    `MetadataValue.table(...)` (records + schema) or a
+    `MetadataValue.json(...)` holding a list of row dicts. This is the
+    answer to "how do I get a preview if my asset only returns a
+    MaterializeResult, not a DataFrame" — attach the table you already
+    have as metadata and preview reads it directly, no warehouse guessing
+    needed. Returns a preview dict, or None if nothing table-shaped is
+    present (caller falls through to the warehouse-read fallbacks).
+    Never raises -- an unexpected shape or dagster-version mismatch just
+    means "nothing usable here", not a crash.
+    """
+    try:
+        metadata = getattr(result, 'metadata', None) or {}
+        if not isinstance(metadata, dict):
+            return None
+        for label, value in metadata.items():
+            inner = getattr(value, 'value', None)
+            records: list[dict] | None = None
+            columns: list[str] | None = None
+
+            # dagster.TableMetadataValue: .value.records (list of
+            # TableRecord, each with a .data dict) + .value.schema.columns
+            table_records = getattr(inner, 'records', None)
+            if table_records:
+                records = [r.data for r in table_records if hasattr(r, 'data')]
+                schema = getattr(inner, 'schema', None)
+                if schema is not None:
+                    columns = [c.name for c in (getattr(schema, 'columns', None) or [])]
+            # dagster.JsonMetadataValue holding a plain list of row dicts.
+            elif isinstance(inner, list) and inner and isinstance(inner[0], dict):
+                records = inner
+
+            if records:
+                columns = columns or list(records[0].keys())
+                limited = records[:row_limit]
+                return {
+                    "success": True,
+                    "data": limited,
+                    "columns": columns,
+                    "dtypes": {c: '' for c in columns},
+                    "row_count": len(records),
+                    "column_count": len(columns),
+                    "shape": [len(records), len(columns)],
+                    "sample_limit": row_limit if len(limited) < len(records) else None,
+                    "source": f"metadata:{label}",
+                }
+    except Exception:
+        pass
+    return None
+
+
 def create_mock_context():
     """Create a mock context for asset execution."""
     class SimpleMockRun:
@@ -852,6 +905,29 @@ def main():
                 else:
                     raise
 
+            # An asset that reports what it did instead of returning data
+            # directly -- MaterializeResult, Output, ObserveResult -- is
+            # NOT the same as a real DataFrame, but it's also not the same
+            # as returning nothing: unlike a bare `None`, duck-typing the
+            # class name here (no direct `dagster` import — this script
+            # avoids a hard dependency on it so it isn't pinned to
+            # whichever dagster version happens to be running) lets us
+            # reuse the exact same "go find the materialized data"
+            # fallback chain the None branch already has, AND first try
+            # pulling a table straight out of the result's own metadata —
+            # the idiomatic way to answer "how do I get a preview if my
+            # asset only returns a MaterializeResult": attach
+            # `MetadataValue.table(...)` (or `.md(...)` markdown, or a
+            # `TableSchema` + a `dagster/row_count`) to it, and preview can
+            # read that directly instead of guessing at a warehouse table.
+            result_envelope = type(result).__name__ in ('MaterializeResult', 'Output', 'ObserveResult', 'AssetMaterialization')
+            if result_envelope:
+                table_from_metadata = _try_metadata_table_preview(result, sample_limit)
+                if table_from_metadata is not None:
+                    print(json.dumps(table_from_metadata, default=str))
+                    sys.exit(0)
+                result = None  # fall through to the None branch's fallback chain below
+
             # Convert result to JSON-serializable format
             if result is not None:
                 import pandas as pd
@@ -912,10 +988,18 @@ def main():
                 print(json.dumps({
                     "success": False,
                     "error": (
-                        "Asset returned None. This asset writes to a warehouse "
-                        "or sink instead of returning a DataFrame — click Run "
-                        "to here first, then re-open the preview so we can "
-                        "read the materialized result."
+                        (
+                            "Asset returned no data to preview directly, and its "
+                            "MaterializeResult metadata didn't have a table we could "
+                            "read (attach one with MetadataValue.table(...) or "
+                            ".json([...]) to preview without a warehouse round trip). "
+                        ) if result_envelope else (
+                            "Asset returned None. "
+                        )
+                    ) + (
+                        "This asset writes to a warehouse or sink instead of "
+                        "returning a DataFrame — click Run to here first, then "
+                        "re-open the preview so we can read the materialized result."
                     ),
                 }))
         else:
