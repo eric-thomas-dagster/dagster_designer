@@ -4,6 +4,7 @@ Runs in the project's Python environment to access custom components.
 """
 import sys
 import json
+import time
 import traceback
 import warnings
 from pathlib import Path
@@ -188,9 +189,29 @@ def _try_duckdb_preview(asset_key: str, row_limit: int = 100):
         return None
 
     for db_path in duckdb_paths:
-        try:
-            con = duckdb.connect(str(db_path), read_only=True)
-        except Exception:
+        # A read-only connect right after `dg launch` finishes can lose a
+        # race against whatever process just wrote the data (a lingering
+        # dbt-duckdb adapter connection, or this project's own `dg dev`
+        # holding the file open) -- DuckDB raises ConnectionException
+        # ("Can't open a connection to same database file with a
+        # different configuration than existing connections") rather than
+        # blocking/waiting. That's exactly the "Run to here" -> immediate
+        # auto-preview sequence, confirmed by reproducing it directly:
+        # opening a write connection elsewhere makes a concurrent
+        # read-only connect fail outright, not stall. Short retry/backoff
+        # covers the transient case instead of surfacing "couldn't find
+        # materialized data" for data that's actually sitting right there.
+        con = None
+        connect_error: Exception | None = None
+        for attempt in range(5):
+            try:
+                con = duckdb.connect(str(db_path), read_only=True)
+                connect_error = None
+                break
+            except Exception as e:
+                connect_error = e
+                time.sleep(0.4 * (attempt + 1))
+        if con is None:
             continue
         try:
             # Discover the schema list once so we can hit the right one.
@@ -620,10 +641,31 @@ def main():
             # produced the misleading "dbt show couldn't preview
             # 'mir_intake': unknown error" any time an agentic_pipeline
             # (or any non-dbt multi_asset) happened to share a project
-            # directory with a leftover dbt_project.yml. The AssetsDef's
-            # module path is the reliable signal: dbt assets always come
-            # from `dagster_dbt.*`, everything else doesn't.
-            is_dbt_asset = 'dbt' in type(asset_def).__module__.lower()
+            # directory with a leftover dbt_project.yml.
+            #
+            # type(asset_def).__module__ is NOT a usable signal here (this
+            # used to check `'dbt' in type(asset_def).__module__.lower()`):
+            # `@dbt_assets` is a decorator FACTORY that returns a plain
+            # `dagster.AssetsDefinition` like any other multi_asset does —
+            # its class always lives in dagster's own core module
+            # regardless of which decorator built it, so that check was
+            # false for every real dbt asset (confirmed live: a materialized
+            # jaffle-shop seed reported
+            # `dagster._core.definitions.assets.definition.assets_definition`,
+            # same as a non-dbt multi_asset would). `dagster_dbt` DOES
+            # reliably tag every spec it emits with `dagster/kind/dbt` and
+            # a family of `dagster_dbt/*`-prefixed metadata keys
+            # (dagster_dbt/manifest, dagster_dbt/unique_id, ...) — check the
+            # specific spec for the key we're previewing instead of the
+            # AssetsDefinition's own class.
+            target_spec = next(
+                (s for s in getattr(asset_def, 'specs', []) if s.key == found_asset),
+                None,
+            )
+            is_dbt_asset = bool(target_spec) and (
+                'dagster/kind/dbt' in (target_spec.tags or {})
+                or any(k.startswith('dagster_dbt/') for k in (target_spec.metadata or {}))
+            )
             if is_dbt_asset:
                 # 1) DuckDB fast path — <100ms if the model has been
                 #    materialized into a `.duckdb` file that lives next

@@ -5,6 +5,7 @@ apply the ResourceTypePrefixTranslator, which resolves duplicate asset key
 conflicts that occur when dbt models and sources share the same name.
 """
 
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -74,10 +75,21 @@ class DbtProjectWithTranslatorComponent(dg.Component, dg.Model, dg.Resolvable):
                 dbt_resource = getattr(context.resources, resource_key)
                 yield from dbt_resource.cli(["build"], context=context).stream()
 
+            # DbtCliResource defaults dbt_executable to the bare string "dbt",
+            # resolved via $PATH -- that fails here because $PATH in whatever
+            # process loads this component (Designer's backend, `dg dev`, a
+            # bare `dg list defs`) doesn't necessarily include this project's
+            # own .venv/bin. dbt IS installed there (it's a project
+            # dependency), just not found by name alone. Resolve it the same
+            # way sys.executable already tells us where THIS project's venv
+            # lives: dbt sits right next to the python running this code.
+            dbt_bin = Path(sys.executable).parent / "dbt"
+            dbt_executable = str(dbt_bin) if dbt_bin.exists() else "dbt"
+
             return Definitions(
                 assets=[dbt_project_assets],
                 resources={
-                    resource_key: DbtCliResource(project_dir=dbt_project)
+                    resource_key: DbtCliResource(project_dir=dbt_project, dbt_executable=dbt_executable)
                 }
             )
 
