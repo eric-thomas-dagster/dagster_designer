@@ -2867,20 +2867,26 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
               </button>
             ))}
           </div>
-          {inGraph && (
-            <label
-              className="inline-flex items-center gap-1 text-[11px] text-gray-700 cursor-pointer whitespace-nowrap"
-              title="By default the lineage graph hides external assets that nothing in this project consumes (usually warehouse-catalog scrapes and orphaned observability nodes). Check to show them too."
-            >
-              <input
-                type="checkbox"
-                checked={showAllInGraph}
-                onChange={(e) => setShowAllInGraph(e.target.checked)}
-                className="w-3 h-3"
-              />
-              <span>Include orphaned externals</span>
-            </label>
-          )}
+          {/* Rendered (not conditionally mounted) even in Catalog view, just
+              hidden via `invisible` — this + the other `inGraph`-gated
+              controls below used to mount/unmount between views, which
+              changed how many controls fit per row and made the whole
+              ribbon jump height/position when switching Graph <-> Catalog.
+              Reserving the same layout space in both views keeps the
+              ribbon's shape stable regardless of which view is active. */}
+          <label
+            className={`inline-flex items-center gap-1 text-[11px] text-gray-700 cursor-pointer whitespace-nowrap ${inGraph ? '' : 'invisible pointer-events-none'}`}
+            title="By default the lineage graph hides external assets that nothing in this project consumes (usually warehouse-catalog scrapes and orphaned observability nodes). Check to show them too."
+          >
+            <input
+              type="checkbox"
+              checked={showAllInGraph}
+              onChange={(e) => setShowAllInGraph(e.target.checked)}
+              className="w-3 h-3"
+              tabIndex={inGraph ? 0 : -1}
+            />
+            <span>Include orphaned externals</span>
+          </label>
           {/* Clears whichever of the filters above (search/group/kind/this
               checkbox) is active -- kept last so it always reads as "clear
               everything before me" rather than popping up in the middle of
@@ -2914,18 +2920,19 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
               </button>
             </>
           )}
-          {/* Add data button - only in Graph view (Catalog is read-only). */}
-          {inGraph && (
-            <button
-              onClick={() => setAddDataOpen(true)}
-              disabled={readOnlyMode}
-              className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium bg-primary text-primary-foreground rounded-md hover:bg-accent disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-primary"
-              title={readOnlyMode ? 'Not available on Dagster+ (read-only)' : 'Connect a database, warehouse, SaaS app, file, or API'}
-            >
-              <Plus className="w-4 h-4" />
-              <span>Add data</span>
-            </button>
-          )}
+          {/* Add data button - only meaningful in Graph view (Catalog is
+              read-only) — reserved-space pattern, see the comment on the
+              "Include orphaned externals" checkbox above. */}
+          <button
+            onClick={() => setAddDataOpen(true)}
+            disabled={readOnlyMode}
+            tabIndex={inGraph ? 0 : -1}
+            className={`flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium bg-primary text-primary-foreground rounded-md hover:bg-accent disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-primary ${inGraph ? '' : 'invisible pointer-events-none'}`}
+            title={readOnlyMode ? 'Not available on Dagster+ (read-only)' : 'Connect a database, warehouse, SaaS app, file, or API'}
+          >
+            <Plus className="w-4 h-4" />
+            <span>Add data</span>
+          </button>
           {/* Prod / Preview toggle — cloud projects only, and only
               once at least one draft exists (otherwise the button has
               nothing to preview). Flips the visual state of every
@@ -2947,8 +2954,14 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
               {previewMode ? 'Preview: drafts promoted' : 'Preview drafts'}
             </button>
           )}
-          {inGraph && (
-            <>
+          {/* Same reserved-space pattern as the controls above — always
+              mounted, hidden via `invisible` in Catalog view so the
+              ribbon's shape doesn't change between views. The nested
+              collapseToGroups/allGroups.length conditional below is
+              unrelated to that (it already caused some width variance
+              within Graph view itself before this change, and still can
+              — only the Graph/Catalog jump is what this fixes). */}
+          <div className={`inline-flex items-center gap-1 ${inGraph ? '' : 'invisible pointer-events-none'}`}>
               <button
                 onClick={() => {
                   setCollapseToGroups(!collapseToGroups);
@@ -2957,6 +2970,7 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
                   // stale expansions the user forgot about.
                   setExpandedGroups(new Set());
                 }}
+                tabIndex={inGraph ? 0 : -1}
                 className={`inline-flex items-center justify-center w-8 h-8 rounded ${
                   collapseToGroups ? 'bg-indigo-100 text-indigo-700 hover:bg-indigo-200' : 'text-gray-700 hover:bg-gray-100'
                 }`}
@@ -2967,6 +2981,7 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
               </button>
               <button
                 onClick={arrangeGroups}
+                tabIndex={inGraph ? 0 : -1}
                 className="inline-flex items-center justify-center w-8 h-8 text-gray-700 hover:bg-gray-100 rounded"
                 title="Arrange groups in a grid to prevent overlaps (preserves positions within groups)"
                 aria-label="Arrange groups"
@@ -2980,6 +2995,7 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
                   <button
                     onClick={() => setExpandedGroups(new Set(allGroups))}
                     disabled={expandedGroups.size === allGroups.length}
+                    tabIndex={inGraph ? 0 : -1}
                     className="px-2 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-100 rounded disabled:opacity-40 disabled:hover:bg-transparent whitespace-nowrap"
                     title="Expand every group at once"
                   >
@@ -2988,6 +3004,7 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
                   <button
                     onClick={() => setExpandedGroups(new Set())}
                     disabled={expandedGroups.size === 0}
+                    tabIndex={inGraph ? 0 : -1}
                     className="px-2 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-100 rounded disabled:opacity-40 disabled:hover:bg-transparent whitespace-nowrap"
                     title="Collapse every group at once"
                   >
@@ -2995,8 +3012,7 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
                   </button>
                 </>
               )}
-            </>
-          )}
+          </div>
         </div>
       </div>
         );
