@@ -9,6 +9,7 @@ from fastapi import APIRouter, HTTPException
 from typing import Dict, Tuple, Any, List
 
 from app.services.primitives_service import PrimitivesService, PrimitiveCategory
+from app.core.uv_binary import venv_bin_path
 from app.core.config import settings
 
 router = APIRouter(prefix="/primitives", tags=["primitives"])
@@ -1116,7 +1117,7 @@ async def list_all_definitions(project_id: str):
             raise HTTPException(status_code=404, detail=f"Project directory not found")
 
         # Check for venv
-        venv_dg = project_path / ".venv" / "bin" / "dg"
+        venv_dg = venv_bin_path(project_path / ".venv", "dg")
         if not venv_dg.exists():
             # FALLBACK: Parse YAML files directly
             print(f"[Definitions] No venv found, using YAML fallback", file=sys.stderr, flush=True)

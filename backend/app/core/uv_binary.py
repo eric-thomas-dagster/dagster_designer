@@ -8,6 +8,7 @@ install location before giving up.
 
 import os
 import shutil
+import sys
 from pathlib import Path
 
 
@@ -39,6 +40,23 @@ def find_uv_binary(name: str = "uv") -> str:
     if fallback.exists():
         return str(fallback)
     return name  # last resort -- let the OS raise if it's truly not on PATH
+
+
+def venv_bin_path(venv_dir: Path, name: str) -> Path:
+    """Path to an executable inside a project's own .venv, cross-platform.
+
+    A venv puts its binaries in bin/ with no extension on macOS/Linux, but
+    in Scripts/ with a .exe extension on Windows -- and that .exe applies
+    to console-script entry points too (dg.exe, dagster.exe), not just
+    python.exe itself. Every hardcoded `venv_dir / "bin" / name` in this
+    codebase (there were ~25 of them, scattered across a dozen files) only
+    ever worked on macOS/Linux; confirmed live on a real Windows box that
+    they fail with a literal "not found at .../.venv/bin/dg" error, since
+    that path never exists there at all.
+    """
+    if sys.platform == "win32":
+        return venv_dir / "Scripts" / f"{name}.exe"
+    return venv_dir / "bin" / name
 
 
 def env_with_bundled_uv_on_path() -> dict[str, str]:

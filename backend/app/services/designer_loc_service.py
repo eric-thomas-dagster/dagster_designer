@@ -25,7 +25,7 @@ from typing import Literal
 import httpx
 import psutil
 
-from ..core.uv_binary import find_uv_binary
+from ..core.uv_binary import find_uv_binary, venv_bin_path
 
 DESIGNER_LOCS_ROOT = Path.home() / ".dagster-designer" / "designer-locs"
 DESIGNER_LOCS_ROOT.mkdir(parents=True, exist_ok=True)
@@ -82,7 +82,7 @@ class DesignerLocState:
         return (self.dir() / "pyproject.toml").exists()
 
     def is_installed(self) -> bool:
-        return (self.dir() / ".venv" / "bin" / "dg").exists()
+        return venv_bin_path(self.dir() / ".venv", "dg").exists()
 
     def is_proc_alive(self) -> bool:
         if not self.pid:
@@ -204,7 +204,7 @@ def _start_process(state: DesignerLocState) -> None:
     """Boot `dg dev` and wait for it to report ready."""
     state.status = "starting"
     port = _find_available_port()
-    dg = state.dir() / ".venv" / "bin" / "dg"
+    dg = venv_bin_path(state.dir() / ".venv", "dg")
     if not dg.exists():
         raise RuntimeError(f"dg not found at {dg}")
 

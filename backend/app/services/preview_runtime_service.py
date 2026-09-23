@@ -28,7 +28,7 @@ from . import promotion_config
 from . import drafts_service
 from . import preview_git_service
 from . import community_installer_service
-from ..core.uv_binary import find_uv_binary
+from ..core.uv_binary import find_uv_binary, venv_bin_path
 
 PORT_START = 4200
 PORT_END = 4299
@@ -151,10 +151,10 @@ def _uv_sync(state: PreviewState) -> None:
 def _dagster_dev_cmd(worktree: Path) -> list[str]:
     """Prefer `dg dev` if the customer's venv has it; fall back to
     `dagster dev`. Older customer repos may not include dagster-dg-cli."""
-    dg = worktree / ".venv" / "bin" / "dg"
+    dg = venv_bin_path(worktree / ".venv", "dg")
     if dg.exists():
         return [str(dg), "dev", "--host", "127.0.0.1"]
-    dagster = worktree / ".venv" / "bin" / "dagster"
+    dagster = venv_bin_path(worktree / ".venv", "dagster")
     if dagster.exists():
         return [str(dagster), "dev", "--host", "127.0.0.1"]
     # Last resort: `uv run dagster dev`

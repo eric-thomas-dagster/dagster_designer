@@ -7,6 +7,7 @@ from typing import Any, Literal
 from app.services.template_service import TemplateService, PrimitiveType
 from app.services.partition_validation import validate_partition_compatibility, get_partition_summary
 from app.models.partition import PartitionConfig
+from app.core.uv_binary import venv_bin_path
 
 router = APIRouter(prefix="/templates", tags=["templates"])
 template_service = TemplateService()
@@ -643,7 +644,7 @@ async def create_python_asset_file(request: CreatePythonAssetFileRequest):
         if is_standard_structure:
             try:
                 # Use dg scaffold defs to create the asset
-                venv_dg = (project_path / ".venv" / "bin" / "dg").resolve()
+                venv_dg = venv_bin_path(project_path / ".venv", "dg").resolve()
                 if not venv_dg.exists():
                     # Fallback to manual creation if dg not found
                     raise FileNotFoundError("dg not found in venv")

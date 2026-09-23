@@ -5,6 +5,8 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+from ..core.uv_binary import venv_bin_path
+
 
 class FileService:
     """Service for managing files in Dagster projects."""
@@ -319,7 +321,7 @@ class FileService:
         # Build command as list for subprocess, not shell string
         cmd_list = command_parts.copy()
         if command_parts[0] in ["dg", "dagster", "python", "pip"]:
-            venv_cmd = project_path / ".venv" / "bin" / command_parts[0]
+            venv_cmd = venv_bin_path(project_path / ".venv", command_parts[0])
             if venv_cmd.exists():
                 # Use absolute path to venv command
                 cmd_list = [str(venv_cmd.absolute())] + command_parts[1:]

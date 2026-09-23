@@ -31,6 +31,7 @@ import yaml
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
+from ..core.uv_binary import venv_bin_path
 from ..services.project_service import project_service
 from ..services.dagster_plus_client import (
     query as dagster_plus_query,
@@ -834,7 +835,7 @@ async def sync_alerts_to_cloud(project_id: str, request: SyncPushRequest):
     # Shell out to `dg api alert-policy sync <path>`. Uses the project's
     # venv so dg picks up its `dagster-cloud` config (org, deployment,
     # token) from the workspace. Errors bubble up in stderr.
-    venv_dg = project_dir / ".venv" / "bin" / "dg"
+    venv_dg = venv_bin_path(project_dir / ".venv", "dg")
     cmd_bin = str(venv_dg) if venv_dg.exists() else "dg"
     try:
         proc = subprocess.run(
@@ -880,7 +881,7 @@ async def sync_alerts_from_cloud(project_id: str):
     if getattr(project, "is_dagster_plus", False):
         raise HTTPException(status_code=400, detail="Open the local project (not the cloud connection) to pull alerts into the repo.")
     project_dir = project_service._get_project_dir(project)
-    venv_dg = project_dir / ".venv" / "bin" / "dg"
+    venv_dg = venv_bin_path(project_dir / ".venv", "dg")
     cmd_bin = str(venv_dg) if venv_dg.exists() else "dg"
     try:
         proc = subprocess.run(

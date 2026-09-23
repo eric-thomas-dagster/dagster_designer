@@ -18,6 +18,7 @@ from ..models.project import (
     ProjectListResponse,
     ProjectSummaryListResponse,
 )
+from ..core.uv_binary import venv_bin_path
 from ..services.project_service import project_service
 from ..services.asset_introspection_service import asset_introspection_service
 from ..services.git_service import git_service
@@ -1910,7 +1911,7 @@ async def validate_project(project_id: str):
         raise HTTPException(status_code=404, detail="Project not found")
 
     project_dir = project_service._get_project_dir(project)
-    venv_dg = project_dir / ".venv" / "bin" / "dg"
+    venv_dg = venv_bin_path(project_dir / ".venv", "dg")
 
     if not venv_dg.exists():
         # Check if dependencies are currently being installed
@@ -2106,8 +2107,8 @@ async def materialize_assets(project_id: str, request: MaterializeRequest):
 
     try:
         # Build dg launch command using project's venv
-        venv_python = project_path / ".venv" / "bin" / "python"
-        venv_dg = project_path / ".venv" / "bin" / "dg"
+        venv_python = venv_bin_path(project_path / ".venv", "python")
+        venv_dg = venv_bin_path(project_path / ".venv", "dg")
 
         if not venv_dg.exists():
             raise HTTPException(
@@ -3277,7 +3278,7 @@ async def launch_backfill(project_id: str, request: BackfillRequest):
 
     # Build the dg asset backfill command
     cmd = [
-        project_dir / ".venv" / "bin" / "dg",
+        venv_bin_path(project_dir / ".venv", "dg"),
         "asset",
         "backfill",
     ]

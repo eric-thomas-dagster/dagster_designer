@@ -7,6 +7,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from app.core.config import settings
+from app.core.uv_binary import venv_bin_path
 from app.services.project_service import project_service
 from app.services.dagster_plus_client import (
     query as dagster_plus_query,
@@ -836,8 +837,8 @@ async def launch_job(project_id: str, job_name: str, request: LaunchJobRequest):
 
     try:
         # Build dg launch command using project's venv
-        venv_python = project_path / ".venv" / "bin" / "python"
-        venv_dg = project_path / ".venv" / "bin" / "dg"
+        venv_python = venv_bin_path(project_path / ".venv", "python")
+        venv_dg = venv_bin_path(project_path / ".venv", "dg")
 
         if not venv_dg.exists():
             raise HTTPException(

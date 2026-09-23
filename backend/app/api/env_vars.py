@@ -5,6 +5,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from ..core.config import settings
+from ..core.uv_binary import venv_bin_path
 from ..services.project_service import project_service
 from ..services.dagster_plus_client import (
     query as dagster_plus_query,
@@ -339,7 +340,7 @@ def _resolve_project_dir(project_id: str) -> Path:
 def _run_dg_env(project_dir: Path, action: str, scope: DagsterPlusScope) -> tuple[int, str, str]:
     """Run `dg plus env pull|push` in the project's venv and return (rc, stdout, stderr)."""
     import subprocess
-    dg_path = project_dir / ".venv" / "bin" / "dg"
+    dg_path = venv_bin_path(project_dir / ".venv", "dg")
     if not dg_path.exists():
         raise HTTPException(
             status_code=400,
@@ -393,7 +394,7 @@ async def get_dagster_plus_scope(project_id: str):
         }
 
     project_dir = _resolve_project_dir(project_id)
-    dg_path = project_dir / ".venv" / "bin" / "dg"
+    dg_path = venv_bin_path(project_dir / ".venv", "dg")
     if not dg_path.exists():
         return {"deployments": [], "code_locations": [], "authenticated": False,
                 "cloud_native": False, "message": "Project venv missing dg CLI"}
@@ -442,7 +443,7 @@ async def start_dagster_plus_login(project_id: str):
     import subprocess
 
     project_dir = _resolve_project_dir(project_id)
-    dg_path = project_dir / ".venv" / "bin" / "dg"
+    dg_path = venv_bin_path(project_dir / ".venv", "dg")
     if not dg_path.exists():
         raise HTTPException(status_code=400, detail="Project venv missing dg CLI")
 
@@ -544,7 +545,7 @@ async def scoped_fetch_from_plus(project_id: str, scope: DagsterPlusScope):
         return {"variables": await _fetch_cloud_secrets(cloud_project, scope.code_location)}
 
     project_dir = _resolve_project_dir(project_id)
-    dg_path = project_dir / ".venv" / "bin" / "dg"
+    dg_path = venv_bin_path(project_dir / ".venv", "dg")
     if not dg_path.exists():
         raise HTTPException(status_code=400, detail="Project venv missing dg CLI")
 
@@ -632,7 +633,7 @@ async def scoped_push_to_plus(project_id: str, request: ScopedPushRequest):
     import subprocess
     import tempfile
     project_dir = _resolve_project_dir(project_id)
-    dg_path = project_dir / ".venv" / "bin" / "dg"
+    dg_path = venv_bin_path(project_dir / ".venv", "dg")
     if not dg_path.exists():
         raise HTTPException(status_code=400, detail="Project venv missing dg CLI")
 
