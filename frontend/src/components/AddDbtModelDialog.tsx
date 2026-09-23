@@ -36,6 +36,7 @@ export function AddDbtModelDialog({ open, onOpenChange, projectId, onCreated }: 
   const isDark = useIsDarkMode();
   const [dbtProjects, setDbtProjects] = useState<Array<{
     name: string; relative_path: string; model_paths: string[]; is_git_repo: boolean;
+    is_remote_git: boolean; remote_git_url: string | null; remote_git_relative_path: string;
   }>>([]);
   const [loadingProjects, setLoadingProjects] = useState(false);
   const [dbtProjectPath, setDbtProjectPath] = useState('');
@@ -79,12 +80,40 @@ export function AddDbtModelDialog({ open, onOpenChange, projectId, onCreated }: 
     return null;
   }, [modelName]);
 
+  const selectedProject = useMemo(
+    () => dbtProjects.find((p) => p.relative_path === dbtProjectPath),
+    [dbtProjects, dbtProjectPath],
+  );
+  const isRemote = !!selectedProject?.is_remote_git;
+
+  useEffect(() => {
+    if (isRemote) setComposeMode('sql');
+  }, [isRemote]);
+
   const canSubmit = !!dbtProjectPath && !!modelName && !nameError && sql.trim().length > 0;
 
   const handleSubmit = async () => {
     if (!canSubmit) return;
     setSaving(true);
     try {
+      if (isRemote && selectedProject?.remote_git_url) {
+        const r = await projectsApi.addDbtModelRemote(projectId, {
+          git_url: selectedProject.remote_git_url,
+          repo_relative_path: selectedProject.remote_git_relative_path,
+          model_name: modelName,
+          subfolder: subfolder || null,
+          materialization,
+          sql,
+        });
+        notify.success(`Opened PR for ${r.file} on ${r.branch}: ${r.pr_url}`);
+        onOpenChange(false);
+        setModelName('');
+        setSubfolder('');
+        setSql(STARTER_SQL);
+        setDescription('');
+        return;
+      }
+
       const tests = createTest && testColumn ? [{
         [testColumn]: ['not_null', 'unique'],
       }] : undefined;
@@ -156,18 +185,21 @@ export function AddDbtModelDialog({ open, onOpenChange, projectId, onCreated }: 
                   )}
                   {dbtProjects.map((p) => (
                     <option key={p.relative_path} value={p.relative_path}>
-                      {p.name}{p.is_git_repo ? ' · git' : ''} ({p.relative_path})
+                      {p.name}{p.is_remote_git ? ' · remote git (opens a PR)' : p.is_git_repo ? ' · git' : ''} ({p.relative_path})
                     </option>
                   ))}
                 </select>
                 {dbtProjects.length === 0 && !loadingProjects && (
                   <p className="text-[11px] text-amber-700 mt-1">
-                    No <code className="bg-gray-100 px-1 rounded">dbt_project.yml</code> found in this project.
-                    <br />
-                    This writes a file straight into a dbt project's local <code className="bg-gray-100 px-1 rounded">models/</code> folder,
-                    so it only works when one is physically present here (e.g. cloned in at project creation, like the Jaffle Shop
-                    starter). If your dbt models live in a remote git repo Designer hasn't cloned — common for a Dagster+ Cloud
-                    project — there's nothing local for this to write to.
+                    No dbt project found — neither a local <code className="bg-gray-100 px-1 rounded">dbt_project.yml</code> nor a
+                    <code className="bg-gray-100 px-1 rounded ml-1">DbtProjectComponent</code> pointed at a remote git repo.
+                  </p>
+                )}
+                {isRemote && (
+                  <p className="text-[11px] text-amber-700 mt-1">
+                    This dbt project lives in <code className="bg-gray-100 px-1 rounded">{selectedProject?.remote_git_url}</code>, not
+                    here — creating this model will open a pull request against that repo instead of writing a local file.
+                    Description + tests aren't supported for remote models yet; add those directly in the PR.
                   </p>
                 )}
               </div>
@@ -214,29 +246,33 @@ export function AddDbtModelDialog({ open, onOpenChange, projectId, onCreated }: 
 
             {/* Compose mode tab bar — Visual or SQL. Visual composer
                 writes into the same `sql` state, so users can flip to
-                SQL and fine-tune the generated result. */}
-            <div className="border-b border-gray-200 flex items-center gap-1">
-              {([
-                { v: 'visual', label: 'Visual composer', icon: Wand2, hint: 'Form-driven — pick a source, columns, filters, joins.' },
-                { v: 'sql',    label: 'SQL editor',      icon: Code2, hint: 'Write raw SQL directly with dbt jinja.' },
-              ] as const).map(({ v, label, icon: Icon, hint }) => (
-                <button
-                  key={v}
-                  onClick={() => setComposeMode(v)}
-                  className={`inline-flex items-center gap-1.5 px-3 py-2 text-sm font-medium border-b-2 -mb-px ${
-                    composeMode === v
-                      ? 'text-blue-600 border-blue-600'
-                      : 'text-gray-600 border-transparent hover:text-gray-900'
-                  }`}
-                  title={hint}
-                >
-                  <Icon className="w-4 h-4" />
-                  {label}
-                </button>
-              ))}
-            </div>
+                SQL and fine-tune the generated result. Not available for
+                a remote-git dbt project — there's no local project to
+                introspect for sources/columns to compose against. */}
+            {!isRemote && (
+              <div className="border-b border-gray-200 flex items-center gap-1">
+                {([
+                  { v: 'visual', label: 'Visual composer', icon: Wand2, hint: 'Form-driven — pick a source, columns, filters, joins.' },
+                  { v: 'sql',    label: 'SQL editor',      icon: Code2, hint: 'Write raw SQL directly with dbt jinja.' },
+                ] as const).map(({ v, label, icon: Icon, hint }) => (
+                  <button
+                    key={v}
+                    onClick={() => setComposeMode(v)}
+                    className={`inline-flex items-center gap-1.5 px-3 py-2 text-sm font-medium border-b-2 -mb-px ${
+                      composeMode === v
+                        ? 'text-blue-600 border-blue-600'
+                        : 'text-gray-600 border-transparent hover:text-gray-900'
+                    }`}
+                    title={hint}
+                  >
+                    <Icon className="w-4 h-4" />
+                    {label}
+                  </button>
+                ))}
+              </div>
+            )}
 
-            {composeMode === 'visual' && dbtProjectPath && (
+            {composeMode === 'visual' && !isRemote && dbtProjectPath && (
               <DbtVisualComposer
                 projectId={projectId}
                 dbtRelativePath={dbtProjectPath}
@@ -270,36 +306,42 @@ export function AddDbtModelDialog({ open, onOpenChange, projectId, onCreated }: 
               </div>
             )}
 
-            {/* Description + optional test */}
-            <div>
-              <label className="text-[10px] uppercase tracking-wider text-gray-500 mb-1 block">Description (optional)</label>
-              <input
-                value={description}
-                onChange={(e) => setDescription(e.target.value)}
-                placeholder="Short summary of what this model returns"
-                className="w-full px-2 py-1.5 text-sm border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
-              />
-            </div>
-            <label className="flex items-start gap-2 cursor-pointer text-sm text-gray-700">
-              <input
-                type="checkbox"
-                checked={createTest}
-                onChange={(e) => setCreateTest(e.target.checked)}
-                className="w-4 h-4 mt-0.5"
-              />
-              <div>
-                <div>Add default not_null + unique tests</div>
-                <div className="mt-1 flex items-center gap-1">
-                  <span className="text-[11px] text-gray-500">on column</span>
+            {/* Description + optional test — not supported by the
+                remote-PR endpoint yet, so hide them for a remote project
+                rather than silently dropping what the user typed. */}
+            {!isRemote && (
+              <>
+                <div>
+                  <label className="text-[10px] uppercase tracking-wider text-gray-500 mb-1 block">Description (optional)</label>
                   <input
-                    value={testColumn}
-                    onChange={(e) => setTestColumn(e.target.value)}
-                    disabled={!createTest}
-                    className="px-1.5 py-0.5 text-xs font-mono border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
+                    value={description}
+                    onChange={(e) => setDescription(e.target.value)}
+                    placeholder="Short summary of what this model returns"
+                    className="w-full px-2 py-1.5 text-sm border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
                   />
                 </div>
-              </div>
-            </label>
+                <label className="flex items-start gap-2 cursor-pointer text-sm text-gray-700">
+                  <input
+                    type="checkbox"
+                    checked={createTest}
+                    onChange={(e) => setCreateTest(e.target.checked)}
+                    className="w-4 h-4 mt-0.5"
+                  />
+                  <div>
+                    <div>Add default not_null + unique tests</div>
+                    <div className="mt-1 flex items-center gap-1">
+                      <span className="text-[11px] text-gray-500">on column</span>
+                      <input
+                        value={testColumn}
+                        onChange={(e) => setTestColumn(e.target.value)}
+                        disabled={!createTest}
+                        className="px-1.5 py-0.5 text-xs font-mono border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
+                      />
+                    </div>
+                  </div>
+                </label>
+              </>
+            )}
           </div>
 
           <div className="border-t border-gray-200 px-6 py-3 flex items-center justify-end gap-2 flex-shrink-0">
@@ -315,7 +357,7 @@ export function AddDbtModelDialog({ open, onOpenChange, projectId, onCreated }: 
               className="px-4 py-1.5 text-sm font-medium bg-orange-500 text-white rounded hover:bg-orange-600 disabled:opacity-50 disabled:cursor-not-allowed inline-flex items-center gap-1.5"
             >
               {saving ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <FileCode className="w-3.5 h-3.5" />}
-              {saving ? 'Creating…' : 'Create model'}
+              {saving ? (isRemote ? 'Opening PR…' : 'Creating…') : (isRemote ? 'Open PR' : 'Create model')}
             </button>
           </div>
         </Dialog.Content>

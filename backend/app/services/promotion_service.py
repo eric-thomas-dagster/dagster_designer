@@ -143,6 +143,56 @@ async def _resolve_target_git_branch(
     return branch
 
 
+async def add_file_to_repo_via_pr(
+    owner_repo: str,
+    base_branch: str,
+    file_relative_path: str,
+    file_content: str,
+    commit_message: str,
+    pr_title: str,
+    pr_body: str,
+) -> dict:
+    """Write a single new file into a repo and open a PR — the
+    general-purpose version of promote_draft's git mechanics, for
+    callers that just need "put this file in that repo, open a PR"
+    without the component-installer/type-resolution machinery a Draft
+    promote needs. First user: adding a dbt model to a REMOTE git dbt
+    project (dagster_dbt.DbtProjectComponent's RemoteGitDbtProjectManager)
+    that isn't colocated with the Dagster project at all — the existing
+    add_dbt_model endpoint only knows how to write into this project's
+    own local files.
+
+    Refuses to overwrite an existing file, matching add_dbt_model's own
+    local-write behavior.
+    """
+    repo = _ensure_clone(owner_repo, base_branch)
+    repo_root = Path(repo.working_dir)
+
+    target_path = (repo_root / file_relative_path).resolve()
+    if not str(target_path).startswith(str(repo_root.resolve())):
+        raise RuntimeError(f"{file_relative_path!r} escapes the repository root")
+    if target_path.exists():
+        raise RuntimeError(f"{file_relative_path} already exists in {owner_repo}@{base_branch}")
+
+    ts = time.strftime("%Y%m%d-%H%M%S")
+    short = uuid.uuid4().hex[:6]
+    branch_name = f"designer/add-file-{ts}-{short}"
+    repo.git.checkout("-b", branch_name)
+
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    target_path.write_text(file_content)
+
+    with repo.config_writer() as cfg:
+        cfg.set_value("user", "name", "Dagster Designer")
+        cfg.set_value("user", "email", "designer@dagsterlabs.com")
+    repo.index.add([file_relative_path])
+    repo.index.commit(commit_message)
+    repo.remotes.origin.push(branch_name)
+
+    pr_url = await _open_pr(owner_repo, branch_name, base_branch, pr_title, pr_body)
+    return {"pr_url": pr_url, "branch": branch_name, "base_branch": base_branch, "file": file_relative_path}
+
+
 async def promote_draft(project_id: str, draft: Draft, dagster_plus_org: str, token: str) -> dict:
     """Land a Draft as a PR against the customer's repo.
 

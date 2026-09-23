@@ -190,6 +190,9 @@ export const projectsApi = {
       profile: string | null;
       version: string | null;
       is_git_repo: boolean;
+      is_remote_git: boolean;
+      remote_git_url: string | null;
+      remote_git_relative_path: string;
     }>;
   }> => {
     const response = await api.get(`/projects/${projectId}/dbt-projects`);
@@ -931,6 +934,22 @@ export const projectsApi = {
     },
   ): Promise<{ success: boolean; sql_path: string; schema_written: boolean }> => {
     const response = await api.post(`/projects/${projectId}/dbt-model`, body);
+    return response.data as any;
+  },
+
+  addDbtModelRemote: async (
+    projectId: string,
+    body: {
+      git_url: string;
+      repo_relative_path?: string;
+      base_branch?: string;
+      model_name: string;
+      subfolder?: string | null;
+      materialization: 'view' | 'table' | 'incremental' | 'ephemeral';
+      sql: string;
+    },
+  ): Promise<{ success: boolean; pr_url: string; branch: string; base_branch: string; file: string }> => {
+    const response = await api.post(`/projects/${projectId}/dbt-model/remote`, body);
     return response.data as any;
   },
 

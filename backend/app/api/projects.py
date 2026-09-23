@@ -3377,6 +3377,16 @@ class DbtProjectSummary(BaseModel):
     profile: str | None = None
     version: str | None = None
     is_git_repo: bool = False
+    # Set when this entry is a dagster_dbt.DbtProjectComponent configured
+    # with a RemoteGitDbtProjectManager (`project: {repo_url: ...}`) —
+    # the dbt project's SQL isn't colocated with the Dagster project at
+    # all, it lives in `remote_git_url`, synced by Dagster's own
+    # state-backed refresh. Adding a model here means opening a PR
+    # against that other repo, not writing a local file — the frontend
+    # branches on this flag to route to a different endpoint.
+    is_remote_git: bool = False
+    remote_git_url: str | None = None
+    remote_git_relative_path: str = "."
 
 
 class DbtProjectListResponse(BaseModel):
@@ -3414,6 +3424,52 @@ def _find_dbt_projects(project_root: Path) -> list[DbtProjectSummary]:
             profile=parsed.get('profile'),
             version=str(parsed.get('version')) if parsed.get('version') else None,
             is_git_repo=is_git,
+        ))
+    out.extend(_find_remote_git_dbt_projects(project_root))
+    return out
+
+
+def _find_remote_git_dbt_projects(project_root: Path) -> list[DbtProjectSummary]:
+    """Walk for defs.yaml files declaring a dagster_dbt.DbtProjectComponent
+    whose `project` is a RemoteGitDbtProjectManager (a dict with
+    `repo_url`, not a local path string) — a dbt project that Dagster
+    itself clones + compiles via state-backed refresh, never colocated
+    with this Dagster project's own files at all. There's no local
+    dbt_project.yml to find for these (that's the point), so this is a
+    separate walk from _find_dbt_projects rather than a fallback inside
+    it, keyed on `type:` instead of on a file that won't exist."""
+    import yaml as _yaml
+    out: list[DbtProjectSummary] = []
+    if not project_root.exists():
+        return out
+    skip_parts = {'.venv', 'venv', 'node_modules', '.git', 'target', 'dbt_packages', '__pycache__'}
+    for p in project_root.rglob('defs.yaml'):
+        if any(part in skip_parts for part in p.parts):
+            continue
+        try:
+            parsed = _yaml.safe_load(p.read_text()) or {}
+        except Exception:
+            continue
+        if not isinstance(parsed, dict):
+            continue
+        type_str = str(parsed.get('type') or '')
+        if 'DbtProjectComponent' not in type_str:
+            continue
+        project_attr = (parsed.get('attributes') or {}).get('project')
+        if not isinstance(project_attr, dict) or not project_attr.get('repo_url'):
+            continue
+        try:
+            rel = p.parent.relative_to(project_root).as_posix()
+        except ValueError:
+            rel = str(p.parent)
+        out.append(DbtProjectSummary(
+            name=project_attr['repo_url'].rstrip('/').rsplit('/', 1)[-1].removesuffix('.git'),
+            relative_path=rel,
+            model_paths=['models'],  # dbt's own default; the real dbt_project.yml lives in the remote repo, unreadable without cloning
+            is_git_repo=True,
+            is_remote_git=True,
+            remote_git_url=project_attr['repo_url'],
+            remote_git_relative_path=str(project_attr.get('repo_relative_path') or '.'),
         ))
     return out
 
@@ -8213,6 +8269,71 @@ async def add_dbt_model(project_id: str, request: AddDbtModelRequest):
         'sql_path': str(sql_path.relative_to(root)),
         'schema_written': schema_written,
     }
+
+
+class AddDbtModelRemoteRequest(BaseModel):
+    """Write a new .sql model into a dbt project that lives in a
+    SEPARATE git repo (a dagster_dbt.DbtProjectComponent configured
+    with a RemoteGitDbtProjectManager) — opens a PR against that repo
+    instead of writing a local file, since there's no local file to
+    write. Same model-naming rules and non-destructive-overwrite
+    guarantee as the local add_dbt_model.
+    """
+    git_url: str
+    repo_relative_path: str = "."   # from DbtProjectSummary.remote_git_relative_path
+    base_branch: str = "main"
+    model_name: str
+    subfolder: str | None = None
+    materialization: str = 'view'
+    sql: str
+
+
+@router.post('/{project_id}/dbt-model/remote')
+async def add_dbt_model_remote(project_id: str, request: AddDbtModelRemoteRequest):
+    """Like POST /{project_id}/dbt-model, but for a dbt project that
+    isn't colocated with the Dagster project at all — opens a PR
+    against the dbt project's own repo instead of writing a local file."""
+    from ..services import promotion_service
+
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    name = request.model_name.strip()
+    if not name or not name.replace('_', '').isalnum() or name[0].isdigit():
+        raise HTTPException(status_code=400, detail="Model name must be snake_case and start with a letter.")
+
+    owner_repo = _owner_repo_from_remote_url(request.git_url)
+    if not owner_repo:
+        raise HTTPException(status_code=400, detail=f"Couldn't parse owner/repo from {request.git_url!r}")
+
+    repo_relative = request.repo_relative_path.strip().strip('/') or '.'
+    models_dir = 'models' if repo_relative == '.' else f'{repo_relative}/models'
+    if request.subfolder:
+        models_dir = f'{models_dir}/{request.subfolder.strip("/")}'
+    file_relative_path = f'{models_dir}/{name}.sql'
+
+    materialization = request.materialization.strip() or 'view'
+    header = f"{{{{ config(materialized='{materialization}') }}}}\n\n"
+    content = header + request.sql.strip() + '\n'
+
+    try:
+        result = await promotion_service.add_file_to_repo_via_pr(
+            owner_repo=owner_repo,
+            base_branch=request.base_branch.strip() or 'main',
+            file_relative_path=file_relative_path,
+            file_content=content,
+            commit_message=f"Add dbt model {name}",
+            pr_title=f"[Dagster Designer] Add dbt model {name}",
+            pr_body=(
+                f"Adds `{name}.sql` to this dbt project via Dagster Designer.\n\n"
+                f"```sql\n{request.sql.strip()}\n```\n"
+            ),
+        )
+    except RuntimeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    return {'success': True, **result}
 
 
 class GitStatusResponse(BaseModel):
