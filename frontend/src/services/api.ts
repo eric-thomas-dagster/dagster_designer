@@ -3363,6 +3363,19 @@ export const designerLocApi = {
     const r = await api.get(`/projects/${projectId}/designer-loc/components`);
     return r.data as any;
   },
+  // Skips git entirely — pushes the sandbox's current code straight to
+  // a Dagster+ Serverless deployment. Explicitly the discouraged fast
+  // path (no review, no history); use Promote to PR for anything that
+  // should last.
+  publishServerless: async (
+    projectId: string,
+    locationName?: string,
+  ): Promise<{ location_name: string; deployment: string; log_tail: string[] }> => {
+    const r = await api.post(`/projects/${projectId}/designer-loc/publish-serverless`, {
+      location_name: locationName || null,
+    }, { timeout: 900_000 });
+    return r.data as any;
+  },
 };
 
 export default api;

@@ -111,3 +111,20 @@ async def list_components(project_id: str):
     promotes it (see POST /projects/{id}/drafts + /drafts/{id}/promote)."""
     _require_dagster_plus(project_id)
     return {"components": svc.list_components(project_id)}
+
+
+class PublishServerlessBody(BaseModel):
+    location_name: str | None = None
+
+
+@router.post("/publish-serverless")
+async def publish_serverless(project_id: str, body: PublishServerlessBody):
+    """Push the sandbox's current code straight to a Dagster+ Serverless
+    deployment — no git, no PR, no review. Explicitly the discouraged
+    fast path, for a demo you're going to throw away; anything meant to
+    last should go through Promote to PR instead."""
+    _require_dagster_plus(project_id)
+    try:
+        return await svc.publish_serverless(project_id, body.location_name)
+    except RuntimeError as e:
+        raise HTTPException(status_code=400, detail=str(e))

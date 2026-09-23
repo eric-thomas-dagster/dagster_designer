@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Boxes, Loader2, AlertTriangle, CheckCircle2, ChevronDown, GitPullRequestArrow } from 'lucide-react';
+import { Boxes, Loader2, AlertTriangle, CheckCircle2, ChevronDown, GitPullRequestArrow, Rocket } from 'lucide-react';
 import { useDesignerLoc } from '@/hooks/useDesignerLoc';
 import {
   designerLocApi,
@@ -59,6 +59,30 @@ export function SandboxStatusPill({ projectId, isDagsterPlus, onPromoted }: Sand
       .then((r) => setLocations(r.locations.filter((l) => l.source !== 'sandbox')))
       .catch(() => setLocations([]));
   }, [projectId, selectedDeployment]);
+
+  // "Publish directly" — skips git+PR entirely and pushes the sandbox's
+  // current code straight to a Dagster+ Serverless deployment. Kept
+  // visually secondary (own collapsed section, muted styling) since
+  // it's deliberately the discouraged path: no review, no history, easy
+  // to overwrite a real location by picking the wrong name. Good for a
+  // demo you're about to throw away, not for anything that should last.
+  const [publishOpen, setPublishOpen] = useState(false);
+  const [publishLocationName, setPublishLocationName] = useState('');
+  const [publishing, setPublishing] = useState(false);
+
+  const handlePublishServerless = async () => {
+    if (!projectId) return;
+    setPublishing(true);
+    try {
+      const r = await designerLocApi.publishServerless(projectId, publishLocationName.trim() || undefined);
+      notify.success(`Published to Serverless location "${r.location_name}" on ${r.deployment}.`);
+      setPublishOpen(false);
+    } catch (e: any) {
+      notify.error(`Publish failed: ${e?.response?.data?.detail || e?.message || String(e)}`);
+    } finally {
+      setPublishing(false);
+    }
+  };
 
   const handlePromote = async () => {
     if (!projectId || !selectedComponentId || !selectedDeployment || !selectedLocation) return;
@@ -218,6 +242,39 @@ export function SandboxStatusPill({ projectId, isDagsterPlus, onPromoted }: Sand
                   )}
                 </div>
               )}
+              <div className="mt-2 pt-2 border-t border-gray-100">
+                <button
+                  onClick={() => setPublishOpen((v) => !v)}
+                  className="w-full flex items-center gap-1.5 text-[11px] font-medium text-amber-700 hover:text-amber-900"
+                >
+                  <Rocket className="w-3.5 h-3.5" />
+                  Publish directly (skip git)
+                  <ChevronDown className={`w-3 h-3 opacity-60 ml-auto transition-transform ${publishOpen ? 'rotate-180' : ''}`} />
+                </button>
+                {publishOpen && (
+                  <div className="mt-2 space-y-2">
+                    <p className="text-amber-700 bg-amber-50 border border-amber-200 rounded p-1.5">
+                      Pushes the sandbox straight to a Serverless deployment — no commit, no PR, no
+                      review. Discouraged for anything but a demo you're going to throw away.
+                    </p>
+                    <input
+                      type="text"
+                      value={publishLocationName}
+                      onChange={(e) => setPublishLocationName(e.target.value)}
+                      placeholder={`Location name (default: designer-sandbox-${(projectId ?? '').slice(0, 8)})`}
+                      className="w-full px-2 py-1 text-[11px] border border-gray-300 rounded font-mono"
+                    />
+                    <button
+                      onClick={handlePublishServerless}
+                      disabled={publishing}
+                      className="w-full flex items-center justify-center gap-1.5 px-2 py-1 text-[11px] font-medium rounded bg-amber-600 text-white hover:bg-amber-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      {publishing ? <Loader2 className="w-3 h-3 animate-spin" /> : <Rocket className="w-3 h-3" />}
+                      {publishing ? 'Publishing…' : 'Publish now'}
+                    </button>
+                  </div>
+                )}
+              </div>
             </div>
           )}
           {status?.log_tail && status.log_tail.length > 0 && (

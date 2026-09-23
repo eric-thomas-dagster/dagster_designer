@@ -603,6 +603,98 @@ def list_components(project_id: str) -> list[dict]:
     return out
 
 
+def _sandbox_python_version(state: DesignerLocState) -> str:
+    """Read the sandbox venv's actual Python version (`major.minor`) from
+    pyvenv.cfg rather than hardcoding one — avoids deploying against a
+    version that doesn't match what the sandbox's deps were installed
+    for. Falls back to 3.12 (create-dagster's current default) if the
+    file's missing or unparseable."""
+    cfg = state.dir() / ".venv" / "pyvenv.cfg"
+    try:
+        for line in cfg.read_text().splitlines():
+            if line.strip().startswith("version"):
+                # "version = 3.12.14" or "version_info = 3.12.14.final.0"
+                raw = line.split("=", 1)[1].strip()
+                parts = raw.split(".")
+                if len(parts) >= 2:
+                    return f"{parts[0]}.{parts[1]}"
+    except Exception:
+        pass
+    return "3.12"
+
+
+def _run_serverless_deploy(state: DesignerLocState, org: str, token: str, deployment: str, location_name: str) -> list[str]:
+    """Blocking half of publish_serverless — shells out to the
+    (deprecated-but-functional) dagster-cloud CLI via uvx, so nothing
+    needs to be pre-installed. `--build-method local` skips Docker
+    entirely, which is the point: this is the "I don't want git or a
+    build pipeline, just ship it" button, explicitly discouraged for
+    anything beyond a throwaway demo. Must run off the event loop —
+    packaging + upload can take tens of seconds."""
+    module_name = state.dir().name
+    python_version = _sandbox_python_version(state)
+    cmd = [
+        "uvx", "--from", "dagster-cloud-cli", "dagster-cloud",
+        "serverless", "deploy-python-executable",
+        str(state.dir()),
+        "--organization", org,
+        "--api-token", token,
+        "--deployment", deployment,
+        "--location-name", location_name,
+        "--module-name", module_name,
+        "--build-method", "local",
+        "--python-version", python_version,
+    ]
+    _log(state, f"dagster-cloud serverless deploy-python-executable --location-name {location_name}")
+    result = subprocess.run(
+        cmd,
+        cwd=str(state.dir()),
+        capture_output=True,
+        text=True,
+        timeout=900,
+    )
+    tail = (result.stdout or "").splitlines()[-30:] + (result.stderr or "").splitlines()[-10:]
+    for line in tail:
+        _log(state, line)
+    if result.returncode != 0:
+        raise RuntimeError("serverless deploy failed:\n" + "\n".join(tail[-20:]))
+    return tail
+
+
+async def publish_serverless(project_id: str, location_name: str | None) -> dict:
+    """Publish the sandbox's current code straight to a Dagster+
+    Serverless deployment, skipping git entirely. For throwaway demos
+    only, by design -- no commit, no PR, no review, no CI. If the
+    location name collides with something real, this will happily
+    overwrite it, so callers should default to a sandbox-namespaced
+    name and let the user override deliberately rather than guess.
+    """
+    from .project_service import project_service
+
+    state = get_state(project_id)
+    if not state.is_scaffolded():
+        raise RuntimeError("Sandbox is not scaffolded yet")
+
+    project = project_service.get_project(project_id)
+    if project is None:
+        raise RuntimeError("Project not found")
+    if not project.is_dagster_plus:
+        raise RuntimeError("Direct publish is only meaningful for Dagster+ projects.")
+    org = project.dagster_plus_org or ""
+    token = project.dagster_plus_token or ""
+    deployment = project.dagster_plus_deployment or ""
+    if not org or not token or not deployment:
+        raise RuntimeError("Project is missing a Dagster+ org, token, or deployment.")
+
+    loc_name = location_name or f"designer-sandbox-{project_id[:8]}"
+
+    loop = asyncio.get_event_loop()
+    tail = await loop.run_in_executor(
+        None, _run_serverless_deploy, state, org, token, deployment, loc_name
+    )
+    return {"location_name": loc_name, "deployment": deployment, "log_tail": tail}
+
+
 async def proxy_graphql(project_id: str, query: str, variables: dict | None) -> dict:
     """Forward a GraphQL request to this project's Designer-managed loc."""
     state = get_state(project_id)
