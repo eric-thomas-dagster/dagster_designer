@@ -461,7 +461,7 @@ async def list_all_primitives(project_id: str):
         )
 
 
-@router.get("/details/{project_id}/{category}/{name}")
+@router.get("/details/{project_id}/{category}/{name:path}")
 async def get_primitive_details(project_id: str, category: PrimitiveCategory, name: str):
     """
     Get detailed information about a specific primitive.
@@ -523,7 +523,7 @@ async def get_primitive_details(project_id: str, category: PrimitiveCategory, na
         )
 
 
-@router.post("/attach-asset/{project_id}/{category}/{name}")
+@router.post("/attach-asset/{project_id}/{category}/{name:path}")
 async def attach_asset_to_primitive(project_id: str, category: PrimitiveCategory, name: str, request: dict):
     """Append an asset to an existing schedule or job's asset_selection.
 
@@ -594,7 +594,7 @@ async def attach_asset_to_primitive(project_id: str, category: PrimitiveCategory
     return {"message": f"Added to {category} '{name}'", "updated": True, "asset_selection": existing}
 
 
-@router.delete("/delete/{project_id}/{category}/{name}")
+@router.delete("/delete/{project_id}/{category}/{name:path}")
 async def delete_primitive(project_id: str, category: PrimitiveCategory, name: str):
     """
     Delete a primitive from the project.

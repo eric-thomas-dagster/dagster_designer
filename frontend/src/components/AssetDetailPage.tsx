@@ -585,6 +585,13 @@ function EventsTab({ node, projectId, onOpenRun }: { node: GraphNode; projectId:
 
 // ---------- Partitions tab ----------
 
+const PARTITION_STATUS_TONE: Record<string, string> = {
+  materialized: 'bg-emerald-500',
+  failed: 'bg-rose-500',
+  materializing: 'bg-blue-400 animate-pulse',
+  missing: 'bg-gray-200',
+};
+
 function PartitionsTab({
   node, isCloud, projectId, currentProject,
 }: {
@@ -597,7 +604,9 @@ function PartitionsTab({
   const assetKey = (data.asset_key as string) || node.id;
   const [backfillOpen, setBackfillOpen] = useState(false);
 
-  const { data: info, isLoading, error } = useQuery({
+  // Static definition (type/cadence/cron/timezone) -- local only, no
+  // Dagster+ GraphQL equivalent surfaced yet.
+  const { data: info } = useQuery({
     queryKey: ['partition-info', projectId, assetKey],
     queryFn: () => partitionsApi.getPartitionInfo(projectId, assetKey),
     enabled: !isCloud,
@@ -605,40 +614,31 @@ function PartitionsTab({
     retry: false,
   });
 
-  if (isCloud) {
-    if (!data.is_partitioned) {
-      return (
-        <div className="p-12 text-center text-gray-500">
-          <Calendar className="w-8 h-8 mx-auto mb-2 text-gray-300" />
-          <p className="text-sm">This asset isn't partitioned.</p>
-        </div>
-      );
-    }
-    return (
-      <div className="p-12 text-center text-gray-500">
-        <Calendar className="w-8 h-8 mx-auto mb-2 text-gray-300" />
-        <p className="text-sm">This asset is partitioned in Dagster+.</p>
-        <p className="text-xs mt-2 text-gray-400 max-w-md mx-auto">
-          Browsing individual partition keys and their materialization status isn't available
-          from Designer for cloud-connected projects yet -- open it in Dagster+ for the full
-          partition matrix.
-        </p>
-        <a
-          href={buildDagsterPlusAssetUrl(currentProject, assetKey)}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="inline-flex items-center gap-1.5 mt-3 px-3 py-1.5 text-xs font-medium text-blue-700 bg-blue-50 border border-blue-200 rounded hover:bg-blue-100"
-        >
-          <ExternalLink className="w-3.5 h-3.5" /> Open in Dagster+
-        </a>
-      </div>
-    );
-  }
+  // Per-partition materialization status -- the actual matrix. Same
+  // endpoint for local (queries the project's own `dagster dev`) and
+  // cloud (queries Dagster+), so this one query covers both.
+  const { data: status, isLoading, error } = useQuery({
+    queryKey: ['partition-status', projectId, assetKey],
+    queryFn: () => partitionsApi.getPartitionStatus(projectId, assetKey),
+    staleTime: 15_000,
+    retry: false,
+  });
 
   if (isLoading) {
     return <div className="p-12 text-center text-gray-500"><Loader2 className="w-5 h-5 mx-auto animate-spin" /></div>;
   }
-  if (error || !info?.is_partitioned || !info.partitions_def) {
+  if (error) {
+    return (
+      <div className="p-12 text-center text-gray-500">
+        <AlertTriangle className="w-8 h-8 mx-auto mb-2 text-gray-300" />
+        <p className="text-sm text-rose-600 font-medium">Couldn't load partition status.</p>
+        <p className="text-xs mt-1 text-gray-400 max-w-md mx-auto">
+          {(error as any)?.response?.data?.detail || (error as any)?.message || String(error)}
+        </p>
+      </div>
+    );
+  }
+  if (!status?.is_partitioned) {
     return (
       <div className="p-12 text-center text-gray-500">
         <Calendar className="w-8 h-8 mx-auto mb-2 text-gray-300" />
@@ -647,41 +647,68 @@ function PartitionsTab({
     );
   }
 
-  const def = info.partitions_def;
-  const keys = def.partition_keys || [];
+  const def = info?.partitions_def;
 
   return (
     <div className="p-6 max-w-[900px] mx-auto space-y-4">
-      <Section title="Partition definition" icon={<Calendar className="w-4 h-4 text-gray-500" />}>
+      <Section title="Partition status" icon={<Calendar className="w-4 h-4 text-gray-500" />}>
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-          <Kpi label="Type" value={def.type} />
-          <Kpi label="Count" value={def.partition_count ?? keys.length} />
-          {def.cron_schedule && <Kpi label="Schedule" value={def.cron_schedule} />}
-          {def.timezone && <Kpi label="Timezone" value={def.timezone} />}
+          <Kpi label="Total" value={status.total} />
+          <Kpi label="Materialized" value={status.materialized} />
+          <Kpi label="Failed" value={status.failed} />
+          <Kpi label="Missing" value={status.missing} />
         </div>
+        {def && (
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mt-3 pt-3 border-t border-gray-100">
+            <Kpi label="Type" value={def.type} />
+            {def.cron_schedule && <Kpi label="Schedule" value={def.cron_schedule} />}
+            {def.timezone && <Kpi label="Timezone" value={def.timezone} />}
+          </div>
+        )}
       </Section>
       <Section
-        title={`Partition keys (${keys.length})`}
+        title={`Partition keys (${status.total})`}
         icon={<LayersIcon className="w-4 h-4 text-gray-500" />}
-        headerRight={
+        headerRight={!isCloud ? (
           <button
             onClick={() => setBackfillOpen(true)}
             className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-blue-700 bg-blue-50 border border-blue-200 rounded hover:bg-blue-100"
           >
             <Play className="w-3 h-3" /> Backfill
           </button>
-        }
+        ) : (
+          <a
+            href={buildDagsterPlusAssetUrl(currentProject, assetKey)}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-blue-700 bg-blue-50 border border-blue-200 rounded hover:bg-blue-100"
+          >
+            <ExternalLink className="w-3 h-3" /> Backfill in Dagster+
+          </a>
+        )}
       >
-        {keys.length === 0 ? (
+        {!status.supported ? (
+          <p className="text-xs text-gray-500 italic">
+            This asset uses multi-dimensional partitions -- the status matrix isn't supported for those yet.
+          </p>
+        ) : status.keys.length === 0 ? (
           <p className="text-xs text-gray-500 italic">No partition keys available.</p>
         ) : (
-          <div className="flex flex-wrap gap-1.5 max-h-64 overflow-y-auto">
-            {keys.map((k) => (
-              <span key={k} className="px-2 py-1 text-[11px] font-mono bg-gray-50 border border-gray-200 rounded text-gray-700">
-                {k}
-              </span>
-            ))}
-          </div>
+          <>
+            {status.truncated && (
+              <p className="text-[11px] text-gray-400 italic mb-2">
+                Showing the most recent {status.keys.length.toLocaleString()} of {status.total.toLocaleString()} partitions.
+              </p>
+            )}
+            <PartitionHeatmap keys={status.keys} />
+            <div className="flex items-center gap-4 mt-3 text-[11px] text-gray-500">
+              {(['materialized', 'failed', 'materializing', 'missing'] as const).map((s) => (
+                <span key={s} className="inline-flex items-center gap-1">
+                  <span className={`inline-block w-2.5 h-2.5 rounded-sm ${PARTITION_STATUS_TONE[s]}`} /> {s}
+                </span>
+              ))}
+            </div>
+          </>
         )}
       </Section>
       {backfillOpen && (
@@ -697,6 +724,35 @@ function PartitionsTab({
           }}
         />
       )}
+    </div>
+  );
+}
+
+/** GitHub-contribution-style heatmap -- one small square per partition
+ *  key, colored by materialization status, hoverable for the exact key.
+ *  Flat wrapping grid rather than a calendar layout since partition
+ *  cadence varies (daily/hourly/static) and a generic grid reads fine
+ *  for all of them without needing to know the cadence. */
+function PartitionHeatmap({ keys }: { keys: Array<{ key: string; status: string }> }) {
+  const [hovered, setHovered] = useState<{ key: string; status: string } | null>(null);
+  return (
+    <div>
+      {hovered && (
+        <div className="text-xs text-gray-700 font-mono mb-1.5 h-4">
+          {hovered.key} · <span className="capitalize">{hovered.status}</span>
+        </div>
+      )}
+      <div className="flex flex-wrap gap-[3px] max-h-64 overflow-y-auto">
+        {keys.map((p) => (
+          <span
+            key={p.key}
+            onMouseEnter={() => setHovered(p)}
+            onMouseLeave={() => setHovered((h) => (h?.key === p.key ? null : h))}
+            className={`inline-block w-3 h-3 rounded-sm cursor-default ${PARTITION_STATUS_TONE[p.status] || 'bg-gray-200'}`}
+            title={`${p.key} · ${p.status}`}
+          />
+        ))}
+      </div>
     </div>
   );
 }

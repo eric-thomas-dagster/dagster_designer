@@ -734,6 +734,39 @@ query DagsterPlusAssetMaterializations($limit: Int!) {
 """
 
 
+# Per-partition materialization status -- covers the two common partition
+# shapes (a flat set of static keys, and a time-window cadence like
+# daily/hourly). Multi-dimensional partitions come back as a different
+# union member (MultiPartitionStatuses) that this doesn't request fields
+# for, so the caller sees an empty assetPartitionStatuses object for
+# those and falls back to "not supported yet" rather than erroring.
+ASSET_PARTITION_STATUS_QUERY = """
+query DagsterPlusAssetPartitionStatus($assetKey: AssetKeyInput!) {
+  assetNodeOrError(assetKey: $assetKey) {
+    __typename
+    ... on AssetNode {
+      partitionKeys
+      assetPartitionStatuses {
+        __typename
+        ... on DefaultPartitionStatuses {
+          materializedPartitions
+          failedPartitions
+          materializingPartitions
+        }
+        ... on TimePartitionStatuses {
+          ranges {
+            startKey
+            endKey
+            status
+          }
+        }
+      }
+    }
+  }
+}
+"""
+
+
 # allTopLevelResourceDetails gives module-level resources/IO managers per
 # repository -- resourceType is the real Python class path (e.g.
 # "dagster_snowflake_pandas.snowflake_pandas_type_handler.SnowflakePandasIOManager"),

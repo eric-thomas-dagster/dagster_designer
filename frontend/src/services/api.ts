@@ -1667,7 +1667,7 @@ export const primitivesApi = {
     name: string
   ): Promise<PrimitiveDetailsResponse> => {
     const response = await api.get<PrimitiveDetailsResponse>(
-      `/primitives/details/${projectId}/${category}/${name}`
+      `/primitives/details/${projectId}/${category}/${encodeURIComponent(name)}`
     );
     return response.data;
   },
@@ -1678,7 +1678,7 @@ export const primitivesApi = {
     name: string
   ): Promise<{ message: string }> => {
     const response = await api.delete<{ message: string }>(
-      `/primitives/delete/${projectId}/${category}/${name}`
+      `/primitives/delete/${projectId}/${category}/${encodeURIComponent(name)}`
     );
     return response.data;
   },
@@ -2197,7 +2197,34 @@ export const partitionsApi = {
     );
     return response.data;
   },
+
+  /** Per-partition materialization status matrix -- works for both local
+   *  (queries the project's own `dagster dev`) and Dagster+ (cloud). */
+  getPartitionStatus: async (projectId: string, assetKey: string): Promise<PartitionStatusResponse> => {
+    const response = await api.get<PartitionStatusResponse>(
+      `/projects/${projectId}/assets/${encodeURIComponent(assetKey)}/partition-status`
+    );
+    return response.data;
+  },
 };
+
+export interface PartitionKeyStatus {
+  key: string;
+  status: 'materialized' | 'failed' | 'materializing' | 'missing';
+}
+
+export interface PartitionStatusResponse {
+  asset_key: string;
+  is_partitioned: boolean;
+  total: number;
+  materialized: number;
+  failed: number;
+  materializing: number;
+  missing: number;
+  keys: PartitionKeyStatus[];
+  truncated: boolean;
+  supported: boolean;
+}
 
 // Assets API
 export interface AssetDataPreview {

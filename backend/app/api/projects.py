@@ -2532,6 +2532,127 @@ class ConfigSchemaResponse(BaseModel):
     default_config: dict | None = None
 
 
+class PartitionKeyStatus(BaseModel):
+    key: str
+    status: str  # 'materialized' | 'failed' | 'materializing' | 'missing'
+
+
+class PartitionStatusResponse(BaseModel):
+    asset_key: str
+    is_partitioned: bool
+    total: int = 0
+    materialized: int = 0
+    failed: int = 0
+    materializing: int = 0
+    missing: int = 0
+    # Capped -- see _PARTITION_KEYS_CAP. `total`/the per-status counts
+    # above are always computed from the FULL set even when `keys` is
+    # truncated, so KPIs stay accurate even for assets with thousands of
+    # partitions (e.g. years of daily/hourly cadence).
+    keys: list[PartitionKeyStatus] = []
+    truncated: bool = False
+    # False for multi-dimensional partitions -- MultiPartitionStatuses
+    # is a 2D matrix this endpoint doesn't attempt to flatten yet.
+    supported: bool = True
+
+
+_PARTITION_KEYS_CAP = 2000
+
+
+def _partition_status_from_graphql(partition_keys: list[str], statuses: dict | None) -> tuple[list[str], bool]:
+    """Returns (status-per-key aligned to partition_keys, supported).
+    `statuses` is the raw assetPartitionStatuses union member dict from
+    either Dagster+ or a local `dagster dev` instance -- same shape
+    either way, same Dagster GraphQL schema underneath."""
+    key_status = ["missing"] * len(partition_keys)
+    if not statuses:
+        return key_status, True
+    typename = statuses.get("__typename")
+    if typename == "DefaultPartitionStatuses":
+        index = {k: i for i, k in enumerate(partition_keys)}
+        for k in statuses.get("materializedPartitions") or []:
+            if k in index: key_status[index[k]] = "materialized"
+        for k in statuses.get("failedPartitions") or []:
+            if k in index: key_status[index[k]] = "failed"
+        for k in statuses.get("materializingPartitions") or []:
+            if k in index: key_status[index[k]] = "materializing"
+        return key_status, True
+    if typename == "TimePartitionStatuses":
+        index = {k: i for i, k in enumerate(partition_keys)}
+        for r in statuses.get("ranges") or []:
+            start_i = index.get(r.get("startKey"))
+            end_i = index.get(r.get("endKey"))
+            if start_i is None or end_i is None:
+                continue
+            status = (r.get("status") or "").lower()
+            for i in range(min(start_i, end_i), max(start_i, end_i) + 1):
+                key_status[i] = status
+        return key_status, True
+    # MultiPartitionStatuses (2D) -- not flattened yet.
+    return key_status, False
+
+
+def _build_partition_status_response(asset_key: str, partition_keys: list[str], statuses: dict | None) -> PartitionStatusResponse:
+    key_status, supported = _partition_status_from_graphql(partition_keys, statuses)
+    truncated = len(partition_keys) > _PARTITION_KEYS_CAP
+    # Keep the most RECENT partitions when truncating -- for time-window
+    # cadences, partition_keys is chronological and the tail is what
+    # users actually care about (has anything materialized recently),
+    # not the oldest history.
+    shown = list(zip(partition_keys, key_status))[-_PARTITION_KEYS_CAP:] if truncated else list(zip(partition_keys, key_status))
+    return PartitionStatusResponse(
+        asset_key=asset_key,
+        is_partitioned=True,
+        total=len(partition_keys),
+        materialized=key_status.count("materialized"),
+        failed=key_status.count("failed"),
+        materializing=key_status.count("materializing"),
+        missing=key_status.count("missing"),
+        keys=[PartitionKeyStatus(key=k, status=s) for k, s in shown],
+        truncated=truncated,
+        supported=supported,
+    )
+
+
+@router.get("/{project_id}/assets/{asset_key:path}/partition-status", response_model=PartitionStatusResponse)
+async def get_asset_partition_status(project_id: str, asset_key: str):
+    """Per-partition materialization status -- the matrix Dagster+'s own
+    UI shows (which partitions are materialized/failed/missing), for
+    BOTH local and cloud projects. Local hits the project's own
+    `dagster dev` GraphQL; cloud hits Dagster+'s. Same query shape --
+    it's the same Dagster GraphQL schema underneath either way."""
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    from ..services.dagster_plus_client import query as dp_query, DagsterPlusError, ASSET_PARTITION_STATUS_QUERY
+
+    path = [seg for seg in asset_key.split("/") if seg]
+
+    if getattr(project, "is_dagster_plus", False):
+        try:
+            data = await dp_query(
+                project.dagster_plus_org or "", project.dagster_plus_deployment or "",
+                project.dagster_plus_token or "", ASSET_PARTITION_STATUS_QUERY,
+                variables={"assetKey": {"path": path}}, region=project.dagster_plus_region,
+            )
+        except DagsterPlusError as e:
+            raise HTTPException(status_code=502, detail=f"Failed to fetch partition status from Dagster+: {e}")
+        node = data.get("assetNodeOrError") or {}
+    else:
+        from .runs import _run_local_query
+        try:
+            data = await _run_local_query(3000, ASSET_PARTITION_STATUS_QUERY, {"assetKey": {"path": path}})
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=f"Couldn't reach local Dagster GraphQL. Is `dg dev` running? ({e})")
+        node = data.get("assetNodeOrError") or {}
+
+    if node.get("__typename") != "AssetNode" or not node.get("partitionKeys"):
+        return PartitionStatusResponse(asset_key=asset_key, is_partitioned=False)
+
+    return _build_partition_status_response(asset_key, node["partitionKeys"], node.get("assetPartitionStatuses"))
+
+
 @router.get("/{project_id}/assets/{asset_key:path}/partitions", response_model=PartitionInfoResponse)
 async def get_asset_partitions(project_id: str, asset_key: str):
     """Get partition definition for an asset.

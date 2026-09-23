@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
+import { useQuery } from '@tanstack/react-query';
 import { Download, Cloud, Database, FileText, Globe, Sparkles, Boxes, CheckCircle2, AlertTriangle, Play, Settings, Activity, TrendingUp, Loader2, XCircle, Layers, CalendarClock, Clock, X, Tag, Lock, Radar } from 'lucide-react';
 import { useProjectStore } from '@/hooks/useProject';
 import { assetsApi, projectsApi, partitionsApi, type IngestionEvent, type BackfillRequest } from '@/services/api';
@@ -451,6 +452,23 @@ export function IngestionsPanel({ onAddDataSource, onEditComponent }: Ingestions
     return { totalRows, totalBytes, successes, failures, running, successRate, avgDurationMs };
   }, [ingestionEvents, windowedEvents]);
 
+  // Local's "total rows" comes from actually reading the data (a real
+  // COUNT(*) / len(df) recorded on preview) -- Dagster+'s materialization
+  // history has no row-count field at all, so `analytics.totalRows` is
+  // structurally always 0 for cloud, which reads as "we ingested nothing"
+  // rather than "we don't track this the same way." Insights' row_count
+  // metric (SUM at deployment level) is real warehouse data reported by
+  // Dagster+ itself, so use that instead when available.
+  const windowDays = window === '24h' ? 1 : window === '7d' ? 7 : 30;
+  const { data: cloudRowCountInsights } = useQuery({
+    queryKey: ['ingestions-row-count-insights', currentProject?.id, windowDays],
+    queryFn: () => assetsApi.getDeploymentInsights(currentProject!.id, windowDays),
+    enabled: isCloud && !!currentProject,
+    staleTime: 60_000,
+    retry: false,
+  });
+  const cloudTotalRows = cloudRowCountInsights?.metrics.find((m) => m.metric_name === 'row_count')?.aggregate_value ?? null;
+
   // Trend series — one bucket per day (or hour for 24h) of the window,
   // counting materializes. Simple SVG line + area chart below.
   const trend = useMemo(() => {
@@ -623,8 +641,12 @@ export function IngestionsPanel({ onAddDataSource, onEditComponent }: Ingestions
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
           <KpiCard
             label="Total rows ingested"
-            value={formatCompact(analytics.totalRows)}
-            hint={analytics.totalBytes > 0 ? `≈ ${formatBytes(analytics.totalBytes)}` : 'across all sources'}
+            value={isCloud
+              ? (cloudTotalRows != null ? formatCompact(cloudTotalRows) : '—')
+              : formatCompact(analytics.totalRows)}
+            hint={isCloud
+              ? (cloudTotalRows != null ? `live from Dagster+ Insights · last ${window}` : 'not reported by Dagster+ for this window')
+              : (analytics.totalBytes > 0 ? `≈ ${formatBytes(analytics.totalBytes)}` : 'across all sources')}
             icon={TrendingUp}
             tone="success"
           />

@@ -71,13 +71,14 @@ export function PrimitivesManager({
   };
 
   // Fetch primitive details
-  const { data: primitiveDetails } = useQuery({
+  const { data: primitiveDetails, error: primitiveDetailsError, isLoading: primitiveDetailsLoading } = useQuery({
     queryKey: ['primitive-details', currentProject?.id, activeTab, selectedPrimitive?.name],
     queryFn: () =>
       currentProject && selectedPrimitive
         ? primitivesApi.getDetails(currentProject.id, activeTab, selectedPrimitive.name)
         : Promise.reject('No selection'),
     enabled: !!currentProject && !!selectedPrimitive && detailsOpen,
+    retry: false,
   });
 
   // Delete mutation
@@ -496,7 +497,16 @@ export function PrimitivesManager({
             </div>
 
             <div className="flex-1 overflow-hidden">
-              {!primitiveDetails ? (
+              {primitiveDetailsError ? (
+                <div className="flex items-center justify-center h-full p-6 text-center">
+                  <div>
+                    <p className="text-sm text-rose-600 font-medium">Failed to load details.</p>
+                    <p className="text-xs text-gray-500 mt-1">
+                      {(primitiveDetailsError as any)?.response?.data?.detail || (primitiveDetailsError as any)?.message || String(primitiveDetailsError)}
+                    </p>
+                  </div>
+                </div>
+              ) : primitiveDetailsLoading || !primitiveDetails ? (
                 <div className="flex items-center justify-center h-full">
                   <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
                 </div>
