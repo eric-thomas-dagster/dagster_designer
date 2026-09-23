@@ -4,9 +4,20 @@ from typing import Optional, Literal
 
 import dagster as dg
 
+from ._check_helpers import asset_key_from_string, latest_materialization_metadata, latest_materialization_timestamp
+
 
 class AssetCheckComponent(dg.Component, dg.Model, dg.Resolvable):
-    """Component for creating asset checks from YAML configuration."""
+    """Component for creating asset checks from YAML configuration.
+
+    Reads real signal from the Dagster instance's own event log -- the
+    target asset's most recent materialization timestamp (freshness) and
+    any metadata it logged (row_count, column_schema for row_count/schema
+    checks) -- rather than a hardcoded placeholder result. When an asset's
+    IO manager doesn't log the metadata a check needs, the check fails
+    with a message saying so instead of silently reporting a pass that
+    isn't backed by anything.
+    """
 
     check_name: str
     asset_name: str
@@ -18,7 +29,6 @@ class AssetCheckComponent(dg.Component, dg.Model, dg.Resolvable):
 
     def build_defs(self, context: dg.ComponentLoadContext) -> dg.Definitions:
         """Build Dagster definitions from component parameters."""
-        # Create asset check based on type
         if self.check_type == "row_count":
             check_def = self._create_row_count_check()
         elif self.check_type == "freshness":
@@ -31,83 +41,141 @@ class AssetCheckComponent(dg.Component, dg.Model, dg.Resolvable):
         return dg.Definitions(asset_checks=[check_def])
 
     def _create_row_count_check(self):
-        """Create a row count check."""
         asset_name = self.asset_name
-        threshold = self.threshold or 0
+        asset_key = asset_key_from_string(asset_name)
+        threshold = self.threshold if self.threshold is not None else 0
+        check_name = self.check_name
+        description = self.description
 
         @dg.asset_check(
-            asset=asset_name,
-            name=self.check_name,
-            description=self.description or f"Check row count >= {threshold}",
+            asset=asset_key,
+            name=check_name,
+            description=description or f"Check row count >= {threshold}",
         )
-        def row_count_check(context):
-            """Check that row count meets threshold."""
-            # This is a template - user needs to implement actual count logic
-            # For now, return a passing check
+        def row_count_check(context: dg.AssetCheckExecutionContext):
+            metadata = latest_materialization_metadata(context, asset_key)
+            row_count = None
+            for key in ("dagster/row_count", "row_count", "num_rows"):
+                if key in metadata:
+                    try:
+                        row_count = int(metadata[key])
+                    except (TypeError, ValueError):
+                        pass
+                    break
+            if row_count is None:
+                return dg.AssetCheckResult(
+                    passed=False,
+                    description=(
+                        f"No row-count metadata found on {asset_name}'s latest materialization "
+                        f"(looked for dagster/row_count, row_count, num_rows). Log one of these "
+                        f"via MetadataValue.int(...) in the asset's own materialization metadata "
+                        f"to make this check real."
+                    ),
+                )
             return dg.AssetCheckResult(
-                passed=True,
-                description=f"Row count check template for {asset_name}",
-                metadata={"threshold": threshold},
+                passed=row_count >= threshold,
+                description=f"{asset_name} has {row_count} rows (threshold {threshold}).",
+                metadata={"row_count": row_count, "threshold": threshold},
             )
 
         return row_count_check
 
     def _create_freshness_check(self):
-        """Create a freshness check."""
         asset_name = self.asset_name
-        max_age = self.max_age_hours or 24
+        asset_key = asset_key_from_string(asset_name)
+        max_age = self.max_age_hours if self.max_age_hours is not None else 24
+        check_name = self.check_name
+        description = self.description
 
         @dg.asset_check(
-            asset=asset_name,
-            name=self.check_name,
-            description=self.description
-            or f"Check data is less than {max_age} hours old",
+            asset=asset_key,
+            name=check_name,
+            description=description or f"Check data is less than {max_age} hours old",
         )
-        def freshness_check(context):
-            """Check data freshness."""
-            # This is a template - user needs to implement actual freshness logic
+        def freshness_check(context: dg.AssetCheckExecutionContext):
+            import time as _time
+            ts = latest_materialization_timestamp(context, asset_key)
+            if ts is None:
+                return dg.AssetCheckResult(
+                    passed=False,
+                    description=f"{asset_name} has never been materialized.",
+                )
+            age_hours = (_time.time() - ts) / 3600
             return dg.AssetCheckResult(
-                passed=True,
-                description=f"Freshness check template for {asset_name}",
-                metadata={"max_age_hours": max_age},
+                passed=age_hours <= max_age,
+                description=f"{asset_name} was last materialized {age_hours:.1f}h ago (max {max_age}h).",
+                metadata={"age_hours": age_hours, "max_age_hours": max_age},
             )
 
         return freshness_check
 
     def _create_schema_check(self):
-        """Create a schema validation check."""
         asset_name = self.asset_name
+        asset_key = asset_key_from_string(asset_name)
         column_name = self.column_name
+        check_name = self.check_name
+        description = self.description
 
         @dg.asset_check(
-            asset=asset_name,
-            name=self.check_name,
-            description=self.description or f"Check schema for {asset_name}",
+            asset=asset_key,
+            name=check_name,
+            description=description or f"Check schema for {asset_name}",
         )
-        def schema_check(context):
-            """Check schema validity."""
-            # This is a template - user needs to implement actual schema logic
+        def schema_check(context: dg.AssetCheckExecutionContext):
+            if not column_name:
+                return dg.AssetCheckResult(
+                    passed=False,
+                    description="No column_name configured for this schema check -- set one in the YAML.",
+                )
+            metadata = latest_materialization_metadata(context, asset_key)
+            columns: set[str] = set()
+            for key in ("dagster/column_schema", "dagster/table_schema", "column_schema", "table_schema"):
+                raw = metadata.get(key)
+                if raw is not None and hasattr(raw, "columns"):
+                    columns = {c.name for c in raw.columns}
+                    break
+            if not columns:
+                return dg.AssetCheckResult(
+                    passed=False,
+                    description=(
+                        f"No column-schema metadata found on {asset_name}'s latest materialization "
+                        f"(looked for dagster/column_schema). Log MetadataValue.table_schema(...) "
+                        f"in the asset's own materialization metadata to make this check real."
+                    ),
+                )
+            passed = column_name in columns
             return dg.AssetCheckResult(
-                passed=True,
-                description=f"Schema check template for {asset_name}",
-                metadata={"column_name": column_name} if column_name else {},
+                passed=passed,
+                description=f"Column '{column_name}' {'found' if passed else 'NOT FOUND'} in {asset_name}'s schema.",
+                metadata={"column_name": column_name, "known_columns": sorted(columns)},
             )
 
         return schema_check
 
     def _create_custom_check(self):
-        """Create a custom check."""
         asset_name = self.asset_name
+        asset_key = asset_key_from_string(asset_name)
+        check_name = self.check_name
+        description = self.description
 
         @dg.asset_check(
-            asset=asset_name,
-            name=self.check_name,
-            description=self.description or "Custom asset check",
+            asset=asset_key,
+            name=check_name,
+            description=description or "Custom asset check",
         )
-        def custom_check(context):
-            """Custom asset check - modify as needed."""
+        def custom_check(context: dg.AssetCheckExecutionContext):
+            # No default logic exists for "custom" -- fail loudly with a
+            # clear message instead of silently reporting a pass that
+            # isn't backed by anything. For a real custom check with SQL
+            # or Python you write yourself, use a Monitor
+            # (EnhancedAssetCheckComponent) instead, or edit this function.
             return dg.AssetCheckResult(
-                passed=True, description=f"Custom check template for {asset_name}"
+                passed=False,
+                description=(
+                    "This custom check has no implementation yet. Edit "
+                    "_create_custom_check in dagster_designer_components/asset_check.py "
+                    "to add real logic, or recreate this check as a Monitor instead."
+                ),
             )
 
         return custom_check

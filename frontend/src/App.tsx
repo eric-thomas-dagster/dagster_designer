@@ -24,6 +24,7 @@ import { DagsterCloudChip } from './components/DagsterCloudChip';
 import { SandboxStatusPill } from './components/SandboxStatusPill';
 import { GitCommitDialog } from './components/GitCommitDialog';
 import { PublishServerlessDialog } from './components/PublishServerlessDialog';
+import { AddMonitorDialog } from './components/AddMonitorDialog';
 import { AddComponentModal, type ConfigureAuthoringPayload } from './components/AddComponentModal';
 import { DraftsPanel } from './components/DraftsPanel';
 import { useDrafts } from './hooks/useDrafts';
@@ -294,6 +295,22 @@ function App() {
   };
   const [templateBuilderTab, setTemplateBuilderTab] = useState<string | null>(null);
   const [templateBuilderAssetKey, setTemplateBuilderAssetKey] = useState<string | null>(null);
+  // "New asset check" routes to the Monitors wizard instead of
+  // TemplateBuilder's own asset-check generator -- that generator writes
+  // a much weaker check (see AssetCheckComponent) and the two flows can
+  // silently create duplicate/conflicting checks on the same asset with
+  // no cross-linking between them.
+  const [addMonitorOpen, setAddMonitorOpen] = useState(false);
+  const [addMonitorInitialAsset, setAddMonitorInitialAsset] = useState<string | undefined>(undefined);
+  const openNewPrimitive = (category: string, assetKey?: string) => {
+    if (category === 'asset_check') {
+      setAddMonitorInitialAsset(assetKey);
+      setAddMonitorOpen(true);
+      return;
+    }
+    if (assetKey) setTemplateBuilderAssetKey(assetKey);
+    setTemplateBuilderTab(category);
+  };
   const [primitiveToOpen, setPrimitiveToOpen] = useState<{ category: string; name: string } | null>(null);
   const [addComponentOpen, setAddComponentOpen] = useState(false);
   const [addComponentProducesFilter, setAddComponentProducesFilter] = useState<any[] | undefined>(undefined);
@@ -1255,10 +1272,7 @@ function App() {
                   onClose={() => { setDetailNodeId(null); setDetailInitialTab(undefined); }}
                   onNavigate={(nextNodeId) => setDetailNodeId(nextNodeId)}
                   onOpenRun={handleOpenRun}
-                  onNewPrimitiveForAsset={(category, assetKey) => {
-                    setTemplateBuilderAssetKey(assetKey);
-                    setTemplateBuilderTab(category);
-                  }}
+                  onNewPrimitiveForAsset={(category, assetKey) => openNewPrimitive(category, assetKey)}
                 />
               </div>
             )}
@@ -1436,10 +1450,7 @@ function App() {
                   nodeId={selectedNodeId}
                   onConfigureComponent={setEditingComponent}
                   onOpenFile={handleOpenFile}
-                  onNewPrimitiveForAsset={(category, assetKey) => {
-                    setTemplateBuilderAssetKey(assetKey);
-                    setTemplateBuilderTab(category);
-                  }}
+                  onNewPrimitiveForAsset={(category, assetKey) => openNewPrimitive(category, assetKey)}
                   onOpenDetail={setDetailNodeId}
                 />
               </aside>
@@ -1568,7 +1579,7 @@ function App() {
                 </div>
               )}
               <PrimitivesManager
-                onNewPrimitive={(category) => setTemplateBuilderTab(category)}
+                onNewPrimitive={(category) => openNewPrimitive(category)}
                 onOpenFile={handleOpenFile}
                 openPrimitive={primitiveToOpen}
                 onOpenPrimitiveConsumed={() => setPrimitiveToOpen(null)}
@@ -1909,6 +1920,17 @@ function App() {
           onOpenChange={setLocalPublishOpen}
           projectId={currentProject.id}
           projectName={currentProject.name}
+        />
+      )}
+
+      {/* "New asset check" — routed here instead of TemplateBuilder's own
+          asset-check generator (see openNewPrimitive above). */}
+      {currentProject && (
+        <AddMonitorDialog
+          open={addMonitorOpen}
+          onOpenChange={(o) => { setAddMonitorOpen(o); if (!o) setAddMonitorInitialAsset(undefined); }}
+          projectId={currentProject.id}
+          initialTargetAsset={addMonitorInitialAsset}
         />
       )}
 

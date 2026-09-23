@@ -14,6 +14,9 @@ interface AddMonitorDialogProps {
   onOpenChange: (open: boolean) => void;
   projectId: string;
   onSaved?: () => void;
+  /** Pre-fill the target asset (e.g. opened from a specific asset's
+   *  "New asset check" action) so the user doesn't have to re-pick it. */
+  initialTargetAsset?: string;
 }
 
 type CheckKind =
@@ -92,7 +95,7 @@ const STARTER_CUSTOM_PYTHON = [
   '',
 ].join('\n');
 
-export function AddMonitorDialog({ open, onOpenChange, projectId, onSaved }: AddMonitorDialogProps) {
+export function AddMonitorDialog({ open, onOpenChange, projectId, onSaved, initialTargetAsset }: AddMonitorDialogProps) {
   const isDark = useIsDarkMode();
   // Step state — a very lightweight wizard. We show all sections at
   // once but scope validation to what's currently active.
@@ -151,6 +154,14 @@ export function AddMonitorDialog({ open, onOpenChange, projectId, onSaved }: Add
     }
   }, [checkKind, kindDef, implementation]);
 
+  // Opened from a specific asset (e.g. "New asset check" on that asset's
+  // detail page) -- pre-fill the target so the user doesn't re-pick it.
+  useEffect(() => {
+    if (open && initialTargetAsset) {
+      setTargetAsset(initialTargetAsset);
+    }
+  }, [open, initialTargetAsset]);
+
   // Load all project assets on open (so target picker is populated).
   useEffect(() => {
     if (!open) return;
@@ -167,6 +178,7 @@ export function AddMonitorDialog({ open, onOpenChange, projectId, onSaved }: Add
       setDbtProjects((dp as any).projects || []);
       const s = new Set<string>();
       for (const m of ((mon as any).monitors || [])) for (const t of m.target_asset_keys) s.add(t);
+      if (initialTargetAsset) s.add(initialTargetAsset);
       setAssets(Array.from(s).sort());
     });
     return () => { cancelled = true; };
