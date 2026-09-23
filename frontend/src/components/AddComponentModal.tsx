@@ -709,7 +709,7 @@ export function AddComponentModal({
                         </div>
                         <div className="text-[10px] text-gray-500 mt-0.5 truncate">{t.fullName}</div>
                         {t.description && (
-                          <div className="text-[11px] text-gray-600 mt-1 line-clamp-2">{t.description}</div>
+                          <div className="text-[11px] text-gray-600 mt-1 line-clamp-2">{truncateDescription(t.description)}</div>
                         )}
                       </button>
                     );
@@ -747,6 +747,21 @@ interface DeploymentOptionProps {
   d: AuthoredDeployment;
   support: boolean | undefined;
   probing: boolean;
+}
+
+// Some component descriptions (esp. Dagster+ built-ins like
+// DefsFolderComponent) are full multi-paragraph docstrings dumped
+// as-is by introspection -- thousands of characters vs. the usual
+// couple hundred. `line-clamp-2` alone doesn't reliably cap the row's
+// rendered height for those outliers in every WebKit version, leaving
+// a patch of blank space below a handful of rows where the browser
+// reserves room for content it isn't actually painting. Hard-capping
+// the character count before it ever reaches the DOM sidesteps that
+// instead of depending on CSS clamping to behave the same everywhere.
+function truncateDescription(text: string, max = 180): string {
+  const oneLine = text.replace(/\s+/g, ' ').trim();
+  if (oneLine.length <= max) return oneLine;
+  return oneLine.slice(0, max).trimEnd() + '…';
 }
 
 function producesLabel(p: Produces): string {
