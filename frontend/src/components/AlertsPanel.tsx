@@ -327,14 +327,16 @@ export function AlertsPanel() {
         </div>
       </div>
 
-      {/* OSS disclaimer */}
-      <Notice icon={Info} className="mx-4 mt-3">
-        <strong>Alerts are only enforced on Dagster+ deployments.</strong> You can still author policies here for version control,
-        but OSS Dagster ignores them at runtime.
-      </Notice>
+      {/* Body -- bg-gray-50 to match RunsPanel, so the shared amber
+          Notice below renders on the same background as the "start dg
+          dev" one there instead of looking like a different shade. */}
+      <div className="flex-1 overflow-y-auto p-6 bg-gray-50">
+        {/* OSS disclaimer */}
+        <Notice icon={Info} className="mb-3">
+          <strong>Alerts are only enforced on Dagster+ deployments.</strong> You can still author policies here for version control,
+          but OSS Dagster ignores them at runtime.
+        </Notice>
 
-      {/* Body */}
-      <div className="flex-1 overflow-y-auto p-6">
         {loading && <div className="text-center py-12 text-gray-500"><Loader2 className="w-6 h-6 animate-spin mx-auto mb-2" />Loading alerts…</div>}
         {error && <div className="p-3 bg-rose-50 border border-rose-200 rounded text-sm text-rose-800">{error}</div>}
         {!loading && !error && localState && localState.policies.length === 0 && (

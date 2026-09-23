@@ -660,11 +660,13 @@ async def _run_dagster_graphql(project: Project, query_str: str, variables: dict
         except Exception as e:
             print(f"[monitors] cloud graphql failed for {project.id}: {e}", flush=True)
             return None
-    # Local `dg dev` -- exposes the same GraphQL surface at
-    # localhost:3000 as Dagster+, so the same queries just work.
+    # Local `dg dev` -- exposes the same GraphQL surface as Dagster+, so
+    # the same queries just work, once resolved to the port it's
+    # actually bound to (not necessarily 3000).
     from .runs import _run_local_query
+    from .dagster_webserver import resolve_local_graphql_port
     try:
-        return await _run_local_query(3000, query_str, variables)
+        return await _run_local_query(resolve_local_graphql_port(project.id), query_str, variables)
     except Exception:
         # `dg dev` not running or unreachable -- caller falls back to
         # jsonl-based history for local.
@@ -2855,8 +2857,9 @@ async def get_asset_partition_status(project_id: str, asset_key: str):
         node = data.get("assetNodeOrError") or {}
     else:
         from .runs import _run_local_query
+        from .dagster_webserver import resolve_local_graphql_port
         try:
-            data = await _run_local_query(3000, ASSET_PARTITION_STATUS_QUERY, {"assetKey": {"path": path}})
+            data = await _run_local_query(resolve_local_graphql_port(project_id), ASSET_PARTITION_STATUS_QUERY, {"assetKey": {"path": path}})
         except Exception as e:
             raise HTTPException(status_code=502, detail=f"Couldn't reach local Dagster GraphQL. Is `dg dev` running? ({e})")
         node = data.get("assetNodeOrError") or {}
@@ -2944,8 +2947,9 @@ async def get_asset_partition_detail(project_id: str, asset_key: str, partition:
         node = data.get("assetNodeOrError") or {}
     else:
         from .runs import _run_local_query
+        from .dagster_webserver import resolve_local_graphql_port
         try:
-            data = await _run_local_query(3000, ASSET_PARTITION_DETAIL_QUERY, variables)
+            data = await _run_local_query(resolve_local_graphql_port(project_id), ASSET_PARTITION_DETAIL_QUERY, variables)
         except Exception as e:
             raise HTTPException(status_code=502, detail=f"Couldn't reach local Dagster GraphQL. Is `dg dev` running? ({e})")
         node = data.get("assetNodeOrError") or {}
@@ -6850,6 +6854,7 @@ async def automation_page_ask(project_id: str, request: PageAskRequest):
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
     lines = ["AUTOMATION_STATE:"]
+    unautomated: list[str] = []
     for n in project.graph.nodes:
         if n.node_kind != 'asset':
             continue
@@ -6863,6 +6868,15 @@ async def automation_page_ask(project_id: str, request: PageAskRequest):
         if auto: parts.append(f"auto_cond=yes")
         if parts:
             lines.append(f"  • {ak}: {', '.join(parts)}")
+        else:
+            unautomated.append(ak)
+    # Without this, an asset with no schedule/sensor/automation_condition
+    # never appears in the context above at all -- the LLM then has no
+    # way to answer "which assets have no automation" beyond generic
+    # advice, since nothing in front of it says which ones are missing.
+    lines.append("")
+    lines.append(f"UNAUTOMATED_ASSETS ({len(unautomated)}):")
+    lines.extend(f"  • {a}" for a in unautomated[:60])
     sys = (
         "You are a Dagster automation expert answering questions about a "
         "project's schedules / sensors / automation conditions. Reference "

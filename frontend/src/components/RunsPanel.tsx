@@ -1507,7 +1507,7 @@ function ChevronDownSVG({ className }: { className?: string }) {
  *  in the Runs panel, this saves them a trip through the Actions menu.
  *  Polls status briefly after starting so we can re-fetch runs cleanly.
  */
-function StartDgDevButton({ onStarted }: { onStarted: () => void }) {
+export function StartDgDevButton({ onStarted }: { onStarted: () => void }) {
   const { currentProject } = useProjectStore();
   const [busy, setBusy] = useState(false);
   const start = async () => {

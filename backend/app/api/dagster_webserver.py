@@ -108,6 +108,50 @@ def check_dagster_webserver(port: int | None = None, project_path: Path | None =
     return False, None, None
 
 
+def _project_path_for_id(project_id: str) -> Path | None:
+    project_file = (settings.projects_dir / f"{project_id}.json").resolve()
+    if not project_file.exists():
+        return None
+    import json
+    with open(project_file, 'r') as f:
+        directory_name = json.load(f).get("directory_name", project_id)
+    return (settings.projects_dir / directory_name).resolve()
+
+
+def resolve_local_graphql_port(project_id: str) -> int:
+    """Best-effort resolution of the port THIS project's local `dg dev`/
+    `dagster dev` is actually bound to. Every local-GraphQL caller across
+    projects.py/runs.py used to hardcode 3000 -- find_available_port scans
+    3000-3009, so any project started while another already held 3000
+    (very normal: multiple Designer projects, or anything else on 3000)
+    silently landed on a different port and every one of those hardcoded
+    callers would then fail to connect, even with `dg dev` running fine.
+
+    Checks the in-memory (port, pid) cache this module maintains first,
+    then falls back to scanning live processes for one that matches this
+    project's directory. Falls back to 3000 (the conventional default) if
+    nothing is discoverable, so callers still get a real connection
+    attempt -- and Dagster's own "is dg dev running?" story -- rather than
+    an opaque port-resolution error when no dev server exists at all.
+    """
+    if project_id in _project_ports:
+        cached_port, cached_pid = _project_ports[project_id]
+        try:
+            if psutil.Process(cached_pid).is_running():
+                return cached_port
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            del _project_ports[project_id]
+
+    project_path = _project_path_for_id(project_id)
+    is_running, pid, port_found = check_dagster_webserver(project_path=project_path)
+    if is_running and port_found:
+        if pid is not None:
+            _project_ports[project_id] = (port_found, pid)
+        return port_found
+
+    return 3000
+
+
 @router.get("/status/{project_id}")
 async def get_dagster_ui_status(project_id: str) -> DagsterUIStatus:
     """

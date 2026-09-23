@@ -23,6 +23,7 @@ from pydantic import BaseModel
 
 from ..services.project_service import project_service
 from ..services.dagster_plus_client import query as dp_query, DagsterPlusError, RUNS_QUERY
+from .dagster_webserver import resolve_local_graphql_port
 
 
 router = APIRouter(prefix="/projects", tags=["runs"])
@@ -227,7 +228,7 @@ async def query_runs(project_id: str, params: RunsQueryParams):
     # Talk to the local dagster dev GraphQL. If dev isn't running,
     # httpx will fail with ConnectError -- return a helpful message so
     # the panel shows "start dev" instead of a scary 500.
-    port = 3000  # dagster dev default; could be overridden per-project later
+    port = resolve_local_graphql_port(project_id)
     merged_tags = [t.model_dump() for t in (params.tags or [])]
     if params.code_location:
         merged_tags.append({"key": "dagster/code_location", "value": params.code_location})
@@ -321,7 +322,7 @@ async def list_code_locations(project_id: str):
             code_locations=_extract_location_names(data), source="cloud",
         )
 
-    port = 3000
+    port = resolve_local_graphql_port(project_id)
     url = LOCAL_GRAPHQL_URL_TEMPLATE.format(port=port)
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
@@ -394,7 +395,7 @@ async def list_job_names(project_id: str):
             raise HTTPException(status_code=502, detail=str(e))
         return JobNamesResponse(job_names=_extract_job_names(data), source="cloud")
 
-    port = 3000
+    port = resolve_local_graphql_port(project_id)
     url = LOCAL_GRAPHQL_URL_TEMPLATE.format(port=port)
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
@@ -477,7 +478,7 @@ async def list_tag_keys(project_id: str):
             return TagKeysResponse(tag_keys=[])
     else:
         try:
-            data = await _run_local_query(3000, RUN_TAG_KEYS_QUERY)
+            data = await _run_local_query(resolve_local_graphql_port(project_id), RUN_TAG_KEYS_QUERY)
         except httpx.ConnectError:
             return TagKeysResponse(tag_keys=[])
 
@@ -509,7 +510,7 @@ async def list_tag_values(project_id: str, key: str):
             return TagValuesResponse(key=key, values=[])
     else:
         try:
-            data = await _run_local_query(3000, RUN_TAG_VALUES_QUERY, {"tagKeys": [key]})
+            data = await _run_local_query(resolve_local_graphql_port(project_id), RUN_TAG_VALUES_QUERY, {"tagKeys": [key]})
         except httpx.ConnectError:
             return TagValuesResponse(key=key, values=[])
 
@@ -688,7 +689,7 @@ async def get_run_detail(project_id: str, run_id: str):
                     raise HTTPException(status_code=502, detail=str(e))
                 print(f"[runs] non-strict Dagster+ error: {e}", flush=True)
                 return {}
-        url = LOCAL_GRAPHQL_URL_TEMPLATE.format(port=3000)
+        url = LOCAL_GRAPHQL_URL_TEMPLATE.format(port=resolve_local_graphql_port(project_id))
         try:
             async with httpx.AsyncClient(timeout=15.0) as client:
                 r = await client.post(url, json={"query": gql, "variables": variables})
@@ -1010,7 +1011,7 @@ async def get_run_logs(
             raise HTTPException(status_code=502, detail=str(e))
         source = "cloud"
     else:
-        url = LOCAL_GRAPHQL_URL_TEMPLATE.format(port=3000)
+        url = LOCAL_GRAPHQL_URL_TEMPLATE.format(port=resolve_local_graphql_port(project_id))
         try:
             async with httpx.AsyncClient(timeout=15.0) as client:
                 r = await client.post(url, json={"query": RUN_LOGS_QUERY, "variables": variables})
@@ -1143,7 +1144,7 @@ async def reexecute_run(project_id: str, run_id: str, request: ReexecuteRequest)
                 gql,
                 variables=variables,
             )
-        url = LOCAL_GRAPHQL_URL_TEMPLATE.format(port=3000)
+        url = LOCAL_GRAPHQL_URL_TEMPLATE.format(port=resolve_local_graphql_port(project_id))
         async with httpx.AsyncClient(timeout=30.0) as client:
             r = await client.post(url, json={"query": gql, "variables": variables})
         body = r.json()
@@ -1202,7 +1203,7 @@ async def terminate_run(project_id: str, run_id: str):
         except DagsterPlusError as e:
             raise HTTPException(status_code=502, detail=str(e))
     else:
-        url = LOCAL_GRAPHQL_URL_TEMPLATE.format(port=3000)
+        url = LOCAL_GRAPHQL_URL_TEMPLATE.format(port=resolve_local_graphql_port(project_id))
         try:
             async with httpx.AsyncClient(timeout=15.0) as client:
                 r = await client.post(url, json={"query": TERMINATE_MUTATION, "variables": variables})
@@ -1258,7 +1259,7 @@ async def get_run_status(project_id: str, run_id: str):
         except DagsterPlusError as e:
             return RunStatusResponse(run_id=run_id, status="UNKNOWN", error=str(e))
     else:
-        url = LOCAL_GRAPHQL_URL_TEMPLATE.format(port=3000)
+        url = LOCAL_GRAPHQL_URL_TEMPLATE.format(port=resolve_local_graphql_port(project_id))
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
                 r = await client.post(url, json={"query": STATUS_QUERY, "variables": variables})

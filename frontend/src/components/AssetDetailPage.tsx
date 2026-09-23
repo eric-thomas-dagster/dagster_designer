@@ -11,6 +11,7 @@ import { projectsApi, assetsApi, partitionsApi, primitivesApi, dagsterPlusOrgBas
 import { classifyStatus, statusTextClass } from '@/lib/status';
 import { notify } from './Notifications';
 import { PartitionBackfill } from './PartitionBackfill';
+import { StartDgDevButton } from './RunsPanel';
 import { InsightMetricCard } from './InsightMetricCard';
 import { MetadataEntryList } from './MetadataEntryList';
 import type { GraphNode, ComponentInstance } from '@/types';
@@ -618,7 +619,7 @@ function PartitionsTab({
   // Per-partition materialization status -- the actual matrix. Same
   // endpoint for local (queries the project's own `dagster dev`) and
   // cloud (queries Dagster+), so this one query covers both.
-  const { data: status, isLoading, error } = useQuery({
+  const { data: status, isLoading, error, refetch } = useQuery({
     queryKey: ['partition-status', projectId, assetKey],
     queryFn: () => partitionsApi.getPartitionStatus(projectId, assetKey),
     staleTime: 15_000,
@@ -629,6 +630,9 @@ function PartitionsTab({
     return <div className="p-12 text-center text-gray-500"><Loader2 className="w-5 h-5 mx-auto animate-spin" /></div>;
   }
   if (error) {
+    const notReachable = /couldn't reach local dagster graphql/i.test(
+      (error as any)?.response?.data?.detail || (error as any)?.message || String(error),
+    );
     return (
       <div className="p-12 text-center text-gray-500">
         <AlertTriangle className="w-8 h-8 mx-auto mb-2 text-gray-300" />
@@ -636,6 +640,11 @@ function PartitionsTab({
         <p className="text-xs mt-1 text-gray-400 max-w-md mx-auto">
           {(error as any)?.response?.data?.detail || (error as any)?.message || String(error)}
         </p>
+        {!isCloud && notReachable && (
+          <div className="mt-4 flex justify-center">
+            <StartDgDevButton onStarted={() => refetch()} />
+          </div>
+        )}
       </div>
     );
   }
