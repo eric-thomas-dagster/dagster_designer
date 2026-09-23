@@ -475,6 +475,13 @@ class ProjectService:
 
         print(f"✅ Project {project.name} created successfully!")
         print(f"{'='*60}\n")
+
+        from .telemetry_service import log_designer_action
+        log_designer_action("designer_project_created", {
+            "has_git_repo": bool(project_create.git_repo),
+            "is_dagster_plus": getattr(project, "is_dagster_plus", False),
+        })
+
         return project
 
     def import_project(self, project_path: str) -> Project:
@@ -573,6 +580,12 @@ class ProjectService:
 
         print(f"✅ Project {project.name} imported successfully!")
         print(f"{'='*60}\n")
+
+        from .telemetry_service import log_designer_action
+        log_designer_action("designer_project_imported", {
+            "is_dagster_plus": getattr(project, "is_dagster_plus", False),
+        })
+
         return project
 
     def get_project(self, project_id: str) -> Project | None:
