@@ -67,7 +67,14 @@ export function ComponentConfigModal({
   const type = component?.component_type || componentType || '';
   const { currentProject, loadProject } = useProjectStore();
   const { data: fetchedSchema } = useComponent(type, currentProject?.id);
-  const componentSchema = schemaOverride ?? fetchedSchema;
+  // An override with no actual field definitions (e.g. AddComponentModal
+  // couldn't resolve a live schema right after installing a community
+  // component) shouldn't win over a real one this hook fetches — that's
+  // the difference between "no configuration fields available" and a
+  // working form. Only prefer the override when it actually has properties.
+  const overrideHasFields = !!schemaOverride?.schema
+    && Object.keys(schemaOverride.schema.properties ?? schemaOverride.schema).length > 0;
+  const componentSchema = overrideHasFields ? schemaOverride : (fetchedSchema ?? schemaOverride);
   const isDraftMode = mode === 'draft';
 
   console.log('[ComponentConfigModal] Opened with:', {

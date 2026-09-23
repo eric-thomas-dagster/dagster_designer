@@ -381,15 +381,22 @@ async def install_community_component(project_id: str, component_id: str) -> dic
         raise RuntimeError("dagster-component add failed:\n" + "\n".join(tail))
 
     # Discover the canonical component type by reading the freshly-written
-    # defs.yaml. The CLI drops it under src/<module>/components/<id>/.
+    # defs.yaml. The CLI's layout splits the two: the component's Python
+    # implementation + schema.json land under src/<module>/components/<id>/,
+    # but the *instance* defs.yaml (with the `type:` line we need) lands
+    # under the sibling src/<module>/defs/<id>/ instead.
     module_name = state.dir().name
-    comp_root_candidates = [
+    comp_dir_candidates = [
         state.dir() / "src" / module_name / "components" / component_id,
         state.dir() / module_name / "components" / component_id,
     ]
+    defs_dir_candidates = [
+        state.dir() / "src" / module_name / "defs" / component_id,
+        state.dir() / module_name / "defs" / component_id,
+    ]
     canonical_type: str | None = None
     req_path: Path | None = None
-    for cd in comp_root_candidates:
+    for cd in defs_dir_candidates:
         defs = cd / "defs.yaml"
         if defs.exists():
             for line in defs.read_text().splitlines():
@@ -397,9 +404,13 @@ async def install_community_component(project_id: str, component_id: str) -> dic
                 if line.startswith("type:"):
                     canonical_type = line.split(":", 1)[1].strip().strip('"').strip("'")
                     break
+            if canonical_type:
+                break
+    for cd in comp_dir_candidates:
         req = cd / "requirements.txt"
         if req.exists():
             req_path = req
+            break
 
     # Safety-net dep install: `dagster-component add --auto-install` is
     # known to skip templates' `requirements.txt` sometimes (hit this on
