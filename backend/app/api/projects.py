@@ -8487,3 +8487,36 @@ async def project_git_create_remote(project_id: str, request: GitCreateRemoteReq
         created=created,
         detail=None if created else "Repo already existed on GitHub -- reused it as origin.",
     )
+
+
+class PublishLocalServerlessRequest(BaseModel):
+    organization: str
+    api_token: str
+    deployment: str
+    location_name: str | None = None
+
+
+class PublishLocalServerlessResponse(BaseModel):
+    location_name: str
+    deployment: str
+    log_tail: list[str]
+
+
+@router.post('/{project_id}/publish-serverless', response_model=PublishLocalServerlessResponse)
+async def publish_local_project_serverless(project_id: str, request: PublishLocalServerlessRequest):
+    """Publish a plain local project straight to a Dagster+ Serverless
+    deployment, skipping git entirely — the local-project counterpart
+    to designer-loc's sandbox publish (POST
+    /projects/{id}/designer-loc/publish-serverless), which only applies
+    to Dagster+-connected projects. A local project has no stored
+    org/token/deployment, so this takes them as input instead."""
+    try:
+        return await project_service.publish_local_project_serverless(
+            project_id,
+            request.organization.strip(),
+            request.api_token.strip(),
+            request.deployment.strip(),
+            request.location_name.strip() if request.location_name else None,
+        )
+    except RuntimeError as e:
+        raise HTTPException(status_code=400, detail=str(e))

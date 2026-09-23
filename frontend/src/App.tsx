@@ -23,6 +23,7 @@ import { DataPreviewModal } from './components/DataPreviewModal';
 import { DagsterCloudChip } from './components/DagsterCloudChip';
 import { SandboxStatusPill } from './components/SandboxStatusPill';
 import { GitCommitDialog } from './components/GitCommitDialog';
+import { PublishServerlessDialog } from './components/PublishServerlessDialog';
 import { AddComponentModal, type ConfigureAuthoringPayload } from './components/AddComponentModal';
 import { DraftsPanel } from './components/DraftsPanel';
 import { useDrafts } from './hooks/useDrafts';
@@ -303,6 +304,9 @@ function App() {
   // Surfaced as its own always-visible header control instead.
   const [headerGitCommitOpen, setHeaderGitCommitOpen] = useState(false);
   const [publishingServerless, setPublishingServerless] = useState(false);
+  // Local-project "Publish to Dagster+" — was reported as simply not
+  // existing anywhere for a project that isn't already Dagster+-connected.
+  const [localPublishOpen, setLocalPublishOpen] = useState(false);
   // Set when the user clicks "Continue" in the picker — triggers
   // ComponentConfigModal to open in draft mode with the picked schema
   // and target. Reused across sandbox + cloud-loc paths.
@@ -1041,6 +1045,13 @@ function App() {
                       title="Commit and push this project to GitHub"
                     >
                       Push to GitHub
+                    </button>
+                    <button
+                      onClick={() => setLocalPublishOpen(true)}
+                      className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium border border-amber-200 bg-amber-50 text-amber-800 hover:bg-amber-100"
+                      title="Publish this project directly to a Dagster+ Serverless deployment, skipping git"
+                    >
+                      Publish to Dagster+
                     </button>
                   </>
                 )}
@@ -1883,6 +1894,21 @@ function App() {
           projectId={currentProject.id}
           defaultMessage="Update from Dagster Designer"
           defaultRepoName={currentProject.name}
+        />
+      )}
+
+      {/* Local-project "Publish to Dagster+" — previously didn't exist
+          anywhere for a project that isn't already Dagster+-connected;
+          the Dagster+-connected version of this lives in the "Publish"
+          header dropdown further up (Publish sandbox directly to
+          Serverless), which needs org/token/deployment already stored
+          on the project record. This collects them inline instead. */}
+      {currentProject && !(currentProject as any)?.is_dagster_plus && (
+        <PublishServerlessDialog
+          open={localPublishOpen}
+          onOpenChange={setLocalPublishOpen}
+          projectId={currentProject.id}
+          projectName={currentProject.name}
         />
       )}
 

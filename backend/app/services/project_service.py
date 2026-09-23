@@ -3012,6 +3012,45 @@ if customizations_path.exists():
         profiles_file.write_text(profiles_content)
         print(f"📝 Created profiles.yml for profile '{profile_name}' with adapter: {adapter_type}")
 
+    async def publish_local_project_serverless(
+        self, project_id: str, org: str, token: str, deployment: str, location_name: str | None,
+    ) -> dict:
+        """Publish a plain LOCAL project (no Dagster+ connection at all —
+        that's the point) straight to a Serverless deployment, skipping
+        git entirely. The sandbox has its own version of this
+        (designer_loc_service.publish_serverless) that reads
+        org/token/deployment off the project record, because a sandbox
+        only exists for a project that's already Dagster+-connected. A
+        local project has none of that stored, so the caller supplies it
+        here instead — same underlying mechanism
+        (serverless_publish_service.run_serverless_deploy), just pointed
+        at this project's own directory instead of a sandbox's.
+        """
+        import asyncio as _asyncio
+        from . import serverless_publish_service
+
+        project = self.get_project(project_id)
+        if project is None:
+            raise RuntimeError("Project not found")
+        if not org or not token or not deployment:
+            raise RuntimeError("Organization, API token, and deployment are all required.")
+
+        project_dir = self._get_project_dir(project)
+        if not (project_dir / ".venv").exists():
+            raise RuntimeError("Project has no virtual environment yet — open it in Designer first so dependencies install.")
+
+        loc_name = location_name or f"designer-{project.directory_name}"
+        module_name = project.directory_name.replace("-", "_")
+
+        loop = _asyncio.get_event_loop()
+        tail = await loop.run_in_executor(
+            None,
+            serverless_publish_service.run_serverless_deploy,
+            project_dir, module_name, org, token, deployment, loc_name,
+            print,
+        )
+        return {"location_name": loc_name, "deployment": deployment, "log_tail": tail}
+
 
 # Global service instance
 project_service = ProjectService()

@@ -992,6 +992,18 @@ export const projectsApi = {
     return response.data as any;
   },
 
+  // Local-project counterpart to designerLocApi.publishServerless (which
+  // only applies to Dagster+-connected projects and their sandbox). A
+  // plain local project has no stored org/token/deployment, so those are
+  // collected here instead of assumed.
+  publishServerless: async (
+    projectId: string,
+    body: { organization: string; api_token: string; deployment: string; location_name?: string | null },
+  ): Promise<{ location_name: string; deployment: string; log_tail: string[] }> => {
+    const response = await api.post(`/projects/${projectId}/publish-serverless`, body, { timeout: 900_000 });
+    return response.data as any;
+  },
+
   exportYAML: async (projectId: string) => {
     const response = await api.get<{ yaml_content: string; filename: string }>(
       `/projects/${projectId}/export-yaml`
