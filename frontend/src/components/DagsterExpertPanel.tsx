@@ -37,6 +37,7 @@ interface DagsterExpertPanelProps {
 export function DagsterExpertPanel({ onClose, pendingQuestion, onPendingQuestionConsumed }: DagsterExpertPanelProps) {
   const [tier, setTier] = useState<Tier>('checking');
   const [installing, setInstalling] = useState(false);
+  const [referenceDocsAvailable, setReferenceDocsAvailable] = useState(false);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
@@ -50,6 +51,7 @@ export function DagsterExpertPanel({ onClose, pendingQuestion, onPendingQuestion
         const r = await fetch(`${API_BASE}/ai/dagster-expert/status`);
         const s = await r.json();
         if (cancelled) return;
+        setReferenceDocsAvailable(!!s.reference_docs_available);
         if (s.cli_available) {
           if (s.dagster_expert_installed) {
             setTier('cli');
@@ -192,7 +194,7 @@ export function DagsterExpertPanel({ onClose, pendingQuestion, onPendingQuestion
         <span className="text-sm font-semibold text-gray-900">Dagster AI</span>
         <span className="ml-auto text-[10px] text-gray-400">
           {tier === 'cli' && 'via dagster-expert skill'}
-          {tier === 'fallback' && 'via your configured AI key'}
+          {tier === 'fallback' && (referenceDocsAvailable ? 'via your AI key + dagster-expert docs' : 'via your configured AI key')}
           {installing && 'installing skill…'}
         </span>
         {onClose && (

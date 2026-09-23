@@ -171,6 +171,7 @@ class DagsterAiStatusResponse(BaseModel):
     dagster_expert_installed: bool
     openai_available: bool
     anthropic_available: bool
+    reference_docs_available: bool
 
 
 @router.get("/dagster-expert/status", response_model=DagsterAiStatusResponse)

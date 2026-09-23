@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import shutil
 from typing import AsyncIterator
 
@@ -38,6 +39,115 @@ FALLBACK_SYSTEM_PROMPT = (
     "explanation when one would help. If you're not sure of exact current API "
     "names, say so rather than inventing plausible-looking ones."
 )
+
+_skill_files_cache: dict[str, str] | None = None
+_skill_files_loaded = False
+
+# Total on-disk content is ~220KB / ~55K tokens across 173 files -- fits
+# in a single request in *theory* (well under even gpt-4o's 128K context),
+# but blowing the whole budget on system-prompt content isn't safe in
+# practice: hit a real 429 from an org-level OpenAI rate limit of 30K
+# tokens/minute on the very first live test, well below what the model's
+# context window alone would suggest is fine. So this is relevance-
+# filtered per question instead, mirroring genie_service.py's own
+# _keyword_prefilter pattern for the same kind of problem (a big catalog,
+# a specific task, pick what's actually relevant).
+_REFERENCE_CHAR_BUDGET = 20_000  # ~5K tokens of reference content, leaves headroom under a 30K TPM cap
+
+
+def _find_dagster_expert_skill_dir() -> "os.PathLike[str] | None":
+    """Locate the dagster-expert skill's files on disk, if the user has
+    it installed via Claude Code — regardless of whether we're routing
+    through the CLI (Tier 1) or not, this content is just markdown and
+    reusable as context for a direct API call too. Checked in the
+    two places `claude plugin install` and the marketplace's own
+    checkout actually put it; picks the highest version under `cache/`
+    if more than one is present."""
+    import glob as _glob
+    from pathlib import Path as _Path
+
+    cache_hits = sorted(_glob.glob(
+        str(_Path.home() / ".claude/plugins/cache/*/dagster-expert/*/skills/dagster-expert/SKILL.md")
+    ))
+    if cache_hits:
+        return _Path(cache_hits[-1]).parent
+
+    marketplace_hits = _glob.glob(
+        str(_Path.home() / ".claude/plugins/marketplaces/*/skills/dagster-expert/SKILL.md")
+    )
+    if marketplace_hits:
+        return _Path(marketplace_hits[0]).parent
+    return None
+
+
+def _load_dagster_expert_files() -> dict[str, str] | None:
+    """{relative_path: content} for SKILL.md + every reference doc.
+    Loaded once and cached for the process lifetime -- the skill's
+    on-disk content doesn't change mid-session."""
+    global _skill_files_cache, _skill_files_loaded
+    if _skill_files_loaded:
+        return _skill_files_cache
+
+    _skill_files_loaded = True
+    skill_dir = _find_dagster_expert_skill_dir()
+    if not skill_dir:
+        return None
+
+    from pathlib import Path as _Path
+    skill_dir = _Path(skill_dir)
+    files: dict[str, str] = {}
+    skill_md = skill_dir / "SKILL.md"
+    if skill_md.exists():
+        files["SKILL.md"] = skill_md.read_text(errors="replace")
+    for md_file in sorted((skill_dir / "references").rglob("*.md")):
+        rel = str(md_file.relative_to(skill_dir))
+        files[rel] = md_file.read_text(errors="replace")
+
+    if not files:
+        return None
+    _skill_files_cache = files
+    return _skill_files_cache
+
+
+def _select_reference_context(question: str, budget_chars: int = _REFERENCE_CHAR_BUDGET) -> str | None:
+    """Real dagster-expert content, filtered to what's relevant to this
+    question rather than dumped in full (see _REFERENCE_CHAR_BUDGET's
+    comment for why). SKILL.md's own core sections (everything before
+    its generated reference index -- concepts, dg CLI basics) are always
+    included since they're small and broadly useful; reference files are
+    ranked by keyword overlap against the question and added greedily
+    until the budget's spent, most relevant first.
+    """
+    files = _load_dagster_expert_files()
+    if not files:
+        return None
+
+    skill_md = files.get("SKILL.md", "")
+    core = skill_md.split("## Reference Index", 1)[0].strip()
+
+    q_words = {w for w in re.findall(r"[a-z0-9]+", question.lower()) if len(w) > 2}
+
+    scored: list[tuple[int, str]] = []
+    for path, content in files.items():
+        if path == "SKILL.md":
+            continue
+        haystack = f"{path} {content[:400]}".lower()
+        h_words = set(re.findall(r"[a-z0-9]+", haystack))
+        score = len(q_words & h_words)
+        if score > 0:
+            scored.append((score, path))
+    scored.sort(key=lambda t: (-t[0], t[1]))
+
+    parts = [f"# SKILL.md (core)\n\n{core}"]
+    used = len(parts[0])
+    for _, path in scored:
+        content = files[path]
+        if used + len(content) > budget_chars and used > len(parts[0]):
+            break
+        parts.append(f"# {path}\n\n{content}")
+        used += len(content)
+
+    return "\n\n---\n\n".join(parts)
 
 
 def find_claude_cli() -> str | None:
@@ -82,6 +192,13 @@ async def status() -> dict:
         "dagster_expert_installed": installed,
         "openai_available": bool(os.getenv("OPENAI_API_KEY")),
         "anthropic_available": bool(os.getenv("ANTHROPIC_API_KEY")),
+        # Whether Tier 2 (direct API fallback) will use the real
+        # dagster-expert reference docs as its system prompt, vs. the
+        # generic one -- found independently of dagster_expert_installed
+        # since that check is scoped to the CLI's OWN plugin list, not a
+        # filesystem scan; a plugin can be present on disk (e.g. via the
+        # marketplace checkout) without `claude` being on PATH at all.
+        "reference_docs_available": _find_dagster_expert_skill_dir() is not None,
     }
 
 
@@ -148,11 +265,23 @@ async def stream_cli_chat(question: str) -> AsyncIterator[str]:
 async def fallback_chat(question: str, history: list[dict] | None = None) -> str:
     """Direct API call, no CLI/skill involved -- Tier 2. Prefers
     Anthropic when both keys are set, matching the existing AI bar's
-    model-preference ordering."""
+    model-preference ordering.
+
+    Uses real dagster-expert reference content (see
+    _select_reference_context), filtered to what's relevant to this
+    question, as the system prompt when the skill is found on disk --
+    regardless of which provider ends up answering, so an OpenAI user
+    with no Claude Code installed still gets Dagster Labs' actual
+    material, just without the live `dg` CLI tool access Tier 1 has.
+    Falls back to the generic prompt when the skill isn't installed
+    locally at all.
+    """
     anthropic_key = os.getenv("ANTHROPIC_API_KEY")
     openai_key = os.getenv("OPENAI_API_KEY")
     if not anthropic_key and not openai_key:
         raise RuntimeError("No AI provider configured — add a key in Settings.")
+
+    system_prompt = _select_reference_context(question) or FALLBACK_SYSTEM_PROMPT
 
     messages = [{"role": h["role"], "content": h["content"]} for h in (history or [])]
     messages.append({"role": "user", "content": question})
@@ -173,7 +302,7 @@ async def fallback_chat(question: str, history: list[dict] | None = None) -> str
                 json={
                     "model": "claude-sonnet-4-5",
                     "max_tokens": 1024,
-                    "system": FALLBACK_SYSTEM_PROMPT,
+                    "system": system_prompt,
                     "messages": messages,
                 },
             )
@@ -188,7 +317,7 @@ async def fallback_chat(question: str, history: list[dict] | None = None) -> str
                 headers={"Authorization": f"Bearer {openai_key}", "Content-Type": "application/json"},
                 json={
                     "model": "gpt-4o",
-                    "messages": [{"role": "system", "content": FALLBACK_SYSTEM_PROMPT}, *messages],
+                    "messages": [{"role": "system", "content": system_prompt}, *messages],
                 },
             )
             if r.status_code != 200:
