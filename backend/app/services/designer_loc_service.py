@@ -234,10 +234,30 @@ def _start_process(state: DesignerLocState) -> None:
             continue
         _log(state, line.rstrip())
         if "Serving" in line or "dagster-webserver" in line.lower():
+            # The log line prints before the webserver actually accepts
+            # connections — a GraphQL call fired immediately after this
+            # (e.g. AddComponentModal's post-install type lookup) can hit
+            # a bare ConnectError. Poll the real port instead of trusting
+            # the log line alone.
+            _wait_for_port(state.port, timeout=15)
             state.status = "ready"
             _drain_stdout_in_background(state)
             return
     raise RuntimeError("dg dev did not report ready within 60s")
+
+
+def _wait_for_port(port: int, timeout: float = 15) -> None:
+    """Block (caller must be off the event loop) until something is
+    actually accepting TCP connections on `port`, or the timeout elapses.
+    Best-effort — a timeout here isn't fatal, the caller proceeds anyway
+    and a real failure just surfaces on the next request."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=0.5):
+                return
+        except OSError:
+            time.sleep(0.2)
 
 
 def _drain_stdout_in_background(state: DesignerLocState) -> None:
@@ -343,22 +363,13 @@ def _sanitize_folder(component_id: str) -> str:
     return "".join(out).strip("_")
 
 
-async def install_community_component(project_id: str, component_id: str) -> dict:
-    """Install a community component template into the sandbox.
-
-    Shells out to `dagster-community-components-cli` (via `uvx`) with
-    the sandbox as the working directory. The CLI knows how to fetch
-    the template from GitHub, drop files into the right subdirectory,
-    and add any pinned deps. We then bounce `dg dev` so the newly
-    registered component type shows up in `componentTypesForLocationOrError`.
-
-    Returns the invoked command's stdout tail + a rough parse of the
-    written `defs.yaml` (so the caller learns the canonical `type:` string).
+def _run_dagster_component_add(state: DesignerLocState, component_id: str) -> tuple[str | None, Path | None, list[str]]:
+    """Blocking half of `install_community_component`: shells out to
+    `dagster-community-components-cli` (via `uvx`), then discovers the
+    canonical component type + any template-declared requirements.txt.
+    Must run off the event loop — `uvx` fetches from GitHub and can take
+    tens of seconds.
     """
-    state = get_state(project_id)
-    if not state.is_scaffolded():
-        raise RuntimeError("Sandbox is not scaffolded yet")
-
     cmd = [
         "uvx",
         "--from", "dagster-community-components-cli",
@@ -412,34 +423,71 @@ async def install_community_component(project_id: str, component_id: str) -> dic
             req_path = req
             break
 
-    # Safety-net dep install: `dagster-component add --auto-install` is
-    # known to skip templates' `requirements.txt` sometimes (hit this on
-    # airtable_ingestion, synthetic_data_generator, and others). If the
-    # template ships one, `uv add` its contents explicitly so the sandbox
-    # can actually load the component on restart.
+    return canonical_type, req_path, (result.stdout or "").splitlines()[-15:]
+
+
+def _install_template_requirements(state: DesignerLocState, req_path: Path) -> None:
+    """Safety-net dep install: `dagster-component add --auto-install` is
+    known to skip templates' `requirements.txt` sometimes (hit this on
+    airtable_ingestion, synthetic_data_generator, and others). If the
+    template ships one, `uv add` its contents explicitly so the sandbox
+    can actually load the component on restart. Blocking — run off the
+    event loop.
+    """
+    reqs: list[str] = []
+    for line in req_path.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        reqs.append(line)
+    if not reqs:
+        return
+    _log(state, f"uv add (from requirements.txt): {' '.join(reqs)}")
+    add_result = subprocess.run(
+        [find_uv_binary("uv"), "add", *reqs],
+        cwd=str(state.dir()),
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    if add_result.returncode != 0:
+        tail = (add_result.stderr or add_result.stdout or "").splitlines()[-10:]
+        _log(state, "WARNING: template requirements install failed:\n" + "\n".join(tail))
+        # Don't hard-fail — the user might still be able to remove the
+        # broken component. But warn loudly.
+    else:
+        _log(state, "template requirements installed")
+
+
+async def install_community_component(project_id: str, component_id: str) -> dict:
+    """Install a community component template into the sandbox.
+
+    Shells out to `dagster-community-components-cli` (via `uvx`) with
+    the sandbox as the working directory. The CLI knows how to fetch
+    the template from GitHub, drop files into the right subdirectory,
+    and add any pinned deps. We then bounce `dg dev` so the newly
+    registered component type shows up in `componentTypesForLocationOrError`.
+
+    Returns the invoked command's stdout tail + a rough parse of the
+    written `defs.yaml` (so the caller learns the canonical `type:` string).
+
+    Every blocking step runs via `run_in_executor` — this used to shell
+    out directly on the event loop, which froze the *entire* backend
+    (every endpoint, every project) for the whole install + restart
+    duration and surfaced to the frontend as a bare "Network Error" on
+    whatever request happened to land during the freeze.
+    """
+    state = get_state(project_id)
+    if not state.is_scaffolded():
+        raise RuntimeError("Sandbox is not scaffolded yet")
+
+    loop = asyncio.get_event_loop()
+    canonical_type, req_path, stdout_tail = await loop.run_in_executor(
+        None, _run_dagster_component_add, state, component_id
+    )
+
     if req_path is not None:
-        reqs: list[str] = []
-        for line in req_path.read_text().splitlines():
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            reqs.append(line)
-        if reqs:
-            _log(state, f"uv add (from requirements.txt): {' '.join(reqs)}")
-            add_result = subprocess.run(
-                [find_uv_binary("uv"), "add", *reqs],
-                cwd=str(state.dir()),
-                capture_output=True,
-                text=True,
-                timeout=300,
-            )
-            if add_result.returncode != 0:
-                tail = (add_result.stderr or add_result.stdout or "").splitlines()[-10:]
-                _log(state, "WARNING: template requirements install failed:\n" + "\n".join(tail))
-                # Don't hard-fail — the user might still be able to remove the
-                # broken component. But warn loudly.
-            else:
-                _log(state, "template requirements installed")
+        await loop.run_in_executor(None, _install_template_requirements, state, req_path)
 
     # New Python deps => restart to pick up the venv changes.
     _log(state, "restarting sandbox to load newly-installed component")
@@ -449,7 +497,7 @@ async def install_community_component(project_id: str, component_id: str) -> dic
     return {
         "component_id": component_id,
         "component_type": canonical_type,
-        "install_stdout_tail": (result.stdout or "").splitlines()[-15:],
+        "install_stdout_tail": stdout_tail,
     }
 
 

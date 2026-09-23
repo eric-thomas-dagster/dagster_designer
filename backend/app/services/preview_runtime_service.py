@@ -202,10 +202,29 @@ def _start_process(state: PreviewState, env_overrides: dict[str, str]) -> None:
             continue
         _log(state, line.rstrip())
         if "Serving" in line or "dagster-webserver" in line.lower():
+            # The log line prints before the webserver actually accepts
+            # connections — a GraphQL call fired immediately after this
+            # can hit a bare ConnectError. Poll the real port instead of
+            # trusting the log line alone.
+            _wait_for_port(state.port, timeout=15)
             state.status = "ready"
             _drain_stdout_in_background(state)
             return
     raise RuntimeError("preview dagster dev did not report ready within 90s")
+
+
+def _wait_for_port(port: int, timeout: float = 15) -> None:
+    """Block (caller must be off the event loop) until something is
+    actually accepting TCP connections on `port`, or the timeout elapses.
+    Best-effort — a timeout here isn't fatal, the caller proceeds anyway
+    and a real failure just surfaces on the next request."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=0.5):
+                return
+        except OSError:
+            time.sleep(0.2)
 
 
 def _drain_stdout_in_background(state: PreviewState) -> None:
