@@ -34,8 +34,11 @@ from pydantic import BaseModel, Field
 from ..services.project_service import project_service
 from ..services.dagster_plus_client import (
     query as dagster_plus_query,
+    query as dp_query,
     ALERT_POLICIES_QUERY,
     ALERT_POLICIES_DOCUMENT_QUERY,
+    CUSTOM_METRICS_LIST_QUERY,
+    CREATE_CUSTOM_METRIC_MUTATION,
     CREATE_OR_UPDATE_ALERT_POLICY_MUTATION,
     DELETE_ALERT_POLICY_MUTATION,
     SET_ALERT_POLICY_MUTE_MUTATION,
@@ -462,6 +465,196 @@ async def _mute_cloud_alert(project, alert_id: str, mute_for_seconds: int | None
 
 
 # ---------------------------------------------------------------------------
+# Dagster+ GraphQL -> AlertPolicy translation
+# ---------------------------------------------------------------------------
+
+
+def _policies_from_graphql(data: dict[str, Any]) -> list[AlertPolicy]:
+    """Parse Dagster+'s `alertPolicies` list into our AlertPolicy shape.
+    Dagster+ discriminates policy type via the `alertTargets` union
+    (there's no explicit `type` field) -- e.g. an AssetKeyTarget means
+    an asset alert, RunResultTarget means run, and so on. Anything
+    unrecognized is preserved raw in `extra_config` so a re-save round
+    trips it."""
+    results = data.get("alertPolicies") or []
+    out: list[AlertPolicy] = []
+    # Which alert-target types map to which of our PolicyType buckets.
+    # Insight / metric-monitor / credit-limit targets all roll up to
+    # `insight_metric`; scheduler-related targets to `automation`; etc.
+    target_type_bucket: dict[str, PolicyType] = {
+        "AssetGroupTarget": "asset",
+        "AssetKeyTarget": "asset",
+        "AssetSelectionTarget": "asset",
+        "AssetSelectionViewTarget": "asset",
+        "FavoritesSelectionViewTarget": "asset",
+        "RunResultTarget": "run",
+        "LongRunningJobThresholdTarget": "run",
+        "CodeLocationTarget": "code_location",
+        "ScheduleSensorTarget": "automation",
+        "InsightsDeploymentThresholdTarget": "insight_metric",
+        "InsightsAssetGroupThresholdTarget": "insight_metric",
+        "InsightsAssetThresholdTarget": "insight_metric",
+        "InsightsJobThresholdTarget": "insight_metric",
+        "MetricMonitorAssetSelectionThresholdTarget": "insight_metric",
+        "MetricMonitorFavoritesThresholdTarget": "insight_metric",
+        "MetricMonitorAssetSelectionViewThresholdTarget": "insight_metric",
+        "CreditLimitTarget": "insight_metric",
+    }
+
+    for r in results:
+        targets = r.get("alertTargets") or []
+        target_typenames = [(t or {}).get("__typename") for t in targets if t]
+        events = [str(e) for e in (r.get("eventTypes") or []) if e]
+
+        # Infer bucket from the first recognized target, then override
+        # with AGENT_UNAVAILABLE if the event set says so (agent alerts
+        # ship without a target).
+        policy_type: PolicyType = "run"
+        for tn in target_typenames:
+            if tn in target_type_bucket:
+                policy_type = target_type_bucket[tn]
+                break
+        if "AGENT_UNAVAILABLE" in events:
+            policy_type = "agent_downtime"
+
+        # ---- Notification service ---------------------------------
+        ns_raw = r.get("notificationService") or {}
+        ns = NotificationService()
+        ns_tn = ns_raw.get("__typename")
+        if ns_tn == "EmailAlertPolicyNotification":
+            ns.email = NotificationEmail(email_addresses=ns_raw.get("emailAddresses") or [])
+        elif ns_tn == "EmailOwnersAlertPolicyNotification":
+            ns.email = NotificationEmail(email_addresses=ns_raw.get("defaultEmailAddresses") or [])
+        elif ns_tn == "SlackAlertPolicyNotification":
+            ns.slack = NotificationSlack(
+                slack_channel_name=ns_raw.get("slackChannelName") or "",
+                slack_workspace_name=ns_raw.get("slackWorkspaceName"),
+            )
+        elif ns_tn == "MicrosoftTeamsAlertPolicyNotification":
+            ns.ms_teams = NotificationMSTeams(ms_teams_webhook_url=ns_raw.get("webhookUrl") or "")
+        elif ns_tn == "PagerdutyAlertPolicyNotification":
+            ns.pagerduty = NotificationPagerDuty(integration_key=ns_raw.get("integrationKey") or "")
+        elif ns_tn == "WebhookAlertPolicyNotification":
+            ns.webhook = NotificationWebhook(url=ns_raw.get("webhookUrl") or "")
+
+        # ---- Per-type config --------------------------------------
+        tags_list = r.get("tags") or []
+        tags_dict: dict[str, str] = {t.get("key"): t.get("value") for t in tags_list if t.get("key")}
+
+        asset_cfg = None
+        run_cfg = None
+        code_loc_cfg = None
+        auto_cfg = None
+        agent_cfg = None
+        insight_cfg = None
+
+        if policy_type == "asset":
+            asset_keys: list[str] = []
+            asset_groups: list[str] = []
+            selection_str: str | None = None
+            for t in targets:
+                tn = (t or {}).get("__typename")
+                if tn == "AssetKeyTarget":
+                    p = ((t.get("assetKey") or {}).get("path")) or []
+                    if p:
+                        asset_keys.append("/".join(p))
+                elif tn == "AssetGroupTarget":
+                    g = t.get("assetGroup")
+                    if g:
+                        asset_groups.append(g)
+                elif tn == "AssetSelectionTarget":
+                    selection_str = t.get("assetSelectionString") or selection_str
+            if selection_str:
+                selection: str | list[str] | None = selection_str
+            elif asset_groups and not asset_keys:
+                selection = [f"group:{g}" for g in asset_groups]
+            elif asset_keys:
+                selection = asset_keys
+            else:
+                selection = "*"
+            asset_cfg = AssetPolicyConfig(
+                asset_selection=selection,
+                events=events,
+                tags=tags_dict or None,
+            )
+        elif policy_type == "run":
+            # RunResultTarget / LongRunningJobThresholdTarget carry the
+            # scoping info (tags, code locations, jobs). Collapse into
+            # our RunPolicyConfig -- we keep tags dict + surface a time
+            # limit when it's a long-running-job policy.
+            time_limit = None
+            for t in targets:
+                if (t or {}).get("__typename") == "LongRunningJobThresholdTarget":
+                    time_limit = t.get("thresholdSeconds")
+                if isinstance(t.get("tags"), list):
+                    for tt in t["tags"]:
+                        if tt and tt.get("key"):
+                            tags_dict.setdefault(tt["key"], tt.get("value") or "")
+            run_cfg = RunPolicyConfig(
+                events=events,
+                tags=tags_dict or None,
+                time_limit_seconds=time_limit,
+            )
+        elif policy_type == "code_location":
+            code_loc_cfg = CodeLocationPolicyConfig()
+        elif policy_type == "automation":
+            # types: list of "SCHEDULE" / "SENSOR" (or both)
+            included = set()
+            for t in targets:
+                if (t or {}).get("__typename") == "ScheduleSensorTarget":
+                    for x in (t.get("types") or []):
+                        included.add((x or "").upper())
+            auto_cfg = AutomationPolicyConfig(
+                events=events,
+                include_schedules="SCHEDULE" in included or not included,
+                include_sensors="SENSOR" in included or not included,
+            )
+        elif policy_type == "agent_downtime":
+            agent_cfg = AgentDowntimePolicyConfig()
+        elif policy_type == "insight_metric":
+            metric = ""
+            threshold = None
+            comparison = None
+            for t in targets:
+                if (t or {}).get("metricName"):
+                    metric = t.get("metricName") or ""
+                    threshold = t.get("threshold")
+                    comparison = t.get("operator")
+                    break
+            insight_cfg = InsightMetricPolicyConfig(
+                metric=metric,
+                threshold=threshold,
+                comparison=(comparison or "").lower() or None,
+            )
+
+        # Preserve the raw target list + policyOptions in extra_config
+        # so a future re-save doesn't quietly drop scoping info we don't
+        # yet model in the wizard (long-running-job specifics, insight
+        # metrics detail, favorites-view metric monitors, etc.).
+        extra: dict[str, Any] = {}
+        if targets:
+            extra["raw_alert_targets"] = targets
+        if r.get("policyOptions"):
+            extra["policy_options"] = r["policyOptions"]
+
+        out.append(AlertPolicy(
+            name=r.get("name") or "",
+            description=r.get("description") or None,
+            enabled=bool(r.get("enabled", True)),
+            type=policy_type,
+            asset=asset_cfg,
+            run=run_cfg,
+            code_location=code_loc_cfg,
+            automation=auto_cfg,
+            agent_downtime=agent_cfg,
+            insight_metric=insight_cfg,
+            notification_service=ns,
+            extra_config=extra or None,
+        ))
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
 
@@ -726,3 +919,238 @@ async def sync_alerts_from_cloud(project_id: str):
     except ValueError:
         rel = str(path)
     return AlertsFile(path=rel, policies=policies)
+
+
+# ---------------------------------------------------------------------------
+# Custom metrics (Dagster+ only)
+# ---------------------------------------------------------------------------
+
+
+class CustomMetric(BaseModel):
+    """One custom-metric definition on a Dagster+ deployment. Metrics
+    are the bridge between numeric metadata emitted on asset checks /
+    materializations and threshold-based alerts -- the alert policy
+    references the metric by id."""
+    id: str
+    metadata_key: str
+    display_name: str | None = None
+    description: str | None = None
+    unit_type: str | None = None                    # ReportingUnitType enum name
+
+
+class CustomMetricsListResponse(BaseModel):
+    metrics: list[CustomMetric]
+
+
+class EnsureMetricRequest(BaseModel):
+    """Reuse-if-exists / create-if-missing for a custom metric keyed by
+    `metadata_key`. Keeping the key as the natural identifier lets any
+    asset emitting the same metadata label reuse the metric -- so users
+    who care about `failed_row_count` see one row on Dagster+'s Insights,
+    not one per asset."""
+    metadata_key: str
+    unit_type: str = "FLOAT"                        # BYTES | FLOAT | INTEGER | MILLISECONDS | SECONDS
+    display_name: str | None = None
+    description: str | None = None
+
+
+def _custom_metric_from_gql(row: dict) -> CustomMetric:
+    return CustomMetric(
+        id=row.get("id") or "",
+        metadata_key=row.get("metadataKey") or "",
+        display_name=row.get("displayName"),
+        description=row.get("description"),
+        unit_type=row.get("unitType"),
+    )
+
+
+@router.get("/{project_id}/custom-metrics", response_model=CustomMetricsListResponse)
+async def list_custom_metrics(project_id: str):
+    """List all custom metrics defined on the Dagster+ deployment."""
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    if not getattr(project, "is_dagster_plus", False):
+        # OSS Dagster doesn't have the custom-metrics concept.
+        return CustomMetricsListResponse(metrics=[])
+    try:
+        data = await dp_query(
+            project.dagster_plus_org or "",
+            project.dagster_plus_deployment or "",
+            project.dagster_plus_token or "",
+            CUSTOM_METRICS_LIST_QUERY,
+        )
+    except DagsterPlusError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    rows = data.get("customMetrics") or []
+    return CustomMetricsListResponse(metrics=[_custom_metric_from_gql(r) for r in rows])
+
+
+@router.post("/{project_id}/custom-metrics/ensure", response_model=CustomMetric)
+async def ensure_custom_metric(project_id: str, request: EnsureMetricRequest):
+    """Reuse-or-create by metadata_key. Metrics are keyed by their
+    metadata label -- any asset check emitting that same metadata
+    entry contributes to the metric, so we never want duplicates."""
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    if not getattr(project, "is_dagster_plus", False):
+        raise HTTPException(
+            status_code=400,
+            detail="Custom metrics only exist on Dagster+ deployments.",
+        )
+    if not request.metadata_key.strip():
+        raise HTTPException(status_code=400, detail="metadata_key is required.")
+
+    # ---- Reuse first -----------------------------------------------
+    try:
+        data = await dp_query(
+            project.dagster_plus_org or "",
+            project.dagster_plus_deployment or "",
+            project.dagster_plus_token or "",
+            CUSTOM_METRICS_LIST_QUERY,
+        )
+    except DagsterPlusError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    for row in (data.get("customMetrics") or []):
+        if (row.get("metadataKey") or "").strip() == request.metadata_key.strip():
+            return _custom_metric_from_gql(row)
+
+    # ---- Create if missing ------------------------------------------
+    valid_units = {"BYTES", "FLOAT", "INTEGER", "MILLISECONDS", "SECONDS"}
+    unit = (request.unit_type or "FLOAT").upper()
+    if unit not in valid_units:
+        raise HTTPException(status_code=400, detail=f"unit_type must be one of {sorted(valid_units)}")
+    try:
+        data = await dp_query(
+            project.dagster_plus_org or "",
+            project.dagster_plus_deployment or "",
+            project.dagster_plus_token or "",
+            CREATE_CUSTOM_METRIC_MUTATION,
+            variables={
+                "customMetricInput": {
+                    "metadataKey": request.metadata_key.strip(),
+                    "displayName": request.display_name or request.metadata_key.strip(),
+                    "description": request.description,
+                    "unitType": unit,
+                },
+            },
+        )
+    except DagsterPlusError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    node = data.get("createCustomMetric") or {}
+    if node.get("__typename") != "CreateCustomMetricSuccess":
+        raise HTTPException(status_code=502, detail=f"createCustomMetric returned {node.get('__typename')}: {node}")
+    cm = node.get("customMetric") or {}
+    return _custom_metric_from_gql(cm)
+
+
+# ---------------------------------------------------------------------------
+# Metric-threshold alert creation (Dagster+ only)
+# ---------------------------------------------------------------------------
+
+
+class MetricThresholdAlertRequest(BaseModel):
+    """Create an alert that fires when a custom metric crosses a
+    threshold on a specific asset. Mirrors what Dagster+'s "Threshold
+    Alert" wizard produces server-side, but keyed off the metric's
+    metadata_key (which we ensure via /custom-metrics/ensure)."""
+    name: str                                          # policy name -- shown in Dagster+ list
+    description: str | None = None
+    metadata_key: str                                  # ties to a CustomMetric
+    asset_key: str                                     # `foo/bar/baz` -- our slash-joined form
+    threshold: float
+    operator: str = "GREATER_THAN"                     # GREATER_THAN | LESS_THAN | GREATER_THAN_OR_EQUAL | LESS_THAN_OR_EQUAL
+    lookback_window_hours: int = 24                    # window over which the aggregation runs
+    aggregation: str = "MAX"                           # MAX | MIN | AVG | LATEST | SUM
+    notify_emails: list[str] = Field(default_factory=list)
+    notify_slack_channel: str | None = None
+    notify_slack_workspace: str | None = None
+    enabled: bool = True
+
+
+class MetricThresholdAlertResponse(BaseModel):
+    id: str
+    name: str
+    enabled: bool
+    event_types: list[str] = Field(default_factory=list)
+
+
+@router.post("/{project_id}/alerts/metric-threshold", response_model=MetricThresholdAlertResponse)
+async def create_metric_threshold_alert(project_id: str, request: MetricThresholdAlertRequest):
+    """Create (or update by name) a metric-threshold alert on a
+    Dagster+ deployment. We serialize the policy as a YAML document
+    and push it through `createOrUpdateAlertPolicyFromDocument` -- the
+    same mutation Dagster+'s UI uses when saving an alert."""
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    if not getattr(project, "is_dagster_plus", False):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Metric-threshold alerts require Dagster+ (they compose Custom Metrics + "
+                "the Insights alerting layer, neither of which exists in OSS Dagster)."
+            ),
+        )
+    if not request.notify_emails and not request.notify_slack_channel:
+        raise HTTPException(status_code=400, detail="Provide at least one notification target (email or slack).")
+
+    # Build the notification block -- matches alert_policies.yaml.
+    notification: dict = {}
+    if request.notify_emails:
+        notification["email"] = {"email_addresses": request.notify_emails}
+    elif request.notify_slack_channel:
+        notification["slack"] = {"slack_channel_name": request.notify_slack_channel}
+        if request.notify_slack_workspace:
+            notification["slack"]["slack_workspace_name"] = request.notify_slack_workspace
+
+    # Assemble the alert policy document. Root-level fields (not
+    # wrapped in `alert_policy`). Target is `insights_asset_threshold_target`
+    # which scopes the alert to a specific (asset, metric) pair --
+    # exactly the granularity we want ("alert me only when THIS check's
+    # failed_row_count on THIS asset crosses X").
+    document = {
+        "name": request.name,
+        "description": request.description or "",
+        "enabled": request.enabled,
+        "event_types": ["INSIGHTS_CONSUMPTION_EXCEEDED"],
+        "notification_service": notification,
+        "alert_targets": [
+            {
+                "insights_asset_threshold_target": {
+                    "asset_key": request.asset_key.split("/"),
+                    "metric_name": request.metadata_key,
+                    "operator": request.operator,
+                    "selection_period_days": max(1, request.lookback_window_hours // 24),
+                    "threshold": request.threshold,
+                },
+            },
+        ],
+    }
+
+    try:
+        data = await dp_query(
+            project.dagster_plus_org or "",
+            project.dagster_plus_deployment or "",
+            project.dagster_plus_token or "",
+            CREATE_OR_UPDATE_ALERT_POLICY_MUTATION,
+            # `document` is a GenericScalar (JSON object), not a
+            # serialized string -- pass the dict straight through.
+            variables={"document": document},
+        )
+    except DagsterPlusError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+    node = data.get("createOrUpdateAlertPolicyFromDocument") or {}
+    tn = node.get("__typename")
+    if tn in ("InvalidAlertPolicyError", "PythonError", "UnauthorizedError"):
+        raise HTTPException(status_code=502, detail=node.get("message") or f"{tn} from Dagster+")
+    if not node.get("id"):
+        raise HTTPException(status_code=502, detail=f"Unexpected response: {node}")
+    return MetricThresholdAlertResponse(
+        id=node.get("id") or "",
+        name=node.get("name") or request.name,
+        enabled=bool(node.get("enabled", True)),
+        event_types=list(node.get("eventTypes") or []),
+    )

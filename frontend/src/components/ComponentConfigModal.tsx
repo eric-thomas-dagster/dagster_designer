@@ -7,6 +7,7 @@ import { useProjectStore } from '@/hooks/useProject';
 import { dbtAdaptersApi, type AdapterInfo , API_BASE } from '@/services/api';
 import { notify } from './Notifications';
 import type { ComponentInstance } from '@/types';
+import type { ComponentSchema } from '@/services/api';
 
 // `x-dagster-io` type fields (inputs.type, outputs.type, accepts[]) are
 // freeform strings community component authors write by hand, not a
@@ -27,6 +28,24 @@ interface ComponentConfigModalProps {
   onSave: (component: ComponentInstance) => void;
   onClose: () => void;
   onOpenVisualEditor?: (upstreamAssetKey: string) => void;
+  /* --- Draft-authoring extensions ---
+     When Designer authors a component against a sandbox or customer
+     Dagster+ location, the schema comes from that source (not from
+     Designer's local registry) and the save path routes into our
+     drafts/sandbox APIs instead of the local project mutation. */
+  schemaOverride?: ComponentSchema | null;                  // skips the useComponent fetch
+  initialAttributes?: Record<string, any>;                  // seeds formData for new authors
+  mode?: 'local' | 'draft';                                 // gates local-project-only UI (translation, deps)
+  /** For cloud drafts: assets registered in the target deployment+
+   *  location. Overrides the default (which is scraped from the
+   *  currently-hydrated project graph — wrong deployment). */
+  availableAssetsOverride?: string[];
+  /** Names of primitives registered in the target deployment+location.
+   *  Powers `job_name` / `schedule_name` / `sensor_name` pickers. */
+  availableJobs?: string[];
+  availableSchedules?: string[];
+  availableSensors?: string[];
+  onSaveDraft?: (attributes: Record<string, any>) => Promise<void> | void;
 }
 
 export function ComponentConfigModal({
@@ -35,11 +54,21 @@ export function ComponentConfigModal({
   onSave,
   onClose,
   onOpenVisualEditor,
+  schemaOverride,
+  initialAttributes,
+  mode = 'local',
+  availableAssetsOverride,
+  availableJobs = [],
+  availableSchedules = [],
+  availableSensors = [],
+  onSaveDraft,
 }: ComponentConfigModalProps) {
   const isNew = !component;
   const type = component?.component_type || componentType || '';
   const { currentProject, loadProject } = useProjectStore();
-  const { data: componentSchema } = useComponent(type, currentProject?.id);
+  const { data: fetchedSchema } = useComponent(type, currentProject?.id);
+  const componentSchema = schemaOverride ?? fetchedSchema;
+  const isDraftMode = mode === 'draft';
 
   console.log('[ComponentConfigModal] Opened with:', {
     isNew,
@@ -51,7 +80,9 @@ export function ComponentConfigModal({
     currentProjectId: currentProject?.id,
   });
 
-  const [formData, setFormData] = useState<Record<string, any>>(component?.attributes || {});
+  const [formData, setFormData] = useState<Record<string, any>>(
+    component?.attributes || initialAttributes || {},
+  );
   const [label, setLabel] = useState(component?.label || '');
   const [description, setDescription] = useState(component?.description || '');
   const [translation, setTranslation] = useState<Record<string, any>>(component?.translation || {});
@@ -96,10 +127,15 @@ export function ComponentConfigModal({
   // Match patterns like "dbt_project", "DbtProject", "dagster_dbt.X", but not "duckdb_table_writer"
   const isDbtComponent = /\bdbt[_\.]|^dbt/i.test(type);
 
-  // Get list of available assets for dependencies dropdown
-  const availableAssets = currentProject?.graph.nodes
-    .filter((node: any) => node.node_kind === 'asset' || node.type === 'component')
-    .map((node: any) => node.data.asset_key || node.data.label || node.id) || [];
+  // Assets for dependency + selection dropdowns. When authoring for a
+  // Dagster+ deployment that isn't the project's hydrated one (e.g.
+  // a branch deployment picked in AddComponentModal), the caller
+  // supplies the deployment-scoped list via `availableAssetsOverride`.
+  const availableAssets = availableAssetsOverride ?? (
+    currentProject?.graph.nodes
+      .filter((node: any) => node.node_kind === 'asset' || node.type === 'component')
+      .map((node: any) => node.data.asset_key || node.data.label || node.id) || []
+  );
 
   // Resource keys already configured in this project (from any component
   // whose own attributes declare one, e.g. duckdb_resource/snowflake_resource
@@ -349,6 +385,19 @@ export function ComponentConfigModal({
       return;
     }
 
+    // Draft-authoring short-circuit: bypass all local-project paths.
+    // The caller (AddComponentModal via App.tsx) decides whether to
+    // land the change in the drafts store or the sandbox filesystem.
+    if (isDraftMode && onSaveDraft) {
+      try {
+        await onSaveDraft(formData);
+        onClose();
+      } catch (error: any) {
+        notify.error(`Failed to save: ${error?.message || String(error)}`);
+      }
+      return;
+    }
+
     // Check if this is a community component (installed from templates)
     // Community components have ".components." in their type path
     const isCommunityComponent = type.includes('.components.');
@@ -490,6 +539,32 @@ export function ComponentConfigModal({
     }
 
     if (fieldType === 'array') {
+      // Arrays of scalars → one item per line; arrays of objects → pretty
+      // JSON so nested step configs (agentic_pipeline.steps, debate
+      // proposers, etc.) render as editable YAML-ish text instead of
+      // `[object Object]` — that's what value.join('\n') produces when
+      // items are dicts.
+      const hasObjects = Array.isArray(value) && value.some((v) => v !== null && typeof v === 'object');
+      if (hasObjects) {
+        return (
+          <textarea
+            value={Array.isArray(value) ? JSON.stringify(value, null, 2) : ''}
+            onChange={(e) => {
+              try {
+                const parsed = JSON.parse(e.target.value);
+                if (Array.isArray(parsed)) {
+                  handleNestedFieldChange(parentField, subField, parsed);
+                }
+              } catch {
+                // Invalid JSON, ignore — user is mid-edit
+              }
+            }}
+            className="w-full px-3 py-2 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono"
+            placeholder="[]"
+            rows={Math.min(20, Math.max(6, JSON.stringify(value ?? [], null, 2).split('\n').length))}
+          />
+        );
+      }
       return (
         <textarea
           value={Array.isArray(value) ? value.join('\n') : ''}
@@ -550,14 +625,33 @@ export function ComponentConfigModal({
   // name-based heuristic so common patterns (partition_date_column,
   // partition_start, sort_by, group_by) get sensible pickers even for
   // community templates that don't set the hint.
-  const pickWidget = (fieldName: string, fieldSchema: any): 'column' | 'columns' | 'date' | 'cron' | 'default' => {
+  const pickWidget = (fieldName: string, fieldSchema: any): 'column' | 'columns' | 'date' | 'cron' | 'asset-selection' | 'job' | 'schedule' | 'sensor' | 'default' => {
     const hint = (fieldSchema?.['x-dagster-widget'] || '').toString().toLowerCase();
     if (hint === 'column' || hint === 'column-single') return 'column';
     if (hint === 'columns' || hint === 'column-multi' || hint === 'column-list') return 'columns';
     if (hint === 'date' || hint === 'datetime') return 'date';
     if (hint === 'cron' || hint === 'crontab') return 'cron';
+    if (hint === 'asset-selection' || hint === 'assetselection') return 'asset-selection';
+    if (hint === 'job' || hint === 'job-name') return 'job';
+    if (hint === 'schedule' || hint === 'schedule-name') return 'schedule';
+    if (hint === 'sensor' || hint === 'sensor-name') return 'sensor';
+    // NOTE: we deliberately do NOT auto-detect `job_name` / `schedule_name`
+    // / `sensor_name` by field name. Those fields are ambiguous — they
+    // might mean "existing primitive to target" (picker useful) or "new
+    // primitive to create" (picker misleading — hides that the user's
+    // job doesn't exist yet). Without a declared widget hint we can't
+    // tell, so default to free text and let component authors opt in
+    // via `x-dagster-widget: job` when the picker semantics are right.
     // Cron by name — freshness_cron / cron_schedule / any *_cron field.
-    if (/cron|schedule/i.test(fieldName) && !/kind|type|display/i.test(fieldName)) return 'cron';
+    if (/cron|schedule/i.test(fieldName) && !/kind|type|display|_name$/i.test(fieldName)) return 'cron';
+    // Asset selection — Dagster selection syntax field. Recognised on
+    // both `asset_selection` and `selection` field names (community
+    // components use both). Only kicks in when the schema type is a
+    // string (array-shaped `deps`/`asset_selection` already renders
+    // as a multi-select via the array branch below).
+    if ((fieldName === 'asset_selection' || fieldName === 'selection') && fieldSchema?.type === 'string') {
+      return 'asset-selection';
+    }
 
     const lower = fieldName.toLowerCase();
     // Multi-column fields — plural, or names that clearly imply a list
@@ -891,6 +985,125 @@ export function ComponentConfigModal({
               </a>
             )}
           </div>
+        </div>
+      );
+    }
+
+    if (widget === 'asset-selection') {
+      // Dagster asset selection: a string parsed by the selection DSL
+      // (`AssetSelection.from_string`). Multiple keys are joined with
+      // ` or ` (the DSL's union operator) — NOT commas. `,` in a
+      // selection string is a hard parse error.
+      //
+      // Tokenize on ` or ` first (canonical), then also split on `,`
+      // as a legacy path so drafts stored under the old comma format
+      // still render correctly.
+      const currentStr = typeof value === 'string' ? value : '';
+      const tokens = currentStr
+        .split(/\s+or\s+|,/)
+        .map((s) => s.trim())
+        .filter(Boolean);
+      const tokenSet = new Set(tokens);
+      const remaining = availableAssets.filter((a: string) => !tokenSet.has(a));
+      const joinTokens = (ts: string[]) => ts.join(' or ');
+      return (
+        <div className="space-y-2">
+          <input
+            type="text"
+            value={currentStr}
+            onChange={(e) => handleFieldChange(fieldName, e.target.value)}
+            placeholder="e.g. * — or key:my_asset or group:analytics or +downstream_of*"
+            className="w-full px-3 py-2 text-sm font-mono border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+          />
+          {tokens.length > 0 && (
+            <div className="flex flex-wrap gap-1">
+              {tokens.map((t) => (
+                <span
+                  key={t}
+                  className="inline-flex items-center gap-1 px-2 py-0.5 text-xs bg-blue-50 border border-blue-200 rounded text-blue-700"
+                >
+                  {t}
+                  <button
+                    type="button"
+                    onClick={() => handleFieldChange(fieldName, joinTokens(tokens.filter((x) => x !== t)))}
+                    className="hover:text-blue-900"
+                  >
+                    <X className="w-3 h-3" />
+                  </button>
+                </span>
+              ))}
+            </div>
+          )}
+          {availableAssets.length > 0 && (
+            <select
+              value=""
+              onChange={(e) => {
+                const k = e.target.value;
+                if (!k || tokenSet.has(k)) return;
+                handleFieldChange(fieldName, joinTokens([...tokens, k]));
+              }}
+              className="w-full px-3 py-2 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
+            >
+              <option value="">
+                + add asset ({remaining.length} available)…
+              </option>
+              {remaining.map((k: string) => (
+                <option key={k} value={k}>{k}</option>
+              ))}
+            </select>
+          )}
+          <p className="text-xs text-gray-500">
+            Dagster selection syntax: multi-key = <code>a or b or c</code>;
+            operators: <code>*</code>, <code>key:name</code>, <code>group:g</code>,
+            <code>tag:k=v</code>, <code>+asset</code> (downstream), <code>asset+</code> (upstream).
+          </p>
+        </div>
+      );
+    }
+
+    if (widget === 'job' || widget === 'schedule' || widget === 'sensor') {
+      // Single-select picker for primitive names + a free-form input
+      // so authors can also type a name that doesn't exist yet (useful
+      // when a component *creates* a new job / schedule / sensor with
+      // this attribute controlling the name).
+      const options =
+        widget === 'job' ? availableJobs :
+        widget === 'schedule' ? availableSchedules :
+        availableSensors;
+      const label =
+        widget === 'job' ? 'job' :
+        widget === 'schedule' ? 'schedule' :
+        'sensor';
+      const currentStr = typeof value === 'string' ? value : '';
+      return (
+        <div className="space-y-1">
+          <input
+            type="text"
+            value={currentStr}
+            onChange={(e) => handleFieldChange(fieldName, e.target.value)}
+            placeholder={`e.g. ${options[0] ?? `existing_${label}_name_or_new_${label}_name`}`}
+            className="w-full px-3 py-2 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+          />
+          {options.length > 0 && (
+            <select
+              value=""
+              onChange={(e) => {
+                if (e.target.value) handleFieldChange(fieldName, e.target.value);
+              }}
+              className="w-full px-3 py-2 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
+            >
+              <option value="">
+                pick from {options.length} existing {label}{options.length === 1 ? '' : 's'} in the target deployment…
+              </option>
+              {options.map((n: string) => (
+                <option key={n} value={n}>{n}</option>
+              ))}
+            </select>
+          )}
+          <p className="text-xs text-gray-500">
+            Existing {label} name (component targets it) or a new one (component creates it). The
+            list reflects what's registered in the target deployment + location right now.
+          </p>
         </div>
       );
     }
@@ -1391,7 +1604,30 @@ export function ComponentConfigModal({
         );
       }
 
-      // Default array rendering for other fields
+      // Default array rendering for other fields. Same object-vs-scalar
+      // split as the nested-field variant above — objects need JSON so
+      // they don't render as `[object Object]`.
+      const topLevelHasObjects = Array.isArray(value) && value.some((v) => v !== null && typeof v === 'object');
+      if (topLevelHasObjects) {
+        return (
+          <textarea
+            value={Array.isArray(value) ? JSON.stringify(value, null, 2) : ''}
+            onChange={(e) => {
+              try {
+                const parsed = JSON.parse(e.target.value);
+                if (Array.isArray(parsed)) {
+                  handleFieldChange(fieldName, parsed);
+                }
+              } catch {
+                // Invalid JSON, ignore — user is mid-edit
+              }
+            }}
+            className="w-full px-3 py-2 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono"
+            placeholder="[]"
+            rows={Math.min(30, Math.max(8, JSON.stringify(value ?? [], null, 2).split('\n').length))}
+          />
+        );
+      }
       return (
         <textarea
           value={Array.isArray(value) ? value.join('\n') : ''}
@@ -1498,8 +1734,9 @@ export function ComponentConfigModal({
 
         {/* Body */}
         <div className="flex-1 overflow-y-auto p-6 space-y-4">
-          {/* Component Label / Instance Name - only show for non-community or multi-asset components */}
-          {(!isCommunityComponent || !hasSingleAssetField) && (
+          {/* Component Label / Instance Name - only show for non-community or multi-asset components.
+              Also hidden in draft-authoring mode — Designer auto-generates the component_id there. */}
+          {!isDraftMode && (!isCommunityComponent || !hasSingleAssetField) && (
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">
                 {isCommunityComponent ? 'Instance Name' : 'Label'}
@@ -1615,8 +1852,10 @@ export function ComponentConfigModal({
             </div>
           )}
 
-          {/* DBT Adapter Status */}
-          {isDbtComponent && currentProject && (
+          {/* DBT Adapter Status — installs adapters into the local
+              project's venv. N/A when authoring for a Dagster+ or
+              sandbox target. */}
+          {!isDraftMode && isDbtComponent && currentProject && (
             <div className="border border-gray-200 rounded-md p-4 space-y-3">
               <h3 className="text-sm font-semibold text-gray-900 flex items-center">
                 <span>DBT Adapter Status</span>
@@ -1756,7 +1995,10 @@ export function ComponentConfigModal({
             )}
           </div>
 
-          {/* Translation Section */}
+          {/* Translation Section — universal to all authoring
+              contexts (asset-key rewriting works whether the
+              component lands locally, in a sandbox, or as a cloud
+              draft to be promoted). */}
           <div className="border-t border-gray-200 pt-4 mt-4">
             <TranslationEditor value={translation} onChange={setTranslation} />
           </div>
@@ -1784,7 +2026,7 @@ export function ComponentConfigModal({
             className="flex items-center space-x-1 px-4 py-2 text-sm bg-blue-600 text-white rounded-md hover:bg-blue-700"
           >
             <Save className="w-4 h-4" />
-            <span>Save Component</span>
+            <span>{isDraftMode ? 'Save' : 'Save Component'}</span>
           </button>
         </div>
       </div>

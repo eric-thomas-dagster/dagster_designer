@@ -21,6 +21,10 @@ import { AlertsPanel } from './components/AlertsPanel';
 import { RunsPanel } from './components/RunsPanel';
 import { DataPreviewModal } from './components/DataPreviewModal';
 import { DagsterCloudChip } from './components/DagsterCloudChip';
+import { SandboxStatusPill } from './components/SandboxStatusPill';
+import { AddComponentModal, type ConfigureAuthoringPayload } from './components/AddComponentModal';
+import { DraftsPanel } from './components/DraftsPanel';
+import { useDrafts } from './hooks/useDrafts';
 import { NotificationHost, notify, confirmDialog } from './components/Notifications';
 import { SettingsHost } from './components/SettingsDialog';
 import { useProjectStore } from './hooks/useProject';
@@ -289,6 +293,13 @@ function App() {
   const [templateBuilderTab, setTemplateBuilderTab] = useState<string | null>(null);
   const [templateBuilderAssetKey, setTemplateBuilderAssetKey] = useState<string | null>(null);
   const [primitiveToOpen, setPrimitiveToOpen] = useState<{ category: string; name: string } | null>(null);
+  const [addComponentOpen, setAddComponentOpen] = useState(false);
+  const [addComponentProducesFilter, setAddComponentProducesFilter] = useState<any[] | undefined>(undefined);
+  const [draftsPanelOpen, setDraftsPanelOpen] = useState(false);
+  // Set when the user clicks "Continue" in the picker — triggers
+  // ComponentConfigModal to open in draft mode with the picked schema
+  // and target. Reused across sandbox + cloud-loc paths.
+  const [draftAuthoring, setDraftAuthoring] = useState<ConfigureAuthoringPayload | null>(null);
   const [navCollapsed, setNavCollapsed] = useState<boolean>(() => {
     try { return localStorage.getItem('nav.collapsed') === '1'; } catch { return false; }
   });
@@ -702,22 +713,58 @@ function App() {
     if (!confirmed) return;
 
     try {
-      // Remove component from the list
+      // Delete the on-disk `defs/<id>/defs.yaml` first. Without this,
+      // updating the project JSON alone leaves orphaned component
+      // files on disk — the next regenerate creates `<name>_2` variants
+      // that collide with the leftovers and blow up with
+      // "Duplicate asset key" errors. Best-effort: if the file is
+      // already gone (e.g. the user manually cleaned up), swallow the
+      // 404 and continue with the JSON-side cleanup.
+      try {
+        await projectsApi.deleteComponentInstance(currentProject.id, component.id);
+      } catch (e: any) {
+        if (e?.response?.status !== 404) throw e;
+        console.warn(`[delete] no on-disk defs for ${component.id} — continuing with JSON cleanup`);
+      }
+
+      // Scrub the component from the project JSON + graph nodes.
+      //
+      // Multi-asset components: the graph nodes for an `agentic_pipeline`
+      // instance aren't stored under `n.id === component.id` — they're
+      // the emitted-asset nodes (`issue_resolution_fetch_issue`, etc.),
+      // each carrying `data.component_id === component.id`. Filtering
+      // only on `n.id !== component.id` leaves the emitted assets
+      // hanging in the graph. So filter on BOTH the top-level id AND
+      // the component_id tag. Same for edges — drop any that reference
+      // an asset id we just removed.
       const updatedComponents = currentProject.components.filter((c) => c.id !== component.id);
+      const removedNodeIds = new Set(
+        currentProject.graph.nodes
+          .filter((n) => n.id === component.id || (n.data as any)?.component_id === component.id)
+          .map((n) => n.id)
+      );
+      const updatedNodes = currentProject.graph.nodes.filter((n) => !removedNodeIds.has(n.id));
+      const updatedEdges = currentProject.graph.edges.filter(
+        (e) => !removedNodeIds.has(e.source) && !removedNodeIds.has(e.target)
+      );
 
-      // Remove any graph nodes associated with this component
-      const updatedNodes = currentProject.graph.nodes.filter((n) => n.id !== component.id);
-
-      // Update project
       await projectsApi.update(currentProject.id, {
         components: updatedComponents,
-        graph: {
-          nodes: updatedNodes,
-          edges: currentProject.graph.edges,
-        },
+        graph: { nodes: updatedNodes, edges: updatedEdges },
       });
 
-      // Reload project
+      // Force re-introspection so the graph reflects what Dagster
+      // actually sees on disk after the delete. Skipping this leaves
+      // whatever we optimistically filtered above as the source of
+      // truth — usually right, but the regenerate catches edge cases
+      // (partition defs that get orphaned, downstream lineage that
+      // needs to be re-computed, etc.).
+      try {
+        await projectsApi.regenerateAssets(currentProject.id, false);
+      } catch (e) {
+        console.warn('[delete] regenerate-assets failed after delete — falling back to loadProject', e);
+      }
+
       const { loadProject } = useProjectStore.getState();
       await loadProject(currentProject.id);
     } catch (error) {
@@ -800,6 +847,7 @@ function App() {
   // Designer-authored "Pipeline" for a live Dagster+ connection) has
   // nothing useful to show for a native job beyond "you can run it".
   const hasPipelines = !isCloudProject;
+  const { drafts: allDrafts, refresh: refreshDrafts, refreshKey: draftsRefreshKey } = useDrafts(currentProject?.id ?? null);
   const navItems = [
     { value: 'assets', label: 'Assets', icon: Network },
     { value: 'ingestions', label: 'Ingestions', icon: Download },
@@ -982,6 +1030,50 @@ function App() {
                     <DagsterCloudChip projectId={currentProject.id} />
                   </>
                 )}
+                {!!(currentProject as any)?.is_dagster_plus && (
+                  <>
+                    <span className="text-xs text-gray-400 ml-2">·</span>
+                    <SandboxStatusPill projectId={currentProject.id} isDagsterPlus />
+                    <DropdownMenu.Root>
+                      <DropdownMenu.Trigger asChild>
+                        <button
+                          className="ml-1 inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium border border-indigo-200 bg-indigo-50 text-indigo-800 hover:bg-indigo-100"
+                          title="Author a new component draft"
+                        >
+                          + Add
+                          <ChevronDown className="w-3 h-3 opacity-70" />
+                        </button>
+                      </DropdownMenu.Trigger>
+                      <DropdownMenu.Portal>
+                        <DropdownMenu.Content
+                          className="min-w-[200px] bg-white rounded-md shadow-lg border border-gray-200 p-1 z-50"
+                          sideOffset={5}
+                          align="start"
+                        >
+                          <QuickAddItem label="Any component" onSelect={() => { setAddComponentProducesFilter(undefined); setAddComponentOpen(true); }} />
+                          <DropdownMenu.Separator className="h-px bg-gray-200 my-1" />
+                          <QuickAddItem label="Schedule" onSelect={() => { setAddComponentProducesFilter(['schedule']); setAddComponentOpen(true); }} />
+                          <QuickAddItem label="Job" onSelect={() => { setAddComponentProducesFilter(['job']); setAddComponentOpen(true); }} />
+                          <QuickAddItem label="Asset" onSelect={() => { setAddComponentProducesFilter(['asset', 'multi_asset']); setAddComponentOpen(true); }} />
+                          <QuickAddItem label="Sensor" onSelect={() => { setAddComponentProducesFilter(['sensor']); setAddComponentOpen(true); }} />
+                          <QuickAddItem label="Asset check" onSelect={() => { setAddComponentProducesFilter(['asset_check']); setAddComponentOpen(true); }} />
+                        </DropdownMenu.Content>
+                      </DropdownMenu.Portal>
+                    </DropdownMenu.Root>
+                    <button
+                      onClick={() => setDraftsPanelOpen(true)}
+                      className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium border border-gray-200 bg-white text-gray-700 hover:bg-gray-50"
+                      title="View drafts pending PR promotion"
+                    >
+                      Drafts
+                      {allDrafts.length > 0 && (
+                        <span className="inline-flex items-center justify-center min-w-[16px] h-4 px-1 rounded-full bg-gray-800 text-white text-[10px] font-semibold">
+                          {allDrafts.length}
+                        </span>
+                      )}
+                    </button>
+                  </>
+                )}
               </>
             ) : (
               <span className="text-sm text-gray-500">No project selected</span>
@@ -1088,13 +1180,12 @@ function App() {
               </div>
             )}
             <div className={`${detailNodeId ? 'hidden' : 'flex'} flex-1 min-w-0 overflow-hidden`}>
-            {/* Left Sidebar - Component Palette + Project Components.
-                Hidden entirely for Dagster+ projects since cloud is
-                read-only and "add a component" / "list local
-                components" don't apply to a live deployment. Also
-                hidden when the user is on the catalog view -- there's
-                no per-asset editing surface to drag onto. */}
-            {!(currentProject && (currentProject as any).is_dagster_plus) && assetsViewMode === 'graph' && (
+            {/* Left sidebar (Project Components + Component Palette).
+                Shown for both local and Dagster+ projects on graph view.
+                On Dagster+ the top section becomes a link into the drafts
+                drawer and the palette click routes to the sandbox
+                authoring flow (same modal, different target). */}
+            {assetsViewMode === 'graph' && (
             <aside
               data-sidebar
               className={`${componentsSidebarCollapsed ? 'w-9' : 'w-64'} transition-[width] duration-150 flex-shrink-0 bg-white border-r border-gray-200 flex flex-col overflow-hidden`}
@@ -1110,51 +1201,106 @@ function App() {
                 </button>
               ) : (
               <>
-              {/* Project Components Section */}
-              <div
-                className="flex flex-col overflow-hidden border-b border-gray-200"
-                style={{ height: `${componentsPanelHeight}%` }}
-              >
-                <div className="px-4 py-3 bg-gray-50 border-b border-gray-200 flex items-center justify-between">
-                  <h3 className="text-xs font-semibold text-gray-700 uppercase tracking-wider">
-                    Project Components
-                  </h3>
-                  <button
-                    onClick={() => setComponentsSidebarCollapsed(true)}
-                    className="text-gray-400 hover:text-gray-700 -mr-1 p-0.5 rounded hover:bg-gray-200 transition-colors"
-                    title="Collapse sidebar"
-                    aria-label="Collapse sidebar"
+              {/* Top section: on local = Project Components; on cloud = Drafts summary */}
+              {isCloudProject ? (
+                <div className="flex flex-col overflow-hidden border-b border-gray-200 flex-shrink-0">
+                  <div className="px-4 py-3 bg-gray-50 border-b border-gray-200 flex items-center justify-between">
+                    <h3 className="text-xs font-semibold text-gray-700 uppercase tracking-wider">
+                      Drafts
+                    </h3>
+                    <button
+                      onClick={() => setComponentsSidebarCollapsed(true)}
+                      className="text-gray-400 hover:text-gray-700 -mr-1 p-0.5 rounded hover:bg-gray-200 transition-colors"
+                      title="Collapse sidebar"
+                      aria-label="Collapse sidebar"
+                    >
+                      <PanelLeftClose className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                  <div className="p-4">
+                    <button
+                      onClick={() => setDraftsPanelOpen(true)}
+                      className="w-full text-left text-xs text-gray-700 hover:text-gray-900 flex items-center justify-between px-2 py-1.5 rounded hover:bg-gray-100"
+                    >
+                      <span>Pending PR promotions</span>
+                      <span className="inline-flex items-center justify-center min-w-[20px] h-5 px-1.5 rounded-full bg-gray-800 text-white text-[10px] font-semibold">
+                        {allDrafts.length}
+                      </span>
+                    </button>
+                    <p className="mt-2 text-[10px] text-gray-500 leading-snug">
+                      Click a component below to add to your sandbox. Use <span className="font-medium">+ Add component</span> in the header to author against a customer code location instead.
+                    </p>
+                  </div>
+                </div>
+              ) : (
+                <>
+                  <div
+                    className="flex flex-col overflow-hidden border-b border-gray-200"
+                    style={{ height: `${componentsPanelHeight}%` }}
                   >
-                    <PanelLeftClose className="w-3.5 h-3.5" />
-                  </button>
-                </div>
-                <div className="flex-1 overflow-y-auto p-4">
-                  <ProjectComponentsList
-                    onEditComponent={setEditingComponent}
-                    onDeleteComponent={handleDeleteComponent}
+                    <div className="px-4 py-3 bg-gray-50 border-b border-gray-200 flex items-center justify-between">
+                      <h3 className="text-xs font-semibold text-gray-700 uppercase tracking-wider">
+                        Project Components
+                      </h3>
+                      <button
+                        onClick={() => setComponentsSidebarCollapsed(true)}
+                        className="text-gray-400 hover:text-gray-700 -mr-1 p-0.5 rounded hover:bg-gray-200 transition-colors"
+                        title="Collapse sidebar"
+                        aria-label="Collapse sidebar"
+                      >
+                        <PanelLeftClose className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                    <div className="flex-1 overflow-y-auto p-4">
+                      <ProjectComponentsList
+                        onEditComponent={setEditingComponent}
+                        onDeleteComponent={handleDeleteComponent}
+                      />
+                    </div>
+                  </div>
+                  <div
+                    onMouseDown={handleDividerMouseDown}
+                    className="h-1 bg-gray-200 hover:bg-blue-400 cursor-ns-resize active:bg-blue-500 transition-colors"
+                    title="Drag to resize"
                   />
-                </div>
-              </div>
+                </>
+              )}
 
-              {/* Resize Handle */}
+              {/* Component Palette Section — always visible on graph view */}
               <div
-                onMouseDown={handleDividerMouseDown}
-                className="h-1 bg-gray-200 hover:bg-blue-400 cursor-ns-resize active:bg-blue-500 transition-colors"
-                title="Drag to resize"
-              />
-
-              {/* Component Palette Section */}
-              <div
-                className="flex flex-col overflow-hidden"
-                style={{ height: `${100 - componentsPanelHeight}%` }}
+                className="flex flex-col overflow-hidden flex-1"
+                style={!isCloudProject ? { height: `${100 - componentsPanelHeight}%` } : undefined}
               >
                 <div className="px-4 py-3 bg-gray-50 border-b border-gray-200">
                   <h3 className="text-xs font-semibold text-gray-700 uppercase tracking-wider">
-                    Add Component
+                    {isCloudProject ? 'Add to Sandbox' : 'Add Component'}
                   </h3>
                 </div>
                 <div className="flex-1 overflow-y-auto">
-                  <ComponentPalette onComponentClick={setAddingComponentType} />
+                  <ComponentPalette
+                    onComponentClick={(componentType) => {
+                      if (isCloudProject) {
+                        // Route to sandbox authoring via the same modal + APIs
+                        // the header "+ Add component" flow uses. Schema is
+                        // fetched by ComponentConfigModal's useComponent hook.
+                        setDraftAuthoring({
+                          componentType,
+                          displayName: componentType.split('.').pop() || componentType,
+                          schema: null,
+                          initialAttributes: {},
+                          location: '__sandbox__',
+                          deployment: null,
+                          target: 'sandbox',
+                          availableAssets: [],
+                          availableJobs: [],
+                          availableSchedules: [],
+                          availableSensors: [],
+                        });
+                      } else {
+                        setAddingComponentType(componentType);
+                      }
+                    }}
+                  />
                 </div>
               </div>
               </>
@@ -1162,7 +1308,7 @@ function App() {
             </aside>
             )}
 
-            {/* Graph Editor */}
+            {/* Graph Editor -- single source of truth for the Assets tab. */}
             <main className="flex-1 min-w-0 relative">
               <GraphEditor
                 onNodeSelect={setSelectedNodeId}
@@ -1703,11 +1849,100 @@ function App() {
         </div>
       )}
 
+      {isCloudProject && currentProject && (
+        <>
+          <AddComponentModal
+            open={addComponentOpen}
+            onOpenChange={setAddComponentOpen}
+            projectId={currentProject.id}
+            onConfigure={setDraftAuthoring}
+            initialProducesFilter={addComponentProducesFilter}
+          />
+          {draftAuthoring && (
+            <ComponentConfigModal
+              component={null}
+              componentType={draftAuthoring.componentType}
+              schemaOverride={draftAuthoring.schema}
+              initialAttributes={draftAuthoring.initialAttributes}
+              mode="draft"
+              availableAssetsOverride={draftAuthoring.availableAssets}
+              availableJobs={draftAuthoring.availableJobs}
+              availableSchedules={draftAuthoring.availableSchedules}
+              availableSensors={draftAuthoring.availableSensors}
+              onSave={() => { /* never called in draft mode */ }}
+              onSaveDraft={async (attributes) => {
+                // Serialise attributes back into a full defs.yaml doc.
+                const { default: _yaml } = await import('js-yaml');
+                const yamlStr = _yaml.dump(
+                  { type: draftAuthoring.componentType, attributes },
+                  { lineWidth: 100 },
+                );
+                if (draftAuthoring.target === 'sandbox') {
+                  const { designerLocApi } = await import('./services/api');
+                  const r = await designerLocApi.scaffoldComponent(currentProject.id, {
+                    component_type: draftAuthoring.componentType,
+                    attributes_yaml: yamlStr,
+                  });
+                  notify.success(
+                    r.restarted
+                      ? `Installed ${r.package ?? 'component'} + wrote defs.yaml. Sandbox restarting…`
+                      : `Wrote defs.yaml — sandbox hot-reloading`,
+                  );
+                } else {
+                  const { draftsApi, previewApi } = await import('./services/api');
+                  await draftsApi.create(currentProject.id, {
+                    location_name: draftAuthoring.location,
+                    deployment_name: draftAuthoring.deployment,
+                    component_type: draftAuthoring.componentType,
+                    attributes: yamlStr,
+                  });
+                  notify.success('Draft created');
+                  refreshDrafts();
+                  setDraftsPanelOpen(true);
+                  // Fire-and-forget pre-warm: if the target is a long-lived
+                  // deployment, backend starts BD creation in the background
+                  // so a later Cloud click completes in ~1s. Branch targets
+                  // no-op server-side (fast path applies state directly).
+                  if (draftAuthoring.deployment) {
+                    previewApi.prewarmRemote(
+                      currentProject.id,
+                      draftAuthoring.deployment,
+                      draftAuthoring.location,
+                    ).catch(() => { /* prewarm is best-effort */ });
+                  }
+                }
+              }}
+              onClose={() => setDraftAuthoring(null)}
+            />
+          )}
+          <DraftsPanel
+            open={draftsPanelOpen}
+            onOpenChange={setDraftsPanelOpen}
+            projectId={currentProject.id}
+            refreshKey={draftsRefreshKey}
+            onDraftsChanged={refreshDrafts}
+          />
+        </>
+      )}
+
       <NotificationHost />
       <SettingsHost />
     </div>
   );
 }
 
+
+// Item for the "+ Add" dropdown. Kept local because the dropdown is
+// tiny and unique to the header — no reason to build another component.
+function QuickAddItem({ label, onSelect }: { label: string; onSelect: () => void }) {
+  return (
+    <DropdownMenu.Item
+      className="flex items-center gap-2 px-3 py-1.5 text-sm text-gray-700 hover:bg-gray-100 rounded cursor-pointer outline-none"
+      onSelect={onSelect}
+    >
+      {label}
+    </DropdownMenu.Item>
+  );
+}
 
 export default App;

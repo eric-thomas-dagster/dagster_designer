@@ -131,6 +131,12 @@ export const projectsApi = {
     const response = await api.post<Project>(url);
     return response.data;
   },
+  dependencyStatus: async (
+    projectId: string,
+  ): Promise<{ status: 'idle' | 'installing' | 'success' | 'error'; error: string | null }> => {
+    const response = await api.get(`/projects/${projectId}/dependency-status`);
+    return response.data as any;
+  },
 
   discoverComponents: async (projectId: string) => {
     const response = await api.post<Project>(`/projects/${projectId}/discover-components`);
@@ -683,6 +689,32 @@ export const projectsApi = {
     return response.data as any;
   },
 
+  // Cheap heuristic ranker (no LLM) — surfaces assets that need
+  // monitors the most. Used as the pre-step to "Generate with AI" so
+  // the user can pick a good candidate before spending a Claude call.
+  coverageRecommendations: async (
+    projectId: string,
+    limit: number = 10,
+  ): Promise<{
+    recommendations: Array<{
+      asset_key: string;
+      label: string | null;
+      current_monitor_count: number;
+      downstream_count: number;
+      upstream_count: number;
+      has_freshness_check: boolean;
+      has_row_count_check: boolean;
+      has_null_check: boolean;
+      score: number;
+      reasons: string[];
+    }>;
+    total_assets: number;
+    unmonitored_asset_count: number;
+  }> => {
+    const response = await api.get(`/projects/${projectId}/monitors/coverage-recommendations`, { params: { limit } });
+    return response.data as any;
+  },
+
   getMonitorImpact: async (
     projectId: string,
     monitorId: string,
@@ -719,6 +751,11 @@ export const projectsApi = {
     }>;
     numeric_series: Array<{ ts: string; value: number; expected_min?: number | null; expected_max?: number | null }>;
     numeric_label: string | null;
+    numeric_metrics: Array<{
+      label: string;
+      points: Array<{ ts: string; value: number }>;
+      is_default: boolean;
+    }>;
   }> => {
     const response = await api.get(`/projects/${projectId}/monitors/history`, {
       params: { monitor_id: monitorId, limit },
@@ -1323,6 +1360,45 @@ export interface SaveTemplateRequest {
   code: string;
 }
 
+export type Produces =
+  | 'asset'
+  | 'multi_asset'
+  | 'asset_check'
+  | 'job'
+  | 'schedule'
+  | 'sensor'
+  | 'resource'
+  | 'io_manager'
+  | 'partitions_def'
+  | 'other';
+
+export interface CommunityTemplate {
+  id: string;
+  name: string;
+  category: string;
+  description: string;
+  path: string;
+  schema_url?: string | null;
+  example_url: string;
+  component_url: string;
+  requirements_url?: string | null;
+  icon?: string | null;
+  tags?: string[];
+  /** Optional manifest-declared list of Dagster primitives this component
+   *  creates when loaded. Landed 2026-07-15 in the eric-thomas-dagster
+   *  community-templates repo. Consumers should degrade to schema-field
+   *  heuristics when absent. */
+  produces?: Produces[];
+}
+
+export const communityTemplatesApi = {
+  manifest: async (): Promise<{ components: CommunityTemplate[] }> => {
+    const r = await api.get('/templates/manifest');
+    return r.data as { components: CommunityTemplate[] };
+  },
+};
+
+
 export const templatesApi = {
   preview: async (primitiveType: PrimitiveType, params: any): Promise<TemplateResponse> => {
     const response = await api.post<TemplateResponse>('/templates/preview', {
@@ -1535,6 +1611,7 @@ export const dagsterUIApi = {
     return response.data;
   },
 };
+
 
 // DBT Adapters API
 export interface AdapterInfo {
@@ -1993,6 +2070,42 @@ export interface RunDetail {
   external_url: string | null;
 }
 
+// Dagster+ Custom Metrics + threshold alerts.
+export const metricsApi = {
+  list: async (projectId: string): Promise<{ metrics: Array<{
+    id: string; metadata_key: string; display_name: string | null; description: string | null; unit_type: string | null;
+  }> }> => {
+    const r = await api.get(`/projects/${projectId}/custom-metrics`);
+    return r.data as any;
+  },
+  ensure: async (projectId: string, body: {
+    metadata_key: string;
+    unit_type?: string;
+    display_name?: string | null;
+    description?: string | null;
+  }): Promise<{ id: string; metadata_key: string; display_name: string | null; description: string | null; unit_type: string | null }> => {
+    const r = await api.post(`/projects/${projectId}/custom-metrics/ensure`, body);
+    return r.data as any;
+  },
+  createThresholdAlert: async (projectId: string, body: {
+    name: string;
+    description?: string | null;
+    metadata_key: string;
+    asset_key: string;
+    threshold: number;
+    operator?: 'GREATER_THAN' | 'LESS_THAN' | 'GREATER_THAN_OR_EQUAL' | 'LESS_THAN_OR_EQUAL';
+    lookback_window_hours?: number;
+    aggregation?: 'MAX' | 'MIN' | 'AVG' | 'LATEST' | 'SUM';
+    notify_emails?: string[];
+    notify_slack_channel?: string | null;
+    notify_slack_workspace?: string | null;
+    enabled?: boolean;
+  }): Promise<{ id: string; name: string; enabled: boolean; event_types: string[] }> => {
+    const r = await api.post(`/projects/${projectId}/alerts/metric-threshold`, body);
+    return r.data as any;
+  },
+};
+
 export const runsApi = {
   query: async (
     projectId: string,
@@ -2060,6 +2173,12 @@ export const runsApi = {
     projectId: string,
   ): Promise<{ code_locations: string[]; source: 'local' | 'cloud' }> => {
     const r = await api.get(`/projects/${projectId}/runs/code-locations`);
+    return r.data as any;
+  },
+  jobNames: async (
+    projectId: string,
+  ): Promise<{ job_names: string[]; source: 'local' | 'cloud' }> => {
+    const r = await api.get(`/projects/${projectId}/runs/job-names`);
     return r.data as any;
   },
   tagKeys: async (projectId: string): Promise<{ tag_keys: string[] }> => {
@@ -2504,6 +2623,42 @@ export const assetsApi = {
     );
     return response.data;
   },
+  // Materialization / observation events. Powers the Activity tab.
+  // Backend dispatches to Dagster+ or local `dg dev` GraphQL based on
+  // project kind. Same event shape either way.
+  getAssetEvents: async (
+    projectId: string,
+    assetKey: string,
+    limit: number = 200,
+  ): Promise<{ events: Array<{ ts: string; kind: string; message?: string | null; run_id?: string | null; partition?: string | null }> }> => {
+    const r = await api.get(`/assets/${projectId}/${encodeURIComponent(assetKey)}/events`, { params: { limit } });
+    return r.data as any;
+  },
+
+  // Partition list + per-key status. Powers the Partitions tab.
+  getAssetPartitions: async (
+    projectId: string,
+    assetKey: string,
+    limit: number = 500,
+  ): Promise<{
+    partitions: Array<{
+      key: string;
+      status?: string | null;
+      last_materialization_ts?: string | null;
+      run_id?: string | null;
+      step_key?: string | null;
+      label?: string | null;
+      description?: string | null;
+      metadata?: Array<{ label: string; type: string; value: any; description?: string | null }>;
+    }>;
+    total_count: number;
+    materialized_count: number;
+    missing_count: number;
+    failed_count: number;
+  }> => {
+    const r = await api.get(`/assets/${projectId}/${encodeURIComponent(assetKey)}/partitions`, { params: { limit } });
+    return r.data as any;
+  },
 };
 
 export interface JobInsightsResponse {
@@ -2665,6 +2820,512 @@ export const aiApi = {
   setKeys: async (keys: { openai_api_key?: string; anthropic_api_key?: string }): Promise<AiProvidersStatus> => {
     const response = await api.post<AiProvidersStatus>('/ai/keys', keys);
     return response.data;
+  },
+};
+
+// Designer-managed code location — laptop-hosted Dagster subprocess that
+// runs alongside a Dagster+ project as a *peer* data source. See
+// backend/app/services/designer_loc_service.py.
+export interface DesignerLocStatus {
+  status: 'missing' | 'scaffolding' | 'installing' | 'starting' | 'ready' | 'error';
+  pid: number | null;
+  port: number | null;
+  error: string | null;
+  graphql_url: string | null;
+  scaffolded: boolean;
+  installed: boolean;
+  log_tail: string[];
+}
+
+// Drafts — AppManagedComponent-shaped records authored against a target
+// code location (customer cloud loc OR the sandbox), pending promotion
+// via PR. Storage is server-side per project.
+export interface Draft {
+  id: string;
+  project_id: string;
+  location_name: string;
+  deployment_name: string | null;
+  component_type: string;
+  component_id: string;
+  attributes: string;               // YAML string
+  status: 'draft' | 'promoted';
+  promoted_pr_url: string | null;
+  created_at: number;
+  updated_at: number;
+}
+
+export const draftsApi = {
+  list: async (projectId: string): Promise<{ drafts: Draft[] }> => {
+    const r = await api.get(`/projects/${projectId}/drafts`);
+    return r.data as { drafts: Draft[] };
+  },
+  create: async (
+    projectId: string,
+    body: {
+      location_name: string;
+      deployment_name?: string | null;
+      component_type: string;
+      attributes: string;
+      component_id?: string | null;
+    },
+  ): Promise<Draft> => {
+    const r = await api.post(`/projects/${projectId}/drafts`, body);
+    return r.data as Draft;
+  },
+  update: async (projectId: string, draftId: string, attributes: string): Promise<Draft> => {
+    const r = await api.patch(`/projects/${projectId}/drafts/${draftId}`, { attributes });
+    return r.data as Draft;
+  },
+  remove: async (projectId: string, draftId: string): Promise<void> => {
+    await api.delete(`/projects/${projectId}/drafts/${draftId}`);
+  },
+  promoteInfo: async (projectId: string, draftId: string): Promise<{
+    available: boolean;
+    mapping: { owner_repo: string; default_branch: string; defs_subdir: string; has_token: boolean } | null;
+    status: 'draft' | 'promoted';
+    promoted_pr_url: string | null;
+  }> => {
+    const r = await api.get(`/projects/${projectId}/drafts/${draftId}/promote-info`);
+    return r.data as any;
+  },
+  promote: async (projectId: string, draftId: string): Promise<{
+    pr_url: string;
+    branch: string;
+    files_written: string[];
+    owner_repo: string;
+    base_branch: string;
+    /** Predicted BD name Dagster+ CI will create off the PR branch —
+     *  matches `branch` under the default 1:1 branch→BD convention. */
+    expected_bd_name?: string;
+    /** Result of the post-promote `deleteAppManagedComponent` call.
+     *  `{cleared: true, deployment}` on success, `{cleared: false, reason, deployment}`
+     *  on failure, `null` if the draft had no active preview state. */
+    cleared_state?: {
+      cleared: boolean;
+      deployment?: string;
+      reason?: string;
+    } | null;
+    /** When Designer had to rewrite the state-registry component type
+     *  string to a real Python import path for defs.yaml, this records
+     *  the mapping (else null). */
+    rewrote_type?: { from: string; to: string } | null;
+    /** Pre-promote environment check (design doc §7). Null when the
+     *  promoted component declared no `consumes` in the manifest OR the
+     *  introspection call failed. Otherwise contains match/miss detail. */
+    resource_check?: {
+      checked: boolean;
+      reason?: string;
+      resources_available?: string[];
+      matches?: Array<{ service: string; matched_by: string }>;
+      missing?: Array<{ service: string; reason: string }>;
+    } | null;
+    /** Repo-relative paths for files the community_component_installer
+     *  bootstrap added or updated on this PR. Empty when the promoted
+     *  component wasn't recognized as a community-catalog entry (nothing
+     *  to bootstrap). */
+    installer_files?: string[];
+  }> => {
+    const r = await api.post(`/projects/${projectId}/drafts/${draftId}/promote`, null, {
+      timeout: 120_000,   // clone + push can take a bit on cold cache
+    });
+    return r.data as any;
+  },
+};
+
+
+// Authored — unified locations + component-types query, routes to
+// Dagster+ for cloud locs and to the sandbox subprocess for the
+// sandbox sentinel `__sandbox__`.
+export const SANDBOX_LOCATION_NAME = '__sandbox__';
+
+export interface AuthoredLocation {
+  name: string;
+  source: 'dagster_plus' | 'sandbox';
+  deployment?: string | null;      // which Dagster+ deployment (long-lived or branch); null for sandbox
+  authoring_supported?: boolean;   // false for cloud locs with no isAppManaged types
+  error?: string;
+}
+
+export interface AuthoredDeployment {
+  name: string;
+  id: number;
+  type: 'PRODUCTION' | 'BRANCH' | string;
+  status: string;
+  display_name: string;            // human-friendly (branch name / PR # for branch deployments)
+  branch_name: string | null;
+  pull_request_url: string | null;
+}
+
+export interface ComponentTypeInfo {
+  name: string;
+  namespace: string | null;
+  schema: any;                     // JSON Schema
+  formSchema: { dataSchema: any; uiSchema: any } | null;
+  isAppManaged: boolean;
+  example: string | null;          // example YAML
+  description: string | null;
+  owners: string[] | null;
+  tags: string[] | null;
+}
+
+// Promotion configuration — user-editable via the UI so no env vars
+// are needed for the demo. Storage: `~/.dagster-designer/config/promotion.json`.
+export interface RepoMapping {
+  org: string;
+  location: string;
+  owner_repo: string;
+  default_branch: string;
+  defs_subdir: string;
+  // Env vars injected into the preview `dagster dev` subprocess.
+  // Non-prod values (dev warehouse, staging DB, sandbox S3, …).
+  preview_env?: Record<string, string>;
+}
+
+export interface PromotionConfig {
+  github_token_preview: string;
+  github_token_present: boolean;
+  mappings: RepoMapping[];
+  defaults: RepoMapping[];
+}
+
+export const promotionApi = {
+  getConfig: async (): Promise<PromotionConfig> => {
+    const r = await api.get('/promotion/config');
+    return r.data as PromotionConfig;
+  },
+  // Pass `github_token: ""` to preserve the existing token, or
+  // `"__CLEAR__"` to wipe it. Any other string replaces it.
+  saveConfig: async (body: { github_token: string; mappings: RepoMapping[] }): Promise<PromotionConfig> => {
+    const r = await api.put('/promotion/config', body);
+    return r.data as PromotionConfig;
+  },
+  // Validate a PAT without saving. If `github_token` is empty, the
+  // saved token is tested. Pass mapping repos so fine-grained PATs
+  // (which have empty scopes on `/user`) can be verified per-repo.
+  testToken: async (body: { github_token: string; owner_repos: string[] }): Promise<{
+    valid: boolean;
+    login?: string;
+    name?: string;
+    scopes?: string[];
+    has_repo_scope?: boolean;
+    repos?: Array<{ owner_repo: string; ok: boolean; can_push?: boolean; reason?: string | null }>;
+    ok_for_promote?: boolean;
+    message: string;
+  }> => {
+    const r = await api.post('/promotion/test-token', body);
+    return r.data as any;
+  },
+  // Scan the target repo and suggest `defs_subdir` candidates. Reads
+  // `dagster_cloud.yaml` when present for an authoritative pick; falls
+  // back to `**/defs/` tree scoring otherwise.
+  resolveDefsSubdir: async (body: {
+    owner_repo: string;
+    ref: string;
+    location_name: string;
+  }): Promise<{
+    candidates: Array<{ path: string; score: number; reason: string }>;
+    total_scanned: number;
+    truncated: boolean;
+    authoritative_build_dir?: string | null;
+    message: string;
+  }> => {
+    const r = await api.post('/promotion/resolve-defs-subdir', body);
+    return r.data as any;
+  },
+  // Confirm `defs_subdir` exists as a real directory on the target branch.
+  // `exists: null` = check couldn't run (no token, missing input).
+  validateDefsSubdir: async (body: {
+    owner_repo: string;
+    ref: string;
+    defs_subdir: string;
+  }): Promise<{
+    exists: boolean | null;
+    is_dir?: boolean;
+    message: string;
+  }> => {
+    const r = await api.post('/promotion/validate-defs-subdir', body);
+    return r.data as any;
+  },
+  // Refresh live GitHub state for every promoted draft in the project.
+  // Returns `{draft_id → {state, merged, message, ...}}` — state is
+  // one of 'open' | 'closed' | 'merged' | 'deleted' | 'unknown'.
+  // Enables the Drafts panel to swap "Open PR" for "Re-promote" once
+  // a PR is closed without merging.
+  prStatus: async (projectId: string): Promise<{
+    statuses: Record<string, {
+      state: 'open' | 'closed' | 'merged' | 'deleted' | 'unknown';
+      merged?: boolean;
+      merged_at?: string | null;
+      closed_at?: string | null;
+      head_sha?: string;
+      base_ref?: string;
+      message: string;
+    }>;
+    message?: string;
+  }> => {
+    const r = await api.post('/promotion/pr-status', { project_id: projectId });
+    return r.data as any;
+  },
+};
+
+
+// Preview runtime — git-cloned per-deployment `dagster dev` on the
+// laptop. Bit-for-bit safer than "run against prod credentials" because
+// env vars come from the (org, location) mapping's `preview_env`.
+export type PreviewStatus =
+  | 'idle'
+  | 'preparing'
+  | 'installing'
+  | 'starting'
+  | 'ready'
+  | 'error';
+
+export interface PreviewState {
+  project_id: string;
+  deployment_name: string;
+  location_name: string;
+  status: PreviewStatus;
+  pid: number | null;
+  port: number | null;
+  worktree_path: string | null;
+  error: string | null;
+  graphql_url: string | null;
+  webserver_url: string | null;
+  files_written: string[];
+  env_var_count: number;
+  log_tail: string[];
+}
+
+export interface RemotePreviewState {
+  kind: 'remote';
+  bd_name: string;
+  bd_id: number | null;
+  /** True when Designer created a fresh isolated BD (slow-path).
+   *  False when we attached to a pre-existing branch deployment
+   *  (fast-path via `setAppManagedComponent`). Governs whether Stop
+   *  deletes the BD or just detaches. */
+  fresh_bd_created: boolean;
+  base_deployment: string;
+  location_name: string;
+  webserver_url: string;
+  graphql_url: string;
+  drafts_applied: Array<{ draft_id: string; component_id: string }>;
+  draft_count: number;
+  /** Installer-driven install actions taken during this sync. Empty
+   *  when no drafts required a source install (the class was already
+   *  loaded on the target). When an entry has `action==='added'`, the
+   *  user just gained access to a new community component on the BD
+   *  without a PR. */
+  installer_actions?: Array<{
+    draft_id: string;
+    catalog_id: string;
+    action: 'added' | 'already-present' | 'no-installer' | 'error';
+    message: string;
+    components?: string[];
+  }>;
+}
+
+export const previewApi = {
+  // Idempotent: clone + worktree + apply drafts + uv sync + boot dagster dev.
+  boot: async (projectId: string, deploymentName: string, locationName: string): Promise<PreviewState> => {
+    const r = await api.post(`/projects/${projectId}/preview/boot`, {
+      deployment_name: deploymentName,
+      location_name: locationName,
+    }, { timeout: 600_000 });
+    return r.data as PreviewState;
+  },
+  // Spin up a Dagster+ Branch Deployment as the preview — no laptop
+  // `dagster dev`, no docker. Reuses the base deployment's image +
+  // applies drafts via `setAppManagedComponent`. Returns the BD's
+  // Dagster+ webserver URL to open.
+  // Fire-and-forget: kick off BD creation for a long-lived-deployment
+  // target so the eventual Cloud click completes in ~1s. No-op for
+  // branch targets (fast path handles those). Returns immediately;
+  // actual work runs server-side in the background.
+  prewarmRemote: async (projectId: string, baseDeployment: string, locationName: string): Promise<{ status: string }> => {
+    const r = await api.post(`/projects/${projectId}/preview/prewarm-remote`, {
+      base_deployment: baseDeployment,
+      location_name: locationName,
+    }, { timeout: 15_000 });
+    return r.data as { status: string };
+  },
+  bootRemote: async (projectId: string, baseDeployment: string, locationName: string): Promise<RemotePreviewState> => {
+    // Real BD creation + location update + agent image pull can take
+    // 30-90s in practice; occasionally longer if the agent's warm. Give
+    // the backend its full 5-minute window plus a bit of buffer.
+    const r = await api.post(`/projects/${projectId}/preview/boot-remote`, {
+      base_deployment: baseDeployment,
+      location_name: locationName,
+    }, { timeout: 480_000 });
+    return r.data as RemotePreviewState;
+  },
+  remoteStatus: async (projectId: string): Promise<{ remote_previews: RemotePreviewState[] }> => {
+    const r = await api.get(`/projects/${projectId}/preview/remote-status`);
+    return r.data as { remote_previews: RemotePreviewState[] };
+  },
+  teardownRemote: async (projectId: string, baseDeployment: string, locationName: string): Promise<void> => {
+    await api.delete(`/projects/${projectId}/preview/remote-session`, {
+      params: { base_deployment: baseDeployment, location: locationName },
+    });
+  },
+  // Explicit "Sync" — reapply the current set of drafts to an already-
+  // running preview. Same as `bootRemote` semantically but the UI treats
+  // it as a distinct user action so it's obvious when changes land.
+  syncRemote: async (projectId: string, baseDeployment: string, locationName: string): Promise<RemotePreviewState> => {
+    const r = await api.post(`/projects/${projectId}/preview/boot-remote`, {
+      base_deployment: baseDeployment,
+      location_name: locationName,
+    }, { timeout: 120_000 });
+    return r.data as RemotePreviewState;
+  },
+  stop: async (projectId: string, deploymentName: string, locationName: string): Promise<void> => {
+    await api.post(`/projects/${projectId}/preview/stop`, {
+      deployment_name: deploymentName,
+      location_name: locationName,
+    });
+  },
+  status: async (projectId: string): Promise<{ previews: PreviewState[] }> => {
+    const r = await api.get(`/projects/${projectId}/preview/status`);
+    return r.data as { previews: PreviewState[] };
+  },
+  teardown: async (projectId: string, deploymentName: string, locationName: string): Promise<void> => {
+    await api.delete(`/projects/${projectId}/preview/session/${encodeURIComponent(deploymentName)}`, {
+      params: { location: locationName },
+    });
+  },
+  graphql: async (projectId: string, deploymentName: string, query: string, variables?: Record<string, any>): Promise<any> => {
+    const r = await api.post(`/projects/${projectId}/preview/graphql`, {
+      deployment_name: deploymentName,
+      query,
+      variables: variables || null,
+    });
+    return r.data;
+  },
+};
+
+
+export const authoredApi = {
+  deployments: async (projectId: string): Promise<{ deployments: AuthoredDeployment[] }> => {
+    const r = await api.get(`/projects/${projectId}/authored/deployments`);
+    return r.data as { deployments: AuthoredDeployment[] };
+  },
+  // Probe every deployment for authoring support (any loc with isAppManaged=true).
+  // Slow first call (fans out 100+ GraphQL requests, concurrency-limited server-side),
+  // subsequent calls hit the 60s cache. Returns { deploymentName -> bool }.
+  deploymentSupport: async (projectId: string): Promise<{ support: Record<string, boolean> }> => {
+    const r = await api.get(`/projects/${projectId}/authored/deployment-support`, {
+      timeout: 60_000,
+    });
+    return r.data as { support: Record<string, boolean> };
+  },
+  locations: async (projectId: string, deployment?: string): Promise<{ locations: AuthoredLocation[] }> => {
+    const params = deployment ? { deployment } : {};
+    const r = await api.get(`/projects/${projectId}/authored/locations`, { params });
+    return r.data as { locations: AuthoredLocation[] };
+  },
+  componentTypes: async (
+    projectId: string,
+    location: string,
+    deployment?: string,
+  ): Promise<{ types: ComponentTypeInfo[]; error?: string }> => {
+    const params: Record<string, string> = { location };
+    if (deployment) params.deployment = deployment;
+    const r = await api.get(`/projects/${projectId}/authored/component-types`, { params });
+    return r.data as { types: ComponentTypeInfo[]; error?: string };
+  },
+  // Community-catalog IDs already installed on the target location via
+  // `community_component_installer`. Powers the picker's "already
+  // installed ✓" indicator. Returns { checked: false } on sandbox or
+  // when introspection fails (picker degrades to no annotation).
+  installedCommunityComponents: async (
+    projectId: string,
+    location: string,
+    deployment?: string,
+  ): Promise<{
+    checked: boolean;
+    installed?: string[];
+    installer_present?: boolean;
+    reason?: string;
+  }> => {
+    const params: Record<string, string> = { location };
+    if (deployment) params.deployment = deployment;
+    const r = await api.get(`/projects/${projectId}/authored/installed-community-components`, { params });
+    return r.data as any;
+  },
+  // Asset keys for the deployment+location the user is authoring
+  // against. Populates the asset_selection picker with the RIGHT
+  // asset set — not whatever the project's hydrated graph holds.
+  assets: async (
+    projectId: string,
+    deployment?: string,
+    location?: string,
+  ): Promise<{ asset_keys: string[] }> => {
+    const params: Record<string, string> = {};
+    if (deployment) params.deployment = deployment;
+    if (location) params.location = location;
+    const r = await api.get(`/projects/${projectId}/authored/assets`, { params });
+    return r.data as { asset_keys: string[] };
+  },
+  // Job / schedule / sensor names for the deployment+location. Powers
+  // `job_name` / `schedule_name` / `sensor_name` pickers.
+  primitives: async (
+    projectId: string,
+    deployment?: string,
+    location?: string,
+  ): Promise<{ jobs: string[]; schedules: string[]; sensors: string[] }> => {
+    const params: Record<string, string> = {};
+    if (deployment) params.deployment = deployment;
+    if (location) params.location = location;
+    const r = await api.get(`/projects/${projectId}/authored/primitives`, { params });
+    return r.data as { jobs: string[]; schedules: string[]; sensors: string[] };
+  },
+};
+
+
+export const designerLocApi = {
+  status: async (projectId: string): Promise<DesignerLocStatus> => {
+    const r = await api.get(`/projects/${projectId}/designer-loc/status`);
+    return r.data as DesignerLocStatus;
+  },
+  ensure: async (projectId: string): Promise<DesignerLocStatus> => {
+    // Slow the first time (scaffold + uv sync + dg dev boot).
+    const r = await api.post(`/projects/${projectId}/designer-loc/ensure`, null, { timeout: 600_000 });
+    return r.data as DesignerLocStatus;
+  },
+  stop: async (projectId: string): Promise<void> => {
+    await api.post(`/projects/${projectId}/designer-loc/stop`);
+  },
+  // Proxy a GraphQL request to the subprocess (browser can't hit the
+  // subprocess directly — no CORS).
+  graphql: async (projectId: string, query: string, variables?: Record<string, any>): Promise<any> => {
+    const r = await api.post(`/projects/${projectId}/designer-loc/graphql`, {
+      query,
+      variables: variables || null,
+    });
+    return r.data;
+  },
+  // Install a community-templates component into the sandbox via the
+  // official `dagster-component` CLI (fetches template from GitHub,
+  // adds Python deps). Restarts the sandbox so the new type registers.
+  installCommunityComponent: async (
+    projectId: string,
+    componentId: string,
+  ): Promise<{ component_id: string; component_type: string | null; install_stdout_tail: string[] }> => {
+    const r = await api.post(`/projects/${projectId}/designer-loc/install-community/${componentId}`, null, {
+      timeout: 600_000,   // CLI install can pull heavy deps
+    });
+    return r.data as any;
+  },
+  // Author a real component in the sandbox: install the package (if
+  // needed) + write `defs.yaml` + hot-reload. Not a draft — direct file.
+  scaffoldComponent: async (
+    projectId: string,
+    body: { component_type: string; attributes_yaml: string; component_id?: string | null },
+  ): Promise<{ component_id: string; path: string; restarted: boolean; package: string | null }> => {
+    const r = await api.post(`/projects/${projectId}/designer-loc/scaffold-component`, body, {
+      timeout: 600_000,   // uv add can pull a big dep
+    });
+    return r.data as any;
   },
 };
 

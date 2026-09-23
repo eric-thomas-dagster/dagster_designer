@@ -2,9 +2,9 @@ import { useEffect, useState } from 'react';
 import {
   ArrowLeft, ChevronRight, Play, Bell, MoreVertical, Loader2, ExternalLink,
   ShieldCheck, TestTube2, Sparkles, CheckCircle2, XCircle, AlertTriangle, Clock,
-  Trash2, FileText, Zap, Radar, Layers, Send, MinusCircle,
+  Trash2, FileText, Zap, Radar, Layers, Send, MinusCircle, X,
 } from 'lucide-react';
-import { projectsApi } from '@/services/api';
+import { projectsApi, metricsApi } from '@/services/api';
 import { classifyStatus, statusTextClass } from '@/lib/status';
 
 type Monitor = Awaited<ReturnType<typeof projectsApi.listMonitors>>['monitors'][number];
@@ -13,6 +13,10 @@ type Status = 'passing' | 'failing' | 'warn' | 'never_run';
 interface MonitorDetailPageProps {
   monitor: Monitor;
   projectId: string;
+  /** Whether the parent project is a Dagster+ connection. Gates the
+   *  "Set alert on this metric" affordance (custom metrics + insights
+   *  alerts are cloud-only). */
+  isDagsterPlus?: boolean;
   onBack: () => void;
   onOpenFile?: (path: string) => void;
   onOpenAsset?: (assetKey: string) => void;
@@ -48,7 +52,7 @@ const bucket = (m: Monitor | { last_status: string | null }): Status => {
  *   • Blast-radius panel — downstream assets + exposures + affected
  *     monitors, so failures translate to real "who cares" impact
  */
-export function MonitorDetailPage({ monitor, projectId, onBack, onOpenFile, onOpenAsset, onOpenRun, onDeleted }: MonitorDetailPageProps) {
+export function MonitorDetailPage({ monitor, projectId, isDagsterPlus = false, onBack, onOpenFile, onOpenAsset, onOpenRun, onDeleted }: MonitorDetailPageProps) {
   const [tab, setTab] = useState<'overview' | 'runs' | 'settings'>('overview');
   const [history, setHistory] = useState<Awaited<ReturnType<typeof projectsApi.getMonitorHistory>> | null>(null);
   const [impact, setImpact] = useState<Awaited<ReturnType<typeof projectsApi.getMonitorImpact>> | null>(null);
@@ -57,6 +61,8 @@ export function MonitorDetailPage({ monitor, projectId, onBack, onOpenFile, onOp
   const [deleting, setDeleting] = useState(false);
   const [runsPage, setRunsPage] = useState(0);
   const RUNS_PAGE_SIZE = 50;
+  const [selectedMetricLabel, setSelectedMetricLabel] = useState<string | null>(null);
+  const [alertModalOpen, setAlertModalOpen] = useState(false);
 
   const handleDelete = async () => {
     if (!window.confirm(
@@ -206,33 +212,83 @@ export function MonitorDetailPage({ monitor, projectId, onBack, onOpenFile, onOp
           </details>
 
           {/* Chart */}
-          <div className="bg-white border border-gray-200 rounded-lg">
-            <div className="px-4 py-3 border-b border-gray-100 flex items-center justify-between">
-              <div>
-                <h3 className="text-sm font-semibold text-gray-900">
-                  {history?.numeric_label ?? 'Run history'}
-                </h3>
-                <p className="text-[11px] text-gray-500 mt-0.5">
-                  {history && history.numeric_series.length > 1
-                    ? `Numeric metric over ${history.numeric_series.length} runs. Green band = expected range.`
-                    : 'Pass/fail history — each square is one run, oldest → newest.'}
-                </p>
+          {(() => {
+            // Prefer the enriched multi-metric list. Fall back to legacy
+            // single-series if the backend hasn't upgraded yet.
+            const metrics = (history?.numeric_metrics && history.numeric_metrics.length > 0)
+              ? history.numeric_metrics
+              : ((history && history.numeric_series.length > 1 && history.numeric_label)
+                  ? [{ label: history.numeric_label, points: history.numeric_series, is_default: true }]
+                  : []);
+            const activeLabel = selectedMetricLabel
+              ?? metrics.find((m) => m.is_default)?.label
+              ?? metrics[0]?.label
+              ?? null;
+            const active = metrics.find((m) => m.label === activeLabel);
+            return (
+              <div className="bg-white border border-gray-200 rounded-lg">
+                <div className="px-4 py-3 border-b border-gray-100 flex items-center justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2">
+                      <h3 className="text-sm font-semibold text-gray-900 truncate">
+                        {activeLabel ?? 'Run history'}
+                      </h3>
+                      {metrics.length > 1 && (
+                        <select
+                          value={activeLabel ?? ''}
+                          onChange={(e) => setSelectedMetricLabel(e.target.value)}
+                          className="text-[11px] border border-gray-300 rounded px-1 py-0.5 bg-white"
+                          title="Switch metric"
+                        >
+                          {metrics.map((m) => (
+                            <option key={m.label} value={m.label}>{m.label}</option>
+                          ))}
+                        </select>
+                      )}
+                    </div>
+                    <p className="text-[11px] text-gray-500 mt-0.5">
+                      {active && active.points.length > 1
+                        ? `Numeric metric over ${active.points.length} runs.`
+                        : 'Pass/fail history — each square is one run, oldest → newest.'}
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    {historyLoading && <Loader2 className="w-4 h-4 animate-spin text-gray-400" />}
+                    {isDagsterPlus && activeLabel && (
+                      <button
+                        onClick={() => setAlertModalOpen(true)}
+                        className="inline-flex items-center gap-1 px-2 py-1 text-[11px] font-medium text-white bg-primary hover:bg-accent rounded"
+                        title={`Create a Dagster+ threshold alert on ${activeLabel} for this asset`}
+                      >
+                        <Bell className="w-3 h-3" />
+                        Alert on this metric
+                      </button>
+                    )}
+                  </div>
+                </div>
+                <div className="p-4">
+                  {active && active.points.length > 1 ? (
+                    <BigTimeSeriesChart points={active.points} />
+                  ) : (
+                    <>
+                      <BigPassFailStrip events={history?.events ?? []} />
+                      <p className="text-[11px] text-gray-500 mt-3">
+                        Numeric-metric charts appear once the check reports a value (row_count, null_ratio, freshness_age, etc.).
+                      </p>
+                    </>
+                  )}
+                </div>
               </div>
-              {historyLoading && <Loader2 className="w-4 h-4 animate-spin text-gray-400" />}
-            </div>
-            <div className="p-4">
-              {history && history.numeric_series.length > 1 ? (
-                <BigTimeSeriesChart points={history.numeric_series} />
-              ) : (
-                <>
-                  <BigPassFailStrip events={history?.events ?? []} />
-                  <p className="text-[11px] text-gray-500 mt-3">
-                    Numeric-metric charts appear once the check reports a value (row_count, null_ratio, freshness_age, etc.).
-                  </p>
-                </>
-              )}
-            </div>
-          </div>
+            );
+          })()}
+          {alertModalOpen && (
+            <MetricThresholdAlertModal
+              projectId={projectId}
+              monitor={monitor}
+              metricLabel={selectedMetricLabel ?? history?.numeric_metrics?.find((m) => m.is_default)?.label ?? history?.numeric_label ?? ''}
+              onClose={() => setAlertModalOpen(false)}
+            />
+          )}
 
           {/* Datapoint Summary — Sifflet-style tabbed list of all
               datapoints with value + expected range. Filterable by
@@ -532,9 +588,9 @@ function formatValue(v: number): string {
  * band. Band is computed from a rolling 7-run mean ± 2σ so it looks
  * proper on unfamiliar metrics without any config.
  */
-interface NumericPoint { ts: string; value: number; expected_min?: number | null; expected_max?: number | null }
+export interface NumericPoint { ts: string; value: number; expected_min?: number | null; expected_max?: number | null }
 
-function BigTimeSeriesChart({ points }: { points: NumericPoint[] }) {
+export function BigTimeSeriesChart({ points }: { points: NumericPoint[] }) {
   const [hover, setHover] = useState<number | null>(null);
   const width = 900;
   const height = 260;
@@ -598,34 +654,54 @@ function BigTimeSeriesChart({ points }: { points: NumericPoint[] }) {
       <path d={bandPath} fill="rgb(16, 185, 129)" fillOpacity="0.15" />
       {/* Series line */}
       <path d={pathD} fill="none" stroke="rgb(16, 185, 129)" strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" />
-      {/* Points — colored by anomaly (outside band) */}
+      {/* Points — colored by anomaly (outside band). Rendered first so
+          the tooltip below can paint on top of ALL circles (before, we
+          were drawing tooltip + subsequent circles in the same loop, so
+          later-index circles clobbered earlier tooltips). */}
       {points.map((p, i) => {
         const bx = x(i), by = y(p.value);
         const outside = by < bandUpper[i].y || by > bandLower[i].y;
         return (
           <g key={i} onMouseEnter={() => setHover(i)} onMouseLeave={() => setHover(null)}>
+            {/* Invisible hit area — makes hovering forgiving even when
+                the point circle is small. */}
+            <rect x={bx - stepX / 2} y={padT} width={Math.max(stepX, 8)} height={height - padT - padB} fill="transparent" />
             <circle cx={bx} cy={by} r={outside ? 4 : 3} fill={outside ? 'rgb(244, 63, 94)' : 'rgb(16, 185, 129)'} stroke="white" strokeWidth="1.5" />
-            {hover === i && (
-              <>
-                <line x1={bx} x2={bx} y1={padT} y2={height - padB} stroke="#9ca3af" strokeDasharray="2 3" />
-                <g transform={`translate(${bx + 8}, ${Math.max(padT + 40, by - 8)})`}>
-                  <rect x="0" y="-30" rx="4" width="180" height="52" fill="rgba(17, 24, 39, 0.94)" />
-                  <text x="8" y="-14" fill={outside ? '#f87171' : '#6ee7b7'} fontSize="10" fontWeight="600">
-                    {outside ? '⚠ Anomaly' : '✓ In range'}
-                  </text>
-                  <text x="8" y="0" fill="white" fontSize="11" fontWeight="600">{formatValue(p.value)}</text>
-                  {(p.expected_min != null && p.expected_max != null) && (
-                    <text x="8" y="12" fill="#d1d5db" fontSize="9">
-                      expected {formatValue(p.expected_min)} – {formatValue(p.expected_max)}
-                    </text>
-                  )}
-                  <text x="8" y="24" fill="#9ca3af" fontSize="9">{new Date(p.ts).toLocaleString()}</text>
-                </g>
-              </>
-            )}
           </g>
         );
       })}
+      {/* Hover tooltip — drawn AFTER all points so it always paints
+          on top. Also flips to the left of the point when we're close
+          to the right edge so the box never clips off-screen. */}
+      {hover != null && (() => {
+        const p = points[hover];
+        const bx = x(hover), by = y(p.value);
+        const outside = by < bandUpper[hover].y || by > bandLower[hover].y;
+        const boxW = 200;
+        const boxH = 72;
+        // Flip to the left of the point when the default (right-of-point)
+        // placement would run past the plot area's right edge.
+        const flip = bx + 12 + boxW > width - padR;
+        const boxX = flip ? bx - 12 - boxW : bx + 12;
+        // Clamp vertically so the whole tooltip stays inside the chart.
+        const boxY = Math.min(Math.max(by - boxH / 2, padT + 4), height - padB - boxH - 4);
+        return (
+          <g pointerEvents="none">
+            <line x1={bx} x2={bx} y1={padT} y2={height - padB} stroke="#9ca3af" strokeDasharray="2 3" />
+            <rect x={boxX} y={boxY} rx="6" width={boxW} height={boxH} fill="rgba(17, 24, 39, 0.96)" stroke="rgba(255,255,255,0.06)" />
+            <text x={boxX + 10} y={boxY + 16} fill={outside ? '#f87171' : '#6ee7b7'} fontSize="10" fontWeight="600">
+              {outside ? '⚠ Anomaly' : '✓ In range'}
+            </text>
+            <text x={boxX + 10} y={boxY + 34} fill="white" fontSize="13" fontWeight="600">{formatValue(p.value)}</text>
+            {(p.expected_min != null && p.expected_max != null) && (
+              <text x={boxX + 10} y={boxY + 50} fill="#d1d5db" fontSize="10">
+                expected {formatValue(p.expected_min)} – {formatValue(p.expected_max)}
+              </text>
+            )}
+            <text x={boxX + 10} y={boxY + boxH - 8} fill="#9ca3af" fontSize="9.5">{new Date(p.ts).toLocaleString()}</text>
+          </g>
+        );
+      })()}
     </svg>
   );
 }
@@ -979,6 +1055,202 @@ function BlastRadiusPanel({ impact, onOpenAsset }: {
           </ul>
         </div>
       )}
+    </div>
+  );
+}
+
+
+/**
+ * Two-step modal that creates a Dagster+ threshold alert on a specific
+ * numeric metric emitted by an asset check:
+ *   1. Ensure the CustomMetric exists on the deployment (reused by
+ *      metadata_key so we don't duplicate across assets).
+ *   2. Create an alert policy targeting `(asset_key, metric_name)` with
+ *      the user's operator + threshold + selection period.
+ *
+ * Not shown for OSS Dagster since custom metrics + insight alerts are
+ * Dagster+ only.
+ */
+function MetricThresholdAlertModal({ projectId, monitor, metricLabel, onClose }: {
+  projectId: string;
+  monitor: Monitor;
+  metricLabel: string;
+  onClose: () => void;
+}) {
+  // Sensible defaults derived from the metric name.
+  const isDuration = /duration|time/i.test(metricLabel);
+  const isRowCount = /row_count|record_count/i.test(metricLabel);
+  const isNullRatio = /null_ratio/i.test(metricLabel);
+  const defaultUnit = isDuration ? 'SECONDS' : (isRowCount ? 'INTEGER' : 'FLOAT');
+  const defaultOperator = isNullRatio ? 'GREATER_THAN' : 'GREATER_THAN';
+
+  const suggestName = () => {
+    const asset = monitor.target_asset_keys[0] ?? monitor.id;
+    // Metric labels can contain slashes (`dagster_dbt/failed_row_count`);
+    // normalize to something a policy name accepts.
+    const slug = (s: string) => s.replace(/[^a-zA-Z0-9]+/g, '_').toLowerCase().replace(/^_+|_+$/g, '');
+    return `${slug(asset)}_${slug(metricLabel)}_threshold`;
+  };
+
+  const [name, setName] = useState(suggestName());
+  const [threshold, setThreshold] = useState('');
+  const [operator, setOperator] = useState<'GREATER_THAN' | 'LESS_THAN' | 'GREATER_THAN_OR_EQUAL' | 'LESS_THAN_OR_EQUAL'>(defaultOperator);
+  const [lookbackDays, setLookbackDays] = useState(1);
+  const [emailInput, setEmailInput] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [success, setSuccess] = useState<{ metricId: string; alertId: string } | null>(null);
+
+  const assetKey = monitor.target_asset_keys[0] ?? '';
+  const canSubmit = !!name.trim() && !!threshold.trim() && !isNaN(parseFloat(threshold)) && !!assetKey && !!emailInput.trim() && !submitting;
+
+  const submit = async () => {
+    setError(null);
+    setSubmitting(true);
+    try {
+      // Step 1 -- ensure the metric exists (reused by metadata_key).
+      const metric = await metricsApi.ensure(projectId, {
+        metadata_key: metricLabel,
+        unit_type: defaultUnit,
+        display_name: metricLabel,
+      });
+      // Step 2 -- create/upsert the threshold alert.
+      const alert = await metricsApi.createThresholdAlert(projectId, {
+        name: name.trim(),
+        metadata_key: metricLabel,
+        asset_key: assetKey,
+        threshold: parseFloat(threshold),
+        operator,
+        lookback_window_hours: lookbackDays * 24,
+        notify_emails: emailInput.split(',').map((s) => s.trim()).filter(Boolean),
+      });
+      setSuccess({ metricId: metric.id, alertId: alert.id });
+    } catch (e: any) {
+      setError(e?.response?.data?.detail || e?.message || 'Failed to create alert.');
+    } finally { setSubmitting(false); }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-6" onClick={onClose}>
+      <div
+        className="bg-white rounded-lg shadow-2xl w-full max-w-md flex flex-col overflow-hidden"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="px-4 py-3 border-b border-gray-200 flex items-center justify-between">
+          <div>
+            <h2 className="text-sm font-semibold text-gray-900 flex items-center gap-1.5">
+              <Bell className="w-4 h-4 text-primary" />
+              Alert on <span className="font-mono">{metricLabel}</span>
+            </h2>
+            <p className="text-[11px] text-gray-500 mt-0.5">
+              Fires when this metric crosses the threshold on <span className="font-mono">{assetKey}</span>.
+            </p>
+          </div>
+          <button onClick={onClose} className="p-1 hover:bg-gray-100 rounded"><X className="w-4 h-4 text-gray-500" /></button>
+        </div>
+
+        {success ? (
+          <div className="p-5 space-y-3">
+            <div className="flex items-start gap-2 text-emerald-800 bg-emerald-50 border border-emerald-200 rounded p-3">
+              <CheckCircle2 className="w-4 h-4 mt-0.5 flex-shrink-0" />
+              <div className="text-xs">
+                <div className="font-medium">Alert created</div>
+                <div className="mt-1 font-mono text-[10px] text-emerald-700 break-all">alert id: {success.alertId}</div>
+                <div className="font-mono text-[10px] text-emerald-700 break-all">metric id: {success.metricId}</div>
+              </div>
+            </div>
+            <p className="text-[11px] text-gray-500">
+              Dagster+ evaluates the metric on the schedule defined for its target — usually within an hour.
+              Watch the Alerts tab (or your email) for the first firing.
+            </p>
+            <button
+              onClick={onClose}
+              className="w-full px-3 py-1.5 text-xs font-medium bg-primary text-primary-foreground rounded hover:bg-accent"
+            >
+              Done
+            </button>
+          </div>
+        ) : (
+          <div className="p-4 space-y-3">
+            <div>
+              <label className="block text-[10px] uppercase tracking-wider text-gray-500 mb-1">Alert name</label>
+              <input
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                className="w-full px-2 py-1.5 text-xs font-mono border border-gray-300 rounded"
+              />
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              <div>
+                <label className="block text-[10px] uppercase tracking-wider text-gray-500 mb-1">When metric is</label>
+                <select
+                  value={operator}
+                  onChange={(e) => setOperator(e.target.value as any)}
+                  className="w-full px-2 py-1.5 text-xs border border-gray-300 rounded bg-white"
+                >
+                  <option value="GREATER_THAN">greater than</option>
+                  <option value="GREATER_THAN_OR_EQUAL">≥</option>
+                  <option value="LESS_THAN">less than</option>
+                  <option value="LESS_THAN_OR_EQUAL">≤</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-[10px] uppercase tracking-wider text-gray-500 mb-1">Threshold</label>
+                <input
+                  type="number"
+                  value={threshold}
+                  onChange={(e) => setThreshold(e.target.value)}
+                  placeholder="e.g. 100"
+                  className="w-full px-2 py-1.5 text-xs border border-gray-300 rounded"
+                />
+              </div>
+            </div>
+            <div>
+              <label className="block text-[10px] uppercase tracking-wider text-gray-500 mb-1">Over the past</label>
+              <select
+                value={lookbackDays}
+                onChange={(e) => setLookbackDays(parseInt(e.target.value, 10))}
+                className="w-full px-2 py-1.5 text-xs border border-gray-300 rounded bg-white"
+              >
+                <option value={1}>1 day</option>
+                <option value={7}>7 days</option>
+                <option value={30}>30 days</option>
+              </select>
+            </div>
+            <div>
+              <label className="block text-[10px] uppercase tracking-wider text-gray-500 mb-1">Notify (comma-separated emails)</label>
+              <input
+                value={emailInput}
+                onChange={(e) => setEmailInput(e.target.value)}
+                placeholder="ops@company.com, oncall@company.com"
+                className="w-full px-2 py-1.5 text-xs font-mono border border-gray-300 rounded"
+              />
+            </div>
+            {error && (
+              <div className="text-[11px] text-rose-800 bg-rose-50 border border-rose-200 rounded p-2 whitespace-pre-wrap break-words">
+                {error}
+              </div>
+            )}
+            <div className="flex items-center justify-end gap-2 pt-2 border-t border-gray-100">
+              <button
+                onClick={onClose}
+                disabled={submitting}
+                className="px-3 py-1.5 text-xs text-gray-700 border border-gray-300 rounded hover:bg-gray-50 disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={submit}
+                disabled={!canSubmit}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-white bg-primary rounded hover:bg-accent disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {submitting ? <Loader2 className="w-3 h-3 animate-spin" /> : <Bell className="w-3 h-3" />}
+                Create alert
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
     </div>
   );
 }

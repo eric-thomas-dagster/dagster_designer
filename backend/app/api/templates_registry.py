@@ -97,6 +97,11 @@ class ComponentTemplate(BaseModel):
     supports_partitions: Optional[bool] = False  # Whether the component supports partitioned assets
     validation: Optional[dict] = None  # New: validation rules from manifest
     agent_hints: Optional[dict] = None  # New: hints for LLM agents
+    # Dagster primitives the component creates when loaded. Optional
+    # per-manifest — Designer degrades to schema-field heuristics when
+    # absent. Values: asset | multi_asset | asset_check | job |
+    # schedule | sensor | resource | io_manager | partitions_def | other.
+    produces: Optional[List[str]] = None
 
 
 class TemplateManifest(BaseModel):
@@ -321,6 +326,8 @@ async def configure_component(
         if not project:
             raise HTTPException(status_code=404, detail="Project not found")
 
+        # Route writes to the Cloud Dev workspace when it's running --
+        # otherwise Dagster+ projects have no local dir to write into.
         project_dir = project_service._get_project_dir(project)
         project_name_sanitized = project.name.replace(" ", "_").replace("-", "_")
 

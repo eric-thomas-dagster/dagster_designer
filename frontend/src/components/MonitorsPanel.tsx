@@ -82,6 +82,7 @@ export function MonitorsPanel({ onOpenFile, onOpenRun }: MonitorsPanelProps) {
   useEffect(() => { refresh(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [currentProject?.id]);
 
   const monitors = data?.monitors ?? [];
+
   const stats = data?.stats ?? {};
   const targets = useMemo(() => {
     const all = new Set<string>();
@@ -120,6 +121,7 @@ export function MonitorsPanel({ onOpenFile, onOpenRun }: MonitorsPanelProps) {
       <MonitorDetailPage
         monitor={selected}
         projectId={currentProject.id}
+        isDagsterPlus={!!(currentProject as any)?.is_dagster_plus}
         onBack={() => setSelected(null)}
         onOpenFile={onOpenFile}
         onOpenRun={onOpenRun}
@@ -129,7 +131,7 @@ export function MonitorsPanel({ onOpenFile, onOpenRun }: MonitorsPanelProps) {
   }
 
   return (
-    <div className="h-full overflow-y-auto bg-gray-50">
+    <div className="h-full overflow-y-auto overflow-x-hidden bg-gray-50">
       {/* Slim ribbon — matches other main pages */}
       <div className="flex-shrink-0 bg-white border-b border-gray-200 px-4 py-2 flex items-center justify-between gap-2">
         <div className="text-xs text-gray-400">
@@ -170,7 +172,7 @@ export function MonitorsPanel({ onOpenFile, onOpenRun }: MonitorsPanelProps) {
       )}
 
       {data && (
-        <div className="px-8 py-6 space-y-4">
+        <div className="px-8 py-6 space-y-4 min-w-0">
           {/* KPI band */}
           <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
             <Kpi label="Monitors" value={stats.total ?? 0} icon={ShieldCheck} tone="neutral" hint={`${stats.dbt_tests ?? 0} dbt · ${stats.asset_checks ?? 0} native · ${stats.enhanced_checks ?? 0} enhanced`} />
@@ -251,8 +253,10 @@ export function MonitorsPanel({ onOpenFile, onOpenRun }: MonitorsPanelProps) {
             <span className="text-[11px] text-gray-500 ml-auto">{filtered.length} / {monitors.length}</span>
           </div>
 
-          {/* Table */}
-          <div className="bg-white border border-gray-200 rounded-lg overflow-hidden">
+          {/* Table -- allow horizontal scroll if the viewport can't fit
+              every column (monitor id / target list can get long) so
+              the Trend sparkline never spills off-screen. */}
+          <div className="bg-white border border-gray-200 rounded-lg overflow-x-auto">
             {filtered.length === 0 ? (
               <div className="p-10 text-center">
                 <ShieldCheck className="w-8 h-8 text-gray-300 mx-auto mb-3" />
@@ -300,10 +304,10 @@ export function MonitorsPanel({ onOpenFile, onOpenRun }: MonitorsPanelProps) {
                         <td className="px-4 py-2.5">
                           <StatusIcon status={b} />
                         </td>
-                        <td className="px-2 py-2.5">
-                          <div className="font-mono text-xs text-gray-900">{m.label}</div>
+                        <td className="px-2 py-2.5 max-w-[280px]">
+                          <div className="font-mono text-xs text-gray-900 truncate" title={m.label}>{m.label}</div>
                           {m.description && (
-                            <div className="text-[11px] text-gray-500 truncate max-w-[240px]" title={m.description}>{m.description}</div>
+                            <div className="text-[11px] text-gray-500 truncate" title={m.description}>{m.description}</div>
                           )}
                         </td>
                         <td className="px-4 py-2.5 text-xs">
@@ -322,17 +326,19 @@ export function MonitorsPanel({ onOpenFile, onOpenRun }: MonitorsPanelProps) {
                             </div>
                           )}
                         </td>
-                        <td className="px-4 py-2.5">
-                          <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] rounded border ${Kind.tone}`}>
-                            <Kind.icon className="w-3 h-3" />
+                        <td className="px-4 py-2.5 whitespace-nowrap">
+                          <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] rounded border whitespace-nowrap ${Kind.tone}`}>
+                            <Kind.icon className="w-3 h-3 flex-shrink-0" />
                             {m.check_kind ?? Kind.label}
                           </span>
                         </td>
                         <td className="px-4 py-2.5">
                           <StatusPill monitor={m} />
                         </td>
-                        <td className="px-4 py-2.5">
-                          <RowSparkline statuses={m.recent_statuses ?? []} />
+                        <td className="px-4 py-2.5 w-[110px] max-w-[110px]">
+                          <div className="overflow-hidden">
+                            <RowSparkline statuses={m.recent_statuses ?? []} />
+                          </div>
                         </td>
                         <td className="px-4 py-2.5 text-xs text-gray-600 truncate max-w-[200px]" title={m.source_project ?? ''}>
                           {m.source_project ?? <span className="italic text-gray-400">—</span>}
@@ -673,6 +679,7 @@ function MonitorDrawer({ monitor, onClose, onOpenFile }: { monitor: Monitor; onC
   const Kind = KIND_META[monitor.kind];
   const [history, setHistory] = useState<Awaited<ReturnType<typeof projectsApi.getMonitorHistory>> | null>(null);
   const [historyLoading, setHistoryLoading] = useState(true);
+  const [selectedMetric, setSelectedMetric] = useState<string | null>(null);
 
   useEffect(() => {
     if (!currentProject) return;
@@ -722,14 +729,43 @@ function MonitorDrawer({ monitor, onClose, onOpenFile }: { monitor: Monitor; onC
                 Native asset check history lands in the next step (Dagster event-log integration).
               </p>
             )}
-            {history && history.numeric_series.length > 1 && (
-              <div className="mt-2 mb-3 p-2 border border-gray-200 rounded bg-white">
-                <div className="text-[10px] text-gray-500 mb-1">
-                  {history.numeric_label ?? 'value'} · last {history.numeric_series.length} runs
+            {(() => {
+              if (!history) return null;
+              // Prefer the enriched multi-metric list. If empty, fall
+              // back to the legacy single series so pre-multi backends
+              // still render something.
+              const metrics = history.numeric_metrics && history.numeric_metrics.length > 0
+                ? history.numeric_metrics
+                : (history.numeric_series.length > 1 && history.numeric_label
+                    ? [{ label: history.numeric_label, points: history.numeric_series, is_default: true }]
+                    : []);
+              if (metrics.length === 0) return null;
+              const activeLabel = selectedMetric ?? metrics.find((m) => m.is_default)?.label ?? metrics[0].label;
+              const active = metrics.find((m) => m.label === activeLabel) ?? metrics[0];
+              if (active.points.length < 2) return null;
+              return (
+                <div className="mt-2 mb-3 p-2 border border-gray-200 rounded bg-white">
+                  <div className="flex items-center gap-2 mb-1">
+                    <span className="text-[10px] text-gray-500 flex-1 truncate">
+                      {active.label} · last {active.points.length} runs
+                    </span>
+                    {metrics.length > 1 && (
+                      <select
+                        value={active.label}
+                        onChange={(e) => setSelectedMetric(e.target.value)}
+                        className="text-[10px] border border-gray-300 rounded px-1 py-0.5 bg-white"
+                        title="Switch metric"
+                      >
+                        {metrics.map((m) => (
+                          <option key={m.label} value={m.label}>{m.label}</option>
+                        ))}
+                      </select>
+                    )}
+                  </div>
+                  <TimeSeriesChart points={active.points} />
                 </div>
-                <TimeSeriesChart points={history.numeric_series} />
-              </div>
-            )}
+              );
+            })()}
             {history && history.events.length > 0 && (
               <div className="mt-2 border border-gray-100 rounded overflow-hidden">
                 <PassFailStrip events={history.events} />

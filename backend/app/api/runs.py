@@ -337,6 +337,79 @@ async def list_code_locations(project_id: str):
     )
 
 
+class JobNamesResponse(BaseModel):
+    job_names: list[str]
+    source: str                  # 'local' | 'cloud'
+
+
+# Enumerate every job name across all locations in the workspace.
+# `repositoriesOrError` is the reliable path — both local and cloud
+# ship it. We flatten across all repos so the dropdown shows the
+# complete set regardless of location.
+JOB_NAMES_QUERY = """
+query JobNames {
+  repositoriesOrError {
+    __typename
+    ... on RepositoryConnection {
+      nodes {
+        name
+        location { name }
+        pipelines { name }
+      }
+    }
+  }
+}
+"""
+
+
+def _extract_job_names(data: dict) -> list[str]:
+    names: set[str] = set()
+    repos = ((data or {}).get("repositoriesOrError") or {}).get("nodes") or []
+    for r in repos:
+        for p in r.get("pipelines") or []:
+            n = p.get("name")
+            if n and not n.startswith("__"):
+                names.add(n)
+    return sorted(names)
+
+
+@router.get("/{project_id}/runs/job-names", response_model=JobNamesResponse)
+async def list_job_names(project_id: str):
+    """Return every job name known to the target Dagster deployment,
+    used to populate the Runs page 'filter by job' dropdown so users
+    don't have to guess the exact job name."""
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    if getattr(project, "is_dagster_plus", False):
+        try:
+            data = await dp_query(
+                project.dagster_plus_org or "",
+                project.dagster_plus_deployment or "",
+                project.dagster_plus_token or "",
+                JOB_NAMES_QUERY,
+            )
+        except DagsterPlusError as e:
+            raise HTTPException(status_code=502, detail=str(e))
+        return JobNamesResponse(job_names=_extract_job_names(data), source="cloud")
+
+    port = 3000
+    url = LOCAL_GRAPHQL_URL_TEMPLATE.format(port=port)
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.post(url, json={"query": JOB_NAMES_QUERY},
+                                  headers={"content-type": "application/json"})
+    except httpx.ConnectError:
+        return JobNamesResponse(job_names=[], source="local")
+    if r.status_code >= 400:
+        return JobNamesResponse(job_names=[], source="local")
+    return JobNamesResponse(
+        job_names=_extract_job_names(r.json().get("data") or {}),
+        source="local",
+    )
+
+
 class TagKeysResponse(BaseModel):
     tag_keys: list[str]
 

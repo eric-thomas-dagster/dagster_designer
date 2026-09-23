@@ -247,6 +247,7 @@ query DagsterPlusAssets {
     description
     computeKind
     repository {
+      name
       location {
         name
       }
@@ -652,6 +653,21 @@ query DagsterPlusAlertPoliciesDocument {
 }
 """
 
+
+# List all custom metrics defined on the deployment. Response shape
+# matches the mutation return type -- one CustomMetric per row.
+CUSTOM_METRICS_LIST_QUERY = """
+query CustomMetricsList {
+  customMetrics {
+    id
+    metadataKey
+    displayName
+    description
+    unitType
+  }
+}
+"""
+
 CREATE_OR_UPDATE_ALERT_POLICY_MUTATION = """
 mutation CreateOrUpdateAlertPolicy($document: GenericScalar!) {
   createOrUpdateAlertPolicyFromDocument(document: $document) {
@@ -661,6 +677,26 @@ mutation CreateOrUpdateAlertPolicy($document: GenericScalar!) {
     ... on CodeBackedAlertPolicyError { message alertPolicyName }
     ... on PythonError { message }
     ... on UnauthorizedError { message }
+  }
+}
+"""
+
+# Create a new custom metric. We infer the input args from the response
+# shape the Dagster+ UI returns: {metadataKey, displayName, description,
+# unitType}. Kept as top-level args (not wrapped in an input object)
+# since that's the mutation style Dagster GraphQL uses elsewhere.
+CREATE_CUSTOM_METRIC_MUTATION = """
+mutation CreateCustomMetric($customMetricInput: CustomMetricInput!) {
+  createCustomMetric(customMetricInput: $customMetricInput) {
+    __typename
+    ... on CreateCustomMetricSuccess {
+      customMetric {
+        id
+        metadataKey
+        displayName
+        unitType
+      }
+    }
   }
 }
 """
@@ -904,8 +940,10 @@ query DagsterPlusAssetDiffHistory($assetKey: AssetKeyInput!, $limit: Int!) {
 
 # Launches a real run scoped to one asset + one partition. Used for
 # Dagster+ (cloud) -- local goes through `dg launch --partition`
-# instead, which needs no GraphQL mutation.
-LAUNCH_RUN_MUTATION = """
+# instead, which needs no GraphQL mutation. Distinct from the simpler
+# LAUNCH_RUN_MUTATION above (selector-only, no partition tag / asset
+# selection support) that pipelines.py's plain "run this job" uses.
+LAUNCH_PARTITION_RUN_MUTATION = """
 mutation DagsterPlusLaunchPartitionRun($executionParams: ExecutionParams!) {
   launchRun(executionParams: $executionParams) {
     __typename

@@ -23,14 +23,20 @@ interface AIPlanResponse {
   notes: string[];
 }
 
+// Ordered so that the FIRST entry the user can actually use (per API-key
+// availability filter) becomes the default. Mini/haiku tiers are still
+// available but pushed down — dogfooding showed they systematically
+// hallucinate schema shapes for whole-pipeline components. Opus is
+// separated out below Sonnet so users don't accidentally default into
+// the highest-cost tier when Sonnet handles the planner just fine.
 const MODEL_OPTIONS = [
-  { value: 'gpt-4o-mini', label: 'GPT-4o mini (fast, cheap)' },
-  { value: 'gpt-4o', label: 'GPT-4o (higher quality)' },
-  { value: 'gpt-4.1-mini', label: 'GPT-4.1 mini' },
-  { value: 'gpt-5-mini', label: 'GPT-5 mini' },
-  { value: 'claude-haiku-4-5', label: 'Claude Haiku 4.5 (fast)' },
-  { value: 'claude-sonnet-4-5', label: 'Claude Sonnet 4.5 (balanced)' },
+  { value: 'claude-sonnet-4-5', label: 'Claude Sonnet 4.5 (recommended)' },
+  { value: 'gpt-4o', label: 'GPT-4o (recommended)' },
   { value: 'claude-opus-4-5', label: 'Claude Opus 4.5 (highest quality)' },
+  { value: 'gpt-5-mini', label: 'GPT-5 mini' },
+  { value: 'gpt-4.1-mini', label: 'GPT-4.1 mini' },
+  { value: 'gpt-4o-mini', label: 'GPT-4o mini (fast, cheap)' },
+  { value: 'claude-haiku-4-5', label: 'Claude Haiku 4.5 (fast)' },
 ];
 
 export function DagsterAIBar() {

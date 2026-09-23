@@ -61,6 +61,7 @@ backend/data/
 backend/projects/
 backend/.env
 backend/.manifest_cache.json
+backend/.claude_md_cache.txt
 frontend/.env
 *.duckdb
 *.duckdb.wal

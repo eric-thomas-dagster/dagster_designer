@@ -615,30 +615,57 @@ def main():
         # file we can read directly. Try that; fall back to a helpful error.
         keys_in_group = list(getattr(asset_def, 'keys', []) or [])
         if len(keys_in_group) > 1:
-            # 1) DuckDB fast path — <100ms if the model has been materialized
-            #    into a `.duckdb` file that lives next to the project.
-            duckdb_result = _try_duckdb_preview(asset_key, sample_limit)
-            if duckdb_result is not None:
-                print(json.dumps(duckdb_result))
-                sys.exit(0)
+            # Only run the DuckDB/dbt fallbacks when this really is a dbt
+            # asset. Previously we tried them unconditionally — which
+            # produced the misleading "dbt show couldn't preview
+            # 'mir_intake': unknown error" any time an agentic_pipeline
+            # (or any non-dbt multi_asset) happened to share a project
+            # directory with a leftover dbt_project.yml. The AssetsDef's
+            # module path is the reliable signal: dbt assets always come
+            # from `dagster_dbt.*`, everything else doesn't.
+            is_dbt_asset = 'dbt' in type(asset_def).__module__.lower()
+            if is_dbt_asset:
+                # 1) DuckDB fast path — <100ms if the model has been
+                #    materialized into a `.duckdb` file that lives next
+                #    to the project.
+                duckdb_result = _try_duckdb_preview(asset_key, sample_limit)
+                if duckdb_result is not None:
+                    print(json.dumps(duckdb_result))
+                    sys.exit(0)
 
-            # 2) `dbt show` general fallback — works for every adapter dbt
-            #    supports (Postgres/Snowflake/BigQuery/Redshift/…). ~5s cold
-            #    start but reuses dbt's full connection + credential stack.
-            dbt_result = _try_dbt_show_preview(asset_key, sample_limit)
-            if dbt_result is not None:
-                print(json.dumps(dbt_result))
-                sys.exit(0)
+                # 2) `dbt show` general fallback — works for every adapter
+                #    dbt supports (Postgres/Snowflake/BigQuery/Redshift/…).
+                #    ~5s cold start but reuses dbt's full
+                #    connection + credential stack.
+                dbt_result = _try_dbt_show_preview(asset_key, sample_limit)
+                if dbt_result is not None:
+                    print(json.dumps(dbt_result))
+                    sys.exit(0)
 
-            group_kind = 'dbt project' if 'dbt' in type(asset_def).__module__.lower() else 'multi-asset group'
+            # Non-dbt multi-asset (agentic_pipeline, custom @multi_asset,
+            # factory-generated groups, etc.) — no generic in-process
+            # preview path. Explain what's happening and hint at what to
+            # do next. When the asset is partitioned, mention that
+            # explicitly since the preview UI doesn't yet let the user
+            # pick a partition key.
+            partitions_def = getattr(asset_def, 'partitions_def', None)
+            partition_hint = ''
+            if partitions_def is not None:
+                partition_hint = (
+                    " This asset is PARTITIONED — Designer's preview panel doesn't "
+                    "yet support picking a partition key. Materialize a partition "
+                    "via Dagster's UI (`dagster dev`) or CLI, then re-open the "
+                    "preview to see that partition's data."
+                )
+            group_kind = 'dbt project' if is_dbt_asset else 'multi-asset group'
             other_keys = [k.to_user_string() for k in keys_in_group if k.to_user_string() != asset_key][:5]
-            hint = f' Related keys in this group: {", ".join(other_keys)}.' if other_keys else ''
+            related_hint = f' Related keys in this group: {", ".join(other_keys)}.' if other_keys else ''
             print(json.dumps({
                 "success": False,
                 "error": (
                     f"Preview couldn't find materialized data for '{asset_key}'. "
-                    f"It's part of a {group_kind} — click Run to here first to "
-                    f"materialize it, then re-open the preview.{hint}"
+                    f"It's part of a {group_kind} — materialize it first, "
+                    f"then re-open the preview.{partition_hint}{related_hint}"
                 ),
             }))
             sys.exit(0)
@@ -823,7 +850,10 @@ def main():
                 #   1. SqlTransformer-specific direct read (knows the exact
                 #      output_schema.asset_name from defs.yaml, no guessing)
                 #   2. DuckDB fast path (glob + naming heuristic)
-                #   3. `dbt show` if a dbt profile is nearby (last resort)
+                #   3. `dbt show` — dbt assets only (same gate as the
+                #      multi-key branch above; unconditional `dbt show`
+                #      surfaces misleading errors for unrelated assets
+                #      whenever a leftover dbt_project.yml exists nearby).
                 sql_r = _try_sql_transformer_output_preview(project_module, asset_key, sample_limit)
                 if sql_r is not None:
                     print(json.dumps(sql_r))
@@ -832,10 +862,11 @@ def main():
                 if duck is not None:
                     print(json.dumps(duck))
                     sys.exit(0)
-                dbt_r = _try_dbt_show_preview(asset_key, sample_limit)
-                if dbt_r is not None:
-                    print(json.dumps(dbt_r))
-                    sys.exit(0)
+                if 'dbt' in type(asset_def).__module__.lower():
+                    dbt_r = _try_dbt_show_preview(asset_key, sample_limit)
+                    if dbt_r is not None:
+                        print(json.dumps(dbt_r))
+                        sys.exit(0)
                 print(json.dumps({
                     "success": False,
                     "error": (

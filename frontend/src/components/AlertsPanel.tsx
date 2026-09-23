@@ -342,15 +342,19 @@ export function AlertsPanel() {
             <Bell className="w-12 h-12 mx-auto mb-4 text-gray-300" />
             <p className="text-base font-medium text-gray-700">No alert policies yet</p>
             <p className="text-sm text-gray-500 mt-1 mb-6">
-              Create your first policy to get notified when assets fail, runs error out, agents go down, etc.
+              {isCloudProject
+                ? 'This Dagster+ deployment has no alert policies configured. Open the local project to author them and push with Sync.'
+                : 'Create your first policy to get notified when assets fail, runs error out, agents go down, etc.'}
             </p>
-            <button
-              onClick={() => setWizardMode({ mode: 'create' })}
-              className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-md"
-            >
-              <Plus className="w-4 h-4" />
-              Create alert policy
-            </button>
+            {!isCloudProject && (
+              <button
+                onClick={() => setWizardMode({ mode: 'create' })}
+                className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-md"
+              >
+                <Plus className="w-4 h-4" />
+                Create alert policy
+              </button>
+            )}
           </div>
         )}
         {!loading && !error && localState && localState.policies.length > 0 && (
@@ -387,10 +391,11 @@ export function AlertsPanel() {
 
 // ---------------------------------------------------------------------------
 
-function PoliciesTable({ policies, onEdit, onDelete }: {
+function PoliciesTable({ policies, onEdit, onDelete, readOnly = false }: {
   policies: AlertPolicy[];
   onEdit: (p: AlertPolicy) => void;
   onDelete: (name: string) => void;
+  readOnly?: boolean;
 }) {
   return (
     <div className="bg-white border border-gray-200 rounded-lg overflow-hidden">
@@ -407,7 +412,7 @@ function PoliciesTable({ policies, onEdit, onDelete }: {
         </thead>
         <tbody>
           {policies.map((p) => (
-            <tr key={p.name} className="border-b border-gray-50 last:border-0 hover:bg-gray-50/50">
+            <tr key={p.name} className={`border-b border-gray-50 last:border-0 ${readOnly ? '' : 'hover:bg-gray-50/50'}`}>
               <td className="px-4 py-2">
                 <div className="font-mono text-xs text-gray-900">{p.name}</div>
                 {p.description && <div className="text-[11px] text-gray-500 mt-0.5">{p.description}</div>}
@@ -421,14 +426,16 @@ function PoliciesTable({ policies, onEdit, onDelete }: {
                   : <span className="text-emerald-700">enabled</span>}
               </td>
               <td className="px-4 py-2 text-right">
-                <div className="flex items-center justify-end gap-1">
-                  <button onClick={() => onEdit(p)} className="p-1.5 text-gray-500 hover:text-blue-600 hover:bg-blue-50 rounded" title="Edit">
-                    <Edit3 className="w-3.5 h-3.5" />
-                  </button>
-                  <button onClick={() => onDelete(p.name)} className="p-1.5 text-gray-500 hover:text-rose-600 hover:bg-rose-50 rounded" title="Delete">
-                    <Trash2 className="w-3.5 h-3.5" />
-                  </button>
-                </div>
+                {!readOnly && (
+                  <div className="flex items-center justify-end gap-1">
+                    <button onClick={() => onEdit(p)} className="p-1.5 text-gray-500 hover:text-blue-600 hover:bg-blue-50 rounded" title="Edit">
+                      <Edit3 className="w-3.5 h-3.5" />
+                    </button>
+                    <button onClick={() => onDelete(p.name)} className="p-1.5 text-gray-500 hover:text-rose-600 hover:bg-rose-50 rounded" title="Delete">
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                )}
               </td>
             </tr>
           ))}

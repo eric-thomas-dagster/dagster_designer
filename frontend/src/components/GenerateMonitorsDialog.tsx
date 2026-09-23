@@ -1,8 +1,11 @@
 import { useEffect, useState } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
-import { X, Sparkles, Loader2, Plus, Check } from 'lucide-react';
+import { X, Sparkles, Loader2, Plus, Check, ChevronRight, ShieldAlert } from 'lucide-react';
 import { projectsApi } from '@/services/api';
+import { useProjectStore } from '@/hooks/useProject';
 import { notify } from './Notifications';
+
+type CoverageRec = Awaited<ReturnType<typeof projectsApi.coverageRecommendations>>['recommendations'][number];
 
 interface GenerateMonitorsDialogProps {
   open: boolean;
@@ -27,9 +30,13 @@ type Proposal = Awaited<ReturnType<typeof projectsApi.generateMonitors>>['propos
  *    the backend rejects duplicates so re-runs don't clobber
  */
 export function GenerateMonitorsDialog({ open, onOpenChange, projectId, onGenerated }: GenerateMonitorsDialogProps) {
+  const { currentProject } = useProjectStore();
   const [step, setStep] = useState<'target' | 'review'>('target');
   const [asset, setAsset] = useState('');
   const [availableAssets, setAvailableAssets] = useState<string[]>([]);
+  const [recommendations, setRecommendations] = useState<CoverageRec[]>([]);
+  const [loadingRecs, setLoadingRecs] = useState(false);
+  const [coverageMeta, setCoverageMeta] = useState<{ total_assets: number; unmonitored_asset_count: number } | null>(null);
   const [focus, setFocus] = useState<string>('');
   const [maxProposals, setMaxProposals] = useState<number>(5);
   const [proposals, setProposals] = useState<Proposal[]>([]);
@@ -41,14 +48,34 @@ export function GenerateMonitorsDialog({ open, onOpenChange, projectId, onGenera
   useEffect(() => {
     if (!open) return;
     let cancelled = false;
-    projectsApi.listMonitors(projectId).then((r) => {
+    // Populate the asset picker from EVERY asset in the project graph
+    // (not just already-monitored ones). Previously the picker sourced
+    // from existing monitor targets, so users couldn't pick an
+    // unmonitored asset — exactly backwards from the intent.
+    const projectAssets: string[] = [];
+    if (currentProject) {
+      for (const n of currentProject.graph.nodes) {
+        if ((n as any).node_kind === 'asset' || n.type === 'asset') {
+          const k = n.data?.asset_key || n.data?.label || n.id;
+          if (k) projectAssets.push(k);
+        }
+      }
+    }
+    setAvailableAssets(Array.from(new Set(projectAssets)).sort());
+
+    // Fire the heuristic ranker so the user gets a "here are the
+    // assets that need monitors most" list at the top of the dialog.
+    setLoadingRecs(true);
+    projectsApi.coverageRecommendations(projectId, 8).then((r) => {
       if (cancelled) return;
-      const s = new Set<string>();
-      for (const m of r.monitors) for (const t of m.target_asset_keys) s.add(t);
-      setAvailableAssets(Array.from(s).sort());
-    }).catch(() => {});
+      setRecommendations(r.recommendations);
+      setCoverageMeta({ total_assets: r.total_assets, unmonitored_asset_count: r.unmonitored_asset_count });
+    }).catch(() => {
+      if (!cancelled) { setRecommendations([]); setCoverageMeta(null); }
+    }).finally(() => { if (!cancelled) setLoadingRecs(false); });
+
     return () => { cancelled = true; };
-  }, [open, projectId]);
+  }, [open, projectId, currentProject]);
 
   const reset = () => {
     setStep('target'); setAsset(''); setFocus(''); setMaxProposals(5);
@@ -145,6 +172,61 @@ export function GenerateMonitorsDialog({ open, onOpenChange, projectId, onGenera
           <div className="p-5 overflow-y-auto flex-1 space-y-4">
             {step === 'target' && (
               <>
+                {/* Cheap-heuristic recommendation list — surfaces assets
+                    that need monitors most so the user doesn't have to
+                    guess which one to run Claude against. No LLM here;
+                    just downstream fan-out + coverage-gap scoring. */}
+                <div>
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="text-[10px] uppercase tracking-wider text-gray-500 flex items-center gap-1.5">
+                      <ShieldAlert className="w-3 h-3" />
+                      Suggested assets · needs monitors most
+                    </label>
+                    {coverageMeta && (
+                      <span className="text-[10px] text-gray-500">
+                        {coverageMeta.unmonitored_asset_count} / {coverageMeta.total_assets} assets have no monitors
+                      </span>
+                    )}
+                  </div>
+                  <div className="border border-gray-200 rounded overflow-hidden">
+                    {loadingRecs ? (
+                      <div className="p-3 flex items-center gap-2 text-xs text-gray-500">
+                        <Loader2 className="w-3 h-3 animate-spin" /> Scanning your project…
+                      </div>
+                    ) : recommendations.length === 0 ? (
+                      <div className="p-3 text-xs text-gray-500 italic">
+                        No unmonitored assets found — every asset in this project has at least one monitor already.
+                      </div>
+                    ) : (
+                      <ul className="divide-y divide-gray-100 max-h-64 overflow-auto">
+                        {recommendations.map((r) => {
+                          const isPicked = asset === r.asset_key;
+                          return (
+                            <li key={r.asset_key}>
+                              <button
+                                type="button"
+                                onClick={() => setAsset(r.asset_key)}
+                                className={`w-full text-left px-3 py-2 hover:bg-indigo-50 flex items-start gap-2 ${isPicked ? 'bg-indigo-50/70' : ''}`}
+                              >
+                                <ChevronRight className={`w-3.5 h-3.5 mt-0.5 text-indigo-500 ${isPicked ? 'opacity-100' : 'opacity-0'}`} />
+                                <div className="min-w-0 flex-1">
+                                  <div className="flex items-baseline gap-2 flex-wrap">
+                                    <span className="font-mono text-xs font-medium text-gray-900 truncate">{r.asset_key}</span>
+                                    <span className="text-[10px] text-gray-400">score {Math.round(r.score)}</span>
+                                  </div>
+                                  <div className="text-[10.5px] text-gray-600 mt-0.5">
+                                    {r.reasons.join(' · ')}
+                                  </div>
+                                </div>
+                              </button>
+                            </li>
+                          );
+                        })}
+                      </ul>
+                    )}
+                  </div>
+                </div>
+
                 <div>
                   <label className="text-[10px] uppercase tracking-wider text-gray-500 mb-1 block">Asset to protect</label>
                   <input
@@ -157,6 +239,9 @@ export function GenerateMonitorsDialog({ open, onOpenChange, projectId, onGenera
                   <datalist id="gen-assets">
                     {availableAssets.map((a) => <option key={a} value={a} />)}
                   </datalist>
+                  <p className="text-[10px] text-gray-500 mt-0.5">
+                    {availableAssets.length} asset{availableAssets.length === 1 ? '' : 's'} in this project — start typing to filter, or click a suggestion above.
+                  </p>
                 </div>
                 <div className="grid grid-cols-2 gap-3">
                   <div>

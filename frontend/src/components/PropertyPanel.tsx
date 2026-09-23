@@ -2010,6 +2010,19 @@ export function PropertyPanel({ nodeId, onConfigureComponent, onOpenFile, onNewP
       const confirmed = await confirmDialog(`Are you sure you want to delete "${node.data.label}"?`, { title: 'Delete node', destructive: true });
       if (!confirmed) return;
 
+      // Delete the on-disk `defs/<id>/defs.yaml` first — otherwise the
+      // component file lingers and the next regenerate creates `<name>_2`
+      // duplicates that collide with the leftover on load. Best-effort;
+      // if there's nothing to delete we still want the JSON cleanup to run.
+      const componentId = node.data?.component_id || nodeId;
+      try {
+        await projectsApi.deleteComponentInstance(currentProject.id, componentId);
+      } catch (e: any) {
+        if (e?.response?.status !== 404) {
+          console.error('Failed to delete component instance:', e);
+        }
+      }
+
       // Remove the node from the graph
       const updatedNodes = currentProject.graph.nodes.filter((n) => n.id !== nodeId);
       // Remove all edges connected to this node
