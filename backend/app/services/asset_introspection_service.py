@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import os
 import shlex
 import subprocess
 import sys
@@ -12,6 +13,7 @@ from typing import Any, Dict, Tuple
 from ..models.graph import GraphNode, GraphEdge
 from ..models.project import Project
 from ..core.config import settings
+from ..core.uv_binary import venv_bin_path
 from .codegen_service import CodegenService
 
 
@@ -129,10 +131,7 @@ class AssetIntrospectionService:
 
         # Get the path to dg in the project's virtualenv
         venv_dir = project_dir / ".venv"
-        if sys.platform == "win32":
-            dg_path = venv_dir / "Scripts" / "dg.exe"
-        else:
-            dg_path = venv_dir / "bin" / "dg"
+        dg_path = venv_bin_path(venv_dir, "dg")
 
         # Fall back to system dg if venv doesn't exist
         if not dg_path.exists():
@@ -144,21 +143,25 @@ class AssetIntrospectionService:
         try:
             # If using project venv, we need to activate it first
             if dg_path.exists():
-                # Run with venv activated using bash -c (use absolute paths for both).
-                # shlex.quote every interpolated path -- both this app's own
-                # install path (/Applications/Dagster Designer.app/...) and
-                # the default projects folder (~/Documents/Dagster
-                # Designer/...) contain a space, and an unquoted path here
-                # gets split into multiple bash tokens, breaking the command.
-                dg_abs_path = shlex.quote(str(dg_path.resolve()))
-                activate_path = shlex.quote(str(venv_dir.resolve() / "bin" / "activate"))
-                # unset PYTHONHOME too -- it can point the interpreter at the
+                # Call the venv's own dg binary directly rather than
+                # `bash -c "source venv/bin/activate && dg ..."` -- bash
+                # doesn't exist on Windows at all, and "activating" is
+                # unnecessary anyway: a venv's own console scripts already
+                # resolve their environment correctly when invoked by full
+                # path. Passing args as a list also sidesteps the shell
+                # quoting this used to need for paths containing spaces
+                # (this app's own install path,
+                # /Applications/Dagster Designer.app/..., and the default
+                # projects folder, ~/Documents/Dagster Designer/...).
+                run_env = os.environ.copy()
+                # Drop PYTHONHOME too -- it can point the interpreter at the
                 # wrong stdlib if inherited from outside this process.
-                cmd = f"unset PYTHONHOME && source {activate_path} && {dg_abs_path} list defs --json"
+                run_env.pop("PYTHONHOME", None)
                 print(f"[Asset Introspection] Running dg list defs for project {project.id}...", flush=True)
                 result = subprocess.run(
-                    ["bash", "-c", cmd],
+                    [str(dg_path.resolve()), "list", "defs", "--json"],
                     cwd=str(project_dir.resolve()),
+                    env=run_env,
                     capture_output=True,
                     text=True,
                     check=True,

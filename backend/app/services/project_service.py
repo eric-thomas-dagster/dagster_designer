@@ -14,7 +14,7 @@ from datetime import datetime
 from typing import Dict, Tuple
 
 from ..core.config import settings
-from ..core.uv_binary import find_uv_binary, env_with_bundled_uv_on_path
+from ..core.uv_binary import find_uv_binary, env_with_bundled_uv_on_path, venv_bin_path
 from ..models.project import Project, ProjectCreate, ProjectUpdate
 from ..models.partition import PartitionConfig
 from ..models.freshness import FreshnessPolicy
@@ -1502,10 +1502,7 @@ if custom_lineage_edges:
         venv_dir = project_dir / ".venv"
 
         # Get the path to dg in the project's virtualenv
-        if sys.platform == "win32":
-            dg_path = venv_dir / "Scripts" / "dg.exe"
-        else:
-            dg_path = venv_dir / "bin" / "dg"
+        dg_path = venv_bin_path(venv_dir, "dg")
 
         if not dg_path.exists():
             print(f"dg not found in virtualenv at {dg_path}")
@@ -1524,16 +1521,18 @@ if custom_lineage_edges:
                     project_path = component.attributes.get("project") or component.attributes.get("project_path", "dbt")
                     folder_name = component.id
 
-                    # shlex.quote the venv/dg paths -- the default projects
-                    # folder (~/Documents/Dagster Designer/...) contains a
-                    # space, and unquoted paths here get split into multiple
-                    # bash tokens, breaking the command.
-                    activate_path = shlex.quote(str((venv_dir / "bin" / "activate").resolve()))
-                    dg_abs_path = shlex.quote(str(dg_path.resolve()))
-                    cmd = f"source {activate_path} && {dg_abs_path} scaffold defs dagster_dbt.DbtProjectComponent {folder_name} --project-path '{project_path}'"
-
+                    # Call the venv's own dg binary directly rather than
+                    # `bash -c "source venv/bin/activate && dg ..."` --
+                    # bash doesn't exist on Windows at all, and "activating"
+                    # is unnecessary noise anyway: a venv's own console
+                    # scripts already resolve their environment correctly
+                    # when invoked by full path, activated or not (same
+                    # reasoning as every other venv_bin_path() call site).
+                    # Passing args as a list also sidesteps the shell
+                    # quoting this used to need for the default projects
+                    # folder's space (~/Documents/Dagster Designer/...).
                     result = subprocess.run(
-                        ["bash", "-c", cmd],
+                        [str(dg_path.resolve()), "scaffold", "defs", "dagster_dbt.DbtProjectComponent", folder_name, "--project-path", str(project_path)],
                         cwd=str(project_dir.resolve()),
                         capture_output=True,
                         text=True,
@@ -1986,19 +1985,25 @@ if custom_lineage_edges:
                 log(f"ℹ️  Installing from subdirectory: {project.dagster_package_subdir}/")
 
             # Use subprocess.Popen for real-time output streaming
+            import os
             import time
             start_time = time.time()
-            # Use UV directly (not uvx) for much faster performance
-            # shlex.quote the uv path -- this app's own install path
-            # (/Applications/Dagster Designer.app/...) contains a space, and
-            # an unquoted path interpolated into a bash -c string gets split
-            # into multiple tokens, breaking the command (bash then reports
-            # "command not found", exit 127, for what looks like a
-            # perfectly fine absolute path).
-            uv_quoted = shlex.quote(find_uv_binary('uv'))
+            # Use UV directly (not uvx) for much faster performance. Set
+            # UV_PROJECT_ENVIRONMENT via the subprocess's own env instead of
+            # a `bash -c "VAR=val cmd"` shell prefix -- bash doesn't exist
+            # on Windows at all (confirmed live: [WinError 2] the system
+            # cannot find the file specified), and passing args as a list
+            # to Popen directly handles spaces in paths (this app's own
+            # install path, "/Applications/Dagster Designer.app/...",
+            # contains one) without needing shell quoting in the first
+            # place -- shlex.quote was only ever a workaround for the shell
+            # wrapper this removes.
+            install_env = os.environ.copy()
+            install_env["UV_PROJECT_ENVIRONMENT"] = venv_path
             process = subprocess.Popen(
-                ["bash", "-c", f"UV_PROJECT_ENVIRONMENT={venv_path} {uv_quoted} pip install -e ."],
+                [find_uv_binary('uv'), "pip", "install", "-e", "."],
                 cwd=str(install_dir),
+                env=install_env,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
