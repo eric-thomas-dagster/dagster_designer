@@ -1976,6 +1976,33 @@ async def validate_project(project_id: str):
                 }
             }
         else:
+            # A moved/copied project directory carries its old .venv along
+            # with it, but each console-script wrapper (bin/dg, bin/dagster,
+            # ...) has the venv's ORIGINAL absolute path baked into its
+            # shebang/exec line — that path is gone post-move, so the shell
+            # fails before dg itself ever runs: "cannot execute: No such
+            # file or directory". This isn't a component problem at all, so
+            # don't run it through the "which component is broken" parsing
+            # below, which produces a misleading "delete broken components"
+            # prompt for something that's actually just a stale environment.
+            # Auto-heal instead: drop the broken venv and let the existing
+            # background dependency-install path (the same one a brand new
+            # project already goes through) recreate it fresh, reusing its
+            # existing status tracking so the frontend's current "still
+            # installing, poll again" handling picks this up for free.
+            stale_venv_signature = "cannot execute" in result.stderr and "No such file or directory" in result.stderr
+            if stale_venv_signature:
+                import shutil as _shutil
+                print(f"[validate] stale .venv detected for project {project_id} (moved directory) — rebuilding")
+                _shutil.rmtree(project_dir / ".venv", ignore_errors=True)
+                asyncio.create_task(project_service.install_dependencies_async(project))
+                return {
+                    "valid": None,
+                    "pending": True,
+                    "message": "Found a stale environment left over from this project being moved — rebuilding it now. Validation will be available once that finishes.",
+                    "details": None,
+                }
+
             # Extract error message from stderr
             error_lines = result.stderr.split('\n')
 
