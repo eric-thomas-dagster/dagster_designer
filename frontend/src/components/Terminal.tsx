@@ -100,6 +100,20 @@ export function Terminal({ projectId }: TerminalProps) {
             const command = currentLineRef.current.trim();
             if (command) {
               term.write('\r\n');
+
+              // Each command runs as its own isolated subprocess reset to
+              // the project root every time -- there's no shell session to
+              // carry a `cd` into the next command, so it can only ever
+              // look like it silently did nothing. Explain that instead of
+              // round-tripping to the backend just to get rejected.
+              if (command === 'cd' || command.startsWith('cd ')) {
+                term.writeln('\x1b[33mNote: each command here runs fresh in the project root — there\'s no persistent shell session, so `cd` has nothing to carry into the next command.\x1b[0m');
+                term.writeln('Use a path directly instead, e.g. `ls data` or `dg list defs --path some/subdir`.');
+                term.write('\r\n$ ');
+                currentLineRef.current = '';
+                return;
+              }
+
               isExecutingRef.current = true;
 
               filesApi.execute(projectId, command)
@@ -114,7 +128,14 @@ export function Terminal({ projectId }: TerminalProps) {
                   term.write('\r\n$ ');
                 })
                 .catch((error) => {
-                  term.writeln(`\x1b[31mError: ${error.message}\x1b[0m`);
+                  // error.message is just axios's generic "Request failed
+                  // with status code 400" -- the backend's actual reason
+                  // (e.g. "Command not allowed. Allowed commands: ...")
+                  // lives in response.data.detail and was being silently
+                  // dropped, leaving the user with an opaque error and no
+                  // way to know what to do differently.
+                  const detail = error?.response?.data?.detail || error.message;
+                  term.writeln(`\x1b[31mError: ${detail}\x1b[0m`);
                   term.write('\r\n$ ');
                 })
                 .finally(() => {
