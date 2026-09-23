@@ -26,7 +26,19 @@ class DagsterPlusError(RuntimeError):
     surface a helpful "check your token / connection" message."""
 
 
-def _graphql_url(org: str, deployment: str) -> str:
+def _region_host_suffix(region: str | None) -> str:
+    """Dagster+ hosts every org, the MCP server, and agents under
+    `dagster.cloud` for the US region and `eu.dagster.cloud` for the EU
+    region (e.g. `mcp.agent.dagster.cloud` vs `mcp.agent.eu.dagster.cloud`,
+    `<org>.dagster.cloud` vs `<org>.eu.dagster.cloud`) -- always the same
+    "insert `eu.` right before `dagster.cloud`" pattern. `dg plus login
+    --region eu` is the CLI's equivalent explicit switch; we mirror that
+    same two-value concept rather than trying to infer region from the
+    org name."""
+    return "eu.dagster.cloud" if (region or "us").strip().lower() == "eu" else "dagster.cloud"
+
+
+def _graphql_url(org: str, deployment: str, region: str | None = None) -> str:
     """Build the org's GraphQL endpoint. Trims accidental whitespace +
     protocol so users can paste the URL or the bare org. When the
     deployment is empty (or 'none'), we hit the top-level org
@@ -34,13 +46,16 @@ def _graphql_url(org: str, deployment: str) -> str:
     rather than at the per-deployment path."""
     o = (org or "").strip().replace("https://", "").replace("http://", "").split("/", 1)[0]
     d = (deployment or "").strip()
-    # Users sometimes paste the full host -- strip common suffixes.
-    for suffix in (".dagster.cloud", ".dagster.plus"):
+    # Users sometimes paste the full host -- strip common suffixes
+    # (including the EU variant) so re-adding the right one below is
+    # never doubled up.
+    for suffix in (".eu.dagster.cloud", ".dagster.cloud", ".dagster.plus"):
         if o.endswith(suffix):
             o = o.rsplit(suffix, 1)[0]
+    host_suffix = _region_host_suffix(region)
     if not d or d.lower() in ("none", "-"):
-        return f"https://{o}.dagster.cloud/graphql"
-    return f"https://{o}.dagster.cloud/{d}/graphql"
+        return f"https://{o}.{host_suffix}/graphql"
+    return f"https://{o}.{host_suffix}/{d}/graphql"
 
 
 async def query(
@@ -50,12 +65,13 @@ async def query(
     gql: str,
     variables: dict | None = None,
     timeout: float = 30.0,
+    region: str | None = None,
 ) -> dict[str, Any]:
     """Run a GraphQL query against the deployment. Returns the top-level
     `data` object or raises DagsterPlusError with a helpful message."""
     if not org or not token:
         raise DagsterPlusError("Dagster+ connection needs both org and token.")
-    url = _graphql_url(org, deployment)
+    url = _graphql_url(org, deployment, region)
     # Handle POST redirects ourselves. httpx's follow_redirects=True
     # sometimes returns HTML from the redirect target when the POST
     # body isn't re-issued cleanly. Manually chase up to 3 3xx hops.
@@ -93,7 +109,7 @@ async def query(
     return body.get("data") or {}
 
 
-async def probe_default_deployment(org: str, token: str, timeout: float = 10.0) -> str | None:
+async def probe_default_deployment(org: str, token: str, timeout: float = 10.0, region: str | None = None) -> str | None:
     """Hit the org-level /graphql and read the deployment name out of
     the 3xx redirect target. This is the only authoritative signal for
     "what is this org's default deployment" -- the fullDeployments
@@ -106,7 +122,7 @@ async def probe_default_deployment(org: str, token: str, timeout: float = 10.0) 
     parseable."""
     if not org or not token:
         return None
-    url = _graphql_url(org, "")
+    url = _graphql_url(org, "", region)
     headers = {"Dagster-Cloud-Api-Token": token, "content-type": "application/json"}
     body = {"query": "query { __typename }", "variables": {}}
     try:
@@ -129,6 +145,18 @@ async def probe_default_deployment(org: str, token: str, timeout: float = 10.0) 
             return path or None
     except httpx.HTTPError:
         return None
+
+
+def org_base_url(org: str, region: str | None = None) -> str:
+    """The org's web UI base URL (not GraphQL) -- e.g.
+    `https://hooli.dagster.cloud` or `https://hooli.eu.dagster.cloud`.
+    Shared by every "Open in Dagster+" deep link on the backend so the
+    region-suffix logic lives in exactly one place."""
+    o = (org or "").strip().replace("https://", "").replace("http://", "").split("/", 1)[0]
+    for suffix in (".eu.dagster.cloud", ".dagster.cloud", ".dagster.plus"):
+        if o.endswith(suffix):
+            o = o.rsplit(suffix, 1)[0]
+    return f"https://{o}.{_region_host_suffix(region)}"
 
 
 # --- Query catalog ----------------------------------------------------------
@@ -159,12 +187,31 @@ query DagsterPlusAssets {
     groupName
     description
     computeKind
+    repository {
+      location {
+        name
+      }
+    }
     isPartitioned
     isExecutable
     isMaterializable
     isObservable
     jobNames
     hasAssetChecks
+    # The legacy `freshnessPolicy` field is unpopulated on every asset in
+    # every deployment we've checked (superseded by internalFreshnessPolicy
+    # -- a union, since Dagster now supports two different policy shapes).
+    internalFreshnessPolicy {
+      __typename
+      ... on TimeWindowFreshnessPolicy { failWindowSeconds warnWindowSeconds }
+      ... on CronFreshnessPolicy { deadlineCron lowerBoundDeltaSeconds timezone }
+    }
+    freshnessStatusInfo {
+      freshnessStatus
+      freshnessStatusMetadata {
+        ... on AssetHealthFreshnessMeta { lastMaterializedTimestamp }
+      }
+    }
     tags { key value }
     owners {
       __typename
@@ -454,6 +501,261 @@ query DagsterRuns($limit: Int!, $cursor: String, $filter: RunsFilter) {
       }
     }
     ... on PythonError { message stack }
+  }
+}
+"""
+
+
+# Deliberately NOT expanding notificationService/alertTargets into inline
+# fragments beyond __typename -- Dagster+'s concrete types there (e.g.
+# WebhookAlertPolicyNotification.webhookUrl vs the very similarly-named
+# but wrong webhookURL) are easy to get subtly wrong, and __typename alone
+# is enough to humanize into "Slack" / "Email" / etc for a read-only view.
+ALERT_POLICIES_QUERY = """
+query DagsterPlusAlertPolicies {
+  alertPolicies {
+    id
+    name
+    description
+    enabled
+    eventTypes
+    notificationService { __typename }
+    alertTargets { __typename }
+    source
+    mutedUntil
+  }
+}
+"""
+
+
+# Secret VALUES (not just names -- see utilizedEnvVarsOrError above, which
+# only gives names + consumers) come from secretsOrError. canViewSecretValue
+# reflects the calling token's actual permission; secretValue is still
+# present but should be treated as inaccessible/redacted when that's false
+# rather than trusted at face value.
+SECRETS_QUERY = """
+query DagsterPlusSecrets {
+  secretsOrError {
+    __typename
+    ... on Secrets {
+      secrets {
+        id
+        secretName
+        secretValue
+        fullDeploymentScope
+        allBranchDeploymentsScope
+        specificBranchDeploymentScope
+        localDeploymentScope
+        locationNames
+        canViewSecretValue
+        canEditSecret
+      }
+    }
+    ... on UnauthorizedError { message }
+    ... on PythonError { message }
+  }
+}
+"""
+
+
+# Fetched alongside the plain `alertPolicies` list (which has `id`, needed
+# for mute/delete) -- this one gives the full per-policy document (richer:
+# actual Slack channel names / email addresses, not just "this uses Slack")
+# and is also the exact shape createOrUpdateAlertPolicyFromDocument expects
+# back, so it doubles as what a "raw edit" UI would show pre-filled.
+ALERT_POLICIES_DOCUMENT_QUERY = """
+query DagsterPlusAlertPoliciesDocument {
+  alertPoliciesAsDocumentOrError {
+    __typename
+    ... on AlertPoliciesAsDocument { document }
+    ... on PythonError { message }
+    ... on UnauthorizedError { message }
+  }
+}
+"""
+
+CREATE_OR_UPDATE_ALERT_POLICY_MUTATION = """
+mutation CreateOrUpdateAlertPolicy($document: GenericScalar!) {
+  createOrUpdateAlertPolicyFromDocument(document: $document) {
+    __typename
+    ... on AlertPolicy { id name }
+    ... on InvalidAlertPolicyError { message }
+    ... on CodeBackedAlertPolicyError { message alertPolicyName }
+    ... on PythonError { message }
+    ... on UnauthorizedError { message }
+  }
+}
+"""
+
+DELETE_ALERT_POLICY_MUTATION = """
+mutation DeleteAlertPolicy($name: String!) {
+  deleteAlertPolicy(alertPolicyName: $name) {
+    __typename
+    ... on DeleteAlertPolicySuccess { alertPolicyName }
+    ... on CodeBackedAlertPolicyError { message alertPolicyName }
+    ... on PythonError { message }
+    ... on UnauthorizedError { message }
+  }
+}
+"""
+
+SET_ALERT_POLICY_MUTE_MUTATION = """
+mutation SetAlertPolicyMute($id: String!, $seconds: Int) {
+  setAlertPolicyMuteUntil(alertPolicyId: $id, muteForSeconds: $seconds) {
+    __typename
+    ... on AlertPolicy { id mutedUntil }
+    ... on PythonError { message }
+    ... on UnauthorizedError { message }
+  }
+}
+"""
+
+
+# Read-only names + what consumes them (no values -- see SECRETS_QUERY
+# above for those). Kept in case a future "unused secrets" or "what
+# references this var" view wants it; not currently called.
+UTILIZED_ENV_VARS_QUERY = """
+query DagsterPlusUtilizedEnvVars($repositorySelector: RepositorySelector) {
+  utilizedEnvVarsOrError(repositorySelector: $repositorySelector) {
+    __typename
+    ... on EnvVarWithConsumersList {
+      results { envVarName envVarConsumers { type name } }
+    }
+    ... on PythonError { message }
+  }
+}
+"""
+
+CREATE_SECRET_MUTATION = """
+mutation CreateSecret($name: String!, $value: String!, $scopes: SecretScopesInput!, $locationNames: [String!]) {
+  createSecret(secretName: $name, secretValue: $value, scopes: $scopes, locationNames: $locationNames) {
+    __typename
+    ... on CreateOrUpdateSecretSuccess { secret { id secretName } }
+    ... on TooManySecretsError { message }
+    ... on InvalidSecretInputError { message }
+    ... on SecretAlreadyExistsError { message }
+    ... on UnauthorizedError { message }
+    ... on PythonError { message }
+  }
+}
+"""
+
+UPDATE_SECRET_MUTATION = """
+mutation UpdateSecret($id: String!, $name: String!, $value: String!, $scopes: SecretScopesInput!, $locationNames: [String!]) {
+  updateSecret(secretId: $id, secretName: $name, secretValue: $value, scopes: $scopes, locationNames: $locationNames) {
+    __typename
+    ... on CreateOrUpdateSecretSuccess { secret { id secretName } }
+    ... on TooManySecretsError { message }
+    ... on InvalidSecretInputError { message }
+    ... on SecretAlreadyExistsError { message }
+    ... on UnauthorizedError { message }
+    ... on PythonError { message }
+  }
+}
+"""
+
+DELETE_SECRET_MUTATION = """
+mutation DeleteSecret($id: String!) {
+  deleteSecret(secretId: $id) {
+    __typename
+    ... on DeleteSecretSuccess { secretId }
+    ... on UnauthorizedError { message }
+    ... on PythonError { message }
+  }
+}
+"""
+
+
+# Jobs -- listed via repositoriesOrError.nodes[].pipelines rather than a
+# dedicated jobs query (Dagster+'s schema still calls them "pipelines"
+# internally). __ASSET_JOB entries are Dagster's own auto-generated
+# "materialize everything" job for each repo, not something a user
+# created -- filtered out by the caller, not here, since that's a display
+# decision, not a data-fetching one.
+JOBS_QUERY = """
+query DagsterPlusJobs {
+  repositoriesOrError {
+    __typename
+    ... on RepositoryConnection {
+      nodes {
+        name
+        location { name }
+        pipelines {
+          name
+          description
+          isJob
+          schedules { name cronSchedule scheduleState { status } }
+          sensors { name sensorState { status } }
+        }
+      }
+    }
+    ... on PythonError { message }
+  }
+}
+"""
+
+LAUNCH_RUN_MUTATION = """
+mutation LaunchRun($selector: JobOrPipelineSelector!) {
+  launchRun(executionParams: { selector: $selector }) {
+    __typename
+    ... on LaunchRunSuccess { run { runId } }
+    ... on RunConfigValidationInvalid { errors { message } }
+    ... on PipelineNotFoundError { message }
+    ... on InvalidSubsetError { message }
+    ... on RunConflict { message }
+    ... on UnauthorizedError { message }
+    ... on PythonError { message }
+    ... on NoModeProvidedError { message }
+    ... on ConflictingExecutionParamsError { message }
+  }
+}
+"""
+
+
+# Lighter than ASSETS_QUERY (no groupName/description/etc) -- just enough
+# per-asset materialization timestamps to reconstruct something close to
+# the local ingestion_history.jsonl event shape (see
+# app/services/ingestion_history.py) for the Ingestions tab's KPIs/trend
+# chart. Every returned event IS a materialization (Dagster only emits
+# these on success), so no separate status field is needed the way a run
+# listing would need one. `rows`/`bytes` have no Dagster+ GraphQL
+# equivalent (they're parsed from local materialize output, not a
+# standard Dagster concept) and are simply absent for cloud events.
+ASSET_MATERIALIZATIONS_QUERY = """
+query DagsterPlusAssetMaterializations($limit: Int!) {
+  assetNodes {
+    assetKey { path }
+    assetMaterializations(limit: $limit) {
+      timestamp
+      runId
+    }
+  }
+}
+"""
+
+
+# allTopLevelResourceDetails gives module-level resources/IO managers per
+# repository -- resourceType is the real Python class path (e.g.
+# "dagster_snowflake_pandas.snowflake_pandas_type_handler.SnowflakePandasIOManager"),
+# which is how the caller tells IO managers apart from plain resources
+# (name-based heuristics like local's "if 'io_manager' in name" don't hold
+# for arbitrary resource names).
+RESOURCES_QUERY = """
+query DagsterPlusResources {
+  repositoriesOrError {
+    __typename
+    ... on RepositoryConnection {
+      nodes {
+        name
+        location { name }
+        allTopLevelResourceDetails {
+          name
+          description
+          resourceType
+        }
+      }
+    }
+    ... on PythonError { message }
   }
 }
 """

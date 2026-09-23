@@ -1,15 +1,27 @@
 import React, { useState, useMemo } from 'react';
+import { useQuery } from '@tanstack/react-query';
 import {
-  Play, ChevronRight, Layers as LayersIcon, Database, CheckCircle2, AlertTriangle,
+  Play, ChevronRight, ChevronDown, Layers as LayersIcon, Database, CheckCircle2, AlertTriangle,
   Book, Filter as FilterIcon, Clock, Zap, Timer, Users as UsersIcon,
-  ExternalLink, Copy, GitBranch, Tag as TagIcon, Pencil, X, Check, Loader2,
+  ExternalLink, Copy, GitBranch, Tag as TagIcon, Pencil, X, Check, Loader2, ArrowLeft,
+  History, Calendar, ArrowUpRight, ArrowDownRight, Ban, Download, BarChart3, MinusCircle,
 } from 'lucide-react';
 import { useProjectStore } from '@/hooks/useProject';
-import { projectsApi, assetsApi } from '@/services/api';
+import { projectsApi, assetsApi, partitionsApi, dagsterPlusOrgBaseUrl, type BackfillRequest } from '@/services/api';
+import { classifyStatus } from '@/lib/status';
 import { notify } from './Notifications';
+import { PartitionBackfill } from './PartitionBackfill';
+import { InsightMetricCard } from './InsightMetricCard';
 import type { GraphNode, ComponentInstance } from '@/types';
 
 const isDbtComponentType = (t: string | undefined | null): boolean => !!t && /\bdbt[_.]|^dbt/i.test(t);
+
+function buildDagsterPlusAssetUrl(project: any, assetKey: string): string {
+  const base = dagsterPlusOrgBaseUrl(project);
+  const dep = project?.dagster_plus_deployment || '';
+  const encoded = encodeURIComponent(assetKey);
+  return dep ? `${base}/${dep}/assets/${encoded}` : `${base}/assets/${encoded}`;
+}
 
 /**
  * Full-screen asset detail view -- opens on top of the Assets tab when
@@ -32,9 +44,20 @@ interface AssetDetailPageProps {
     category: 'schedule' | 'job' | 'sensor' | 'asset_check' | 'freshness_policy',
     assetKey: string,
   ) => void;
+  /** Jump the detail page to a different node (e.g. clicking an
+   *  upstream/downstream asset in the Lineage tab) without closing
+   *  the overlay. */
+  onNavigate?: (nodeId: string) => void;
+  /** Jump to the Runs tab for a specific run id (e.g. clicking a
+   *  materialization event in the Events tab). */
+  onOpenRun?: (runId: string) => void;
+  /** Open directly on a specific tab (e.g. drilling in from the
+   *  deployment-level Insights page should land on Insights, not
+   *  Overview). Defaults to 'overview'. */
+  initialTab?: Tab;
 }
 
-type Tab = 'overview' | 'partitions' | 'events' | 'checks' | 'lineage' | 'insights' | 'change_history';
+export type Tab = 'overview' | 'partitions' | 'events' | 'checks' | 'lineage' | 'insights' | 'change_history';
 
 const TABS: { id: Tab; label: string }[] = [
   { id: 'overview',       label: 'Overview' },
@@ -46,9 +69,9 @@ const TABS: { id: Tab; label: string }[] = [
   { id: 'change_history', label: 'Change history' },
 ];
 
-export function AssetDetailPage({ nodeId, onClose, onNewPrimitiveForAsset }: AssetDetailPageProps) {
+export function AssetDetailPage({ nodeId, onClose, onNewPrimitiveForAsset, onNavigate, onOpenRun, initialTab }: AssetDetailPageProps) {
   const { currentProject } = useProjectStore();
-  const [activeTab, setActiveTab] = useState<Tab>('overview');
+  const [activeTab, setActiveTab] = useState<Tab>(initialTab || 'overview');
 
   const node: GraphNode | undefined = useMemo(
     () => currentProject?.graph.nodes.find((n) => n.id === nodeId) as GraphNode | undefined,
@@ -86,30 +109,43 @@ export function AssetDetailPage({ nodeId, onClose, onNewPrimitiveForAsset }: Ass
     <div className="w-full h-full flex flex-col bg-white">
       {/* Header */}
       <div className="flex-shrink-0 border-b border-gray-200 px-6 py-3 flex items-start justify-between gap-4 bg-white">
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-1 text-xs text-gray-500 mb-1 truncate">
-            <span>Catalog</span>
-            <ChevronRight className="w-3 h-3 flex-shrink-0" />
-            <span>All assets</span>
-            {groupName && (
-              <>
-                <ChevronRight className="w-3 h-3 flex-shrink-0" />
-                <span className="text-gray-700 font-medium">{groupName}</span>
-              </>
-            )}
-            <ChevronRight className="w-3 h-3 flex-shrink-0" />
-            <span className="text-gray-900 font-semibold truncate">{displayName}</span>
-          </div>
-          <div className="flex items-center gap-3">
-            <h1 className="text-lg font-bold text-gray-900 truncate">{displayName}</h1>
-            <StatusPill state={overallState} />
-            <button
-              onClick={() => { navigator.clipboard.writeText(assetKey); }}
-              className="p-1 text-gray-400 hover:text-gray-700 hover:bg-gray-100 rounded"
-              title={`Copy asset key: ${assetKey}`}
-            >
-              <Copy className="w-3.5 h-3.5" />
-            </button>
+        <div className="flex items-start gap-3 min-w-0 flex-1">
+          {/* Back sits first/left, matching MonitorDetailPage's convention
+              -- it used to be a small text link on the far right of the
+              action row (after Materialize), easy to miss and inconsistent
+              with every other detail page's navigation. */}
+          <button
+            onClick={onClose}
+            className="p-1 mt-0.5 text-gray-500 hover:text-gray-900 hover:bg-gray-100 rounded flex-shrink-0"
+            title="Back to the asset graph / catalog"
+          >
+            <ArrowLeft className="w-4 h-4" />
+          </button>
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-1 text-xs text-gray-500 mb-1 truncate">
+              <span>Catalog</span>
+              <ChevronRight className="w-3 h-3 flex-shrink-0" />
+              <span>All assets</span>
+              {groupName && (
+                <>
+                  <ChevronRight className="w-3 h-3 flex-shrink-0" />
+                  <span className="text-gray-700 font-medium">{groupName}</span>
+                </>
+              )}
+              <ChevronRight className="w-3 h-3 flex-shrink-0" />
+              <span className="text-gray-900 font-semibold truncate">{displayName}</span>
+            </div>
+            <div className="flex items-center gap-3">
+              <h1 className="text-lg font-bold text-gray-900 truncate">{displayName}</h1>
+              <StatusPill state={overallState} />
+              <button
+                onClick={() => { navigator.clipboard.writeText(assetKey); }}
+                className="p-1 text-gray-400 hover:text-gray-700 hover:bg-gray-100 rounded"
+                title={`Copy asset key: ${assetKey}`}
+              >
+                <Copy className="w-3.5 h-3.5" />
+              </button>
+            </div>
           </div>
         </div>
         <div className="flex items-center gap-2 flex-shrink-0">
@@ -120,14 +156,6 @@ export function AssetDetailPage({ nodeId, onClose, onNewPrimitiveForAsset }: Ass
           >
             <Play className="w-4 h-4" />
             Materialize
-          </button>
-          <button
-            onClick={onClose}
-            className="inline-flex items-center gap-1 px-2 py-1.5 text-xs text-gray-600 hover:text-gray-900 hover:bg-gray-100 rounded"
-            title="Return to the asset graph / catalog"
-          >
-            <ChevronRight className="w-3.5 h-3.5 rotate-180" />
-            <span>Back</span>
           </button>
         </div>
       </div>
@@ -151,17 +179,592 @@ export function AssetDetailPage({ nodeId, onClose, onNewPrimitiveForAsset }: Ass
 
       {/* Content */}
       <div className="flex-1 overflow-y-auto bg-gray-50">
-        {activeTab === 'overview' && <OverviewTab node={node} isCloud={isCloud} onNewPrimitiveForAsset={onNewPrimitiveForAsset} />}
-        {activeTab !== 'overview' && (
+        {activeTab === 'overview' && <OverviewTab node={node} isCloud={isCloud} onNewPrimitiveForAsset={onNewPrimitiveForAsset} onNavigate={onNavigate} />}
+        {activeTab === 'checks' && <ChecksTab node={node} projectId={currentProject.id} onOpenRun={onOpenRun} />}
+        {activeTab === 'lineage' && <LineageTab node={node} currentProject={currentProject} onNavigate={onNavigate} />}
+        {activeTab === 'events' && <EventsTab node={node} projectId={currentProject.id} onOpenRun={onOpenRun} />}
+        {activeTab === 'partitions' && <PartitionsTab node={node} isCloud={isCloud} projectId={currentProject.id} currentProject={currentProject} />}
+        {activeTab === 'insights' && <InsightsTab node={node} isCloud={isCloud} projectId={currentProject.id} />}
+        {activeTab === 'change_history' && (
           <div className="p-12 text-center text-gray-500">
             <div className="inline-flex items-center gap-2 text-sm">
               <Clock className="w-4 h-4" />
-              <span>The <span className="font-medium">{TABS.find((t) => t.id === activeTab)?.label}</span> tab isn't wired up yet.</span>
+              <span>The <span className="font-medium">Change history</span> tab isn't wired up yet.</span>
             </div>
             <p className="text-xs mt-2 text-gray-400">Coming soon.</p>
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+// ---------- Checks tab ----------
+
+function ChecksTab({ node, projectId, onOpenRun }: { node: GraphNode; projectId: string; onOpenRun?: (runId: string) => void }) {
+  const data = node.data as any;
+  const checks: any[] = Array.isArray(data.checks) ? data.checks : [];
+  const [expandedKey, setExpandedKey] = useState<string | null>(null);
+
+  if (checks.length === 0) {
+    return (
+      <div className="p-12 text-center text-gray-500">
+        <CheckCircle2 className="w-8 h-8 mx-auto mb-2 text-gray-300" />
+        <p className="text-sm">No checks on this asset yet.</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="p-6 max-w-[1000px] mx-auto space-y-3">
+      {checks.map((c, i) => {
+        const monitorId = c.key || `${data.asset_key}::${c.name || i}`;
+        return (
+          <CheckDetailRow
+            key={monitorId}
+            check={c}
+            projectId={projectId}
+            monitorId={monitorId}
+            isExpanded={expandedKey === monitorId}
+            onToggle={() => setExpandedKey(expandedKey === monitorId ? null : monitorId)}
+            onOpenRun={onOpenRun}
+          />
+        );
+      })}
+    </div>
+  );
+}
+
+function CheckDetailRow({
+  check, projectId, monitorId, isExpanded, onToggle, onOpenRun,
+}: {
+  check: any;
+  projectId: string;
+  monitorId: string;
+  isExpanded: boolean;
+  onToggle: () => void;
+  onOpenRun?: (runId: string) => void;
+}) {
+  const c = classifyStatus(check.last_status);
+  const ok = c === 'success';
+  const bad = c === 'failure';
+
+  const { data: history, isLoading } = useQuery({
+    queryKey: ['monitor-history', projectId, monitorId],
+    queryFn: () => projectsApi.getMonitorHistory(projectId, monitorId, 25),
+    enabled: isExpanded,
+    staleTime: 30_000,
+  });
+
+  return (
+    <div className="bg-white border border-gray-200 rounded-lg overflow-hidden">
+      <button onClick={onToggle} className="w-full flex items-start gap-2.5 p-3 text-left hover:bg-gray-50/50">
+        {ok ? <CheckCircle2 className="w-4 h-4 text-emerald-500 mt-0.5 flex-shrink-0" />
+          : bad ? <AlertTriangle className="w-4 h-4 text-rose-500 mt-0.5 flex-shrink-0" />
+          : <span className="w-4 h-4 mt-0.5 flex-shrink-0 inline-block rounded-full border border-gray-300" />}
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2">
+            <span className="text-sm font-medium text-gray-900 truncate">{check.name || 'check'}</span>
+            {check.blocking && (
+              <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 text-[10px] font-medium rounded bg-amber-50 border border-amber-200 text-amber-700">
+                <Ban className="w-2.5 h-2.5" /> blocking
+              </span>
+            )}
+          </div>
+          {check.description && <p className="text-xs text-gray-500 mt-0.5">{check.description}</p>}
+          <div className="flex items-center gap-3 mt-1 text-[11px] text-gray-500">
+            <span>{check.last_status ? check.last_status.toLowerCase() : 'never run'}</span>
+            {check.last_run_at && <span>· {formatRelative(check.last_run_at)}</span>}
+            {Array.isArray(check.job_names) && check.job_names.length > 0 && (
+              <span className="font-mono">· {check.job_names.join(', ')}</span>
+            )}
+          </div>
+        </div>
+        <ChevronDown className={`w-4 h-4 text-gray-400 mt-0.5 flex-shrink-0 transition-transform ${isExpanded ? 'rotate-180' : ''}`} />
+      </button>
+      {isExpanded && (
+        <div className="border-t border-gray-100 px-3 py-2 bg-gray-50/50">
+          {isLoading ? (
+            <div className="flex items-center gap-2 text-xs text-gray-500 py-2"><Loader2 className="w-3.5 h-3.5 animate-spin" /> Loading run history…</div>
+          ) : !history?.events?.length ? (
+            <p className="text-xs text-gray-400 italic py-1">No run history recorded yet.</p>
+          ) : (
+            <>
+              {history.numeric_series.length > 1 && (
+                <div className="pb-2 mb-2 border-b border-gray-100">
+                  <div className="text-[10px] uppercase tracking-wider text-gray-500 font-medium mb-1">
+                    {history.numeric_label ?? 'value'} over time
+                  </div>
+                  <CheckMetricChart points={history.numeric_series} />
+                </div>
+              )}
+              <ul className="divide-y divide-gray-100">
+                {history.events.slice().reverse().map((e, i) => {
+                  const ec = classifyStatus(e.status);
+                  return (
+                    <li key={i} className="py-1.5 flex items-center gap-2 text-xs">
+                      {ec === 'success' ? <CheckCircle2 className="w-3 h-3 text-emerald-500 flex-shrink-0" />
+                        : ec === 'failure' ? <AlertTriangle className="w-3 h-3 text-rose-500 flex-shrink-0" />
+                        : ec === 'skipped' ? <MinusCircle className="w-3 h-3 text-gray-400 flex-shrink-0" />
+                        : <span className="w-3 h-3 flex-shrink-0 inline-block rounded-full border border-gray-300" />}
+                      <span className="text-gray-500 tabular-nums flex-shrink-0">{formatRelative(e.ts)}</span>
+                      {e.value != null && (
+                        <span className="text-gray-700 font-mono flex-shrink-0">
+                          {formatMetricValue(e.value)} {e.value_label ?? ''}
+                        </span>
+                      )}
+                      {e.message && <span className="text-gray-600 truncate">{e.message}</span>}
+                      {e.run_id && onOpenRun && (
+                        <button
+                          onClick={() => onOpenRun(e.run_id!)}
+                          className="ml-auto flex-shrink-0 text-indigo-600 hover:text-indigo-800 hover:underline font-mono"
+                          title={`Open run ${e.run_id}`}
+                        >
+                          view run
+                        </button>
+                      )}
+                    </li>
+                  );
+                })}
+              </ul>
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function formatMetricValue(v: number): string {
+  if (Number.isInteger(v)) return v.toLocaleString();
+  if (Math.abs(v) < 0.01) return v.toExponential(2);
+  return v.toLocaleString(undefined, { maximumFractionDigits: 4 });
+}
+
+/** Bare SVG line chart for a check's numeric metadata over time (e.g.
+ *  failed row count, execution duration) -- no charting library dep,
+ *  small enough to hand-roll. */
+function CheckMetricChart({ points }: { points: Array<{ ts: string; value: number }> }) {
+  const width = 600;
+  const height = 80;
+  const paddingX = 6;
+  const paddingY = 8;
+  const values = points.map((p) => p.value);
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const range = max - min || 1;
+  const stepX = (width - 2 * paddingX) / Math.max(1, points.length - 1);
+  const y = (v: number) => paddingY + (1 - (v - min) / range) * (height - 2 * paddingY);
+  const x = (i: number) => paddingX + i * stepX;
+  const pathD = points.map((p, i) => `${i === 0 ? 'M' : 'L'} ${x(i)} ${y(p.value)}`).join(' ');
+  const areaD = `${pathD} L ${x(points.length - 1)} ${height - paddingY} L ${x(0)} ${height - paddingY} Z`;
+  const last = points[points.length - 1];
+  return (
+    <div>
+      <svg viewBox={`0 0 ${width} ${height}`} className="w-full h-auto">
+        <defs>
+          <linearGradient id="check-chart-fill" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor="rgb(99, 102, 241)" stopOpacity="0.25" />
+            <stop offset="100%" stopColor="rgb(99, 102, 241)" stopOpacity="0" />
+          </linearGradient>
+        </defs>
+        <path d={areaD} fill="url(#check-chart-fill)" />
+        <path d={pathD} fill="none" stroke="rgb(99, 102, 241)" strokeWidth="1.5" strokeLinejoin="round" strokeLinecap="round" />
+        {points.map((p, i) => (
+          <circle key={i} cx={x(i)} cy={y(p.value)} r={1.5} fill="rgb(99, 102, 241)" />
+        ))}
+      </svg>
+      <div className="flex items-baseline justify-between text-[10px] text-gray-500 mt-1">
+        <span>min {formatMetricValue(min)}</span>
+        <span className="text-gray-900 font-medium">latest {formatMetricValue(last.value)}</span>
+        <span>max {formatMetricValue(max)}</span>
+      </div>
+    </div>
+  );
+}
+
+// ---------- Lineage tab ----------
+
+function LineageTab({
+  node, currentProject, onNavigate,
+}: {
+  node: GraphNode;
+  currentProject: any;
+  onNavigate?: (nodeId: string) => void;
+}) {
+  const data = node.data as any;
+  const myKey = (data.asset_key as string) || '';
+  const allNodes: GraphNode[] = currentProject?.graph.nodes || [];
+
+  const byKey = useMemo(() => {
+    const m = new Map<string, GraphNode>();
+    for (const n of allNodes) {
+      const k = (n.data as any)?.asset_key as string | undefined;
+      if (k) m.set(k, n);
+    }
+    return m;
+  }, [allNodes]);
+
+  const upstream1: string[] = Array.isArray(data.deps) ? data.deps : [];
+  const downstream1: GraphNode[] = allNodes.filter((other) =>
+    other.id !== node.id
+    && Array.isArray(other.data?.deps)
+    && (other.data.deps as string[]).includes(myKey)
+  );
+
+  const upstream2 = useMemo(() => {
+    const seen = new Set<string>([myKey, ...upstream1]);
+    const out: string[] = [];
+    for (const k of upstream1) {
+      const n = byKey.get(k);
+      const deps: string[] = Array.isArray(n?.data?.deps) ? (n!.data.deps as string[]) : [];
+      for (const d of deps) {
+        if (!seen.has(d)) { seen.add(d); out.push(d); }
+      }
+    }
+    return out;
+  }, [upstream1, byKey, myKey]);
+
+  const downstream2 = useMemo(() => {
+    const seen = new Set<string>([myKey, ...downstream1.map((n) => (n.data as any).asset_key)]);
+    const out: GraphNode[] = [];
+    for (const n1 of downstream1) {
+      const k1 = (n1.data as any).asset_key as string;
+      for (const other of allNodes) {
+        if (seen.has((other.data as any)?.asset_key)) continue;
+        const deps: string[] = Array.isArray(other.data?.deps) ? (other.data.deps as string[]) : [];
+        if (deps.includes(k1)) { seen.add((other.data as any).asset_key); out.push(other); }
+      }
+    }
+    return out;
+  }, [downstream1, allNodes, myKey]);
+
+  if (!upstream1.length && !downstream1.length) {
+    return (
+      <div className="p-12 text-center text-gray-500">
+        <GitBranch className="w-8 h-8 mx-auto mb-2 text-gray-300" />
+        <p className="text-sm">This asset has no upstream or downstream dependencies in the current graph.</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="p-6 max-w-[1200px] mx-auto grid grid-cols-1 md:grid-cols-2 gap-6">
+      <LineageColumn
+        title="Upstream"
+        icon={<ArrowUpRight className="w-3.5 h-3.5" />}
+        directKeys={upstream1}
+        extendedKeys={upstream2}
+        byKey={byKey}
+        onNavigate={onNavigate}
+        emptyLabel="No upstream dependencies -- this is a source."
+      />
+      <LineageColumn
+        title="Downstream"
+        icon={<ArrowDownRight className="w-3.5 h-3.5" />}
+        directKeys={downstream1.map((n) => (n.data as any).asset_key)}
+        extendedKeys={downstream2.map((n) => (n.data as any).asset_key)}
+        byKey={byKey}
+        onNavigate={onNavigate}
+        emptyLabel="Nothing downstream -- this is a leaf."
+      />
+    </div>
+  );
+}
+
+function LineageColumn({
+  title, icon, directKeys, extendedKeys, byKey, onNavigate, emptyLabel,
+}: {
+  title: string;
+  icon: React.ReactNode;
+  directKeys: string[];
+  extendedKeys: string[];
+  byKey: Map<string, GraphNode>;
+  onNavigate?: (nodeId: string) => void;
+  emptyLabel: string;
+}) {
+  const row = (key: string) => {
+    const target = byKey.get(key);
+    const clickable = !!(target && onNavigate);
+    return (
+      <div
+        key={key}
+        onClick={clickable ? () => onNavigate!(target!.id) : undefined}
+        title={key}
+        className={`text-[11px] font-mono text-gray-700 truncate px-2 py-1.5 bg-white border border-gray-200 rounded ${
+          clickable ? 'cursor-pointer hover:border-blue-300 hover:bg-blue-50/50' : ''
+        }`}
+      >
+        {key}
+      </div>
+    );
+  };
+  return (
+    <Section title={`${title} (${directKeys.length})`} icon={icon}>
+      {directKeys.length ? (
+        <div className="space-y-1">{directKeys.map(row)}</div>
+      ) : (
+        <p className="text-xs text-gray-500 italic">{emptyLabel}</p>
+      )}
+      {extendedKeys.length > 0 && (
+        <div className="mt-3 pt-3 border-t border-gray-100">
+          <div className="text-[10px] uppercase tracking-wider text-gray-400 font-medium mb-1.5">
+            2 hops out ({extendedKeys.length})
+          </div>
+          <div className="space-y-1">{extendedKeys.map(row)}</div>
+        </div>
+      )}
+    </Section>
+  );
+}
+
+// ---------- Events tab ----------
+
+function EventsTab({ node, projectId, onOpenRun }: { node: GraphNode; projectId: string; onOpenRun?: (runId: string) => void }) {
+  const data = node.data as any;
+  const assetKey = (data.asset_key as string) || node.id;
+
+  const { data: history, isLoading, error } = useQuery({
+    queryKey: ['ingestion-history', projectId],
+    queryFn: () => assetsApi.ingestionHistory(projectId, 2000),
+    staleTime: 15_000,
+  });
+
+  const events = (history?.events || [])
+    .filter((e) => e.asset_key === assetKey)
+    .slice()
+    .reverse();
+
+  if (isLoading) {
+    return <div className="p-12 text-center text-gray-500"><Loader2 className="w-5 h-5 mx-auto animate-spin" /></div>;
+  }
+  if (error) {
+    return <div className="p-12 text-center text-rose-600 text-sm">Failed to load event history.</div>;
+  }
+  if (events.length === 0) {
+    return (
+      <div className="p-12 text-center text-gray-500">
+        <History className="w-8 h-8 mx-auto mb-2 text-gray-300" />
+        <p className="text-sm">No materialization events recorded for this asset yet.</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="p-6 max-w-[900px] mx-auto">
+      <ul className="divide-y divide-gray-100 bg-white border border-gray-200 rounded-lg overflow-hidden">
+        {events.map((e, i) => {
+          const ok = e.status === 'success';
+          const bad = e.status === 'failure';
+          return (
+            <li key={i} className="px-3 py-2.5 flex items-center gap-3 text-sm">
+              {ok ? <CheckCircle2 className="w-4 h-4 text-emerald-500 flex-shrink-0" />
+                : bad ? <AlertTriangle className="w-4 h-4 text-rose-500 flex-shrink-0" />
+                : <Loader2 className="w-4 h-4 text-blue-500 flex-shrink-0" />}
+              <span className="text-gray-900 font-medium flex-shrink-0">{e.type === 'preview' ? 'Preview' : 'Materialize'}</span>
+              <span className="text-gray-500 tabular-nums flex-shrink-0">{formatRelative(e.ts)}</span>
+              {typeof e.rows === 'number' && <span className="text-gray-500 flex-shrink-0">{e.rows.toLocaleString()} rows</span>}
+              {typeof e.duration_ms === 'number' && <span className="text-gray-400 flex-shrink-0">{(e.duration_ms / 1000).toFixed(1)}s</span>}
+              {e.component && <span className="text-gray-400 truncate font-mono text-xs">{e.component}</span>}
+              {e.run_id && onOpenRun && (
+                <button
+                  onClick={() => onOpenRun(e.run_id!)}
+                  className="ml-auto flex-shrink-0 text-[11px] text-indigo-600 hover:text-indigo-800 hover:underline font-mono"
+                  title={`Open run ${e.run_id}`}
+                >
+                  view run
+                </button>
+              )}
+            </li>
+          );
+        })}
+      </ul>
+    </div>
+  );
+}
+
+// ---------- Partitions tab ----------
+
+function PartitionsTab({
+  node, isCloud, projectId, currentProject,
+}: {
+  node: GraphNode;
+  isCloud: boolean;
+  projectId: string;
+  currentProject: any;
+}) {
+  const data = node.data as any;
+  const assetKey = (data.asset_key as string) || node.id;
+  const [backfillOpen, setBackfillOpen] = useState(false);
+
+  const { data: info, isLoading, error } = useQuery({
+    queryKey: ['partition-info', projectId, assetKey],
+    queryFn: () => partitionsApi.getPartitionInfo(projectId, assetKey),
+    enabled: !isCloud,
+    staleTime: 30_000,
+    retry: false,
+  });
+
+  if (isCloud) {
+    if (!data.is_partitioned) {
+      return (
+        <div className="p-12 text-center text-gray-500">
+          <Calendar className="w-8 h-8 mx-auto mb-2 text-gray-300" />
+          <p className="text-sm">This asset isn't partitioned.</p>
+        </div>
+      );
+    }
+    return (
+      <div className="p-12 text-center text-gray-500">
+        <Calendar className="w-8 h-8 mx-auto mb-2 text-gray-300" />
+        <p className="text-sm">This asset is partitioned in Dagster+.</p>
+        <p className="text-xs mt-2 text-gray-400 max-w-md mx-auto">
+          Browsing individual partition keys and their materialization status isn't available
+          from Designer for cloud-connected projects yet -- open it in Dagster+ for the full
+          partition matrix.
+        </p>
+        <a
+          href={buildDagsterPlusAssetUrl(currentProject, assetKey)}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="inline-flex items-center gap-1.5 mt-3 px-3 py-1.5 text-xs font-medium text-blue-700 bg-blue-50 border border-blue-200 rounded hover:bg-blue-100"
+        >
+          <ExternalLink className="w-3.5 h-3.5" /> Open in Dagster+
+        </a>
+      </div>
+    );
+  }
+
+  if (isLoading) {
+    return <div className="p-12 text-center text-gray-500"><Loader2 className="w-5 h-5 mx-auto animate-spin" /></div>;
+  }
+  if (error || !info?.is_partitioned || !info.partitions_def) {
+    return (
+      <div className="p-12 text-center text-gray-500">
+        <Calendar className="w-8 h-8 mx-auto mb-2 text-gray-300" />
+        <p className="text-sm">This asset isn't partitioned.</p>
+      </div>
+    );
+  }
+
+  const def = info.partitions_def;
+  const keys = def.partition_keys || [];
+
+  return (
+    <div className="p-6 max-w-[900px] mx-auto space-y-4">
+      <Section title="Partition definition" icon={<Calendar className="w-4 h-4 text-gray-500" />}>
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+          <Kpi label="Type" value={def.type} />
+          <Kpi label="Count" value={def.partition_count ?? keys.length} />
+          {def.cron_schedule && <Kpi label="Schedule" value={def.cron_schedule} />}
+          {def.timezone && <Kpi label="Timezone" value={def.timezone} />}
+        </div>
+      </Section>
+      <Section
+        title={`Partition keys (${keys.length})`}
+        icon={<LayersIcon className="w-4 h-4 text-gray-500" />}
+        headerRight={
+          <button
+            onClick={() => setBackfillOpen(true)}
+            className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-blue-700 bg-blue-50 border border-blue-200 rounded hover:bg-blue-100"
+          >
+            <Play className="w-3 h-3" /> Backfill
+          </button>
+        }
+      >
+        {keys.length === 0 ? (
+          <p className="text-xs text-gray-500 italic">No partition keys available.</p>
+        ) : (
+          <div className="flex flex-wrap gap-1.5 max-h-64 overflow-y-auto">
+            {keys.map((k) => (
+              <span key={k} className="px-2 py-1 text-[11px] font-mono bg-gray-50 border border-gray-200 rounded text-gray-700">
+                {k}
+              </span>
+            ))}
+          </div>
+        )}
+      </Section>
+      {backfillOpen && (
+        <PartitionBackfill
+          open={backfillOpen}
+          onOpenChange={setBackfillOpen}
+          projectId={projectId}
+          assetKey={assetKey}
+          onLaunch={async (request: BackfillRequest) => {
+            const r = await partitionsApi.launchBackfill(projectId, request);
+            if (r.success) notify.success(`Backfill launched for ${assetKey}.`);
+            else notify.error(`Backfill failed: ${r.message}`);
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+// ---------- Insights tab ----------
+//
+// Live Dagster+ Insights usage/cost/reliability metrics, fetched directly
+// via MCP tools (see assets.py's insights-metrics endpoint) -- no LLM in
+// the loop. This is pure fetch-and-display data, so routing it through a
+// model for "summarization" would just add latency and cost for nothing;
+// direct tool calls are the right fit here, same as this app's existing
+// direct GraphQL calls for everything else.
+
+function InsightsTab({ node, isCloud, projectId }: { node: GraphNode; isCloud: boolean; projectId: string }) {
+  const data = node.data as any;
+  const assetKey = (data.asset_key as string) || node.id;
+  const [days, setDays] = useState(30);
+
+  const { data: resp, isLoading, error } = useQuery({
+    queryKey: ['asset-insights-metrics', projectId, assetKey, days],
+    queryFn: () => assetsApi.getInsightsMetrics(projectId, assetKey, days),
+    enabled: isCloud,
+    staleTime: 60_000,
+  });
+
+  if (!isCloud) {
+    return (
+      <div className="p-12 text-center text-gray-500">
+        <BarChart3 className="w-8 h-8 mx-auto mb-2 text-gray-300" />
+        <p className="text-sm">Insights (usage, cost, and reliability metrics) is a Dagster+-only feature.</p>
+        <p className="text-xs mt-2 text-gray-400">Not available for local projects.</p>
+      </div>
+    );
+  }
+  if (isLoading) {
+    return <div className="p-12 text-center text-gray-500"><Loader2 className="w-5 h-5 mx-auto animate-spin" /></div>;
+  }
+  if (error) {
+    return <div className="p-12 text-center text-rose-600 text-sm">Failed to load Insights metrics.</div>;
+  }
+  const metrics = resp?.metrics || [];
+
+  return (
+    <div className="p-6 max-w-[1200px] mx-auto space-y-4">
+      <div className="flex items-center justify-between">
+        <p className="text-xs text-gray-500">Live from Dagster+ Insights — usage, cost, and reliability over time.</p>
+        <div className="inline-flex rounded border border-gray-200 overflow-hidden flex-shrink-0">
+          {[7, 30, 60, 90, 120].map((d) => (
+            <button
+              key={d}
+              onClick={() => setDays(d)}
+              className={`px-2.5 py-1 text-xs font-medium ${days === d ? 'bg-blue-600 text-white' : 'bg-white text-gray-600 hover:bg-gray-50'}`}
+            >
+              {d}d
+            </button>
+          ))}
+        </div>
+      </div>
+      {metrics.length === 0 ? (
+        <div className="p-12 text-center text-gray-500">
+          <BarChart3 className="w-8 h-8 mx-auto mb-2 text-gray-300" />
+          <p className="text-sm">No Insights data available for this asset in the last {days} days.</p>
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          {metrics.map((m) => <InsightMetricCard key={m.metric_name} metric={m} />)}
+        </div>
+      )}
     </div>
   );
 }
@@ -190,13 +793,15 @@ function StatusPill({ state }: { state: 'healthy' | 'degraded' | 'unknown' }) {
   );
 }
 
-function OverviewTab({ node, isCloud, onNewPrimitiveForAsset }: {
+function OverviewTab({ node, isCloud, onNewPrimitiveForAsset, onNavigate }: {
   node: GraphNode;
   isCloud: boolean;
   onNewPrimitiveForAsset?: (category: 'schedule' | 'job' | 'sensor' | 'asset_check' | 'freshness_policy', assetKey: string) => void;
+  onNavigate?: (nodeId: string) => void;
 }) {
-  const { currentProject } = useProjectStore();
+  const { currentProject, loadProject } = useProjectStore();
   const data = node.data as any;
+  const assetKey = (data.asset_key as string) || node.id;
   const checks: any[] = Array.isArray(data.checks) ? data.checks : [];
   const columns: Record<string, any> = (data.columns as any) || {};
   const columnNames = Object.keys(columns);
@@ -225,9 +830,30 @@ function OverviewTab({ node, isCloud, onNewPrimitiveForAsset }: {
   const [showFullDescription, setShowFullDescription] = useState(false);
   const [columnSearch, setColumnSearch] = useState('');
   const [coverageOpen, setCoverageOpen] = useState(false);
+  const [taggingIngestion, setTaggingIngestion] = useState(false);
   const filteredColumnNames = columnNames.filter((name) =>
     name.toLowerCase().includes(columnSearch.trim().toLowerCase())
   );
+  const isTaggedIngestion = !!(currentProject?.manual_ingestion_asset_keys || []).includes(assetKey);
+
+  const handleToggleIngestionTag = async () => {
+    if (!currentProject) return;
+    setTaggingIngestion(true);
+    try {
+      if (isTaggedIngestion) {
+        await assetsApi.untagAsIngestion(currentProject.id, assetKey);
+        notify.success('Removed from Ingestions.');
+      } else {
+        await assetsApi.tagAsIngestion(currentProject.id, assetKey);
+        notify.success('Tagged as an ingestion source -- it now shows on the Ingestions tab.');
+      }
+      await loadProject(currentProject.id);
+    } catch (e: any) {
+      notify.error(`Failed to update tag: ${e?.message ?? e}`);
+    } finally {
+      setTaggingIngestion(false);
+    }
+  };
 
   return (
     <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 p-6 max-w-[1600px] mx-auto">
@@ -283,6 +909,18 @@ function OverviewTab({ node, isCloud, onNewPrimitiveForAsset }: {
             && (other.data.deps as string[]).includes(myKey)
           );
           if (!deps.length && !consumers.length) return null;
+          // Upstream deps are asset KEYS, not node ids -- resolve each to
+          // its node so a click can navigate there (downstream consumers
+          // are already full nodes, no lookup needed).
+          const byKey = new Map<string, GraphNode>();
+          for (const n of (currentProject?.graph.nodes || [])) {
+            const k = (n.data as any)?.asset_key as string | undefined;
+            if (k) byKey.set(k, n);
+          }
+          const rowClass = (clickable: boolean) =>
+            `text-[11px] font-mono text-gray-700 truncate px-2 py-1 bg-white border border-gray-200 rounded ${
+              clickable ? 'cursor-pointer hover:border-blue-300 hover:bg-blue-50/50' : ''
+            }`;
           return (
             <Section title="Lineage" icon={<GitBranch className="w-4 h-4 text-gray-500" />}>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -294,11 +932,20 @@ function OverviewTab({ node, isCloud, onNewPrimitiveForAsset }: {
                   </div>
                   {deps.length ? (
                     <div className="space-y-1">
-                      {deps.map((d) => (
-                        <div key={d} className="text-[11px] font-mono text-gray-700 truncate px-2 py-1 bg-white border border-gray-200 rounded" title={d}>
-                          {d}
-                        </div>
-                      ))}
+                      {deps.map((d) => {
+                        const target = byKey.get(d);
+                        const clickable = !!(target && onNavigate);
+                        return (
+                          <div
+                            key={d}
+                            onClick={clickable ? () => onNavigate!(target!.id) : undefined}
+                            className={rowClass(clickable)}
+                            title={d}
+                          >
+                            {d}
+                          </div>
+                        );
+                      })}
                     </div>
                   ) : (
                     <p className="text-xs text-gray-500 italic">No upstream dependencies -- this is a source.</p>
@@ -312,11 +959,19 @@ function OverviewTab({ node, isCloud, onNewPrimitiveForAsset }: {
                   </div>
                   {consumers.length ? (
                     <div className="space-y-1">
-                      {consumers.map((c) => (
-                        <div key={c.id} className="text-[11px] font-mono text-gray-700 truncate px-2 py-1 bg-white border border-gray-200 rounded" title={(c.data.asset_key as string) || c.id}>
-                          {(c.data.asset_key as string) || c.id}
-                        </div>
-                      ))}
+                      {consumers.map((c) => {
+                        const clickable = !!onNavigate;
+                        return (
+                          <div
+                            key={c.id}
+                            onClick={clickable ? () => onNavigate!(c.id) : undefined}
+                            className={rowClass(clickable)}
+                            title={(c.data.asset_key as string) || c.id}
+                          >
+                            {(c.data.asset_key as string) || c.id}
+                          </div>
+                        );
+                      })}
                     </div>
                   ) : (
                     <p className="text-xs text-gray-500 italic">Nothing downstream -- this is a leaf.</p>
@@ -464,6 +1119,31 @@ function OverviewTab({ node, isCloud, onNewPrimitiveForAsset }: {
           </p>
         </Section>
 
+        {/* Ingestions tab tagging -- the automatic heuristic (component
+            type / computeKind / description / "no upstream" sniffing)
+            has no way to notice e.g. a plain Python asset that calls a
+            REST API and writes to Snowflake. This override always
+            surfaces the asset on the Ingestions tab regardless. */}
+        <Section title="Ingestion source" icon={<Download className="w-4 h-4 text-gray-500" />} compact>
+          <p className="text-xs text-gray-500 mb-2">
+            {isTaggedIngestion
+              ? 'Manually tagged -- shows up on the Ingestions tab even if the automatic detection misses it.'
+              : "Not detected as an ingestion source. If this asset pulls data in from an external system, tag it so it shows up on the Ingestions tab."}
+          </p>
+          <button
+            onClick={handleToggleIngestionTag}
+            disabled={taggingIngestion}
+            className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium rounded border disabled:opacity-50 ${
+              isTaggedIngestion
+                ? 'text-gray-700 border-gray-200 hover:bg-gray-50'
+                : 'text-blue-700 border-blue-200 bg-blue-50 hover:bg-blue-100'
+            }`}
+          >
+            {taggingIngestion ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <TagIcon className="w-3.5 h-3.5" />}
+            {isTaggedIngestion ? 'Remove from Ingestions' : 'Mark as ingestion source'}
+          </button>
+        </Section>
+
         {/* Open in Dagster+ (cloud only) */}
         {isCloud && (
           <a
@@ -481,13 +1161,7 @@ function OverviewTab({ node, isCloud, onNewPrimitiveForAsset }: {
   );
 
   function buildDagsterPlusUrl(assetKey: string): string {
-    const cp = currentProject as any;
-    const org = (cp?.dagster_plus_org || '').replace(/^https?:\/\//, '').replace(/\.dagster\.(cloud|plus).*$/, '').split('/')[0];
-    const dep = cp?.dagster_plus_deployment || '';
-    const encoded = encodeURIComponent(assetKey.replace(/\//g, '/'));
-    return dep
-      ? `https://${org}.dagster.cloud/${dep}/assets/${encoded}`
-      : `https://${org}.dagster.cloud/assets/${encoded}`;
+    return buildDagsterPlusAssetUrl(currentProject, assetKey);
   }
 }
 

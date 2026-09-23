@@ -17,9 +17,11 @@ import {
   FileCode,
   Timer,
 } from 'lucide-react';
-import { primitivesApi, pipelinesApi, type PrimitiveCategory, type PrimitiveItem } from '@/services/api';
+import { primitivesApi, pipelinesApi, assetsApi, type PrimitiveCategory, type PrimitiveItem } from '@/services/api';
 import { useProjectStore } from '@/hooks/useProject';
 import { CommunityAvailableSection } from './CommunityAvailableSection';
+import { InsightMetricCard } from './InsightMetricCard';
+import { Loader2 } from 'lucide-react';
 import { useIsDarkMode } from '@/hooks/useIsDarkMode';
 
 interface PrimitivesManagerProps {
@@ -27,12 +29,16 @@ interface PrimitivesManagerProps {
   onOpenFile?: (filePath: string) => void;
   openPrimitive?: { category: string; name: string } | null;
   onOpenPrimitiveConsumed?: () => void;
+  /** Jump to a specific asset's detail page (e.g. clicking a target asset
+   *  chip on a cloud sensor/job's detail view). */
+  onOpenAsset?: (nodeId: string) => void;
 }
 
 export function PrimitivesManager({
   onNewPrimitive,
   onOpenFile,
   openPrimitive,
+  onOpenAsset,
   onOpenPrimitiveConsumed,
 }: PrimitivesManagerProps = {}) {
   const isDark = useIsDarkMode();
@@ -229,8 +235,8 @@ export function PrimitivesManager({
   }, [openPrimitive?.category, openPrimitive?.name, currentProject?.id]);
 
   const renderPrimitivesList = (primitives: Array<PrimitiveItem & { isManaged: boolean }>, category: PrimitiveCategory) => {
+    const isCloud = !!(currentProject as any)?.is_dagster_plus;
     if (!primitives || primitives.length === 0) {
-      const isCloud = !!(currentProject as any)?.is_dagster_plus;
       return (
         <div className="flex items-center justify-center h-64 text-gray-500">
           <div className="text-center">
@@ -306,19 +312,34 @@ export function PrimitivesManager({
                       Asset: {primitive.asset}
                     </span>
                   )}
+                  {category === 'freshness_policy' && primitive.asset_key && (
+                    <span className="text-xs text-gray-500">
+                      Asset: {primitive.asset_key}
+                    </span>
+                  )}
+                  {category === 'freshness_policy' && primitive.status && (
+                    <span className={`text-xs font-medium ${
+                      primitive.status === 'HEALTHY' ? 'text-emerald-600'
+                        : primitive.status === 'DEGRADED' ? 'text-red-600'
+                        : primitive.status === 'WARNING' ? 'text-amber-600'
+                        : 'text-gray-500'
+                    }`}>
+                      {primitive.status}
+                    </span>
+                  )}
                 </div>
               </div>
               <div className="flex items-center space-x-2 ml-4">
-                {primitive.isManaged && primitive.file && primitive.file !== 'N/A' && (
+                {(isCloud || (primitive.isManaged && primitive.file && primitive.file !== 'N/A')) && (
                   <button
                     onClick={() => handleViewDetails(primitive)}
                     className="p-1.5 text-blue-600 hover:bg-blue-50 rounded"
-                    title="View code"
+                    title={isCloud ? 'View details' : 'View code'}
                   >
                     <Eye className="w-4 h-4" />
                   </button>
                 )}
-                {!primitive.isManaged && (
+                {!isCloud && !primitive.isManaged && (
                   <button
                     onClick={() => handleSearchAndOpen(
                       category === 'schedule' ? 'schedule' : category === 'job' ? 'job' : category === 'sensor' ? 'sensor' : 'asset_check',
@@ -340,7 +361,7 @@ export function PrimitivesManager({
                     <Play className="w-4 h-4" />
                   </button>
                 )}
-                {primitive.isManaged && (
+                {!isCloud && primitive.isManaged && (
                   <button
                     onClick={() => handleDelete(category, primitive.name)}
                     className="p-1.5 text-red-600 hover:bg-red-50 rounded"
@@ -475,7 +496,23 @@ export function PrimitivesManager({
             </div>
 
             <div className="flex-1 overflow-hidden">
-              {primitiveDetails ? (
+              {!primitiveDetails ? (
+                <div className="flex items-center justify-center h-full">
+                  <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
+                </div>
+              ) : (currentProject as any)?.is_dagster_plus ? (
+                <div className="h-full overflow-y-auto">
+                  <CloudPrimitiveDetail
+                    category={activeTab}
+                    primitive={primitiveDetails.primitive}
+                    projectId={currentProject!.id}
+                    onOpenAsset={onOpenAsset ? (assetKey: string) => {
+                      const node = currentProject?.graph.nodes.find((n) => (n.data as any)?.asset_key === assetKey);
+                      if (node) onOpenAsset(node.id);
+                    } : undefined}
+                  />
+                </div>
+              ) : (
                 <Editor
                   height="100%"
                   language="python"
@@ -490,29 +527,29 @@ export function PrimitivesManager({
                     automaticLayout: true,
                   }}
                 />
-              ) : (
-                <div className="flex items-center justify-center h-full">
-                  <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
-                </div>
               )}
             </div>
 
             <div className="p-4 border-t border-gray-200 flex justify-between items-center">
               <div className="text-sm text-gray-600">
-                File: {selectedPrimitive?.file}
+                {(currentProject as any)?.is_dagster_plus
+                  ? 'Defined in your Dagster+ deployment -- read-only here.'
+                  : `File: ${selectedPrimitive?.file}`}
               </div>
               <div className="flex items-center space-x-2">
                 <Dialog.Close className="px-4 py-2 text-sm border border-gray-300 rounded-md hover:bg-gray-50">
                   Close
                 </Dialog.Close>
-                <button
-                  onClick={() =>
-                    selectedPrimitive && handleDelete(activeTab, selectedPrimitive.name)
-                  }
-                  className="px-4 py-2 text-sm bg-red-600 text-white rounded-md hover:bg-red-700"
-                >
-                  Delete
-                </button>
+                {!(currentProject as any)?.is_dagster_plus && (
+                  <button
+                    onClick={() =>
+                      selectedPrimitive && handleDelete(activeTab, selectedPrimitive.name)
+                    }
+                    className="px-4 py-2 text-sm bg-red-600 text-white rounded-md hover:bg-red-700"
+                  >
+                    Delete
+                  </button>
+                )}
               </div>
             </div>
           </Dialog.Content>
@@ -534,4 +571,139 @@ export function PrimitivesManager({
       )}
     </div>
   );
+}
+
+// ---------- Cloud primitive detail (no local file/code -- structured
+// summary of whatever the Dagster+ hydration captured instead) ----------
+
+function AssetKeyChip({ assetKey, onOpenAsset }: { assetKey: string; onOpenAsset?: (assetKey: string) => void }) {
+  const clickable = !!onOpenAsset;
+  return (
+    <span
+      onClick={clickable ? () => onOpenAsset!(assetKey) : undefined}
+      className={`px-1.5 py-0.5 text-[11px] font-mono rounded bg-gray-100 text-gray-700 ${
+        clickable ? 'cursor-pointer hover:bg-blue-50 hover:text-blue-700' : ''
+      }`}
+      title={clickable ? `Open ${assetKey}` : undefined}
+    >
+      {assetKey}
+    </span>
+  );
+}
+
+function CloudPrimitiveDetail({
+  category, primitive, projectId, onOpenAsset,
+}: {
+  category: PrimitiveCategory;
+  primitive: any;
+  projectId: string;
+  onOpenAsset?: (assetKey: string) => void;
+}) {
+  const rows: Array<{ label: string; value: any }> = [];
+  if (primitive.description) rows.push({ label: 'Description', value: primitive.description });
+
+  // Jobs had nothing beyond "targets N assets" -- the eyeball icon in
+  // Automation was basically a no-op. Real Insights metrics (credits,
+  // run health, duration) give this an actual reason to click through.
+  const { data: jobInsights, isLoading: jobInsightsLoading } = useQuery({
+    queryKey: ['job-insights-metrics', projectId, primitive.name],
+    queryFn: () => assetsApi.getJobInsightsMetrics(projectId, primitive.name, 30),
+    enabled: category === 'job' && !!primitive.name,
+    staleTime: 60_000,
+    retry: false,
+  });
+
+  if (category === 'schedule') {
+    if (primitive.cron) rows.push({ label: 'Cron schedule', value: <span className="font-mono">{primitive.cron}</span> });
+    if (primitive.pipeline_name) rows.push({ label: 'Job', value: primitive.pipeline_name });
+    if (primitive.status) rows.push({ label: 'Status', value: primitive.status });
+    if (primitive.repository) rows.push({ label: 'Code location', value: primitive.repository });
+  } else if (category === 'sensor') {
+    if (primitive.sensor_type) rows.push({ label: 'Sensor type', value: primitive.sensor_type });
+    if (primitive.status) rows.push({ label: 'Status', value: primitive.status });
+    if (primitive.repository) rows.push({ label: 'Code location', value: primitive.repository });
+    if (Array.isArray(primitive.linked_asset_keys) && primitive.linked_asset_keys.length > 0) {
+      rows.push({
+        label: `Targets ${primitive.linked_asset_keys.length} asset${primitive.linked_asset_keys.length === 1 ? '' : 's'}`,
+        value: (
+          <div className="flex flex-wrap gap-1 mt-1">
+            {primitive.linked_asset_keys.map((k: string) => (
+              <AssetKeyChip key={k} assetKey={k} onOpenAsset={onOpenAsset} />
+            ))}
+          </div>
+        ),
+      });
+    }
+  } else if (category === 'job') {
+    if (Array.isArray(primitive.asset_keys) && primitive.asset_keys.length > 0) {
+      rows.push({
+        label: `Targets ${primitive.asset_keys.length} asset${primitive.asset_keys.length === 1 ? '' : 's'}`,
+        value: (
+          <div className="flex flex-wrap gap-1 mt-1">
+            {primitive.asset_keys.map((k: string) => (
+              <AssetKeyChip key={k} assetKey={k} onOpenAsset={onOpenAsset} />
+            ))}
+          </div>
+        ),
+      });
+    }
+  } else if (category === 'asset_check') {
+    if (primitive.asset_key) rows.push({ label: 'Asset', value: <AssetKeyChip assetKey={primitive.asset_key} onOpenAsset={onOpenAsset} /> });
+    if (primitive.key) rows.push({ label: 'Check key', value: <span className="font-mono text-xs">{primitive.key}</span> });
+  } else if (category === 'freshness_policy') {
+    if (primitive.asset_key) rows.push({ label: 'Asset', value: <AssetKeyChip assetKey={primitive.asset_key} onOpenAsset={onOpenAsset} /> });
+    if (primitive.status) rows.push({ label: 'Status', value: primitive.status });
+    const p = primitive.policy;
+    if (p) {
+      rows.push({ label: 'Policy type', value: p.type === 'time_window' ? 'Time window' : 'Cron deadline' });
+      if (p.fail_window_seconds) rows.push({ label: 'Fails after', value: _formatDurationSeconds(p.fail_window_seconds) + ' stale' });
+      if (p.warn_window_seconds) rows.push({ label: 'Warns after', value: _formatDurationSeconds(p.warn_window_seconds) + ' stale' });
+      if (p.deadline_cron) rows.push({ label: 'Deadline cron', value: <span className="font-mono">{p.deadline_cron}</span> });
+      if (p.timezone) rows.push({ label: 'Timezone', value: p.timezone });
+    }
+  }
+
+  return (
+    <div className="p-6 max-w-2xl">
+      {rows.length === 0 ? (
+        <p className="text-sm text-gray-500 italic">No additional details available for this {category.replace('_', ' ')}.</p>
+      ) : (
+        <dl className="space-y-3">
+          {rows.map((r, i) => (
+            <div key={i}>
+              <dt className="text-[10px] uppercase tracking-wider text-gray-500 font-medium mb-0.5">{r.label}</dt>
+              <dd className="text-sm text-gray-800">{r.value}</dd>
+            </div>
+          ))}
+        </dl>
+      )}
+      {category === 'job' && (
+        <div className="mt-6">
+          <h4 className="text-[10px] uppercase tracking-wider text-gray-500 font-medium mb-2">
+            Insights — last 30 days
+          </h4>
+          {jobInsightsLoading ? (
+            <div className="p-6 text-center text-gray-400"><Loader2 className="w-4 h-4 mx-auto animate-spin" /></div>
+          ) : !jobInsights || jobInsights.metrics.length === 0 ? (
+            <p className="text-xs text-gray-400 italic">No Insights data for this job in the last 30 days.</p>
+          ) : (
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              {jobInsights.metrics.map((m) => <InsightMetricCard key={m.metric_name} metric={m} />)}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function _formatDurationSeconds(seconds: number): string {
+  const days = Math.floor(seconds / 86400);
+  const hours = Math.floor((seconds % 86400) / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const parts: string[] = [];
+  if (days) parts.push(`${days}d`);
+  if (hours) parts.push(`${hours}h`);
+  if (minutes && !days) parts.push(`${minutes}m`);
+  return parts.join(' ') || '0m';
 }

@@ -12,6 +12,7 @@ import ReactFlow, {
 } from 'reactflow';
 import 'reactflow/dist/style.css';
 import { projectsApi } from '@/services/api';
+import { classifyStatus } from '@/lib/status';
 import { Database, Table as TableIcon, Layers as LayersIcon, TestTube2, Camera } from 'lucide-react';
 
 interface DbtLineageViewProps {
@@ -194,7 +195,7 @@ const HANDLE_STYLE: React.CSSProperties = {
 function DbtGraphNode({ data }: { data: any }) {
   const accent = resourceAccent(data.resource_type || 'model');
   const Icon = accent.icon;
-  const status = data.model?.last_run_status?.toLowerCase();
+  const statusBucket = classifyStatus(data.model?.last_run_status);
   const isSelected = !!data.selected;
   // Selected → primary border + ring, matching AssetNode.
   // Status → a small colored dot in the top-right, not a full ring.
@@ -202,8 +203,10 @@ function DbtGraphNode({ data }: { data: any }) {
     ? 'border-2 border-primary ring-2 ring-primary/20'
     : 'border border-gray-200';
   const statusDot =
-    status === 'success' ? 'bg-emerald-500'
-    : (status === 'error' || status === 'fail' || status === 'runtime error') ? 'bg-rose-500'
+    statusBucket === 'success' ? 'bg-emerald-500'
+    : statusBucket === 'failure' ? 'bg-rose-500'
+    : statusBucket === 'warning' ? 'bg-amber-500'
+    : statusBucket === 'skipped' ? 'bg-slate-400'
     : '';
   return (
     <div

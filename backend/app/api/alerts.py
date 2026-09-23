@@ -22,6 +22,7 @@ Ref: https://docs.dagster.io/guides/observe/alerts/yaml-reference
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 from pathlib import Path
 from typing import Any, Literal
@@ -31,6 +32,15 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from ..services.project_service import project_service
+from ..services.dagster_plus_client import (
+    query as dagster_plus_query,
+    ALERT_POLICIES_QUERY,
+    ALERT_POLICIES_DOCUMENT_QUERY,
+    CREATE_OR_UPDATE_ALERT_POLICY_MUTATION,
+    DELETE_ALERT_POLICY_MUTATION,
+    SET_ALERT_POLICY_MUTE_MUTATION,
+    DagsterPlusError,
+)
 
 
 router = APIRouter(prefix="/projects", tags=["alerts"])
@@ -153,6 +163,60 @@ class AlertsFile(BaseModel):
     policies: list[AlertPolicy] = Field(default_factory=list)
 
 
+# ---------------------------------------------------------------------------
+# Cloud (Dagster+) alert policies -- fetched live via GraphQL, editable
+# through Dagster+'s own document-based mutation rather than round-tripped
+# through the local AlertPolicy model above.
+#
+# Deliberately a SEPARATE, simpler shape from AlertPolicy: Dagster+'s
+# alertPolicies query returns `eventTypes` (a list, e.g.
+# ["ASSET_HEALTH_WARNING", "ASSET_HEALTH_DEGRADED"]) and `alertTargets` (a
+# list of typed targets), neither of which maps cleanly onto the local YAML
+# schema's single `type` enum + one populated type-specific sub-object.
+# `document` carries the policy's full config in the exact shape
+# createOrUpdateAlertPolicyFromDocument expects back -- editing means
+# handing that same dict back, tweaked, rather than reconstructing it field
+# by field into a different model.
+# ---------------------------------------------------------------------------
+
+
+class CloudAlertPolicy(BaseModel):
+    id: str
+    name: str
+    description: str = ""
+    enabled: bool = True
+    event_types: list[str] = Field(default_factory=list)
+    notification_type: str | None = None   # humanized, e.g. "Slack: #hooli-alerts"
+    target_types: list[str] = Field(default_factory=list)
+    source: str | None = None
+    # Policies defined in the user's Python code (source="CODE") can't be
+    # edited or deleted here -- Dagster+ itself rejects that with
+    # CodeBackedAlertPolicyError. Surfaced so the UI can disable those
+    # actions instead of letting the user hit a confusing API error.
+    is_code_backed: bool = False
+    muted_until: float | None = None   # unix timestamp; None means not muted
+    document: dict[str, Any] | None = None
+
+
+class CloudAlertsFile(BaseModel):
+    path: str = "Dagster+"
+    policies: list[CloudAlertPolicy] = Field(default_factory=list)
+    is_cloud: bool = True
+
+
+class SaveCloudAlertRequest(BaseModel):
+    # The full per-policy document (see CloudAlertPolicy.document) -- for a
+    # new policy, the caller builds this from scratch; for an edit, it's
+    # the existing document with fields changed.
+    document: dict[str, Any]
+
+
+class MuteCloudAlertRequest(BaseModel):
+    # None/omitted un-mutes (Dagster+ semantics: muteForSeconds omitted or
+    # null clears any existing mute).
+    mute_for_seconds: int | None = None
+
+
 DEFAULT_ALERTS_FILENAME = "alert_policies.yaml"
 
 
@@ -264,22 +328,157 @@ def _policy_from_yaml_dict(d: dict) -> AlertPolicy:
     return AlertPolicy(**kwargs)
 
 
+def _humanize_typename(typename: str | None, suffix: str) -> str | None:
+    """"SlackAlertPolicyNotification" -> "Slack", "AssetSelectionViewTarget"
+    -> "Asset Selection View" -- strips the GraphQL type's boilerplate
+    suffix and CamelCase-splits whatever's left."""
+    if not typename:
+        return None
+    name = typename[: -len(suffix)] if typename.endswith(suffix) else typename
+    return re.sub(r"(?<!^)(?=[A-Z])", " ", name) or typename
+
+
+def _notification_summary(doc_policy: dict) -> str | None:
+    """Richer than the __typename-only humanizer above -- e.g. "Slack:
+    #hooli-alerts" instead of just "Slack", pulled from the document's own
+    nested notification_service (whichever single channel key is set)."""
+    svc = (doc_policy.get("notification_service") or {})
+    if "slack" in svc:
+        ch = (svc["slack"] or {}).get("slack_channel_name")
+        return f"Slack: #{ch}" if ch else "Slack"
+    if "email" in svc:
+        addrs = (svc["email"] or {}).get("email_addresses") or []
+        return f"Email: {', '.join(addrs)}" if addrs else "Email"
+    if "ms_teams" in svc or "microsoft_teams" in svc:
+        return "Microsoft Teams"
+    if "pagerduty" in svc:
+        return "PagerDuty"
+    if "webhook" in svc:
+        return "Webhook"
+    return None
+
+
+def _dagster_plus_creds(project) -> tuple[str, str, str, str]:
+    return (
+        project.dagster_plus_org or "",
+        project.dagster_plus_deployment or "",
+        project.dagster_plus_token or "",
+        project.dagster_plus_region,
+    )
+
+
+async def _list_cloud_alerts(project) -> CloudAlertsFile:
+    """Live Dagster+ alert policies for a connected cloud project. Fetches
+    both the structured list (has `id`, needed for mute/delete, and
+    `source`, needed to know which policies are code-backed and therefore
+    not editable here) and the per-policy document form (richer display
+    data, and the exact shape editing hands back)."""
+    org, deployment, token, region = _dagster_plus_creds(project)
+    try:
+        structured = await dagster_plus_query(org, deployment, token, ALERT_POLICIES_QUERY, region=region)
+        doc_result = await dagster_plus_query(org, deployment, token, ALERT_POLICIES_DOCUMENT_QUERY, region=region)
+    except DagsterPlusError as e:
+        raise HTTPException(status_code=502, detail=f"Failed to fetch alert policies from Dagster+: {e}")
+    doc_wrapper = doc_result.get("alertPoliciesAsDocumentOrError") or {}
+    if doc_wrapper.get("__typename") != "AlertPoliciesAsDocument":
+        raise HTTPException(status_code=502, detail=doc_wrapper.get("message") or "Dagster+ returned an unexpected response for alert policies.")
+    docs_by_name = {d.get("name"): d for d in (doc_wrapper.get("document") or {}).get("alert_policies", [])}
+
+    policies = []
+    for p in (structured.get("alertPolicies") or []):
+        name = p.get("name", "")
+        doc = docs_by_name.get(name)
+        policies.append(CloudAlertPolicy(
+            id=p.get("id", ""),
+            name=name,
+            description=p.get("description") or "",
+            enabled=bool(p.get("enabled", True)),
+            event_types=list(p.get("eventTypes") or []),
+            notification_type=(_notification_summary(doc) if doc else None) or _humanize_typename(
+                (p.get("notificationService") or {}).get("__typename"), "AlertPolicyNotification"
+            ),
+            target_types=[
+                _humanize_typename(t.get("__typename"), "Target") or "Unknown"
+                for t in (p.get("alertTargets") or [])
+            ],
+            source=p.get("source"),
+            is_code_backed=p.get("source") == "CODE",
+            muted_until=p.get("mutedUntil"),
+            document=doc,
+        ))
+    return CloudAlertsFile(policies=policies)
+
+
+async def _save_cloud_alert(project, document: dict) -> CloudAlertPolicy:
+    org, deployment, token, region = _dagster_plus_creds(project)
+    try:
+        data = await dagster_plus_query(
+            org, deployment, token, CREATE_OR_UPDATE_ALERT_POLICY_MUTATION, variables={"document": document},
+            region=region,
+        )
+    except DagsterPlusError as e:
+        raise HTTPException(status_code=502, detail=f"Failed to save alert policy: {e}")
+    result = data.get("createOrUpdateAlertPolicyFromDocument") or {}
+    typename = result.get("__typename")
+    if typename == "AlertPolicy":
+        return CloudAlertPolicy(id=result.get("id", ""), name=result.get("name", ""), document=document)
+    if typename == "CodeBackedAlertPolicyError":
+        raise HTTPException(status_code=400, detail=f"\"{result.get('alertPolicyName')}\" is defined in code and can't be edited here.")
+    raise HTTPException(status_code=400, detail=result.get("message") or "Failed to save alert policy.")
+
+
+async def _delete_cloud_alert(project, name: str) -> None:
+    org, deployment, token, region = _dagster_plus_creds(project)
+    try:
+        data = await dagster_plus_query(
+            org, deployment, token, DELETE_ALERT_POLICY_MUTATION, variables={"name": name},
+            region=region,
+        )
+    except DagsterPlusError as e:
+        raise HTTPException(status_code=502, detail=f"Failed to delete alert policy: {e}")
+    result = data.get("deleteAlertPolicy") or {}
+    typename = result.get("__typename")
+    if typename == "DeleteAlertPolicySuccess":
+        return
+    if typename == "CodeBackedAlertPolicyError":
+        raise HTTPException(status_code=400, detail=f"\"{result.get('alertPolicyName')}\" is defined in code and can't be deleted here.")
+    raise HTTPException(status_code=400, detail=result.get("message") or "Failed to delete alert policy.")
+
+
+async def _mute_cloud_alert(project, alert_id: str, mute_for_seconds: int | None) -> CloudAlertPolicy:
+    org, deployment, token, region = _dagster_plus_creds(project)
+    try:
+        data = await dagster_plus_query(
+            org, deployment, token, SET_ALERT_POLICY_MUTE_MUTATION,
+            variables={"id": alert_id, "seconds": mute_for_seconds},
+            region=region,
+        )
+    except DagsterPlusError as e:
+        raise HTTPException(status_code=502, detail=f"Failed to update mute state: {e}")
+    result = data.get("setAlertPolicyMuteUntil") or {}
+    if result.get("__typename") == "AlertPolicy":
+        return CloudAlertPolicy(id=result.get("id", ""), name="")
+    raise HTTPException(status_code=400, detail=result.get("message") or "Failed to update mute state.")
+
+
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
 
 
-@router.get("/{project_id}/alerts", response_model=AlertsFile)
+@router.get("/{project_id}/alerts", response_model=AlertsFile | CloudAlertsFile)
 async def list_alerts(project_id: str):
-    """Return all alert policies for the project. Reads whatever YAML
-    file exists (or reports the default path if none exists yet)."""
+    """Return all alert policies for the project. Local projects read
+    whatever YAML file exists (or reports the default path if none exists
+    yet); Dagster+ (cloud) projects fetch the live policy list via
+    GraphQL -- editable via the /alerts/cloud/* endpoints below rather than
+    this same PUT/DELETE pair, since Dagster+'s edit surface takes a
+    differently-shaped document than the local YAML model."""
     project = project_service.get_project(project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
     if getattr(project, "is_dagster_plus", False):
-        # For cloud projects we don't have a local dir; return empty
-        # + a pointer that the sync-from-cloud button should be used.
-        return AlertsFile(path="(pull from Dagster+ via Sync)", policies=[])
+        return await _list_cloud_alerts(project)
     project_dir = project_service._get_project_dir(project)
     path = _find_alerts_path(project_dir)
     try:
@@ -294,6 +493,43 @@ async def list_alerts(project_id: str):
     except ValueError:
         rel = str(path)
     return AlertsFile(path=rel, policies=policies)
+
+
+def _require_cloud_project(project_id: str):
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    if not getattr(project, "is_dagster_plus", False):
+        raise HTTPException(status_code=400, detail="This project isn't a Dagster+ connection.")
+    return project
+
+
+@router.post("/{project_id}/alerts/cloud", response_model=CloudAlertsFile)
+async def save_cloud_alert(project_id: str, request: SaveCloudAlertRequest):
+    """Create or update a Dagster+ alert policy from its document form
+    (see CloudAlertPolicy.document) -- Dagster+ itself decides create vs.
+    update from whether `name` in the document matches an existing policy.
+    Returns the full refreshed list so the UI stays in sync with whatever
+    Dagster+ actually stored (which may differ slightly from what was
+    sent, e.g. normalized fields)."""
+    project = _require_cloud_project(project_id)
+    await _save_cloud_alert(project, request.document)
+    return await _list_cloud_alerts(project)
+
+
+@router.delete("/{project_id}/alerts/cloud/{name}", response_model=CloudAlertsFile)
+async def delete_cloud_alert(project_id: str, name: str):
+    project = _require_cloud_project(project_id)
+    await _delete_cloud_alert(project, name)
+    return await _list_cloud_alerts(project)
+
+
+@router.post("/{project_id}/alerts/cloud/{alert_id}/mute", response_model=CloudAlertsFile)
+async def mute_cloud_alert(project_id: str, alert_id: str, request: MuteCloudAlertRequest):
+    """mute_for_seconds omitted/null un-mutes (Dagster+'s own semantics)."""
+    project = _require_cloud_project(project_id)
+    await _mute_cloud_alert(project, alert_id, request.mute_for_seconds)
+    return await _list_cloud_alerts(project)
 
 
 class SaveAlertsRequest(BaseModel):

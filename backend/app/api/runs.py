@@ -839,9 +839,10 @@ async def get_run_detail(project_id: str, run_id: str):
     # External URL to open in Dagster UI (as a fallback for logs)
     external_url = None
     if source == "cloud":
-        org = (project.dagster_plus_org or "").replace(".dagster.cloud", "").replace(".dagster.plus", "").split(".")[0]
+        from ..services.dagster_plus_client import org_base_url
+        base = org_base_url(project.dagster_plus_org or "", project.dagster_plus_region)
         dep = project.dagster_plus_deployment or ""
-        external_url = f"https://{org}.dagster.cloud/{dep}/runs/{run_id}" if dep else f"https://{org}.dagster.cloud/runs/{run_id}"
+        external_url = f"{base}/{dep}/runs/{run_id}" if dep else f"{base}/runs/{run_id}"
     else:
         external_url = f"http://localhost:3000/runs/{run_id}"
 

@@ -51,6 +51,20 @@ export interface MaterializeResponse {
   stderr: string;
 }
 
+/** The org's web UI base URL (not GraphQL) -- e.g. `https://hooli.dagster.cloud`
+ *  or `https://hooli.eu.dagster.cloud`. Mirrors the backend's
+ *  `dagster_plus_client.org_base_url` so every "Open in Dagster+" deep
+ *  link respects the project's region instead of assuming US. */
+export function dagsterPlusOrgBaseUrl(project: { dagster_plus_org?: string | null; dagster_plus_region?: string | null } | null | undefined): string {
+  const org = (project?.dagster_plus_org || '')
+    .replace(/^https?:\/\//, '')
+    .replace(/\.eu\.dagster\.cloud.*$/, '')
+    .replace(/\.dagster\.(cloud|plus).*$/, '')
+    .split('/')[0];
+  const suffix = (project?.dagster_plus_region || 'us').toLowerCase() === 'eu' ? 'eu.dagster.cloud' : 'dagster.cloud';
+  return `https://${org}.${suffix}`;
+}
+
 export const projectsApi = {
   list: async () => {
     // Use /projects/summary for faster list loading (only loads minimal metadata)
@@ -499,7 +513,7 @@ export const projectsApi = {
   // AiAssistantPanel component doesn't care which page it's on.
   // ------------ Dagster+ (cloud) integration ---------------------------
   testDagsterPlusConnection: async (
-    body: { name: string; description?: string; org: string; deployment: string; token: string; location?: string },
+    body: { name: string; description?: string; org: string; region?: 'us' | 'eu'; deployment: string; token: string; location?: string },
   ): Promise<{
     ok: boolean;
     version: string | null;
@@ -512,8 +526,8 @@ export const projectsApi = {
   },
 
   connectDagsterPlus: async (
-    body: { name: string; description?: string; org: string; deployment: string; token: string; location?: string },
-  ): Promise<{ id: string; name: string; is_dagster_plus: boolean; dagster_plus_org: string | null; dagster_plus_deployment: string | null }> => {
+    body: { name: string; description?: string; org: string; region?: 'us' | 'eu'; deployment: string; token: string; location?: string },
+  ): Promise<{ id: string; name: string; is_dagster_plus: boolean; dagster_plus_org: string | null; dagster_plus_region: string | null; dagster_plus_deployment: string | null }> => {
     const response = await api.post(`/projects/dagster-plus/connect`, body);
     return response.data as any;
   },
@@ -608,7 +622,7 @@ export const projectsApi = {
     projectId: string,
     surface: 'dbt' | 'ingestions' | 'automation' | 'pipelines',
     body: { question: string; history?: Array<{ role: 'user' | 'assistant'; content: string }> },
-  ): Promise<{ answer: string }> => {
+  ): Promise<{ answer: string; tools_used?: string[] }> => {
     const response = await api.post(`/projects/${projectId}/${surface}/ask`, body);
     return response.data as any;
   },
@@ -700,6 +714,7 @@ export const projectsApi = {
       value_label: string | null;
       expected_min: number | null;
       expected_max: number | null;
+      run_id: string | null;
     }>;
     numeric_series: Array<{ ts: string; value: number; expected_min?: number | null; expected_max?: number | null }>;
     numeric_label: string | null;
@@ -1701,6 +1716,23 @@ export interface EnvVarsResponse {
   variables: EnvVariable[];
 }
 
+// Mirrors Dagster+'s SecretScopesInput -- distinct from location_names,
+// which further restricts to specific code locations within whichever of
+// these scopes is chosen.
+export interface CloudSecretScopes {
+  full_deployment_scope: boolean;
+  all_branch_deployments_scope: boolean;
+  specific_branch_deployment_scope: string | null;
+  local_deployment_scope: boolean;
+}
+
+export interface CloudEnvVariable extends EnvVariable {
+  id: string;
+  scopes: CloudSecretScopes;
+  location_names: string[];
+  can_edit: boolean;
+}
+
 export const envVarsApi = {
   get: async (projectId: string): Promise<EnvVarsResponse> => {
     const response = await api.get<EnvVarsResponse>(`/env/${projectId}`);
@@ -1712,6 +1744,34 @@ export const envVarsApi = {
       `/env/${projectId}`,
       { variables }
     );
+    return response.data;
+  },
+
+  createCloudSecret: async (
+    projectId: string,
+    key: string,
+    value: string,
+    scopes: CloudSecretScopes,
+    locationNames: string[],
+  ): Promise<{ variables: CloudEnvVariable[] }> => {
+    const response = await api.post(`/env/${projectId}/cloud-secrets`, { key, value, scopes, location_names: locationNames });
+    return response.data;
+  },
+
+  updateCloudSecret: async (
+    projectId: string,
+    secretId: string,
+    key: string,
+    value: string,
+    scopes: CloudSecretScopes,
+    locationNames: string[],
+  ): Promise<{ variables: CloudEnvVariable[] }> => {
+    const response = await api.put(`/env/${projectId}/cloud-secrets/${encodeURIComponent(secretId)}`, { key, value, scopes, location_names: locationNames });
+    return response.data;
+  },
+
+  deleteCloudSecret: async (projectId: string, secretId: string): Promise<{ variables: CloudEnvVariable[] }> => {
+    const response = await api.delete(`/env/${projectId}/cloud-secrets/${encodeURIComponent(secretId)}`);
     return response.data;
   },
 };
@@ -1740,7 +1800,14 @@ export interface PipelineListItem {
   id: string;
   name: string;
   description: string;
-  file: string;
+  file?: string;
+  // Only present for Dagster+ (cloud) jobs -- needed to launch one (a
+  // bare job name doesn't uniquely identify a job across code locations
+  // the way it does locally) and to show where it lives.
+  location_name?: string;
+  repository_name?: string;
+  schedules?: string[];
+  sensors?: string[];
 }
 
 export interface PipelinesListResponse {
@@ -1807,10 +1874,35 @@ export interface AlertsFile {
   policies: AlertPolicy[];
 }
 
+// Dagster+ (cloud) alert policies, fetched + edited live -- a deliberately
+// simpler shape than AlertPolicy above (see the backend's CloudAlertsFile
+// docstring for why it isn't forced into that one). `document` is the raw
+// per-policy config in the exact shape Dagster+'s save mutation expects
+// back -- editing means handing this same object back, tweaked.
+export interface CloudAlertPolicy {
+  id: string;
+  name: string;
+  description?: string;
+  enabled: boolean;
+  event_types: string[];
+  notification_type: string | null;
+  target_types: string[];
+  source?: string | null;
+  is_code_backed: boolean;
+  muted_until: number | null;
+  document: Record<string, any> | null;
+}
+
+export interface CloudAlertsFile {
+  path: string;
+  policies: CloudAlertPolicy[];
+  is_cloud: true;
+}
+
 export const alertsApi = {
-  list: async (projectId: string): Promise<AlertsFile> => {
+  list: async (projectId: string): Promise<AlertsFile | CloudAlertsFile> => {
     const r = await api.get(`/projects/${projectId}/alerts`);
-    return r.data as AlertsFile;
+    return r.data as AlertsFile | CloudAlertsFile;
   },
   save: async (projectId: string, policies: AlertPolicy[]): Promise<AlertsFile> => {
     const r = await api.put(`/projects/${projectId}/alerts`, { policies });
@@ -1831,6 +1923,18 @@ export const alertsApi = {
   syncFromCloud: async (projectId: string): Promise<AlertsFile> => {
     const r = await api.post(`/projects/${projectId}/alerts/sync-from-cloud`);
     return r.data as AlertsFile;
+  },
+  saveCloud: async (projectId: string, document: Record<string, any>): Promise<CloudAlertsFile> => {
+    const r = await api.post(`/projects/${projectId}/alerts/cloud`, { document });
+    return r.data as CloudAlertsFile;
+  },
+  removeCloud: async (projectId: string, name: string): Promise<CloudAlertsFile> => {
+    const r = await api.delete(`/projects/${projectId}/alerts/cloud/${encodeURIComponent(name)}`);
+    return r.data as CloudAlertsFile;
+  },
+  muteCloud: async (projectId: string, alertId: string, muteForSeconds: number | null): Promise<CloudAlertsFile> => {
+    const r = await api.post(`/projects/${projectId}/alerts/cloud/${encodeURIComponent(alertId)}/mute`, { mute_for_seconds: muteForSeconds });
+    return r.data as CloudAlertsFile;
   },
 };
 
@@ -1995,11 +2099,16 @@ export const pipelinesApi = {
     projectId: string,
     jobName: string,
     config?: Record<string, any>,
-    tags?: Record<string, string>
+    tags?: Record<string, string>,
+    // Only meaningful for Dagster+ (cloud) jobs -- see PipelineItem's
+    // location_name/repository_name, which a cloud job list result carries
+    // and a local one doesn't.
+    locationName?: string,
+    repositoryName?: string,
   ): Promise<LaunchJobResponse> => {
     const response = await api.post<LaunchJobResponse>(
       `/pipelines/${projectId}/${jobName}/launch`,
-      { config, tags }
+      { config, tags, location_name: locationName, repository_name: repositoryName }
     );
     return response.data;
   },
@@ -2253,7 +2362,164 @@ export const assetsApi = {
     );
     return response.data;
   },
+
+  /** Manually mark/unmark an asset as an ingestion source — overrides the
+   *  Ingestions tab's automatic heuristic, which has no way to notice
+   *  e.g. a plain Python asset that calls a REST API and writes to
+   *  Snowflake. Works for local and cloud projects alike. */
+  tagAsIngestion: async (projectId: string, assetKey: string): Promise<{ manual_ingestion_asset_keys: string[] }> => {
+    const response = await api.post(`/assets/${projectId}/${encodeURIComponent(assetKey)}/tag-ingestion`);
+    return response.data as any;
+  },
+
+  untagAsIngestion: async (projectId: string, assetKey: string): Promise<{ manual_ingestion_asset_keys: string[] }> => {
+    const response = await api.delete(`/assets/${projectId}/${encodeURIComponent(assetKey)}/tag-ingestion`);
+    return response.data as any;
+  },
+
+  /** Live Dagster+ Insights usage/cost/reliability metrics for one asset,
+   *  fetched directly via MCP tools (no LLM involved) -- there's no
+   *  GraphQL equivalent for this. Cloud projects only. */
+  getInsightsMetrics: async (projectId: string, assetKey: string, days: number = 30): Promise<AssetInsightsResponse> => {
+    const response = await api.get<AssetInsightsResponse>(
+      `/assets/${projectId}/${encodeURIComponent(assetKey)}/insights-metrics`,
+      { params: { days } },
+    );
+    return response.data;
+  },
+
+  /** Deployment-wide Insights metrics -- the top-level view before
+   *  drilling into a specific asset. Direct MCP call, no LLM. */
+  getDeploymentInsights: async (projectId: string, days: number = 30): Promise<DeploymentInsightsResponse> => {
+    const response = await api.get<DeploymentInsightsResponse>(
+      `/assets/${projectId}/insights/deployment`,
+      { params: { days } },
+    );
+    return response.data;
+  },
+
+  /** Per-asset breakdown for one metric across every asset, sorted
+   *  highest first -- powers the "top assets by ..." drill-down list. */
+  getInsightsBreakdown: async (projectId: string, metricName: string, days: number = 30): Promise<AssetBreakdownResponse> => {
+    const response = await api.get<AssetBreakdownResponse>(
+      `/assets/${projectId}/insights/breakdown`,
+      { params: { metric_name: metricName, days } },
+    );
+    return response.data;
+  },
+
+  /** Per-job breakdown for one metric across every job in the
+   *  deployment, sorted highest first -- powers the "top jobs by ..."
+   *  cards. */
+  getJobInsightsBreakdown: async (projectId: string, metricName: string, days: number = 30): Promise<JobBreakdownResponse> => {
+    const response = await api.get<JobBreakdownResponse>(
+      `/assets/${projectId}/insights/job-breakdown`,
+      { params: { metric_name: metricName, days } },
+    );
+    return response.data;
+  },
+
+  /** Live Dagster+ Insights metrics for a single job over a trailing
+   *  window -- the job-level counterpart to getInsightsMetrics. */
+  getJobInsightsMetrics: async (projectId: string, jobName: string, days: number = 30): Promise<JobInsightsResponse> => {
+    const response = await api.get<JobInsightsResponse>(
+      `/assets/${projectId}/insights/job-metrics`,
+      { params: { job_name: jobName, days } },
+    );
+    return response.data;
+  },
 };
+
+export interface JobInsightsResponse {
+  job_name: string;
+  window_days: number;
+  metrics: AssetInsightMetric[];
+}
+
+export interface AssetInsightMetric {
+  metric_name: string;
+  label: string;
+  unit: 'count' | 'credits' | 'ms' | 'percent' | string;
+  aggregate_value: number | null;
+  previous_aggregate_value: number | null;
+  timestamps: number[];
+  values: number[];
+  // Daily values for the prior period, aligned by day-offset (not
+  // calendar date) so it overlays cleanly against `values` on one chart.
+  previous_values: number[];
+}
+
+export interface AssetInsightsResponse {
+  asset_key: string;
+  window_days: number;
+  metrics: AssetInsightMetric[];
+}
+
+export interface DeploymentInsightsResponse {
+  window_days: number;
+  metrics: AssetInsightMetric[];
+}
+
+export interface AssetBreakdownRow {
+  asset_key: string;
+  value: number;
+}
+
+export interface AssetBreakdownResponse {
+  metric_name: string;
+  label: string;
+  unit: string;
+  window_days: number;
+  rows: AssetBreakdownRow[];
+}
+
+/** Same curated metric catalog as the backend's _ASSET_INSIGHT_METRICS --
+ *  kept in sync by hand since it's small and stable; powers the
+ *  "top assets by ..." cards on the deployment-level Insights page. */
+export const INSIGHTS_BREAKDOWN_METRICS: Array<{ name: string; label: string }> = [
+  { name: '__dagster_dagster_credits', label: 'Dagster Credits' },
+  { name: '__dagster_materializations', label: 'Materializations' },
+  { name: '__dagster_execution_time_ms', label: 'Execution Time' },
+  { name: '__dagster_asset_success_rate', label: 'Success Rate' },
+  { name: '__dagster_run_failures', label: 'Run Failures' },
+  { name: '__dagster_observations', label: 'Observations' },
+  { name: '__dagster_failed_to_materialize', label: 'Failed to Materialize' },
+  { name: '__dagster_step_retries', label: 'Step Retries' },
+  { name: '__dagster_asset_check_errors', label: 'Check Errors' },
+  { name: 'row_count', label: 'Row Count' },
+  { name: '__dagster_asset_check_success_rate', label: 'Check Success Rate' },
+  { name: '__dagster_freshness_pass_rate', label: 'Freshness Pass Rate' },
+];
+
+export interface JobBreakdownRow {
+  job_name: string;
+  code_location: string | null;
+  value: number;
+}
+
+export interface JobBreakdownResponse {
+  metric_name: string;
+  label: string;
+  unit: string;
+  window_days: number;
+  rows: JobBreakdownRow[];
+}
+
+/** Same catalog as the backend's _JOB_BREAKDOWN_METRICS -- job-flavored
+ *  (run health/cost), reusing deployment-level metric labels since
+ *  asset-only concepts (freshness, observations) don't apply to a job. */
+export const INSIGHTS_JOB_BREAKDOWN_METRICS: Array<{ name: string; label: string }> = [
+  { name: '__dagster_dagster_credits', label: 'Dagster Credits' },
+  { name: '__dagster_materializations', label: 'Materializations' },
+  { name: '__dagster_run_successes', label: 'Run Successes' },
+  { name: '__dagster_run_failures', label: 'Run Failures' },
+  { name: '__dagster_run_duration_ms', label: 'Run Duration' },
+  { name: '__dagster_step_failures', label: 'Step Failures' },
+  { name: '__dagster_failed_to_materialize', label: 'Failed to Materialize' },
+  { name: '__dagster_run_queue_time_ms', label: 'Run Queue Time' },
+  { name: '__dagster_observations', label: 'Observations' },
+  { name: 'row_count', label: 'Row Count' },
+];
 
 export interface IngestionEvent {
   ts: string;                          // ISO-8601 UTC
@@ -2264,6 +2530,10 @@ export interface IngestionEvent {
   bytes?: number;
   duration_ms?: number;
   status: 'success' | 'failure' | 'running';
+  /** The Dagster run that produced this event -- only populated for
+   *  Dagster+ (cloud) materializations; local materializes aren't
+   *  always wrapped in a full run. */
+  run_id?: string;
 }
 
 export interface AiProvidersStatus {

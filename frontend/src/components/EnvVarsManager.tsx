@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo, useRef } from 'react';
-import { Plus, Trash2, Eye, EyeOff, Save, RefreshCw, Cloud, HardDrive, LogIn, Loader2 } from 'lucide-react';
-import { envVarsApi, type EnvVariable , API_BASE } from '@/services/api';
-import { notify } from './Notifications';
+import { Plus, Trash2, Eye, EyeOff, Save, RefreshCw, Cloud, HardDrive, LogIn, Loader2, Edit3, X } from 'lucide-react';
+import { envVarsApi, type EnvVariable, type CloudEnvVariable, type CloudSecretScopes, API_BASE } from '@/services/api';
+import { notify, confirmDialog } from './Notifications';
 import { useUnsavedChangesStore } from '@/hooks/useUnsavedChanges';
 
 interface EnvVarsManagerProps {
@@ -22,6 +22,16 @@ function scopeKey(scope: Scope): string {
 function scopeLabel(scope: Scope): string {
   if (scope.kind === 'local') return 'Local (.env)';
   return scope.deployment;
+}
+
+function cloudScopeSummary(variable: CloudEnvVariable): string {
+  const parts: string[] = [];
+  if (variable.scopes.full_deployment_scope) parts.push('Full deployment');
+  if (variable.scopes.local_deployment_scope) parts.push('Local');
+  if (variable.scopes.all_branch_deployments_scope) parts.push('All branches');
+  if (variable.scopes.specific_branch_deployment_scope) parts.push(`Branch: ${variable.scopes.specific_branch_deployment_scope}`);
+  const scopeText = parts.length > 0 ? parts.join(', ') : 'Unscoped';
+  return variable.location_names.length > 0 ? `${scopeText} · ${variable.location_names.join(', ')}` : scopeText;
 }
 
 interface ScopeState {
@@ -49,7 +59,23 @@ export function EnvVarsManager({ projectId }: EnvVarsManagerProps) {
   const [availableDeployments, setAvailableDeployments] = useState<string[]>([]);
   const [availableCodeLocations, setAvailableCodeLocations] = useState<string[]>([]);
   const [dagsterPlusAuthed, setDagsterPlusAuthed] = useState<boolean>(false);
+  // True for a genuine Dagster+ connection (dedicated per-secret create/
+  // update/delete endpoints usable); false for a local project that merely
+  // has `dg plus login` / cloud sync configured, which keeps using the
+  // older bulk dg-CLI push/pull flow -- see the backend's cloud_native note.
+  const [cloudNative, setCloudNative] = useState<boolean>(false);
   const [signingIn, setSigningIn] = useState(false);
+  // Dagster+ secrets are each their own entity with their own scope (see
+  // CloudSecretScopes) -- they don't fit the "collect edits, bulk Save"
+  // flow the table below uses for local .env / the legacy dg-CLI push
+  // path, so cloud scopes get their own dedicated create/edit modal
+  // instead of inline-editable rows.
+  const [cloudSecretEditor, setCloudSecretEditor] = useState<
+    | { mode: 'create' }
+    | { mode: 'edit'; variable: CloudEnvVariable }
+    | null
+  >(null);
+  const [cloudSecretSaving, setCloudSecretSaving] = useState(false);
   const unmountedRef = useRef(false);
   useEffect(() => () => { unmountedRef.current = true; }, []);
 
@@ -61,6 +87,7 @@ export function EnvVarsManager({ projectId }: EnvVarsManagerProps) {
 
   const activeKey = scopeKey(activeScope);
   const activeState = scopeData[activeKey] ?? emptyScopeState;
+  const isCloudScope = activeScope.kind === 'plus' && cloudNative;
 
   const updateActive = (patch: Partial<ScopeState>) => {
     setScopeData((prev) => ({
@@ -81,6 +108,7 @@ export function EnvVarsManager({ projectId }: EnvVarsManagerProps) {
         setAvailableDeployments(data.deployments || []);
         setAvailableCodeLocations(data.code_locations || []);
         setDagsterPlusAuthed(!!data.authenticated);
+        setCloudNative(!!data.cloud_native);
       } catch {
         // ignore
       }
@@ -89,6 +117,18 @@ export function EnvVarsManager({ projectId }: EnvVarsManagerProps) {
       cancelled = true;
     };
   }, [projectId]);
+
+  // The "Local" tab is always shown first (see `tabs` below), but a pure
+  // Dagster+ connection (no local repo at all) has no .env to edit -- its
+  // load fails, same as it always has. Once we know it failed AND there's
+  // a real Dagster+ deployment to show instead, switch there automatically
+  // rather than leaving the user parked on a tab that can only ever error.
+  useEffect(() => {
+    if (activeScope.kind !== 'local') return;
+    if (!scopeData['local']?.error) return;
+    if (availableDeployments.length === 0) return;
+    setActiveScope({ kind: 'plus', deployment: availableDeployments[0] });
+  }, [scopeData, availableDeployments, activeScope.kind]);
 
   // Runs `dg plus login` for the user instead of sending them to a terminal.
   // It opens a browser and blocks server-side until the OAuth flow
@@ -262,6 +302,40 @@ export function EnvVarsManager({ projectId }: EnvVarsManagerProps) {
     }
   };
 
+  const handleCloudSecretSave = async (key: string, value: string, scopes: CloudSecretScopes, locationNames: string[]) => {
+    setCloudSecretSaving(true);
+    try {
+      const result = cloudSecretEditor?.mode === 'edit'
+        ? await envVarsApi.updateCloudSecret(projectId, cloudSecretEditor.variable.id, key, value, scopes, locationNames)
+        : await envVarsApi.createCloudSecret(projectId, key, value, scopes, locationNames);
+      updateActive({ variables: result.variables });
+      // Re-mask sensitive values by default, same as the initial load does.
+      setMaskedValues((prev) => {
+        const next = new Set(prev);
+        result.variables.filter((v) => v.is_sensitive).forEach((v) => next.add(`${activeKey}:${v.key}`));
+        return next;
+      });
+      setCloudSecretEditor(null);
+      notify.success(`Saved "${key}".`);
+    } catch (err: any) {
+      notify.error(err?.response?.data?.detail || err?.message || 'Failed to save secret.');
+    } finally {
+      setCloudSecretSaving(false);
+    }
+  };
+
+  const handleCloudSecretDelete = async (variable: CloudEnvVariable) => {
+    const ok = await confirmDialog(`Delete "${variable.key}" from Dagster+? This deletes it directly -- there's no undo.`, { title: 'Delete secret', destructive: true });
+    if (!ok) return;
+    try {
+      const result = await envVarsApi.deleteCloudSecret(projectId, variable.id);
+      updateActive({ variables: result.variables });
+      notify.success(`Deleted "${variable.key}".`);
+    } catch (err: any) {
+      notify.error(err?.response?.data?.detail || err?.message || 'Failed to delete secret.');
+    }
+  };
+
   // Tabs to render: Local + one per deployment.
   const tabs: Scope[] = useMemo(() => {
     const t: Scope[] = [{ kind: 'local' }];
@@ -353,25 +427,31 @@ export function EnvVarsManager({ projectId }: EnvVarsManagerProps) {
             <RefreshCw className={`w-4 h-4 ${activeState.loading ? 'animate-spin' : ''}`} />
             <span>Reload</span>
           </button>
-          <button
-            onClick={handleSave}
-            disabled={activeState.saving || !activeState.hasChanges || activeState.loading}
-            className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium bg-primary text-primary-foreground rounded-md hover:bg-accent disabled:opacity-50 disabled:cursor-not-allowed"
-            title={
-              activeScope.kind === 'local'
-                ? 'Save to .env file'
-                : `Push to Dagster+ (${activeScope.deployment})`
-            }
-          >
-            <Save className="w-4 h-4" />
-            <span>
-              {activeState.saving
-                ? 'Saving…'
-                : activeScope.kind === 'local'
-                ? 'Save'
-                : 'Push to Dagster+'}
-            </span>
-          </button>
+          {/* Cloud-native secrets save individually through the New/Edit
+              modal below (each is its own mutation with its own scope) --
+              there's nothing to bulk-push here, unlike local .env or the
+              legacy dg-CLI cloud-sync path. */}
+          {!isCloudScope && (
+            <button
+              onClick={handleSave}
+              disabled={activeState.saving || !activeState.hasChanges || activeState.loading}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium bg-primary text-primary-foreground rounded-md hover:bg-accent disabled:opacity-50 disabled:cursor-not-allowed"
+              title={
+                activeScope.kind === 'local'
+                  ? 'Save to .env file'
+                  : `Push to Dagster+ (${activeScope.deployment})`
+              }
+            >
+              <Save className="w-4 h-4" />
+              <span>
+                {activeState.saving
+                  ? 'Saving…'
+                  : activeScope.kind === 'local'
+                  ? 'Save'
+                  : 'Push to Dagster+'}
+              </span>
+            </button>
+          )}
         </div>
       </div>
 
@@ -388,6 +468,71 @@ export function EnvVarsManager({ projectId }: EnvVarsManagerProps) {
           <div className="flex items-center justify-center h-64 text-gray-500 text-sm">
             <RefreshCw className="w-5 h-5 mr-2 animate-spin" />
             Loading…
+          </div>
+        ) : isCloudScope ? (
+          <div className="bg-white rounded-lg border border-gray-200">
+            <div className="grid grid-cols-12 gap-4 px-4 py-3 bg-gray-50 border-b border-gray-200 font-medium text-xs text-gray-700 uppercase tracking-wider">
+              <div className="col-span-3">Variable Name</div>
+              <div className="col-span-4">Value</div>
+              <div className="col-span-3">Scope</div>
+              <div className="col-span-2 text-right">Actions</div>
+            </div>
+            {activeState.variables.length === 0 ? (
+              <div className="p-8 text-center text-gray-500">
+                <p>No secrets in this deployment.</p>
+                <p className="text-sm mt-2">Click "New secret" to create one.</p>
+              </div>
+            ) : (
+              <div className="divide-y divide-gray-200">
+                {(activeState.variables as CloudEnvVariable[]).map((variable) => (
+                  <div key={variable.id} className="grid grid-cols-12 gap-4 px-4 py-3 items-center">
+                    <div className="col-span-3 font-mono text-sm text-gray-900 truncate">{variable.key}</div>
+                    <div className="col-span-4">
+                      <div className="flex items-center gap-2">
+                        <span className="font-mono text-sm text-gray-700 truncate">
+                          {maskedValues.has(`${activeKey}:${variable.key}`) ? '••••••••' : variable.value}
+                        </span>
+                        <button
+                          onClick={() => toggleMask(variable.key)}
+                          className="text-gray-400 hover:text-gray-600 flex-shrink-0"
+                          title={maskedValues.has(`${activeKey}:${variable.key}`) ? 'Show value' : 'Hide value'}
+                        >
+                          {maskedValues.has(`${activeKey}:${variable.key}`) ? <Eye className="w-3.5 h-3.5" /> : <EyeOff className="w-3.5 h-3.5" />}
+                        </button>
+                      </div>
+                    </div>
+                    <div className="col-span-3 text-xs text-gray-500">{cloudScopeSummary(variable)}</div>
+                    <div className="col-span-2 flex items-center justify-end space-x-1">
+                      <button
+                        onClick={() => variable.can_edit && setCloudSecretEditor({ mode: 'edit', variable })}
+                        disabled={!variable.can_edit}
+                        className="p-2 text-blue-600 hover:bg-blue-50 rounded-md transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+                        title={variable.can_edit ? 'Edit' : "No permission to edit"}
+                      >
+                        <Edit3 className="w-4 h-4" />
+                      </button>
+                      <button
+                        onClick={() => variable.can_edit && handleCloudSecretDelete(variable)}
+                        disabled={!variable.can_edit}
+                        className="p-2 text-red-600 hover:bg-red-50 rounded-md transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+                        title={variable.can_edit ? 'Delete' : "No permission to delete"}
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+            <div className="px-4 py-2 bg-gray-50 border-t border-gray-200">
+              <button
+                onClick={() => setCloudSecretEditor({ mode: 'create' })}
+                className="flex items-center gap-1.5 px-2.5 py-1.5 text-sm text-primary hover:bg-primary/5 rounded-md transition-colors"
+              >
+                <Plus className="w-4 h-4" />
+                <span>New secret</span>
+              </button>
+            </div>
           </div>
         ) : (
           <div className="bg-white rounded-lg border border-gray-200">
@@ -506,6 +651,136 @@ export function EnvVarsManager({ projectId }: EnvVarsManagerProps) {
               </a>
             </li>
           </ul>
+        </div>
+      </div>
+
+      {cloudSecretEditor && (
+        <CloudSecretEditorModal
+          initial={cloudSecretEditor.mode === 'edit' ? cloudSecretEditor.variable : null}
+          saving={cloudSecretSaving}
+          onCancel={() => setCloudSecretEditor(null)}
+          onSave={handleCloudSecretSave}
+        />
+      )}
+    </div>
+  );
+}
+
+function CloudSecretEditorModal({
+  initial,
+  saving,
+  onCancel,
+  onSave,
+}: {
+  initial: CloudEnvVariable | null;
+  saving: boolean;
+  onCancel: () => void;
+  onSave: (key: string, value: string, scopes: CloudSecretScopes, locationNames: string[]) => void;
+}) {
+  const [key, setKey] = useState(initial?.key ?? '');
+  const [value, setValue] = useState(initial?.value ?? '');
+  const [fullDeployment, setFullDeployment] = useState(initial?.scopes.full_deployment_scope ?? true);
+  const [allBranches, setAllBranches] = useState(initial?.scopes.all_branch_deployments_scope ?? false);
+  const [localDeployment, setLocalDeployment] = useState(initial?.scopes.local_deployment_scope ?? false);
+  const [specificBranch, setSpecificBranch] = useState(initial?.scopes.specific_branch_deployment_scope ?? '');
+  const [locations, setLocations] = useState(initial?.location_names.join(', ') ?? '');
+
+  const handleSubmit = () => {
+    if (!key.trim()) {
+      notify.error('Name is required.');
+      return;
+    }
+    if (!fullDeployment && !allBranches && !localDeployment && !specificBranch.trim()) {
+      notify.error('Pick at least one scope.');
+      return;
+    }
+    onSave(
+      key.trim(),
+      value,
+      {
+        full_deployment_scope: fullDeployment,
+        all_branch_deployments_scope: allBranches,
+        local_deployment_scope: localDeployment,
+        specific_branch_deployment_scope: specificBranch.trim() || null,
+      },
+      locations.split(',').map((l) => l.trim()).filter(Boolean),
+    );
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black/40 z-[110] flex items-center justify-center p-4" onClick={() => !saving && onCancel()}>
+      <div className="bg-white rounded-lg shadow-xl w-full max-w-md" onClick={(e) => e.stopPropagation()}>
+        <div className="px-6 py-4 border-b border-gray-200 flex items-center justify-between">
+          <h3 className="text-base font-semibold text-gray-900">{initial ? 'Edit secret' : 'New secret'}</h3>
+          <button onClick={onCancel} className="text-gray-400 hover:text-gray-600"><X className="w-4 h-4" /></button>
+        </div>
+        <div className="px-6 py-4 space-y-4">
+          <div>
+            <label className="block text-xs font-medium text-gray-700 mb-1">Name</label>
+            <input
+              type="text"
+              value={key}
+              onChange={(e) => setKey(e.target.value)}
+              disabled={!!initial}
+              placeholder="VARIABLE_NAME"
+              className="w-full px-3 py-2 border border-gray-300 rounded-md font-mono text-sm disabled:bg-gray-50 disabled:text-gray-500"
+            />
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-gray-700 mb-1">Value</label>
+            <input
+              type="text"
+              value={value}
+              onChange={(e) => setValue(e.target.value)}
+              className="w-full px-3 py-2 border border-gray-300 rounded-md font-mono text-sm"
+            />
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-gray-700 mb-1.5">Scope</label>
+            <div className="space-y-1.5">
+              <label className="flex items-center gap-2 text-sm text-gray-700">
+                <input type="checkbox" checked={fullDeployment} onChange={(e) => setFullDeployment(e.target.checked)} />
+                Full deployment
+              </label>
+              <label className="flex items-center gap-2 text-sm text-gray-700">
+                <input type="checkbox" checked={localDeployment} onChange={(e) => setLocalDeployment(e.target.checked)} />
+                Local deployments
+              </label>
+              <label className="flex items-center gap-2 text-sm text-gray-700">
+                <input type="checkbox" checked={allBranches} onChange={(e) => setAllBranches(e.target.checked)} />
+                All branch deployments
+              </label>
+              <div className="flex items-center gap-2">
+                <span className="text-sm text-gray-700 whitespace-nowrap">Specific branch:</span>
+                <input
+                  type="text"
+                  value={specificBranch}
+                  onChange={(e) => setSpecificBranch(e.target.value)}
+                  placeholder="(none)"
+                  className="flex-1 px-2 py-1 border border-gray-300 rounded text-sm"
+                />
+              </div>
+            </div>
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-gray-700 mb-1">Code locations (optional, comma-separated -- blank applies to all)</label>
+            <input
+              type="text"
+              value={locations}
+              onChange={(e) => setLocations(e.target.value)}
+              placeholder="my_code_location, other_location"
+              className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm"
+            />
+          </div>
+        </div>
+        <div className="px-6 py-3 border-t border-gray-200 flex justify-end gap-2">
+          <button onClick={onCancel} disabled={saving} className="px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-100 rounded-md disabled:opacity-50">
+            Cancel
+          </button>
+          <button onClick={handleSubmit} disabled={saving} className="px-4 py-2 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-md disabled:opacity-50 flex items-center gap-1.5">
+            {saving && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+            Save
+          </button>
         </div>
       </div>
     </div>

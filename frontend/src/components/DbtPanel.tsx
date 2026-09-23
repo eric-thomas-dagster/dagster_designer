@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useState } from 'react';
-import { FileCode, Play, Loader2, CheckCircle2, XCircle, AlertTriangle, TestTube2, Book, FileText, Search, Layers, GitCommit, GitCompare, Clock, Eye, DollarSign, X, Network, Filter, Share2, ExternalLink, Sparkles, Plus, Trash2, Sigma } from 'lucide-react';
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
+import { useQuery } from '@tanstack/react-query';
+import { FileCode, Play, Loader2, CheckCircle2, XCircle, AlertTriangle, TestTube2, Book, FileText, Search, Layers, GitCommit, GitCompare, Clock, Eye, DollarSign, X, Network, Filter, Share2, ExternalLink, Sparkles, Plus, Trash2, Sigma, Copy } from 'lucide-react';
 import { projectsApi } from '@/services/api';
+import { classifyStatus } from '@/lib/status';
 import { useProjectStore } from '@/hooks/useProject';
 import { notify } from './Notifications';
+import { SimpleMarkdown } from './SimpleMarkdown';
 import { AddDbtModelDialog } from './AddDbtModelDialog';
 import { GitCommitDialog } from './GitCommitDialog';
 import { SqlDiffDialog } from './SqlDiffDialog';
@@ -41,9 +42,6 @@ export function DbtPanel({ onOpenFile }: DbtPanelProps) {
   // hide the "New model" / "Commit" / "Scaffold" affordances that
   // would otherwise 500 with a .venv-not-found error.
   const isCloudProject = !!(currentProject && (currentProject as any).is_dagster_plus);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [data, setData] = useState<Awaited<ReturnType<typeof projectsApi.listDbtModels>> | null>(null);
 
   const [search, setSearch] = useState('');
   const [selectedUniqueId, setSelectedUniqueId] = useState<string | null>(null);
@@ -94,23 +92,36 @@ export function DbtPanel({ onOpenFile }: DbtPanelProps) {
   // Cost data — parsed from run_results.json's adapter_response.
   const [cost, setCost] = useState<Awaited<ReturnType<typeof projectsApi.getDbtCost>> | null>(null);
 
-  const refresh = async (path?: string) => {
-    if (!currentProject) return;
-    setLoading(true);
-    setError(null);
-    try {
-      const r = await projectsApi.listDbtModels(currentProject.id, (path ?? selectedDbtPath) || undefined);
-      setData(r);
-      if (r.dbt_project_relative_path && !selectedDbtPath) {
-        setSelectedDbtPath(r.dbt_project_relative_path);
-      }
-    } catch (e: any) {
-      const msg = e?.response?.data?.detail || e?.message || String(e);
-      setError(msg);
-    } finally {
-      setLoading(false);
+  // Cached by [project, dbt path] so switching back to this tab (Radix
+  // Tabs.Content unmounts inactive tabs) shows the last-known model list
+  // instantly instead of a blank "populating" state every single time --
+  // this used to be plain useState, which starts fresh (and re-fetches
+  // from scratch) on every remount. staleTime keeps quick back-and-forth
+  // navigation from re-hitting the backend at all; a background refetch
+  // still keeps it current past that window.
+  const {
+    data,
+    isLoading: loading,
+    error: queryError,
+    refetch,
+  } = useQuery({
+    queryKey: ['dbt-models', currentProject?.id, selectedDbtPath],
+    queryFn: () => projectsApi.listDbtModels(currentProject!.id, selectedDbtPath || undefined),
+    enabled: !!currentProject,
+    staleTime: 30_000,
+  });
+  const error = queryError
+    ? (queryError as any)?.response?.data?.detail || (queryError as any)?.message || String(queryError)
+    : null;
+  const refresh = async () => { await refetch(); };
+
+  // Populate the path picker's default once, from the first successful
+  // fetch (mirrors what the old inline refresh() did after each call).
+  useEffect(() => {
+    if (data?.dbt_project_relative_path && !selectedDbtPath) {
+      setSelectedDbtPath(data.dbt_project_relative_path);
     }
-  };
+  }, [data, selectedDbtPath]);
 
   // Enumerate dbt projects up-front so the header picker knows all
   // options (even if only one, we still show it as a chip so users
@@ -128,9 +139,6 @@ export function DbtPanel({ onOpenFile }: DbtPanelProps) {
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentProject?.id]);
-
-  // Refresh the model list whenever the selected dbt project changes.
-  useEffect(() => { refresh(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [currentProject?.id, selectedDbtPath]);
 
   // Fetch column-level lineage lazily — it's only needed when the
   // drawer is open. Reuses one fetch across every model the user
@@ -594,19 +602,24 @@ export function DbtPanel({ onOpenFile }: DbtPanelProps) {
           </button>
         </div>
       )}
-      {data && view === 'models' && data.dbt_project_relative_path && !isCloudProject && (
+      {data && view === 'models' && data.dbt_project_relative_path && (
         <div className="px-8 pt-6">
           <AiAssistantPanel
             title="AI Assistant · dbt"
             subtitle="Coverage gaps, failing tests, and doc suggestions across your dbt models."
-            suggestions={[
+            suggestions={isCloudProject ? [
+              'Why did model X last fail?',
+              "What's the status of my last run?",
+              'Which models have no tests?',
+              "What's undocumented?",
+            ] : [
               'Which models have no tests?',
               "What's undocumented?",
               'Any expensive models to worry about?',
               'What should I add tests for next?',
             ]}
             fetchInsights={() => projectsApi.pageInsights(currentProject.id, 'dbt') as any}
-            ask={(q, h) => projectsApi.pageAsk(currentProject.id, 'dbt', { question: q, history: h }).then(r => r.answer)}
+            ask={(q, h) => projectsApi.pageAsk(currentProject.id, 'dbt', { question: q, history: h }).then(r => ({ answer: r.answer, toolsUsed: r.tools_used }))}
             onOpenRef={(name) => {
               const m = data.models.find((x) => x.name === name || x.unique_id.endsWith('.' + name));
               if (m) setSelectedUniqueId(m.unique_id);
@@ -1387,7 +1400,7 @@ export function DbtPanel({ onOpenFile }: DbtPanelProps) {
               ? () => setDiffFor({ path: selected.relative_sql_path!, name: selected.name })
               : undefined
           }
-          onPreview={() => runPreview(selected)}
+          onPreview={isCloudProject ? undefined : () => runPreview(selected)}
           onColumnLineage={() => setColumnLineageFor(selected)}
           onAddTest={isCloudProject ? undefined : () => setAddTestFor({ model: selected })}
           onDeleteTest={isCloudProject ? undefined : (uid) => handleDeleteTest(uid)}
@@ -1537,12 +1550,12 @@ function TestsView({
   const q = search.trim().toLowerCase();
   const filtered = all.filter(({ model, test }) => {
     if (statusFilter !== 'all') {
-      const s = test.last_run_status?.toLowerCase();
-      const passLike = s === 'pass' || s === 'success';
-      const failLike = s === 'fail' || s === 'error' || s === 'runtime error';
+      const c = classifyStatus(test.last_run_status);
+      const passLike = c === 'success';
+      const failLike = c === 'failure';
       if (statusFilter === 'pass' && !passLike) return false;
       if (statusFilter === 'fail' && !failLike) return false;
-      if (statusFilter === 'never' && !!s) return false;
+      if (statusFilter === 'never' && !!test.last_run_status) return false;
     }
     if (kindFilter !== 'all' && test.test_kind !== kindFilter) return false;
     if (q) {
@@ -1553,8 +1566,8 @@ function TestsView({
   });
   // Aggregate stats for the header
   const total = all.length;
-  const passing = all.filter((r) => ['pass', 'success'].includes((r.test.last_run_status ?? '').toLowerCase())).length;
-  const failing = all.filter((r) => ['fail', 'error', 'runtime error'].includes((r.test.last_run_status ?? '').toLowerCase())).length;
+  const passing = all.filter((r) => classifyStatus(r.test.last_run_status) === 'success').length;
+  const failing = all.filter((r) => classifyStatus(r.test.last_run_status) === 'failure').length;
   const never = all.filter((r) => !r.test.last_run_status).length;
 
   // Group by model for the render
@@ -1614,7 +1627,7 @@ function TestsView({
       ) : (
         <div className="bg-white border border-gray-200 rounded-lg overflow-hidden">
           {Array.from(byModel.values()).map(({ model, tests }) => {
-            const modelFailing = tests.filter((t) => ['fail', 'error', 'runtime error'].includes((t.last_run_status ?? '').toLowerCase())).length;
+            const modelFailing = tests.filter((t) => classifyStatus(t.last_run_status) === 'failure').length;
             return (
               <div key={model.unique_id} className="border-b border-gray-100 last:border-0">
                 <div className="px-4 py-2.5 bg-gray-50/50 flex items-center gap-2 border-b border-gray-100">
@@ -1699,12 +1712,9 @@ function TestKpi({ label, value, hint, tone }: { label: string; value: number; h
 }
 
 function TestStatusIcon({ status }: { status: string | null }) {
-  const s = status?.toLowerCase();
-  const ok = s === 'pass' || s === 'success';
-  const fail = s === 'fail' || s === 'error' || s === 'runtime error';
-  const warn = s === 'warn';
-  const Icon = ok ? CheckCircle2 : fail ? XCircle : warn ? AlertTriangle : TestTube2;
-  const tone = ok ? 'text-emerald-500' : fail ? 'text-rose-500' : warn ? 'text-amber-500' : 'text-gray-300';
+  const c = classifyStatus(status);
+  const Icon = c === 'success' ? CheckCircle2 : c === 'failure' ? XCircle : c === 'warning' ? AlertTriangle : c === 'skipped' ? Clock : TestTube2;
+  const tone = c === 'success' ? 'text-emerald-500' : c === 'failure' ? 'text-rose-500' : c === 'warning' ? 'text-amber-500' : c === 'skipped' ? 'text-slate-400' : 'text-gray-300';
   return <Icon className={`w-3.5 h-3.5 flex-shrink-0 ${tone}`} />;
 }
 
@@ -1712,10 +1722,10 @@ function LastRunPill({ status, durationMs }: { status: string | null; durationMs
   if (!status) {
     return <span className="text-[11px] text-gray-400 italic">never run</span>;
   }
-  const norm = status.toLowerCase();
-  const ok = norm === 'success' || norm === 'pass';
-  const fail = norm === 'error' || norm === 'fail' || norm === 'runtime error';
-  const skip = norm === 'skipped';
+  const c = classifyStatus(status);
+  const ok = c === 'success';
+  const fail = c === 'failure';
+  const skip = c === 'skipped';
   const Icon = ok ? CheckCircle2 : fail ? XCircle : AlertTriangle;
   const tone = ok ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
     : fail ? 'bg-rose-50 text-rose-700 border-rose-200'
@@ -1784,6 +1794,12 @@ function ModelDetail({
     }
     return map;
   }, [lineage, model.unique_id]);
+  // Cloud (Dagster+) assets have no schema.yml, so `description` is
+  // whatever dagster-dbt auto-generated: "dbt model for: X" followed by
+  // the raw .sql file contents. Rendering that as prose markdown reads
+  // as a wall of mangled text — detect the generated shape and render
+  // the SQL/Jinja body as an actual code block instead.
+  const generatedDoc = model.description ? parseGeneratedDbtDescription(model.description) : null;
   // Slide-from-right drawer — matches the IngestionsPanel drawer
   // aesthetic: fixed-position, backdrop, full height, closes on
   // click-outside. Works uniformly from Models view AND the full-bleed
@@ -1821,7 +1837,8 @@ function ModelDetail({
         <div className="flex flex-wrap gap-2">
           <button
             onClick={onRun}
-            disabled={running}
+            disabled={running || dbtRelativePath === '__cloud__'}
+            title={dbtRelativePath === '__cloud__' ? 'Not available on Dagster+ (read-only) — no local dbt project to run' : undefined}
             className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium bg-primary text-primary-foreground rounded disabled:opacity-40"
           >
             {running ? <Loader2 className="w-3 h-3 animate-spin" /> : <Play className="w-3 h-3" />}
@@ -1870,7 +1887,23 @@ function ModelDetail({
           <h4 className="text-[10px] uppercase tracking-wider text-gray-500 mb-1 flex items-center gap-1">
             <Book className="w-3 h-3" /> Docs
           </h4>
-          {model.description ? (
+          {generatedDoc ? (
+            <div>
+              <div className="flex items-center justify-between mb-1">
+                <p className="text-[11px] text-gray-400 italic">
+                  Auto-generated from source — no custom description set for this {generatedDoc.kind}.
+                </p>
+                <button
+                  onClick={() => { navigator.clipboard.writeText(generatedDoc.code); notify.success('SQL copied'); }}
+                  className="p-1 text-gray-400 hover:text-gray-700 hover:bg-gray-100 rounded flex-shrink-0"
+                  title="Copy SQL"
+                >
+                  <Copy className="w-3 h-3" />
+                </button>
+              </div>
+              <HighlightedSql code={generatedDoc.code} />
+            </div>
+          ) : model.description ? (
             <SimpleMarkdown text={model.description} />
           ) : (
             <p className="text-xs text-gray-400 italic">
@@ -2107,12 +2140,12 @@ function ModelDetail({
  * needed.
  */
 function TestRow({ test, onDelete }: { test: NonNullable<Model['tests_detail']>[number]; onDelete?: () => void }) {
-  const status = test.last_run_status?.toLowerCase();
-  const ok = status === 'pass' || status === 'success';
-  const fail = status === 'fail' || status === 'error' || status === 'runtime error';
-  const warn = status === 'warn';
-  const tone = ok ? 'text-emerald-700' : fail ? 'text-rose-700' : warn ? 'text-amber-700' : 'text-gray-400';
-  const Icon = ok ? CheckCircle2 : fail ? XCircle : warn ? AlertTriangle : TestTube2;
+  const c = classifyStatus(test.last_run_status);
+  const ok = c === 'success';
+  const fail = c === 'failure';
+  const warn = c === 'warning';
+  const tone = ok ? 'text-emerald-700' : fail ? 'text-rose-700' : warn ? 'text-amber-700' : c === 'skipped' ? 'text-slate-500' : 'text-gray-400';
+  const Icon = ok ? CheckCircle2 : fail ? XCircle : warn ? AlertTriangle : c === 'skipped' ? Clock : TestTube2;
   return (
     <div
       className="group text-[11px] flex items-center gap-1.5 px-2 py-1 border border-gray-100 rounded hover:bg-gray-50"
@@ -2144,71 +2177,93 @@ function TestRow({ test, onDelete }: { test: NonNullable<Model['tests_detail']>[
   );
 }
 
-/**
- * Full markdown renderer for dbt content — descriptions, overview.md,
- * doc blocks. Uses react-markdown + remark-gfm so we get real support
- * for tables, headers, lists, code blocks, blockquotes, and the
- * inline stuff (bold/italic/code/links). dbt docs frequently ship
- * markdown tables and headers so a "handle bold/italic only" renderer
- * left too much unrendered.
- */
-function SimpleMarkdown({ text }: { text: string }) {
+// dagster-dbt's own auto-generated asset description, e.g.
+// "dbt model for: orders_augmented\n\n{{ config(...) }}\nselect ...".
+// Only matches that exact shape — a hand-written schema.yml description
+// (local projects) or a custom Dagster+ doc never starts this way.
+const GENERATED_DBT_DESC_RE = /^dbt (model|seed|snapshot) for:\s*(.+?)\s*\n/;
+
+function parseGeneratedDbtDescription(description: string): { kind: string; target: string; code: string } | null {
+  const match = description.match(GENERATED_DBT_DESC_RE);
+  if (!match) return null;
+  const code = description.slice(match[0].length).replace(/^\n+/, '').replace(/\s+$/, '');
+  if (!code.trim()) return null;
+  return { kind: match[1], target: match[2], code };
+}
+
+const SQL_KEYWORDS = new Set([
+  'select', 'from', 'where', 'join', 'left', 'right', 'inner', 'outer', 'full', 'on', 'and', 'or',
+  'not', 'as', 'group', 'by', 'order', 'having', 'union', 'all', 'distinct', 'case', 'when', 'then',
+  'else', 'end', 'with', 'insert', 'into', 'values', 'update', 'set', 'delete', 'create', 'table',
+  'view', 'if', 'is', 'null', 'in', 'between', 'like', 'limit', 'offset', 'asc', 'desc', 'over',
+  'partition', 'qualify', 'using', 'cross', 'lateral', 'unnest',
+]);
+
+// Jinja delimiters never nest, so a non-greedy match to the next closing
+// tag is safe (no catastrophic backtracking risk).
+const JINJA_SPLIT_RE = /(\{\{[\s\S]*?\}\}|\{%[\s\S]*?%\}|\{#[\s\S]*?#\})/g;
+const SQL_TOKEN_RE = /('(?:[^'\\]|\\.)*'|--[^\n]*|\b[A-Za-z_][A-Za-z0-9_]*\b)/g;
+
+function highlightSqlSegment(segment: string, keyPrefix: string): React.ReactNode[] {
+  const nodes: React.ReactNode[] = [];
+  let lastIndex = 0;
+  let n = 0;
+  SQL_TOKEN_RE.lastIndex = 0;
+  let match: RegExpExecArray | null;
+  while ((match = SQL_TOKEN_RE.exec(segment))) {
+    if (match.index > lastIndex) nodes.push(segment.slice(lastIndex, match.index));
+    const token = match[0];
+    if (token.startsWith("'")) {
+      nodes.push(<span key={`${keyPrefix}-${n++}`} className="text-emerald-700">{token}</span>);
+    } else if (token.startsWith('--')) {
+      nodes.push(<span key={`${keyPrefix}-${n++}`} className="text-gray-400 italic">{token}</span>);
+    } else if (SQL_KEYWORDS.has(token.toLowerCase())) {
+      nodes.push(<span key={`${keyPrefix}-${n++}`} className="text-blue-700 font-semibold">{token}</span>);
+    } else {
+      nodes.push(token);
+    }
+    lastIndex = match.index + token.length;
+  }
+  if (lastIndex < segment.length) nodes.push(segment.slice(lastIndex));
+  return nodes;
+}
+
+/** Lightweight SQL + Jinja highlighter for auto-generated dbt descriptions.
+ * No new dependency (matches SimpleMarkdown's own hand-rolled approach
+ * rather than pulling in a syntax-highlighting library for one code path). */
+function HighlightedSql({ code }: { code: string }) {
+  const parts = code.split(JINJA_SPLIT_RE);
+  const nodes: React.ReactNode[] = [];
+  parts.forEach((part, idx) => {
+    if (!part) return;
+    if (part.startsWith('{{') || part.startsWith('{%') || part.startsWith('{#')) {
+      const isComment = part.startsWith('{#');
+      const isStatement = part.startsWith('{%');
+      nodes.push(
+        <span
+          key={`j-${idx}`}
+          className={
+            isComment
+              ? 'text-gray-400 italic'
+              : isStatement
+                ? 'text-purple-700 font-medium bg-purple-50 rounded'
+                : 'text-indigo-700 font-medium bg-indigo-50 rounded'
+          }
+        >
+          {part}
+        </span>
+      );
+    } else {
+      nodes.push(...highlightSqlSegment(part, `s-${idx}`));
+    }
+  });
   return (
-    <div className="text-xs text-gray-700 leading-relaxed dbt-markdown">
-      <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
-        components={{
-          h1: ({ children }) => <h1 className="text-base font-semibold text-gray-900 mt-4 mb-2">{children}</h1>,
-          h2: ({ children }) => <h2 className="text-sm font-semibold text-gray-900 mt-3 mb-2">{children}</h2>,
-          h3: ({ children }) => <h3 className="text-xs font-semibold text-gray-900 uppercase tracking-wider mt-3 mb-1.5">{children}</h3>,
-          p: ({ children }) => <p className="text-xs text-gray-700 mb-2 last:mb-0">{children}</p>,
-          ul: ({ children }) => <ul className="list-disc pl-5 mb-2 space-y-0.5">{children}</ul>,
-          ol: ({ children }) => <ol className="list-decimal pl-5 mb-2 space-y-0.5">{children}</ol>,
-          li: ({ children }) => <li className="text-xs text-gray-700">{children}</li>,
-          strong: ({ children }) => <strong className="font-semibold text-gray-900">{children}</strong>,
-          em: ({ children }) => <em className="italic">{children}</em>,
-          code: ({ children, className }) => {
-            const isBlock = className?.startsWith('language-');
-            if (isBlock) {
-              return (
-                <pre className="bg-gray-50 border border-gray-200 rounded p-2 my-2 text-[11px] font-mono overflow-x-auto">
-                  <code>{children}</code>
-                </pre>
-              );
-            }
-            return <code className="bg-gray-100 px-1 rounded font-mono text-[11px]">{children}</code>;
-          },
-          pre: ({ children }) => <>{children}</>,
-          a: ({ children, href }) => (
-            <a href={href} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">
-              {children}
-            </a>
-          ),
-          blockquote: ({ children }) => (
-            <blockquote className="border-l-2 border-gray-300 pl-3 my-2 text-gray-600 italic">
-              {children}
-            </blockquote>
-          ),
-          table: ({ children }) => (
-            <div className="overflow-x-auto my-2 -mx-1">
-              <table className="min-w-full text-[11px] border border-gray-200 rounded">
-                {children}
-              </table>
-            </div>
-          ),
-          thead: ({ children }) => <thead className="bg-gray-50 border-b border-gray-200">{children}</thead>,
-          tbody: ({ children }) => <tbody className="divide-y divide-gray-100">{children}</tbody>,
-          tr: ({ children }) => <tr>{children}</tr>,
-          th: ({ children }) => <th className="px-2 py-1.5 text-left font-semibold text-gray-800 whitespace-nowrap">{children}</th>,
-          td: ({ children }) => <td className="px-2 py-1.5 text-gray-700 align-top">{children}</td>,
-          hr: () => <hr className="my-3 border-gray-200" />,
-        }}
-      >
-        {text}
-      </ReactMarkdown>
-    </div>
+    <pre className="bg-gray-50 border border-gray-200 rounded p-2.5 text-[11px] font-mono leading-relaxed overflow-x-auto whitespace-pre">
+      <code>{nodes}</code>
+    </pre>
   );
 }
+
 
 function Kpi({
   label,

@@ -66,6 +66,7 @@ interface ResourcesManagerProps {
 export function ResourcesManager({ onOpenFile }: ResourcesManagerProps = {}) {
   const isDark = useIsDarkMode();
   const { currentProject } = useProjectStore();
+  const isCloudProject = !!(currentProject as any)?.is_dagster_plus;
   const [activeTab, setActiveTab] = useState<ResourceType>('io_manager');
 
   // Fetch installed resources + IO managers so the user can see what's already
@@ -270,8 +271,8 @@ export function ResourcesManager({ onOpenFile }: ResourcesManagerProps = {}) {
 
       {/* Existing items — mirrors Automation's list style */}
       {activeTab !== 'env_vars' && installed && (
-        <div className="flex-shrink-0 bg-white border-b border-gray-200 px-4 py-2 flex items-center gap-3 flex-wrap">
-          <span className="text-xs font-semibold text-gray-500 uppercase tracking-wider">
+        <div className="flex-shrink-0 bg-white border-b border-gray-200 px-4 py-2 flex items-start gap-3 flex-wrap max-h-48 overflow-y-auto">
+          <span className="text-xs font-semibold text-gray-500 uppercase tracking-wider pt-1">
             Installed
           </span>
           {(() => {
@@ -279,7 +280,7 @@ export function ResourcesManager({ onOpenFile }: ResourcesManagerProps = {}) {
             if (items.length === 0) {
               return (
                 <span className="text-xs text-gray-400">
-                  None yet — fill the form below and click Save to add one
+                  {isCloudProject ? 'None found in this deployment.' : 'None yet — fill the form below and click Save to add one'}
                 </span>
               );
             }
@@ -333,6 +334,15 @@ export function ResourcesManager({ onOpenFile }: ResourcesManagerProps = {}) {
       {/* Main Content */}
       {activeTab === 'env_vars' ? (
         currentProject && <EnvVarsManager projectId={currentProject.id} />
+      ) : isCloudProject ? (
+        // Creating a resource/IO manager means writing Python source --
+        // fundamentally local-only, Dagster+ has no equivalent. The
+        // "Installed" list above this already shows real ones (see
+        // list_resources_and_io_managers' cloud branch), just not this
+        // create form.
+        <div className="flex-1 flex items-center justify-center text-sm text-gray-500 text-center p-6">
+          Resources and IO managers are defined in this deployment's code — add new ones from the source repo.
+        </div>
       ) : (
       <div className="flex-1 flex overflow-hidden">
         {/* Left Panel - Configuration */}

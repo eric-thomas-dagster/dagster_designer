@@ -24,10 +24,10 @@ import { Notice } from './Notice';
  * last runId). Filter by status. Job-name filter is server-side too.
  * Clicking a row opens the run in the Dagster UI (local or cloud).
  */
-export function RunsPanel() {
+export function RunsPanel({ initialRunId }: { initialRunId?: string } = {}) {
   const { currentProject } = useProjectStore();
   const [runs, setRuns] = useState<Run[]>([]);
-  const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
+  const [selectedRunId, setSelectedRunId] = useState<string | null>(initialRunId ?? null);
   const [source, setSource] = useState<'local' | 'cloud' | null>(null);
   const [cursor, setCursor] = useState<string | null>(null);
   const [nextCursor, setNextCursor] = useState<string | null>(null);

@@ -38,7 +38,7 @@ import { AutoCoverageModal } from './AssetDetailPage';
 import { useProjectStore } from '@/hooks/useProject';
 import { useIsDarkMode } from '@/hooks/useIsDarkMode';
 import { projectsApi, componentsApi , API_BASE } from '@/services/api';
-import { Play, Plus, Layers, CheckCircle } from 'lucide-react';
+import { Play, Plus, Layers, CheckCircle, Group, Ungroup } from 'lucide-react';
 import type { GraphNode, GraphEdge, ComponentSchema } from '@/types';
 
 // Node for the "collapse to groups" mode. Fixed width (so edges hit
@@ -55,6 +55,7 @@ const GroupNode = memo(({ data }: NodeProps) => {
   // unreliable. The whole card is a click target via cursor:pointer
   // and ReactFlow's native onNodeClick.
   const kinds: string[] = data?.kinds || [];
+  const codeLocations: string[] = data?.codeLocations || [];
   return (
     <>
       <Handle type="target" position={Position.Left} isConnectable={false} style={{ background: '#6366f1', pointerEvents: 'none' }} />
@@ -62,11 +63,30 @@ const GroupNode = memo(({ data }: NodeProps) => {
         className="rounded-lg border-2 border-indigo-300 bg-gradient-to-br from-indigo-50 to-white shadow-md p-2.5 hover:border-indigo-500 hover:shadow-lg hover:from-indigo-100 transition cursor-pointer"
         style={{ width: 220 }}
         title="Click anywhere to expand this group's assets"
+        // Same fix as GroupOverlay's header: a fast double-click here is
+        // a real dblclick event separate from the two onNodeClick calls
+        // it also fires, and that dblclick still bubbles up to React
+        // Flow's zoomOnDoubleClick (on by default) unless stopped here --
+        // otherwise a quick double-click zooms the camera in on this
+        // card, making every other group look like it vanished.
+        onDoubleClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between gap-2">
           <div className="flex items-center gap-1.5 min-w-0">
             <Layers className="w-4 h-4 text-indigo-600 flex-shrink-0" />
-            <div className="font-semibold text-sm text-indigo-900 truncate">{data?.label || 'ungrouped'}</div>
+            <div className="min-w-0">
+              <div className="font-semibold text-sm text-indigo-900 truncate">{data?.label || 'ungrouped'}</div>
+              {/* Matches Dagster's own asset-group header: shown only when
+                  the group's assets span more than one code location
+                  (single-repo groups/projects have nothing worth
+                  disambiguating). Full opacity + its own line rather than
+                  folded into the title row so it doesn't read as decoration. */}
+              {codeLocations.length > 0 && (
+                <div className="text-[10px] text-indigo-600 truncate" title={codeLocations.join(', ')}>
+                  {codeLocations.join(', ')}
+                </div>
+              )}
+            </div>
           </div>
           <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-indigo-100 text-indigo-800 border border-indigo-200 flex-shrink-0">
             {data?.assetCount || 0}
@@ -543,6 +563,14 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
   const [assetSearch, setAssetSearch] = useState('');
   const [groupFilter, setGroupFilter] = useState<string>('all');
   const [kindFilter, setKindFilter] = useState<string>('all');
+  // Same "filter by one of Dagster's own facets" idea Dagster+ applies
+  // pervasively across its own UI -- code location, tags, owner. The
+  // data was already on every node (used in free-text search and the
+  // catalog table's columns); these just add dedicated dropdowns for it,
+  // same pattern as group/kind above.
+  const [codeLocationFilter, setCodeLocationFilter] = useState<string>('all');
+  const [tagFilter, setTagFilter] = useState<string>('all');
+  const [ownerFilter, setOwnerFilter] = useState<string>('all');
   // View toggle — the Assets tab flips between the graph editor and
   // a searchable / filterable table (catalog). Catalog is a huge win
   // for wide cloud orgs where the graph is hard to scan.
@@ -2154,6 +2182,27 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
     }
     return Array.from(s).sort();
   }, [nodes]);
+  const allCodeLocations = React.useMemo(() => {
+    const s = new Set<string>();
+    for (const n of nodes) {
+      if (n.data?.node_kind === 'asset' && n.data?.code_location) s.add(n.data.code_location);
+    }
+    return Array.from(s).sort();
+  }, [nodes]);
+  const allTags = React.useMemo(() => {
+    const s = new Set<string>();
+    for (const n of nodes) {
+      for (const t of (n.data?.tags || [])) if (t) s.add(t);
+    }
+    return Array.from(s).sort();
+  }, [nodes]);
+  const allOwners = React.useMemo(() => {
+    const s = new Set<string>();
+    for (const n of nodes) {
+      for (const o of (n.data?.owners || [])) if (o) s.add(o);
+    }
+    return Array.from(s).sort();
+  }, [nodes]);
 
   // Set of node IDs that have at least one outgoing edge -- used to
   // detect "external leaves" (external + no downstream in this project).
@@ -2163,11 +2212,15 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
     return s;
   }, [edges]);
 
-  // Common filters (search + group + kind). Applied in both views.
+  // Common filters (search + group + kind + code location + tag +
+  // owner). Applied in both views.
   const matchesUserFilters = (node: Node): boolean => {
     if (node.data?.node_kind !== 'asset') return true;
     if (groupFilter !== 'all' && (node.data?.group_name || '') !== groupFilter) return false;
     if (kindFilter !== 'all' && !(node.data?.kinds || []).includes(kindFilter)) return false;
+    if (codeLocationFilter !== 'all' && (node.data?.code_location || '') !== codeLocationFilter) return false;
+    if (tagFilter !== 'all' && !(node.data?.tags || []).includes(tagFilter)) return false;
+    if (ownerFilter !== 'all' && !(node.data?.owners || []).includes(ownerFilter)) return false;
     if (assetSearch.trim()) {
       const q = assetSearch.trim().toLowerCase();
       const hay = `${node.data?.asset_key || ''} ${node.data?.label || ''} ${node.data?.description || ''} ${(node.data?.tags || []).join(' ')} ${(node.data?.owners || []).join(' ')}`.toLowerCase();
@@ -2185,7 +2238,8 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
     return true;
   };
 
-  const isFiltering = assetSearch.trim() !== '' || groupFilter !== 'all' || kindFilter !== 'all' || showAllInGraph;
+  const isFiltering = assetSearch.trim() !== '' || groupFilter !== 'all' || kindFilter !== 'all'
+    || codeLocationFilter !== 'all' || tagFilter !== 'all' || ownerFilter !== 'all' || showAllInGraph;
 
   // First-load defaults for Dagster+ projects: catalog view + hide
   // externals + collapse-to-groups (already handled above). Fire
@@ -2229,7 +2283,7 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
         };
       });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [nodes, selectedAssets, groupFilter, kindFilter, assetSearch, showAllInGraph, nodesWithDownstream]);
+  }, [nodes, selectedAssets, groupFilter, kindFilter, codeLocationFilter, tagFilter, ownerFilter, assetSearch, showAllInGraph, nodesWithDownstream]);
 
   // Group-collapse mode: replace individual assets with one node per
   // group_name (default: "ungrouped"). Edges collapse to inter-group
@@ -2246,13 +2300,14 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
     // Group summaries -- collected for every group so the aggregated
     // node knows its member count / kinds even after some groups get
     // expanded individually.
-    const groupInfo: Record<string, { assets: Node[]; kinds: Set<string>; hasChecks: number }> = {};
+    const groupInfo: Record<string, { assets: Node[]; kinds: Set<string>; hasChecks: number; codeLocations: Set<string> }> = {};
     for (const n of assets) {
       const g = groupOf(n);
-      const info = groupInfo[g] ||= { assets: [], kinds: new Set(), hasChecks: 0 };
+      const info = groupInfo[g] ||= { assets: [], kinds: new Set(), hasChecks: 0, codeLocations: new Set() };
       info.assets.push(n);
       for (const k of (n.data?.kinds || [])) info.kinds.add(k);
       if ((n.data?.checks || []).length > 0) info.hasChecks += 1;
+      if (n.data?.code_location) info.codeLocations.add(n.data.code_location);
     }
 
     // idToOutputId: each individual asset maps to either its own id
@@ -2480,6 +2535,11 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
           assetCount: info.assets.length,
           kinds: Array.from(info.kinds),
           withChecks: info.hasChecks,
+          // Dagster proper shows the code location under a group's name
+          // when its assets come from more than one -- only meaningful for
+          // multi-repo Dagster+ deployments, so a single (or no) location
+          // shows nothing here, same as upstream.
+          codeLocations: info.codeLocations.size > 1 ? Array.from(info.codeLocations) : [],
           node_kind: 'asset',
           isGroup: true,
           onExpand: () => handleExpandGroup(g),
@@ -2557,6 +2617,86 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
   const displayNodes = groupedView ? groupedView.nodes : perAssetDisplay;
   const displayEdges = groupedView ? groupedView.edges : edges;
 
+  // Hover lineage highlighting -- local + cloud alike, since it's driven
+  // purely by whatever edges/nodes are currently on screen (individual
+  // assets in expanded mode, group-to-group edges in collapsed mode --
+  // BFS over displayEdges works identically either way). Full transitive
+  // upstream + downstream, not just direct neighbors, so hovering a
+  // source shows everything it ultimately feeds, not just its first hop.
+  const [hoveredNodeId, setHoveredNodeId] = useState<string | null>(null);
+  const hoverLineage = React.useMemo(() => {
+    if (!hoveredNodeId) return null;
+    const outgoing = new Map<string, Edge[]>();
+    const incoming = new Map<string, Edge[]>();
+    for (const e of displayEdges) {
+      if (!outgoing.has(e.source)) outgoing.set(e.source, []);
+      outgoing.get(e.source)!.push(e);
+      if (!incoming.has(e.target)) incoming.set(e.target, []);
+      incoming.get(e.target)!.push(e);
+    }
+    const nodeIds = new Set<string>([hoveredNodeId]);
+    const edgeIds = new Set<string>();
+    // Upstream: walk incoming edges backward from the hovered node.
+    let frontier = [hoveredNodeId];
+    while (frontier.length) {
+      const next: string[] = [];
+      for (const id of frontier) {
+        for (const e of incoming.get(id) ?? []) {
+          edgeIds.add(e.id);
+          if (!nodeIds.has(e.source)) { nodeIds.add(e.source); next.push(e.source); }
+        }
+      }
+      frontier = next;
+    }
+    // Downstream: walk outgoing edges forward from the hovered node.
+    frontier = [hoveredNodeId];
+    while (frontier.length) {
+      const next: string[] = [];
+      for (const id of frontier) {
+        for (const e of outgoing.get(id) ?? []) {
+          edgeIds.add(e.id);
+          if (!nodeIds.has(e.target)) { nodeIds.add(e.target); next.push(e.target); }
+        }
+      }
+      frontier = next;
+    }
+    return { nodeIds, edgeIds };
+  }, [hoveredNodeId, displayEdges]);
+
+  const styledDisplayNodes = React.useMemo(() => {
+    if (!hoverLineage) return displayNodes;
+    return displayNodes.map((n) => ({
+      ...n,
+      style: {
+        ...n.style,
+        opacity: hoverLineage.nodeIds.has(n.id) ? 1 : 0.25,
+        transition: 'opacity 150ms ease',
+      },
+    }));
+  }, [displayNodes, hoverLineage]);
+
+  const styledDisplayEdges = React.useMemo(() => {
+    if (!hoverLineage) return displayEdges;
+    return displayEdges.map((e) => {
+      const inLineage = hoverLineage.edgeIds.has(e.id);
+      return {
+        ...e,
+        style: {
+          ...e.style,
+          opacity: inLineage ? 1 : 0.12,
+          strokeWidth: inLineage ? 3 : e.style?.strokeWidth,
+          stroke: inLineage ? '#6366f1' : e.style?.stroke,
+          transition: 'opacity 150ms ease, stroke-width 150ms ease',
+        },
+        // A moving dash pattern on the highlighted lineage edges only --
+        // reads as a "flash"/flow direction cue without being distracting
+        // on the (majority, dimmed) rest of the graph.
+        animated: inLineage,
+        zIndex: inLineage ? 1 : 0,
+      };
+    });
+  }, [displayEdges, hoverLineage]);
+
   return (
     <div className="w-full h-full flex flex-col">
       {/* Slim header row -- filters on the left, actions on the right.
@@ -2571,8 +2711,8 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
         const isCloud = !!(currentProject as any)?.is_dagster_plus;
         const inGraph = viewMode === 'graph';
         const ribbonJsx = (
-      <div className="flex-shrink-0 bg-white border-b border-gray-200 px-3 py-2 flex items-center justify-between gap-2">
-        <div className="flex items-center gap-1.5 flex-1 min-w-0">
+      <div className="flex-shrink-0 bg-white border-b border-gray-200 px-3 py-2 flex items-center justify-between gap-2 flex-wrap gap-y-1.5">
+        <div className="flex items-center gap-1.5 flex-1 min-w-0 flex-wrap gap-y-1.5">
           <div className="relative w-44 flex-shrink-0">
             <svg className="w-3.5 h-3.5 text-gray-400 absolute left-2 top-1/2 -translate-y-1/2 pointer-events-none" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-4.35-4.35M17 11a6 6 0 11-12 0 6 6 0 0112 0z" />
@@ -2602,6 +2742,39 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
             >
               <option value="all">All kinds</option>
               {allKinds.map((k) => <option key={k} value={k}>{k}</option>)}
+            </select>
+          )}
+          {allCodeLocations.length > 1 && (
+            <select
+              value={codeLocationFilter}
+              onChange={(e) => setCodeLocationFilter(e.target.value)}
+              className="text-xs px-2 py-1 border border-gray-300 rounded bg-white max-w-[140px]"
+              title="Filter by code location"
+            >
+              <option value="all">All code locations</option>
+              {allCodeLocations.map((c) => <option key={c} value={c}>{c}</option>)}
+            </select>
+          )}
+          {allTags.length > 0 && (
+            <select
+              value={tagFilter}
+              onChange={(e) => setTagFilter(e.target.value)}
+              className="text-xs px-2 py-1 border border-gray-300 rounded bg-white max-w-[120px]"
+              title="Filter by tag"
+            >
+              <option value="all">All tags</option>
+              {allTags.map((t) => <option key={t} value={t}>{t}</option>)}
+            </select>
+          )}
+          {allOwners.length > 0 && (
+            <select
+              value={ownerFilter}
+              onChange={(e) => setOwnerFilter(e.target.value)}
+              className="text-xs px-2 py-1 border border-gray-300 rounded bg-white max-w-[120px]"
+              title="Filter by owner"
+            >
+              <option value="all">All owners</option>
+              {allOwners.map((o) => <option key={o} value={o}>{o}</option>)}
             </select>
           )}
           <div className="ml-1 flex items-center bg-gray-100 rounded p-0.5">
@@ -2635,7 +2808,11 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
               the row depending on which filter happened to trigger it. */}
           {isFiltering && (
             <button
-              onClick={() => { setAssetSearch(''); setGroupFilter('all'); setKindFilter('all'); setShowAllInGraph(false); }}
+              onClick={() => {
+                setAssetSearch(''); setGroupFilter('all'); setKindFilter('all');
+                setCodeLocationFilter('all'); setTagFilter('all'); setOwnerFilter('all');
+                setShowAllInGraph(false);
+              }}
               className="text-[11px] text-gray-500 hover:text-gray-800 underline decoration-dotted whitespace-nowrap"
             >
               Clear
@@ -2683,9 +2860,7 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
                 title={collapseToGroups ? 'Expand groups: show individual assets' : 'Collapse to one card per asset group. Click a card to expand just that group.'}
                 aria-label={collapseToGroups ? 'Expand groups' : 'Collapse groups'}
               >
-                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" />
-                </svg>
+                {collapseToGroups ? <Ungroup className="w-4 h-4" /> : <Group className="w-4 h-4" />}
               </button>
               <button
                 onClick={arrangeGroups}
@@ -2899,12 +3074,14 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
       {viewMode === 'graph' && (
       <div className="flex-1 min-h-0 relative">
       <ReactFlow
-        nodes={displayNodes}
-        edges={displayEdges}
+        nodes={styledDisplayNodes}
+        edges={styledDisplayEdges}
         onNodesChange={onNodesChange}
         onEdgesChange={onEdgesChange}
         onConnect={onConnect}
         onNodeClick={onNodeClick}
+        onNodeMouseEnter={(_, node) => setHoveredNodeId(node.id)}
+        onNodeMouseLeave={() => setHoveredNodeId(null)}
         onPaneClick={onPaneClick}
         onSelectionChange={({ nodes: sel }) => {
           const assetIds = sel
@@ -3171,12 +3348,20 @@ function GroupOverlay({ nodes, setNodes }: { nodes: Node[]; setNodes: React.Disp
       const maxX = Math.max(...positions.map((p) => p.x + p.width)) + 60;
       const maxY = Math.max(...positions.map((p) => p.y + p.height)) + 60;
 
+      // Same rule as the collapsed card: only worth showing when the
+      // group's assets actually span more than one code location.
+      const codeLocationSet = new Set<string>();
+      for (const n of groupNodes) {
+        if (n.data?.code_location) codeLocationSet.add(n.data.code_location);
+      }
+
       return {
         groupName,
         x: minX,
         y: minY,
         width: maxX - minX,
         height: maxY - minY,
+        codeLocations: codeLocationSet.size > 1 ? Array.from(codeLocationSet) : [],
       };
     });
 
@@ -3276,8 +3461,32 @@ function GroupOverlay({ nodes, setNodes }: { nodes: Node[]; setNodes: React.Disp
               console.log('[GroupOverlay] Group header clicked!', bound.groupName);
               handleGroupHeaderClick(bound.groupName, e);
             }}
+            // A fast double-click here only stops the *mousedown* above
+            // from reaching React Flow -- the resulting native `dblclick`
+            // event is a separate event that still bubbles up to React
+            // Flow's own zoomOnDoubleClick (on by default, never disabled
+            // for this canvas), which zooms way in centered on the click
+            // point. Every other group is still there, just now far
+            // outside the viewport -- looks exactly like everything else
+            // got hidden/filtered, but it's a camera jump, not a filter.
+            onDoubleClick={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+            }}
           >
-            {bound.groupName}
+            <span className="truncate">{bound.groupName}</span>
+            {bound.codeLocations.length > 0 && (
+              // Inline (not a second line) so the header bar's existing
+              // height -- and the -80px top padding the bounding box above
+              // already reserves for it -- doesn't need to change per group.
+              <span
+                className="truncate"
+                style={{ marginLeft: '8px', fontWeight: 400, textTransform: 'none', opacity: 0.85 }}
+                title={bound.codeLocations.join(', ')}
+              >
+                · {bound.codeLocations.join(', ')}
+              </span>
+            )}
           </div>
         );
       })}

@@ -1,8 +1,9 @@
 import { useEffect, useState } from 'react';
 import {
   Sparkles, Loader2, Send, MessageSquare, Lightbulb, ChevronRight,
-  AlertTriangle,
+  AlertTriangle, Radio,
 } from 'lucide-react';
+import { SimpleMarkdown } from './SimpleMarkdown';
 
 /**
  * Reusable page-level AI Assistant callout — the same UX as the fleet
@@ -32,12 +33,20 @@ export interface AiInsightsResponse {
   insights: AiInsight[];
 }
 
+interface AiAskResult {
+  answer: string;
+  /** Live Dagster+ MCP tools the assistant called while answering (e.g.
+   *  ["list_runs", "get_asset"]) -- cloud projects only. Undefined/empty
+   *  means the answer came entirely from the page's own context. */
+  toolsUsed?: string[];
+}
+
 interface AiAssistantPanelProps {
   title: string;
   subtitle: string;
   suggestions: string[];
   fetchInsights: () => Promise<AiInsightsResponse>;
-  ask: (question: string, history: Array<{ role: 'user' | 'assistant'; content: string }>) => Promise<string>;
+  ask: (question: string, history: Array<{ role: 'user' | 'assistant'; content: string }>) => Promise<AiAskResult>;
   onOpenRef?: (ref: string) => void;   // click a chip → open the entity
   refIcon?: any;                       // icon for ref chips
 }
@@ -53,7 +62,7 @@ export function AiAssistantPanel({
   // expand only when they want the recommendations. Prevents the
   // panel from dominating the tab whenever it's open.
   const [collapsed, setCollapsed] = useState(true);
-  const [turns, setTurns] = useState<Array<{ role: 'user' | 'assistant'; content: string }>>([]);
+  const [turns, setTurns] = useState<Array<{ role: 'user' | 'assistant'; content: string; toolsUsed?: string[] }>>([]);
   const [input, setInput] = useState('');
   const [chatLoading, setChatLoading] = useState(false);
 
@@ -75,13 +84,13 @@ export function AiAssistantPanel({
 
   const handleAsk = async (q: string) => {
     if (!q.trim() || chatLoading) return;
-    const nextTurns: Array<{ role: 'user' | 'assistant'; content: string }> = [...turns, { role: 'user', content: q.trim() }];
+    const nextTurns: Array<{ role: 'user' | 'assistant'; content: string; toolsUsed?: string[] }> = [...turns, { role: 'user', content: q.trim() }];
     setTurns(nextTurns);
     setInput('');
     setChatLoading(true);
     try {
-      const answer = await ask(q.trim(), turns);
-      setTurns([...nextTurns, { role: 'assistant', content: answer }]);
+      const result = await ask(q.trim(), turns);
+      setTurns([...nextTurns, { role: 'assistant', content: result.answer, toolsUsed: result.toolsUsed }]);
     } catch (e: any) {
       setTurns([...nextTurns, { role: 'assistant', content: `⚠️ ${e?.response?.data?.detail || e?.message || 'Ask failed'}` }]);
     } finally { setChatLoading(false); }
@@ -202,11 +211,17 @@ export function AiAssistantPanel({
                 <div className="space-y-2 max-h-64 overflow-y-auto">
                   {turns.map((t, i) => (
                     <div key={i} className={`text-xs ${t.role === 'user' ? 'text-right' : ''}`}>
-                      <div className={`inline-block max-w-[90%] px-3 py-2 rounded-lg whitespace-pre-wrap leading-relaxed ${
-                        t.role === 'user' ? 'bg-indigo-600 text-white' : 'bg-white text-gray-800 border border-gray-200'
+                      <div className={`inline-block max-w-[90%] px-3 py-2 rounded-lg leading-relaxed ${
+                        t.role === 'user' ? 'bg-indigo-600 text-white whitespace-pre-wrap' : 'bg-white text-gray-800 border border-gray-200 text-left'
                       }`}>
-                        {t.content}
+                        {t.role === 'assistant' ? <SimpleMarkdown text={t.content} /> : t.content}
                       </div>
+                      {t.role === 'assistant' && t.toolsUsed && t.toolsUsed.length > 0 && (
+                        <div className="mt-1 flex flex-wrap items-center gap-1 text-[10px] text-gray-500" title="Looked these up live from your Dagster+ deployment instead of answering from the page's own snapshot.">
+                          <Radio className="w-2.5 h-2.5 text-emerald-500" />
+                          <span>Live: {formatToolTally(t.toolsUsed)}</span>
+                        </div>
+                      )}
                     </div>
                   ))}
                   {chatLoading && (
@@ -242,4 +257,15 @@ export function AiAssistantPanel({
       )}
     </div>
   );
+}
+
+// A tool loop that answers "which sources look stale" calls get_asset once
+// per stale source -- listing it out that many times reads as noise, not
+// signal. Collapse to "name" (called once) or "name ×N" (called more).
+function formatToolTally(toolsUsed: string[]): string {
+  const counts = new Map<string, number>();
+  for (const t of toolsUsed) counts.set(t, (counts.get(t) || 0) + 1);
+  return Array.from(counts.entries())
+    .map(([name, count]) => (count > 1 ? `${name} ×${count}` : name))
+    .join(', ');
 }

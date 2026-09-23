@@ -113,6 +113,8 @@ export interface Project {
   git_branch: string;
   custom_lineage?: any;
   directory_name?: string;
+  manual_ingestion_asset_keys?: string[];
+  dagster_plus_region?: 'us' | 'eu';
 }
 
 export interface ProjectCreate {

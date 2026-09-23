@@ -5,6 +5,7 @@ import json
 import subprocess
 import importlib.util
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
@@ -12,6 +13,7 @@ from typing import Any
 
 from ..services.project_service import project_service
 from ..core.uv_binary import find_uv_binary, env_with_bundled_uv_on_path
+from ..services.dagster_plus_client import query as dagster_plus_query, ASSET_MATERIALIZATIONS_QUERY, DagsterPlusError
 
 router = APIRouter(prefix="/assets", tags=["assets"])
 
@@ -215,6 +217,45 @@ async def column_lineage(project_id: str, asset_key: str):
     )
 
 
+async def _cloud_ingestion_events(project, limit: int) -> list[dict]:
+    """Reconstructs events in the same shape ingestion_history.record_event
+    writes locally, from real Dagster+ materialization history --
+    per-asset via assetMaterializations, since the frontend filters events
+    down to known ingestion asset keys (a run-level event wouldn't carry
+    one). `rows`/`bytes` have no Dagster+ GraphQL equivalent (parsed from
+    local materialize output, not a standard Dagster concept) and are
+    simply omitted; every materialization Dagster reports is inherently a
+    success (a failed step doesn't emit one), so status is always
+    "success" here."""
+    try:
+        data = await dagster_plus_query(
+            project.dagster_plus_org or "",
+            project.dagster_plus_deployment or "",
+            project.dagster_plus_token or "",
+            ASSET_MATERIALIZATIONS_QUERY,
+            variables={"limit": min(limit, 50)},  # per-asset cap -- this is per assetNode, not a global limit
+            region=project.dagster_plus_region,
+        )
+    except DagsterPlusError as e:
+        raise HTTPException(status_code=502, detail=f"Failed to fetch materialization history from Dagster+: {e}")
+    events: list[dict] = []
+    for node in (data.get("assetNodes") or []):
+        asset_key = "/".join((node.get("assetKey") or {}).get("path") or [])
+        for m in (node.get("assetMaterializations") or []):
+            ts_millis = m.get("timestamp")
+            if not ts_millis:
+                continue
+            events.append({
+                "ts": datetime.fromtimestamp(int(ts_millis) / 1000, tz=timezone.utc).isoformat(),
+                "type": "materialize",
+                "asset_key": asset_key,
+                "status": "success",
+                "run_id": m.get("runId"),
+            })
+    events.sort(key=lambda e: e["ts"], reverse=True)
+    return events[:limit]
+
+
 @router.get("/{project_id}/ingestion-history")
 async def ingestion_history_endpoint(project_id: str, limit: int = 1000):
     """Read the ingestion event log — every materialize and successful
@@ -226,15 +267,520 @@ async def ingestion_history_endpoint(project_id: str, limit: int = 1000):
     project = project_service.get_project(project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
-    # Dagster+ (cloud) projects have no local ingestion log file. The
-    # Ingestions tab renders empty in that case (fine -- run history
-    # lives in the Dagster+ UI). Return empty rather than 500-ing on a
-    # missing directory.
+    # Dagster+ (cloud) projects have no local ingestion log file --
+    # reconstruct an equivalent from real materialization history instead
+    # of returning empty. "Total rows" won't populate (no Dagster+
+    # equivalent for that local-only metric) but 24h count / success rate
+    # / the trend chart all work from real data.
     if getattr(project, "is_dagster_plus", False):
-        return {"events": []}
+        return {"events": await _cloud_ingestion_events(project, limit)}
     project_dir = project_service._get_project_dir(project)
     events = read_events(project_dir, limit=limit)
     return {"events": events}
+
+
+@router.post("/{project_id}/{asset_key:path}/tag-ingestion")
+async def tag_asset_as_ingestion(project_id: str, asset_key: str):
+    """Manually mark an asset as an ingestion source, overriding the
+    Ingestions tab's automatic heuristic. Needed for assets the heuristic
+    has no signal for — e.g. a plain Python asset that calls a REST API
+    and writes to Snowflake looks identical to any other transformation
+    from the outside. Works for local AND cloud projects since it's just
+    an asset-key list, independent of where the asset is defined."""
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    if asset_key not in project.manual_ingestion_asset_keys:
+        project.manual_ingestion_asset_keys.append(asset_key)
+        project_service._save_project(project)
+    return {"manual_ingestion_asset_keys": project.manual_ingestion_asset_keys}
+
+
+@router.delete("/{project_id}/{asset_key:path}/tag-ingestion")
+async def untag_asset_as_ingestion(project_id: str, asset_key: str):
+    """Remove a manual ingestion tag (does not affect automatic detection —
+    an asset the heuristic already matches stays visible either way)."""
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    if asset_key in project.manual_ingestion_asset_keys:
+        project.manual_ingestion_asset_keys.remove(asset_key)
+        project_service._save_project(project)
+    return {"manual_ingestion_asset_keys": project.manual_ingestion_asset_keys}
+
+
+class AssetInsightMetric(BaseModel):
+    metric_name: str
+    label: str
+    unit: str  # 'count' | 'credits' | 'ms' | 'percent'
+    aggregate_value: float | None
+    # Same aggregation over the PRIOR window of equal length (e.g. the
+    # 30 days before the requested 30) -- Dagster+'s own
+    # aggregate_value_change field on this tool is always 0.0 in
+    # practice, so this is computed here instead by fetching double the
+    # window and splitting it, rather than trusting that field.
+    previous_aggregate_value: float | None
+    timestamps: list[float]
+    values: list[float]
+    # Daily values for the prior period, aligned by day-offset-within-
+    # period (previous_values[0] is the same offset into its window as
+    # values[0] is into the current one) rather than by calendar date --
+    # lets the frontend overlay "this period" vs "the period before it"
+    # on one chart without the two lines needing matching timestamps.
+    previous_values: list[float]
+
+
+class AssetInsightsResponse(BaseModel):
+    asset_key: str
+    window_days: int
+    metrics: list[AssetInsightMetric]
+
+
+# (metric_name, display label, unit, aggregation function) -- a curated
+# subset of the ~37 metric types Dagster+ Insights tracks, picked for
+# relevance at the single-asset level. Fetched directly via MCP tools,
+# not through an LLM -- this is pure fetch-and-display data, so routing
+# it through a model would just add latency and cost for no benefit.
+_ASSET_INSIGHT_METRICS = [
+    ("__dagster_materializations", "Materializations", "count", "SUM"),
+    ("__dagster_dagster_credits", "Dagster Credits", "credits", "SUM"),
+    ("__dagster_execution_time_ms", "Execution Time", "ms", "SUM"),
+    ("__dagster_asset_success_rate", "Success Rate", "percent", "AVERAGE"),
+    ("__dagster_run_failures", "Run Failures", "count", "SUM"),
+    ("__dagster_observations", "Observations", "count", "SUM"),
+    ("__dagster_failed_to_materialize", "Failed to Materialize", "count", "SUM"),
+    ("__dagster_step_retries", "Step Retries", "count", "SUM"),
+    ("__dagster_asset_check_errors", "Check Errors", "count", "SUM"),
+    ("row_count", "Row Count", "count", "LATEST"),
+    ("__dagster_asset_check_success_rate", "Check Success Rate", "percent", "AVERAGE"),
+    ("__dagster_freshness_pass_rate", "Freshness Pass Rate", "percent", "AVERAGE"),
+]
+
+
+async def _fetch_insight_metric(
+    mcp: "Any", tool_name: str, metric_name: str, label: str, unit: str, agg: str,
+    window_start: float, window_end: float, deployment_name: str | None, extra_params: dict,
+) -> AssetInsightMetric | None:
+    """Shared fetch+parse for a single Insights metric, used by the
+    per-asset, per-deployment, and asset-breakdown endpoints below --
+    they only differ in which MCP tool they call and what extra
+    selector params (asset_keys, none) that tool needs.
+
+    Makes TWO separate calls -- the requested window, and the equal-length
+    window immediately before it -- rather than one call spanning both.
+    Dagster+'s Insights API hard-caps any single query to 120 days
+    ("Invalid time range. The maximum allowed time range is 120 days.");
+    doubling the window in one call silently broke for any request over
+    60 days, and the DagsterPlusMcpError got caught below and swallowed
+    into a plain "no data" response -- exactly backwards, since 60-120 day
+    windows are the ones a real deployment has the most historical data
+    for. Two bounded calls (each ≤ the requested days, capped at 120)
+    avoid the limit entirely and run concurrently, so this isn't slower
+    than the single wide call was."""
+    from ..services.dagster_plus_mcp import DagsterPlusMcpError
+    import asyncio as _asyncio
+
+    async def _call(after: float, before: float) -> tuple[float | None, list[float], list[float]] | None:
+        try:
+            raw = await mcp.call_tool(tool_name, {
+                "metric_name": metric_name, "after": after, "before": before,
+                "granularity": "DAILY", "aggregation_function": agg,
+                "deployment_name": deployment_name,
+                **extra_params,
+            })
+        except DagsterPlusMcpError:
+            return None
+        try:
+            data = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            return None
+        items = data.get("items") or []
+        if not items:
+            return None
+        item = items[0]
+        timestamps = data.get("timestamps") or []
+        values = [v if v is not None else 0.0 for v in (item.get("values") or [])]
+        return item.get("aggregate_value"), timestamps, values
+
+    window_width = window_end - window_start
+    current_result, previous_result = await _asyncio.gather(
+        _call(window_start, window_end),
+        _call(window_start - window_width, window_start),
+    )
+    if current_result is None:
+        return None
+
+    def _reaggregate(vals: list[float]) -> float | None:
+        if not vals:
+            return None
+        if agg == "AVERAGE":
+            return sum(vals) / len(vals)
+        if agg == "LATEST":
+            # A snapshot metric (e.g. row_count) -- re-summing daily
+            # values would double/triple count a value that just hasn't
+            # changed day to day. Take the most recent day's value
+            # instead (values are chronological, oldest first).
+            return vals[-1]
+        if agg == "MAX":
+            return max(vals)
+        if agg == "MIN":
+            return min(vals)
+        return sum(vals)
+
+    current_agg, current_ts, current_vals = current_result
+    if current_agg is None:
+        current_agg = _reaggregate(current_vals)
+    if current_agg is None:
+        return None
+
+    previous_agg: float | None = None
+    previous_vals: list[float] = []
+    if previous_result is not None:
+        previous_agg, _prev_ts, previous_vals = previous_result
+        if previous_agg is None:
+            previous_agg = _reaggregate(previous_vals)
+
+    return AssetInsightMetric(
+        metric_name=metric_name, label=label, unit=unit,
+        aggregate_value=current_agg,
+        previous_aggregate_value=previous_agg,
+        timestamps=current_ts,
+        values=current_vals,
+        previous_values=previous_vals,
+    )
+
+
+@router.get("/{project_id}/{asset_key:path}/insights-metrics", response_model=AssetInsightsResponse)
+async def get_asset_insights_metrics(project_id: str, asset_key: str, days: int = 30):
+    """Live Dagster+ Insights usage/cost/reliability metrics for a single
+    asset over a trailing window, fetched directly via the Dagster+ MCP
+    server's reporting-metrics tools. There's no GraphQL equivalent for
+    this -- Insights data lives behind a separate internal API that only
+    MCP (and the Dagster+ UI itself) expose."""
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    if not getattr(project, "is_dagster_plus", False):
+        raise HTTPException(status_code=404, detail="Insights metrics are only available for Dagster+ connections.")
+
+    from ..services.dagster_plus_mcp import DagsterPlusMcpSession, DagsterPlusMcpError
+    import asyncio as _asyncio
+
+    days = max(1, min(days, 120))
+    before = time.time()
+    after = before - days * 86400
+    path = [seg for seg in asset_key.split("/") if seg]
+
+    try:
+        async with DagsterPlusMcpSession(
+            project.dagster_plus_org or "", project.dagster_plus_token or "", project.dagster_plus_region,
+        ) as mcp:
+            results = await _asyncio.gather(*(
+                _fetch_insight_metric(
+                    mcp, "get_asset_metrics", name, label, unit, agg, after, before,
+                    project.dagster_plus_deployment, {"asset_keys": [path]},
+                )
+                for name, label, unit, agg in _ASSET_INSIGHT_METRICS
+            ))
+    except DagsterPlusMcpError as e:
+        raise HTTPException(status_code=502, detail=f"Failed to fetch Insights metrics: {e}")
+
+    metrics = [m for m in results if m is not None]
+    return AssetInsightsResponse(asset_key=asset_key, window_days=days, metrics=metrics)
+
+
+# Deployment-level metrics -- same curated shape as the per-asset set
+# above, but a few asset-specific ones (freshness, per-asset success
+# rate) don't make sense rolled up, so this is its own, slightly
+# broader list including run/queue health.
+_DEPLOYMENT_INSIGHT_METRICS = [
+    ("__dagster_materializations", "Materializations", "count", "SUM"),
+    ("__dagster_dagster_credits", "Dagster Credits", "credits", "SUM"),
+    ("__dagster_run_successes", "Run Successes", "count", "SUM"),
+    ("__dagster_run_failures", "Run Failures", "count", "SUM"),
+    ("__dagster_run_duration_ms", "Run Duration", "ms", "AVERAGE"),
+    ("__dagster_step_failures", "Step Failures", "count", "SUM"),
+    ("__dagster_failed_to_materialize", "Failed to Materialize", "count", "SUM"),
+    ("__dagster_run_queue_time_ms", "Run Queue Time", "ms", "AVERAGE"),
+    ("__dagster_observations", "Observations", "count", "SUM"),
+    ("row_count", "Row Count", "count", "SUM"),
+]
+
+# The metric a caller can pick for the "top assets by ..." breakdown --
+# same catalog as the asset-level cards so the two views stay consistent.
+_BREAKDOWN_METRICS = {name: (label, unit) for name, label, unit, _agg in _ASSET_INSIGHT_METRICS}
+
+
+class DeploymentInsightsResponse(BaseModel):
+    window_days: int
+    metrics: list[AssetInsightMetric]
+
+
+@router.get("/{project_id}/insights/deployment", response_model=DeploymentInsightsResponse)
+async def get_deployment_insights_metrics(project_id: str, days: int = 30):
+    """Deployment-wide Insights metrics -- the top-level view before
+    drilling into a specific asset's own Insights tab."""
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    if not getattr(project, "is_dagster_plus", False):
+        raise HTTPException(status_code=404, detail="Insights metrics are only available for Dagster+ connections.")
+
+    from ..services.dagster_plus_mcp import DagsterPlusMcpSession, DagsterPlusMcpError
+    import asyncio as _asyncio
+
+    days = max(1, min(days, 120))
+    before = time.time()
+    after = before - days * 86400
+
+    try:
+        async with DagsterPlusMcpSession(
+            project.dagster_plus_org or "", project.dagster_plus_token or "", project.dagster_plus_region,
+        ) as mcp:
+            results = await _asyncio.gather(*(
+                _fetch_insight_metric(
+                    mcp, "get_deployment_metrics", name, label, unit, agg, after, before,
+                    project.dagster_plus_deployment, {},
+                )
+                for name, label, unit, agg in _DEPLOYMENT_INSIGHT_METRICS
+            ))
+    except DagsterPlusMcpError as e:
+        raise HTTPException(status_code=502, detail=f"Failed to fetch deployment Insights metrics: {e}")
+
+    metrics = [m for m in results if m is not None]
+    return DeploymentInsightsResponse(window_days=days, metrics=metrics)
+
+
+class AssetBreakdownRow(BaseModel):
+    asset_key: str
+    value: float
+
+
+class AssetBreakdownResponse(BaseModel):
+    metric_name: str
+    label: str
+    unit: str
+    window_days: int
+    rows: list[AssetBreakdownRow]
+
+
+@router.get("/{project_id}/insights/breakdown", response_model=AssetBreakdownResponse)
+async def get_asset_insights_breakdown(project_id: str, metric_name: str = "__dagster_dagster_credits", days: int = 30):
+    """Per-asset breakdown for one metric across every asset in the
+    project, sorted highest first -- the "top assets by ..." drill-down
+    list on the deployment-level Insights page. Dagster+'s tool caps
+    this at its own top-N server-side (observed: 20), which is exactly
+    the shape a drill-down list wants anyway."""
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    if not getattr(project, "is_dagster_plus", False):
+        raise HTTPException(status_code=404, detail="Insights metrics are only available for Dagster+ connections.")
+    if metric_name not in _BREAKDOWN_METRICS:
+        raise HTTPException(status_code=400, detail=f"Unknown metric '{metric_name}'.")
+    label, unit = _BREAKDOWN_METRICS[metric_name]
+
+    asset_keys = [
+        n.data.get("asset_key", "").split("/")
+        for n in (project.graph.nodes if project.graph else [])
+        if n.node_kind == "asset" and n.data.get("asset_key")
+    ]
+    if not asset_keys:
+        return AssetBreakdownResponse(metric_name=metric_name, label=label, unit=unit, window_days=days, rows=[])
+
+    from ..services.dagster_plus_mcp import DagsterPlusMcpSession, DagsterPlusMcpError
+
+    days = max(1, min(days, 120))
+    before = time.time()
+    after = before - days * 86400
+    # Aggregation function doesn't matter much for a ranking list -- SUM
+    # for counts/credits, AVERAGE for rate-shaped metrics (matches the
+    # same choice _ASSET_INSIGHT_METRICS makes per metric).
+    agg = next((a for n, _, _, a in _ASSET_INSIGHT_METRICS if n == metric_name), "SUM")
+
+    try:
+        async with DagsterPlusMcpSession(
+            project.dagster_plus_org or "", project.dagster_plus_token or "", project.dagster_plus_region,
+        ) as mcp:
+            raw = await mcp.call_tool("get_asset_metrics", {
+                "metric_name": metric_name, "after": after, "before": before,
+                "granularity": "DAILY", "aggregation_function": agg,
+                "asset_keys": asset_keys, "deployment_name": project.dagster_plus_deployment,
+            })
+    except DagsterPlusMcpError as e:
+        raise HTTPException(status_code=502, detail=f"Failed to fetch Insights breakdown: {e}")
+
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        data = {}
+    rows: list[AssetBreakdownRow] = []
+    for item in (data.get("items") or []):
+        val = item.get("aggregate_value")
+        if val is None:
+            continue
+        key = "/".join(((item.get("entity") or {}).get("assetKey") or {}).get("path") or [])
+        if not key:
+            continue
+        rows.append(AssetBreakdownRow(asset_key=key, value=val))
+    rows.sort(key=lambda r: r.value, reverse=True)
+    return AssetBreakdownResponse(metric_name=metric_name, label=label, unit=unit, window_days=days, rows=rows)
+
+
+class JobBreakdownRow(BaseModel):
+    job_name: str
+    code_location: str | None
+    value: float
+
+
+class JobBreakdownResponse(BaseModel):
+    metric_name: str
+    label: str
+    unit: str
+    window_days: int
+    rows: list[JobBreakdownRow]
+
+
+# Metric picker for the job breakdown -- job-flavored (run health/cost),
+# reusing the deployment catalog's labels rather than the asset one
+# (asset-level concepts like freshness/observations don't apply to a job).
+_JOB_BREAKDOWN_METRICS = {name: (label, unit) for name, label, unit, _agg in _DEPLOYMENT_INSIGHT_METRICS}
+
+
+@router.get("/{project_id}/insights/job-breakdown", response_model=JobBreakdownResponse)
+async def get_job_insights_breakdown(project_id: str, metric_name: str = "__dagster_dagster_credits", days: int = 30):
+    """Per-job breakdown for one metric across every job in the
+    deployment, sorted highest first -- the job-level counterpart to
+    get_asset_insights_breakdown. Unlike get_asset_metrics, get_job_metrics
+    doesn't require an explicit selector -- omitting `jobs` returns every
+    job directly, so there's no need to enumerate them from the project
+    graph first."""
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    if not getattr(project, "is_dagster_plus", False):
+        raise HTTPException(status_code=404, detail="Insights metrics are only available for Dagster+ connections.")
+    if metric_name not in _JOB_BREAKDOWN_METRICS:
+        raise HTTPException(status_code=400, detail=f"Unknown metric '{metric_name}'.")
+    label, unit = _JOB_BREAKDOWN_METRICS[metric_name]
+
+    from ..services.dagster_plus_mcp import DagsterPlusMcpSession, DagsterPlusMcpError
+
+    days = max(1, min(days, 120))
+    before = time.time()
+    after = before - days * 86400
+    agg = next((a for n, _, _, a in _DEPLOYMENT_INSIGHT_METRICS if n == metric_name), "SUM")
+
+    try:
+        async with DagsterPlusMcpSession(
+            project.dagster_plus_org or "", project.dagster_plus_token or "", project.dagster_plus_region,
+        ) as mcp:
+            raw = await mcp.call_tool("get_job_metrics", {
+                "metric_name": metric_name, "after": after, "before": before,
+                "granularity": "DAILY", "aggregation_function": agg,
+                "deployment_name": project.dagster_plus_deployment,
+            })
+    except DagsterPlusMcpError as e:
+        raise HTTPException(status_code=502, detail=f"Failed to fetch job Insights breakdown: {e}")
+
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        data = {}
+    rows: list[JobBreakdownRow] = []
+    for item in (data.get("items") or []):
+        val = item.get("aggregate_value")
+        if val is None:
+            continue
+        entity = item.get("entity") or {}
+        job_name = entity.get("jobName") or ""
+        # Dagster's own auto-generated "materialize everything" implicit
+        # job, not something a user created -- noise in a ranking list.
+        if not job_name or job_name.startswith("__"):
+            continue
+        rows.append(JobBreakdownRow(job_name=job_name, code_location=entity.get("codeLocationName"), value=val))
+    rows.sort(key=lambda r: r.value, reverse=True)
+    return JobBreakdownResponse(metric_name=metric_name, label=label, unit=unit, window_days=days, rows=rows)
+
+
+class JobInsightsResponse(BaseModel):
+    job_name: str
+    window_days: int
+    metrics: list[AssetInsightMetric]
+
+
+async def _resolve_job_selector(mcp: "Any", job_name: str, deployment_name: str | None) -> dict | None:
+    """Look up a job's (repository_name, code_location_name) qualifier.
+    get_job_metrics' `jobs` selector 500s when given a bare job_name
+    without these -- there's no dedicated "list jobs" tool, so this
+    reuses the same no-selector call get_job_insights_breakdown makes
+    (cheap: one metric, a short window) and picks out the matching
+    entity's qualifier fields."""
+    before = time.time()
+    after = before - 7 * 86400
+    try:
+        raw = await mcp.call_tool("get_job_metrics", {
+            "metric_name": "__dagster_dagster_credits", "after": after, "before": before,
+            "granularity": "DAILY", "aggregation_function": "SUM",
+            "deployment_name": deployment_name,
+        })
+    except Exception:
+        return None
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    for item in (data.get("items") or []):
+        entity = item.get("entity") or {}
+        if entity.get("jobName") == job_name:
+            return {
+                "jobs": [{
+                    "job_name": job_name,
+                    "repository_name": entity.get("repositoryName"),
+                    "code_location_name": entity.get("codeLocationName"),
+                }],
+            }
+    return None
+
+
+@router.get("/{project_id}/insights/job-metrics", response_model=JobInsightsResponse)
+async def get_job_insights_metrics(project_id: str, job_name: str, days: int = 30):
+    """Live per-job Insights metrics over a trailing window -- the job-level
+    counterpart to get_asset_insights_metrics. Powers a richer job detail
+    view than the plain "no pipeline selected" the Automation tab's job
+    dialog showed before."""
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    if not getattr(project, "is_dagster_plus", False):
+        raise HTTPException(status_code=404, detail="Insights metrics are only available for Dagster+ connections.")
+
+    from ..services.dagster_plus_mcp import DagsterPlusMcpSession, DagsterPlusMcpError
+    import asyncio as _asyncio
+
+    days = max(1, min(days, 120))
+    before = time.time()
+    after = before - days * 86400
+
+    try:
+        async with DagsterPlusMcpSession(
+            project.dagster_plus_org or "", project.dagster_plus_token or "", project.dagster_plus_region,
+        ) as mcp:
+            selector = await _resolve_job_selector(mcp, job_name, project.dagster_plus_deployment)
+            if selector is None:
+                raise HTTPException(status_code=404, detail=f"Job '{job_name}' not found in Dagster+ Insights.")
+            results = await _asyncio.gather(*(
+                _fetch_insight_metric(
+                    mcp, "get_job_metrics", name, label, unit, agg, after, before,
+                    project.dagster_plus_deployment, selector,
+                )
+                for name, label, unit, agg in _DEPLOYMENT_INSIGHT_METRICS
+            ))
+    except DagsterPlusMcpError as e:
+        raise HTTPException(status_code=502, detail=f"Failed to fetch job Insights metrics: {e}")
+
+    metrics = [m for m in results if m is not None]
+    return JobInsightsResponse(job_name=job_name, window_days=days, metrics=metrics)
 
 
 def _infer_upstream_resource_key(src_dir: Path, source_asset_key: str) -> str | None:

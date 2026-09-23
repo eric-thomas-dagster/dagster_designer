@@ -20,6 +20,76 @@ _definitions_cache: Dict[str, Tuple[float, Dict[str, Any]]] = {}
 CACHE_TTL_SECONDS = 10  # Cache results for 10 seconds
 
 
+def _format_duration(seconds: int | None) -> str:
+    """Human-readable duration for freshness-policy windows (Dagster+ gives
+    these in raw seconds; a 604800s window read as-is is meaningless)."""
+    if not seconds:
+        return "0m"
+    days, rem = divmod(seconds, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes = rem // 60
+    parts = []
+    if days:
+        parts.append(f"{days}d")
+    if hours:
+        parts.append(f"{hours}h")
+    if minutes and not days:
+        parts.append(f"{minutes}m")
+    return " ".join(parts) or "0m"
+
+
+def _build_cloud_primitives(project) -> Dict[str, List[Dict[str, Any]]]:
+    """All primitive categories for a Dagster+ (cloud) project, built from
+    `project.discovered_primitives` (schedules/sensors/jobs, populated by
+    `_hydrate_cloud_graph`) plus a scan of `project.graph.nodes` for
+    per-asset checks and freshness policies. Shared by the list-all,
+    list-one-category, and details endpoints so cloud primitives always
+    look the same everywhere instead of drifting per endpoint (a category
+    missing from one call site's cat_map used to mean it silently returned
+    nothing there, even though it showed up in the main tab view)."""
+    dp = project.discovered_primitives or {}
+    asset_checks: List[Dict[str, Any]] = []
+    freshness_policies: List[Dict[str, Any]] = []
+    for node in (project.graph.nodes if project.graph else []):
+        if node.node_kind != "asset":
+            continue
+        for check in (node.data.get("checks") or []):
+            asset_checks.append({
+                "name": check.get("name", ""),
+                "key": check.get("key", ""),
+                "description": check.get("description", ""),
+                "asset_key": node.data.get("asset_key", ""),
+                "file": check.get("source", ""),
+            })
+        policy = node.data.get("freshness_policy")
+        if not policy:
+            continue
+        asset_key = node.data.get("asset_key", "")
+        if policy.get("type") == "time_window":
+            fail_s = policy.get("fail_window_seconds")
+            warn_s = policy.get("warn_window_seconds")
+            description = f"Fails if more than {_format_duration(fail_s)} stale"
+            if warn_s:
+                description += f", warns after {_format_duration(warn_s)}"
+        else:
+            description = f"Must materialize by {policy.get('deadline_cron', '?')} ({policy.get('timezone', 'UTC')})"
+        freshness_policies.append({
+            "name": asset_key or node.id,
+            "file": "N/A",
+            "description": description,
+            "asset_key": asset_key,
+            "status": node.data.get("freshness_status"),
+            "policy": policy,
+        })
+    return {
+        "schedules": list(dp.get("schedules", [])),
+        "sensors": list(dp.get("sensors", [])),
+        "jobs": list(dp.get("jobs", [])),
+        "asset_checks": asset_checks,
+        "freshness_policies": freshness_policies,
+    }
+
+
 def _parse_automations_from_yaml(project_path: Path) -> Dict[str, List[Dict[str, Any]]]:
     """
     Parse jobs, schedules, sensors, and asset checks directly from YAML files
@@ -158,23 +228,11 @@ async def list_primitives(project_id: str, category: PrimitiveCategory):
         # Dagster+ (cloud) short-circuit: mirror the list-all endpoint.
         _cloud_project = project_service.get_project(project_id)
         if _cloud_project and getattr(_cloud_project, "is_dagster_plus", False):
-            dp = _cloud_project.discovered_primitives or {}
-            if category == "asset_check":
-                items: list[dict] = []
-                for node in (_cloud_project.graph.nodes if _cloud_project.graph else []):
-                    if node.node_kind != "asset":
-                        continue
-                    for check in (node.data.get("checks") or []):
-                        items.append({
-                            "name": check.get("name", ""),
-                            "key": check.get("key", ""),
-                            "description": check.get("description", ""),
-                            "asset_key": node.data.get("asset_key", ""),
-                            "file": check.get("source", ""),
-                        })
-            else:
-                cat_map = {"schedule": "schedules", "sensor": "sensors", "job": "jobs"}
-                items = list(dp.get(cat_map.get(category, ""), []))
+            cat_map = {
+                "schedule": "schedules", "sensor": "sensors", "job": "jobs",
+                "asset_check": "asset_checks", "freshness_policy": "freshness_policies",
+            }
+            items = _build_cloud_primitives(_cloud_project).get(cat_map.get(category, ""), [])
             return {
                 "project_id": project_id,
                 "category": category,
@@ -299,28 +357,9 @@ async def list_all_primitives(project_id: str):
         # GraphQL and stored on project.discovered_primitives + graph.
         _cloud_project = project_service.get_project(project_id)
         if _cloud_project and getattr(_cloud_project, "is_dagster_plus", False):
-            dp = _cloud_project.discovered_primitives or {}
-            asset_checks: list[dict] = []
-            for node in (_cloud_project.graph.nodes if _cloud_project.graph else []):
-                if node.node_kind != "asset":
-                    continue
-                for check in (node.data.get("checks") or []):
-                    asset_checks.append({
-                        "name": check.get("name", ""),
-                        "key": check.get("key", ""),
-                        "description": check.get("description", ""),
-                        "asset_key": node.data.get("asset_key", ""),
-                        "file": check.get("source", ""),
-                    })
             return {
                 "project_id": project_id,
-                "primitives": {
-                    "schedules": list(dp.get("schedules", [])),
-                    "sensors": list(dp.get("sensors", [])),
-                    "jobs": list(dp.get("jobs", [])),
-                    "asset_checks": asset_checks,
-                    "freshness_policies": [],
-                },
+                "primitives": _build_cloud_primitives(_cloud_project),
                 "source": "dagster_plus",
             }
 
@@ -436,6 +475,31 @@ async def get_primitive_details(project_id: str, category: PrimitiveCategory, na
         Primitive details including code
     """
     try:
+        from ..services.project_service import project_service
+
+        # Dagster+ (cloud) short-circuit: there's no local file to read
+        # code from -- return whatever the live hydration captured
+        # (cron/status/sensor_type/linked assets/freshness policy config)
+        # so the details view has something real to show instead of 404ing.
+        _cloud_project = project_service.get_project(project_id)
+        if _cloud_project and getattr(_cloud_project, "is_dagster_plus", False):
+            cat_map = {
+                "schedule": "schedules", "sensor": "sensors", "job": "jobs",
+                "asset_check": "asset_checks", "freshness_policy": "freshness_policies",
+            }
+            items = _build_cloud_primitives(_cloud_project).get(cat_map.get(category, ""), [])
+            primitive = next((p for p in items if p.get("name") == name), None)
+            if not primitive:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Primitive {name} not found in category {category}",
+                )
+            return {
+                "project_id": project_id,
+                "category": category,
+                "primitive": primitive,
+            }
+
         primitive = primitives_service.get_primitive_details(project_id, category, name)
 
         if not primitive:
@@ -544,6 +608,21 @@ async def delete_primitive(project_id: str, category: PrimitiveCategory, name: s
         Success message
     """
     try:
+        from ..services.project_service import project_service
+
+        # Cloud primitives are defined in the user's Dagster+-deployed
+        # code (or built into the deployment itself) -- there's no local
+        # file for Designer to remove. The frontend hides the delete
+        # action for cloud projects; this is a defensive backstop so
+        # hitting the endpoint directly fails with a clear reason instead
+        # of a confusing "not found" from the local-file lookup below.
+        _cloud_project = project_service.get_project(project_id)
+        if _cloud_project and getattr(_cloud_project, "is_dagster_plus", False):
+            raise HTTPException(
+                status_code=400,
+                detail="Can't delete this from Designer -- it's defined in your Dagster+ deployment's code. Remove it from source and redeploy, or disable it from Dagster+ directly.",
+            )
+
         success = primitives_service.delete_primitive(project_id, category, name)
 
         if not success:

@@ -716,6 +716,52 @@ def {request.asset_name}():
         )
 
 
+async def _list_cloud_resources(project) -> dict:
+    """Real resources + IO managers for a Dagster+ connection, via
+    allTopLevelResourceDetails -- creating a NEW one is local-only (means
+    writing Python source Dagster+ has no equivalent for), but listing
+    EXISTING ones works from real data instead of the empty result a pure
+    cloud connection always got before (no local resources.py to parse)."""
+    from app.services.dagster_plus_client import query as dagster_plus_query, RESOURCES_QUERY, DagsterPlusError
+
+    try:
+        data = await dagster_plus_query(
+            project.dagster_plus_org or "",
+            project.dagster_plus_deployment or "",
+            project.dagster_plus_token or "",
+            RESOURCES_QUERY,
+            region=project.dagster_plus_region,
+        )
+    except DagsterPlusError as e:
+        raise HTTPException(status_code=502, detail=f"Failed to fetch resources from Dagster+: {e}")
+    result = data.get("repositoriesOrError") or {}
+    if result.get("__typename") != "RepositoryConnection":
+        raise HTTPException(status_code=502, detail=result.get("message") or "Dagster+ returned an unexpected response for resources.")
+    io_managers: list[dict[str, Any]] = []
+    resources: list[dict[str, Any]] = []
+    for repo in (result.get("nodes") or []):
+        location_name = (repo.get("location") or {}).get("name", "")
+        for res in (repo.get("allTopLevelResourceDetails") or []):
+            resource_type = res.get("resourceType") or ""
+            entry = {
+                "name": res.get("name", ""),
+                "file": location_name,   # no source file for cloud -- shows where it's defined instead
+                "line_number": 0,
+                "resource_type": resource_type,
+                "description": res.get("description") or "",
+            }
+            if "iomanager" in resource_type.lower().replace("_", ""):
+                io_managers.append(entry)
+            else:
+                resources.append(entry)
+    return {
+        "project_id": project.id,
+        "resources_file": None,
+        "io_managers": io_managers,
+        "resources": resources,
+    }
+
+
 @router.get("/resources/{project_id}")
 async def list_resources_and_io_managers(project_id: str):
     """List installed resources and IO managers by parsing resources.py.
@@ -731,6 +777,9 @@ async def list_resources_and_io_managers(project_id: str):
     project = project_service.get_project(project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
+
+    if getattr(project, "is_dagster_plus", False):
+        return await _list_cloud_resources(project)
 
     project_dir = project_service._get_project_dir(project)
     directory_name = project.directory_name or ""

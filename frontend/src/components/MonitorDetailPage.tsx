@@ -2,9 +2,10 @@ import { useEffect, useState } from 'react';
 import {
   ArrowLeft, ChevronRight, Play, Bell, MoreVertical, Loader2, ExternalLink,
   ShieldCheck, TestTube2, Sparkles, CheckCircle2, XCircle, AlertTriangle, Clock,
-  Trash2, FileText, Zap, Radar, Layers, Send,
+  Trash2, FileText, Zap, Radar, Layers, Send, MinusCircle,
 } from 'lucide-react';
 import { projectsApi } from '@/services/api';
+import { classifyStatus, statusTextClass } from '@/lib/status';
 
 type Monitor = Awaited<ReturnType<typeof projectsApi.listMonitors>>['monitors'][number];
 type Status = 'passing' | 'failing' | 'warn' | 'never_run';
@@ -15,6 +16,9 @@ interface MonitorDetailPageProps {
   onBack: () => void;
   onOpenFile?: (path: string) => void;
   onOpenAsset?: (assetKey: string) => void;
+  /** Jump to the Runs tab for the run that produced a given check
+   *  execution -- only available for Dagster+ (cloud) history. */
+  onOpenRun?: (runId: string) => void;
   /** Called after a successful delete so the parent (index) can refresh
    *  its list and hide this page. */
   onDeleted?: () => void;
@@ -27,10 +31,10 @@ const KIND_META: Record<Monitor['kind'], { label: string; icon: any; accent: str
 };
 
 const bucket = (m: Monitor | { last_status: string | null }): Status => {
-  const s = (m.last_status || '').toLowerCase();
-  if (s === 'pass' || s === 'success') return 'passing';
-  if (s === 'fail' || s === 'error' || s === 'runtime error') return 'failing';
-  if (s === 'warn') return 'warn';
+  const c = classifyStatus(m.last_status);
+  if (c === 'success') return 'passing';
+  if (c === 'failure') return 'failing';
+  if (c === 'warning') return 'warn';
   return 'never_run';
 };
 
@@ -44,13 +48,15 @@ const bucket = (m: Monitor | { last_status: string | null }): Status => {
  *   • Blast-radius panel — downstream assets + exposures + affected
  *     monitors, so failures translate to real "who cares" impact
  */
-export function MonitorDetailPage({ monitor, projectId, onBack, onOpenFile, onOpenAsset, onDeleted }: MonitorDetailPageProps) {
+export function MonitorDetailPage({ monitor, projectId, onBack, onOpenFile, onOpenAsset, onOpenRun, onDeleted }: MonitorDetailPageProps) {
   const [tab, setTab] = useState<'overview' | 'runs' | 'settings'>('overview');
   const [history, setHistory] = useState<Awaited<ReturnType<typeof projectsApi.getMonitorHistory>> | null>(null);
   const [impact, setImpact] = useState<Awaited<ReturnType<typeof projectsApi.getMonitorImpact>> | null>(null);
   const [historyLoading, setHistoryLoading] = useState(true);
   const [impactLoading, setImpactLoading] = useState(true);
   const [deleting, setDeleting] = useState(false);
+  const [runsPage, setRunsPage] = useState(0);
+  const RUNS_PAGE_SIZE = 50;
 
   const handleDelete = async () => {
     if (!window.confirm(
@@ -77,6 +83,7 @@ export function MonitorDetailPage({ monitor, projectId, onBack, onOpenFile, onOp
   useEffect(() => {
     let cancelled = false;
     setHistoryLoading(true); setImpactLoading(true);
+    setRunsPage(0);
     projectsApi.getMonitorHistory(projectId, monitor.id, 500)
       .then((r) => { if (!cancelled) { setHistory(r); setHistoryLoading(false); } })
       .catch(() => { if (!cancelled) setHistoryLoading(false); });
@@ -272,14 +279,23 @@ export function MonitorDetailPage({ monitor, projectId, onBack, onOpenFile, onOp
                 {history.events.slice().reverse().slice(0, 8).map((e, i) => (
                   <li key={i} className="px-4 py-2 flex items-center gap-2 text-xs">
                     <StatusDot status={e.status} />
-                    <span className="text-gray-800 font-mono">{e.status}</span>
+                    <span className={`font-mono font-medium ${statusTextClass(e.status)}`}>{e.status}</span>
                     {e.failures != null && e.failures > 0 && (
                       <span className="text-rose-700 font-medium">{e.failures} failed</span>
                     )}
                     {e.value != null && (
                       <span className="text-gray-600 font-mono">{formatValue(e.value)} {e.value_label ?? ''}</span>
                     )}
-                    <span className="ml-auto text-gray-400 tabular-nums">
+                    {e.run_id && onOpenRun && (
+                      <button
+                        onClick={() => onOpenRun(e.run_id!)}
+                        className="ml-auto text-indigo-600 hover:text-indigo-800 hover:underline font-mono"
+                        title={`Open run ${e.run_id}`}
+                      >
+                        view run
+                      </button>
+                    )}
+                    <span className={`${e.run_id && onOpenRun ? '' : 'ml-auto'} text-gray-400 tabular-nums`}>
                       {new Date(e.ts).toLocaleString()}
                       {e.duration_ms != null && ` · ${(e.duration_ms / 1000).toFixed(1)}s`}
                     </span>
@@ -317,46 +333,94 @@ export function MonitorDetailPage({ monitor, projectId, onBack, onOpenFile, onOp
                 No runs recorded yet.
               </div>
             )}
-            {history && history.events.length > 0 && (
-              <table className="w-full text-sm">
-                <thead className="bg-gray-50 border-b border-gray-100">
-                  <tr>
-                    <th className="text-left px-4 py-2 text-xs font-medium text-gray-700 uppercase tracking-wider w-8"></th>
-                    <th className="text-left px-2 py-2 text-xs font-medium text-gray-700 uppercase tracking-wider">Status</th>
-                    <th className="text-left px-4 py-2 text-xs font-medium text-gray-700 uppercase tracking-wider">When</th>
-                    <th className="text-left px-4 py-2 text-xs font-medium text-gray-700 uppercase tracking-wider">Duration</th>
-                    <th className="text-left px-4 py-2 text-xs font-medium text-gray-700 uppercase tracking-wider">Failures</th>
-                    <th className="text-left px-4 py-2 text-xs font-medium text-gray-700 uppercase tracking-wider">Value</th>
-                    <th className="text-left px-4 py-2 text-xs font-medium text-gray-700 uppercase tracking-wider">Message</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {history.events.slice().reverse().map((e, i) => (
-                    <tr key={i} className="border-b border-gray-50 last:border-0 hover:bg-gray-50/50">
-                      <td className="px-4 py-2.5"><StatusDot status={e.status} /></td>
-                      <td className="px-2 py-2.5 font-mono text-xs text-gray-800">{e.status}</td>
-                      <td className="px-4 py-2.5 text-xs text-gray-700 tabular-nums">
-                        {new Date(e.ts).toLocaleString()}
-                      </td>
-                      <td className="px-4 py-2.5 text-xs text-gray-700 tabular-nums">
-                        {e.duration_ms != null ? `${(e.duration_ms / 1000).toFixed(1)}s` : '—'}
-                      </td>
-                      <td className="px-4 py-2.5 text-xs">
-                        {e.failures != null && e.failures > 0
-                          ? <span className="text-rose-700 font-medium">{e.failures}</span>
-                          : <span className="text-gray-400">—</span>}
-                      </td>
-                      <td className="px-4 py-2.5 text-xs font-mono text-gray-700">
-                        {e.value != null ? formatValue(e.value) + (e.value_label ? ' ' + e.value_label : '') : <span className="text-gray-400">—</span>}
-                      </td>
-                      <td className="px-4 py-2.5 text-[11px] text-gray-600 truncate max-w-[320px]" title={e.message || ''}>
-                        {e.message || <span className="text-gray-400 italic">—</span>}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            )}
+            {history && history.events.length > 0 && (() => {
+              const allRuns = history.events.slice().reverse();
+              const pageCount = Math.max(1, Math.ceil(allRuns.length / RUNS_PAGE_SIZE));
+              const page = Math.min(runsPage, pageCount - 1);
+              const pageRuns = allRuns.slice(page * RUNS_PAGE_SIZE, (page + 1) * RUNS_PAGE_SIZE);
+              return (
+                <>
+                  <table className="w-full text-sm">
+                    <thead className="bg-gray-50 border-b border-gray-100">
+                      <tr>
+                        <th className="text-left px-4 py-2 text-xs font-medium text-gray-700 uppercase tracking-wider w-8"></th>
+                        <th className="text-left px-2 py-2 text-xs font-medium text-gray-700 uppercase tracking-wider">Status</th>
+                        <th className="text-left px-4 py-2 text-xs font-medium text-gray-700 uppercase tracking-wider">When</th>
+                        <th className="text-left px-4 py-2 text-xs font-medium text-gray-700 uppercase tracking-wider">Duration</th>
+                        <th className="text-left px-4 py-2 text-xs font-medium text-gray-700 uppercase tracking-wider">Failures</th>
+                        <th className="text-left px-4 py-2 text-xs font-medium text-gray-700 uppercase tracking-wider">Value</th>
+                        <th className="text-left px-4 py-2 text-xs font-medium text-gray-700 uppercase tracking-wider">Message</th>
+                        {onOpenRun && <th className="text-left px-4 py-2 text-xs font-medium text-gray-700 uppercase tracking-wider">Run</th>}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {pageRuns.map((e, i) => (
+                        <tr key={i} className="border-b border-gray-50 last:border-0 hover:bg-gray-50/50">
+                          <td className="px-4 py-2.5"><StatusDot status={e.status} /></td>
+                          <td className={`px-2 py-2.5 font-mono text-xs ${statusTextClass(e.status)}`}>{e.status}</td>
+                          <td className="px-4 py-2.5 text-xs text-gray-700 tabular-nums">
+                            {new Date(e.ts).toLocaleString()}
+                          </td>
+                          <td className="px-4 py-2.5 text-xs text-gray-700 tabular-nums">
+                            {e.duration_ms != null ? `${(e.duration_ms / 1000).toFixed(1)}s` : '—'}
+                          </td>
+                          <td className="px-4 py-2.5 text-xs">
+                            {e.failures != null && e.failures > 0
+                              ? <span className="text-rose-700 font-medium">{e.failures}</span>
+                              : <span className="text-gray-400">—</span>}
+                          </td>
+                          <td className="px-4 py-2.5 text-xs font-mono text-gray-700">
+                            {e.value != null ? formatValue(e.value) + (e.value_label ? ' ' + e.value_label : '') : <span className="text-gray-400">—</span>}
+                          </td>
+                          <td className="px-4 py-2.5 text-[11px] text-gray-600 truncate max-w-[320px]" title={e.message || ''}>
+                            {e.message || <span className="text-gray-400 italic">—</span>}
+                          </td>
+                          {onOpenRun && (
+                            <td className="px-4 py-2.5 text-xs">
+                              {e.run_id
+                                ? (
+                                  <button
+                                    onClick={() => onOpenRun(e.run_id!)}
+                                    className="text-indigo-600 hover:text-indigo-800 hover:underline font-mono"
+                                    title={`Open run ${e.run_id}`}
+                                  >
+                                    view run
+                                  </button>
+                                )
+                                : <span className="text-gray-400">—</span>}
+                            </td>
+                          )}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  {pageCount > 1 && (
+                    <div className="px-4 py-2.5 border-t border-gray-100 flex items-center justify-between text-xs text-gray-500">
+                      <span>
+                        Showing {page * RUNS_PAGE_SIZE + 1}–{Math.min((page + 1) * RUNS_PAGE_SIZE, allRuns.length)} of {allRuns.length}
+                      </span>
+                      <div className="flex items-center gap-2">
+                        <button
+                          onClick={() => setRunsPage((p) => Math.max(0, p - 1))}
+                          disabled={page === 0}
+                          className="px-2 py-1 rounded border border-gray-200 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
+                        >
+                          Prev
+                        </button>
+                        <span className="tabular-nums">Page {page + 1} of {pageCount}</span>
+                        <button
+                          onClick={() => setRunsPage((p) => Math.min(pageCount - 1, p + 1))}
+                          disabled={page >= pageCount - 1}
+                          className="px-2 py-1 rounded border border-gray-200 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
+                        >
+                          Next
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </>
+              );
+            })()}
           </div>
         </div>
       )}
@@ -440,10 +504,11 @@ function BigStatusPill({ status, monitor }: { status: Status; monitor: Monitor }
 }
 
 function StatusDot({ status }: { status: string }) {
-  const s = (status || '').toLowerCase();
-  if (s === 'pass' || s === 'success') return <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500 flex-shrink-0" />;
-  if (s === 'fail' || s === 'error' || s === 'runtime error') return <XCircle className="w-3.5 h-3.5 text-rose-500 flex-shrink-0" />;
-  if (s === 'warn') return <AlertTriangle className="w-3.5 h-3.5 text-amber-500 flex-shrink-0" />;
+  const c = classifyStatus(status);
+  if (c === 'success') return <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500 flex-shrink-0" />;
+  if (c === 'failure') return <XCircle className="w-3.5 h-3.5 text-rose-500 flex-shrink-0" />;
+  if (c === 'warning') return <AlertTriangle className="w-3.5 h-3.5 text-amber-500 flex-shrink-0" />;
+  if (c === 'skipped') return <MinusCircle className="w-3.5 h-3.5 text-gray-400 flex-shrink-0" />;
   return <Clock className="w-3.5 h-3.5 text-gray-300 flex-shrink-0" />;
 }
 
@@ -577,12 +642,13 @@ function BigPassFailStrip({ events }: { events: Array<{ status: string; ts: stri
   return (
     <div className="flex items-center gap-[2px] h-16" title={`${slots.length} recent runs`}>
       {slots.map((e, i) => {
-        const s = (e.status || '').toLowerCase();
-        const tone = s === 'pass' || s === 'success' ? 'bg-emerald-500'
-          : s === 'fail' || s === 'error' || s === 'runtime error' ? 'bg-rose-500'
-          : s === 'warn' ? 'bg-amber-500'
+        const c = classifyStatus(e.status);
+        const tone = c === 'success' ? 'bg-emerald-500'
+          : c === 'failure' ? 'bg-rose-500'
+          : c === 'warning' ? 'bg-amber-500'
+          : c === 'skipped' ? 'bg-slate-400'
           : 'bg-gray-300';
-        return <div key={i} className={`${tone} rounded-sm flex-1 min-w-[3px]`} title={`${s} · ${new Date(e.ts).toLocaleString()}`} />;
+        return <div key={i} className={`${tone} rounded-sm flex-1 min-w-[3px]`} title={`${e.status} · ${new Date(e.ts).toLocaleString()}`} />;
       })}
     </div>
   );
@@ -722,16 +788,15 @@ function AskMonitorPanel({ monitor, projectId }: { monitor: Monitor; projectId: 
 type Event = NonNullable<Awaited<ReturnType<typeof projectsApi.getMonitorHistory>>>['events'][number];
 
 function isAnomaly(e: Event): boolean {
-  const s = (e.status || '').toLowerCase();
-  if (s === 'fail' || s === 'error' || s === 'runtime error' || s === 'warn') return true;
+  const c = classifyStatus(e.status);
+  if (c === 'failure' || c === 'warning') return true;
   if (e.value != null && e.expected_min != null && e.expected_max != null) {
     if (e.value < e.expected_min || e.value > e.expected_max) return true;
   }
   return false;
 }
 function isPassing(e: Event): boolean {
-  const s = (e.status || '').toLowerCase();
-  return (s === 'pass' || s === 'success') && !isAnomaly(e);
+  return classifyStatus(e.status) === 'success' && !isAnomaly(e);
 }
 
 function DatapointSummary({ events }: { events: Event[] }) {

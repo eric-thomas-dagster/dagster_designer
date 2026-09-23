@@ -101,6 +101,7 @@ class ConnectDagsterPlusRequest(BaseModel):
     deployment: str = "prod"           # deployment name — usually 'prod'
     token: str                         # Dagster+ user token (read scope is enough)
     location: str | None = None        # optional code-location filter
+    region: str = "us"                 # 'us' or 'eu' -- picked once, up front, at connect time
 
 
 class TestDagsterPlusDeploymentHint(BaseModel):
@@ -145,7 +146,7 @@ async def test_dagster_plus_connection(request: ConnectDagsterPlusRequest):
         query, DagsterPlusError, PING_QUERY, DEPLOYMENTS_QUERY, probe_default_deployment,
     )
     try:
-        data = await query(request.org, request.deployment, request.token, PING_QUERY)
+        data = await query(request.org, request.deployment, request.token, PING_QUERY, region=request.region)
     except DagsterPlusError as e:
         # str(e) can contain non-ASCII characters that fail to encode
         # when the HTTP layer (or some downstream serializer) picks
@@ -164,7 +165,7 @@ async def test_dagster_plus_connection(request: ConnectDagsterPlusRequest):
     deployments: list[TestDagsterPlusDeploymentHint] = []
     default_deployment: str | None = None
     try:
-        dep_data = await query(request.org, "", request.token, DEPLOYMENTS_QUERY)
+        dep_data = await query(request.org, "", request.token, DEPLOYMENTS_QUERY, region=request.region)
         for d in (dep_data.get("fullDeployments") or []):
             deployments.append(TestDagsterPlusDeploymentHint(
                 deployment_name=d.get("deploymentName") or "",
@@ -179,7 +180,7 @@ async def test_dagster_plus_connection(request: ConnectDagsterPlusRequest):
     # does when the deployment field is left blank, so what this dialog
     # shows matches what "Connect" will actually pin.
     try:
-        default_deployment = await probe_default_deployment(request.org, request.token)
+        default_deployment = await probe_default_deployment(request.org, request.token, region=request.region)
     except Exception as e:
         print(f"[dagster+] default deployment probe failed: {e}", flush=True)
 
@@ -218,7 +219,7 @@ async def connect_dagster_plus(request: ConnectDagsterPlusRequest):
 
     # Verify the token round-trips before we persist anything.
     try:
-        await query(request.org, request.deployment, request.token, PING_QUERY)
+        await query(request.org, request.deployment, request.token, PING_QUERY, region=request.region)
     except DagsterPlusError as e:
         raise HTTPException(status_code=400, detail=f"Couldn't connect to Dagster+: {e}")
 
@@ -237,7 +238,7 @@ async def connect_dagster_plus(request: ConnectDagsterPlusRequest):
         # -- e.g. some Hybrid setups), this falls back to None exactly
         # like before: still functional, just back to the slower,
         # per-query resolution.
-        deployment = await probe_default_deployment(request.org, request.token)
+        deployment = await probe_default_deployment(request.org, request.token, region=request.region)
 
     # Create a project record but flag it as a cloud connection.
     proj_create = ProjectCreate(
@@ -249,6 +250,7 @@ async def connect_dagster_plus(request: ConnectDagsterPlusRequest):
     # since ProjectCreate doesn't carry them.
     project.is_dagster_plus = True
     project.dagster_plus_org = request.org.strip()
+    project.dagster_plus_region = (request.region or "us").strip().lower()
     project.dagster_plus_deployment = deployment
     project.dagster_plus_token = request.token
     project.dagster_plus_location = (request.location or "").strip() or None
@@ -285,6 +287,7 @@ async def get_dagster_plus_assets(project_id: str):
             project.dagster_plus_deployment or "",
             project.dagster_plus_token or "",
             ASSETS_QUERY,
+            region=project.dagster_plus_region,
         )
     except DagsterPlusError as e:
         raise HTTPException(status_code=502, detail=str(e))
@@ -330,6 +333,7 @@ async def get_dagster_plus_asset_checks(project_id: str):
             project.dagster_plus_deployment or "",
             project.dagster_plus_token or "",
             ASSET_CHECKS_QUERY,
+            region=project.dagster_plus_region,
         )
     except DagsterPlusError as e:
         raise HTTPException(status_code=502, detail=str(e))
@@ -385,6 +389,7 @@ async def list_dagster_plus_deployments(project_id: str):
             "",  # org-level endpoint
             project.dagster_plus_token or "",
             DEPLOYMENTS_QUERY,
+            region=project.dagster_plus_region,
         )
     except DagsterPlusError as e:
         # Sanitize -- str(e) can contain em-dashes / curly quotes that
@@ -434,12 +439,12 @@ async def switch_dagster_plus_deployment(project_id: str, request: SwitchDeploym
             # deployment name now.
             from ..services.dagster_plus_client import probe_default_deployment
             deployment = await probe_default_deployment(
-                project.dagster_plus_org or "", project.dagster_plus_token or ""
+                project.dagster_plus_org or "", project.dagster_plus_token or "", region=project.dagster_plus_region
             )
         project.dagster_plus_deployment = deployment
         project_service._save_project(project)
         try:
-            await _hydrate_cloud_graph(project)
+            await _hydrate_cloud_graph(project, force=True)
             project.dagster_plus_last_error = None
         except Exception as e:
             # Non-fatal: hydrate can fail if the new deployment is bad;
@@ -473,6 +478,7 @@ async def get_dagster_plus_runs(project_id: str, limit: int = 25):
             project.dagster_plus_token or "",
             RUNS_QUERY,
             variables={"limit": max(1, min(limit, 100))},
+            region=project.dagster_plus_region,
         )
     except DagsterPlusError as e:
         raise HTTPException(status_code=502, detail=str(e))
@@ -608,6 +614,7 @@ async def _cloud_monitor_history(project: Project, monitor_id: str, limit: int) 
             project.dagster_plus_deployment or "",
             project.dagster_plus_token or "",
             ASSET_CHECK_HISTORY_QUERY,
+            region=project.dagster_plus_region,
             variables={"assetKey": asset_key, "checkName": check_name, "limit": max(1, min(limit, 500)), "cursor": None},
         )
     except Exception as e:
@@ -632,15 +639,29 @@ async def _cloud_monitor_history(project: Project, monitor_id: str, limit: int) 
             "kind": "asset_check",
             "status": (exec_.get("status") or "").lower() or "unknown",
             "message": evl.get("description") if evl else None,
+            "run_id": exec_.get("runId"),
         })
     # Return chronological order to match local behavior.
     events.reverse()
     return events
 
 
-async def _hydrate_cloud_graph(project: Project) -> None:
+_CLOUD_HYDRATE_TTL_SECONDS = 20
+
+
+async def _hydrate_cloud_graph(project: Project, force: bool = False) -> None:
     """Fetch assets + checks + schedules + sensors from Dagster+ and
     translate into the PipelineGraph shape local projects use.
+
+    Every cloud-facing endpoint calls this on nearly every request
+    (project.graph isn't kept in memory between requests — each one
+    reloads Project fresh from disk), so without a freshness check,
+    routine navigation like opening the project then clicking into the
+    dbt tab a moment later re-runs the full live GraphQL fetch twice in
+    a row. Skip the refetch if we hydrated within the last
+    `_CLOUD_HYDRATE_TTL_SECONDS` and already have a populated graph on
+    disk. Pass `force=True` where correctness requires the latest data
+    regardless of TTL (e.g. right after switching deployments).
 
     Query strategy (matches the actual Dagster+ GraphQL schema):
       • assetsOrError → asset graph shape (upstream/downstream)
@@ -658,11 +679,23 @@ async def _hydrate_cloud_graph(project: Project) -> None:
         REPOSITORIES_QUERY, SCHEDULES_QUERY, SENSORS_QUERY,
     )
     from ..models.graph import GraphNode, GraphEdge, PipelineGraph
+    import time as _time
 
     org = project.dagster_plus_org or ""
     dep = project.dagster_plus_deployment or ""
     tok = project.dagster_plus_token or ""
+    reg = project.dagster_plus_region
     if not org or not tok:
+        return
+
+    hydrate_started_at = _time.time()
+    last_hydrate = project.dagster_plus_graph_hydrated_at
+    if (
+        not force
+        and last_hydrate
+        and (hydrate_started_at - last_hydrate) < _CLOUD_HYDRATE_TTL_SECONDS
+        and project.graph and project.graph.nodes
+    ):
         return
 
     # Single query returns lineage + checks + schedule/sensor
@@ -673,7 +706,7 @@ async def _hydrate_cloud_graph(project: Project) -> None:
     # deployment (this call isn't wrapped in try/except on purpose: if
     # it fails there's no asset graph to build regardless, so we let it
     # raise and the caller records it as project.dagster_plus_last_error).
-    assets_data = await query(org, dep, tok, ASSETS_QUERY, timeout=90.0)
+    assets_data = await query(org, dep, tok, ASSETS_QUERY, timeout=90.0, region=reg)
     raw_assets = assets_data.get("assetNodes") or []
 
     from datetime import datetime as _dt, timezone as _tz
@@ -743,7 +776,7 @@ async def _hydrate_cloud_graph(project: Project) -> None:
         repo_sensor_links: dict[str, list[dict]] = {}
         repo_label = f"{selector['repositoryLocationName']}::{selector['repositoryName']}"
         try:
-            s_data = await query(org, dep, tok, SCHEDULES_QUERY, variables={"repositorySelector": selector})
+            s_data = await query(org, dep, tok, SCHEDULES_QUERY, variables={"repositorySelector": selector}, region=reg)
             for s in (((s_data.get("schedulesOrError") or {}).get("results") or [])):
                 repo_schedules.append({
                     "name": s.get("name"),
@@ -756,7 +789,7 @@ async def _hydrate_cloud_graph(project: Project) -> None:
         except Exception as e:
             print(f"[dagster+] schedules for {selector} failed: {e}", flush=True)
         try:
-            sen_data = await query(org, dep, tok, SENSORS_QUERY, variables={"repositorySelector": selector})
+            sen_data = await query(org, dep, tok, SENSORS_QUERY, variables={"repositorySelector": selector}, region=reg)
             for s in (((sen_data.get("sensorsOrError") or {}).get("results") or [])):
                 linked_keys = ["/".join(k.get("path") or []) for k in ((s.get("metadata") or {}).get("assetKeys") or [])]
                 repo_sensors.append({
@@ -775,7 +808,7 @@ async def _hydrate_cloud_graph(project: Project) -> None:
         return repo_schedules, repo_sensors, repo_sensor_links
 
     try:
-        repos_data = await query(org, dep, tok, REPOSITORIES_QUERY)
+        repos_data = await query(org, dep, tok, REPOSITORIES_QUERY, region=reg)
         repos = ((repos_data.get("repositoriesOrError") or {}).get("nodes") or [])
         selectors = [
             {
@@ -852,6 +885,16 @@ async def _hydrate_cloud_graph(project: Project) -> None:
         's3', 'gcs', 'adls', 'sftp', 'http', 'rest',
     }
 
+    # Path-segment prefixes that read as "this is a raw/ingested stage" --
+    # checked against EVERY segment of the asset key (not just the first
+    # or last), since real-world keys put this anywhere: `RAW_DATA/orders`
+    # (first segment, and "raw_data" not literally "raw"), `foo/stg_bar`
+    # (last segment), `a/staging/b` (middle segment).
+    _INGESTION_SEGMENT_HINTS = ("raw", "source", "src", "seed", "stg", "staging", "ingest", "landing", "bronze")
+
+    def _segment_hints_ingestion(seg: str) -> bool:
+        return seg in _INGESTION_KINDS or seg.startswith(_INGESTION_SEGMENT_HINTS)
+
     def _component_type_for(defn: dict, key: str, has_upstream: bool) -> str:
         """Give cloud assets a component_type that lines up with the
         heuristics existing frontend panels rely on.
@@ -859,22 +902,22 @@ async def _hydrate_cloud_graph(project: Project) -> None:
         Cast a wider net for ingestion-like assets:
           • computeKind matches a known ingestion tool (fivetran /
             airbyte / dlt / s3 / stripe / ...)
-          • asset key looks like a raw / source stage (raw_*, stg_*,
-            source_*, sources/*, seeds/*)
-          • description mentions "ingest" / "source" / "raw"
-          • the asset has NO upstream in this deployment (leaf sources
-            like external API pulls or Snowflake raw tables)
+          • any segment of the asset key looks like a raw / source /
+            staging stage (raw_data/orders, foo/stg_bar, a/staging/b, ...)
+          • description mentions "ingest" / "raw source" / "external source"
+          • the asset has NO upstream in this deployment AND its group
+            name reads the same way (leaf sources like external API
+            pulls or Snowflake raw tables)
         """
         kind = (defn.get("computeKind") or "").lower()
         desc = (defn.get("description") or "").lower()
         key_l = (key or "").lower()
-        key_last = key_l.rsplit('/', 1)[-1]
+        group = ((defn or {}).get("groupName") or "").lower()
         looks_source = (
             kind in _INGESTION_KINDS
-            or key_l.startswith(("raw/", "source/", "sources/", "seeds/", "stg/", "staging/", "ingest/", "ingestion/"))
-            or key_last.startswith(("raw_", "stg_", "source_", "src_", "seed_"))
-            or "ingest" in desc or "raw source" in desc or "external source" in desc
-            or (not has_upstream and (defn or {}).get("groupName") and (defn or {}).get("groupName").lower() in ("raw", "source", "sources", "ingest", "ingestion", "staging", "stg"))
+            or any(_segment_hints_ingestion(seg) for seg in key_l.split('/') if seg)
+            or "ingest" in desc or "raw source" in desc or "external source" in desc or "raw table" in desc
+            or (not has_upstream and group and _segment_hints_ingestion(group))
         )
         if looks_source:
             k = kind or "cloud_source"
@@ -890,6 +933,32 @@ async def _hydrate_cloud_graph(project: Project) -> None:
             a = assets_by_key.get(key) or {}
             # assetNodes flattens definition fields to the top level.
             defn = a
+            code_location = ((defn.get("repository") or {}).get("location") or {}).get("name") or None
+
+            # Normalize the two possible internalFreshnessPolicy shapes
+            # (a GraphQL union: TimeWindowFreshnessPolicy | CronFreshnessPolicy)
+            # into one flat dict so the frontend doesn't need to branch on
+            # __typename. None when the asset has no freshness policy set.
+            freshness_policy = None
+            ifp = defn.get("internalFreshnessPolicy")
+            if ifp:
+                kind = ifp.get("__typename")
+                if kind == "TimeWindowFreshnessPolicy":
+                    freshness_policy = {
+                        "type": "time_window",
+                        "fail_window_seconds": ifp.get("failWindowSeconds"),
+                        "warn_window_seconds": ifp.get("warnWindowSeconds"),
+                    }
+                elif kind == "CronFreshnessPolicy":
+                    freshness_policy = {
+                        "type": "cron",
+                        "deadline_cron": ifp.get("deadlineCron"),
+                        "lower_bound_delta_seconds": ifp.get("lowerBoundDeltaSeconds"),
+                        "timezone": ifp.get("timezone"),
+                    }
+            freshness_status_info = defn.get("freshnessStatusInfo") or {}
+            freshness_status = freshness_status_info.get("freshnessStatus")
+            freshness_last_materialized = (freshness_status_info.get("freshnessStatusMetadata") or {}).get("lastMaterializedTimestamp")
             # Dagster+ marks connection/observed-only assets (e.g.
             # information_schema, external BigQuery tables) with
             # isExecutable=false + isMaterializable=false + empty
@@ -998,6 +1067,10 @@ async def _hydrate_cloud_graph(project: Project) -> None:
                     "name": key,
                     "description": defn.get("description") or "",
                     "group_name": defn.get("groupName"),
+                    "code_location": code_location,
+                    "freshness_policy": freshness_policy,
+                    "freshness_status": freshness_status,
+                    "freshness_last_materialized": freshness_last_materialized,
                     "owners": owner_strs,
                     "kinds": kinds_from_tags or ([defn.get("computeKind")] if defn.get("computeKind") else []),
                     "tags": flat_tags,
@@ -1076,6 +1149,7 @@ async def _hydrate_cloud_graph(project: Project) -> None:
         "sensors": all_sensors,
         "jobs": list(seen_jobs.values()),
     }
+    project.dagster_plus_graph_hydrated_at = hydrate_started_at
 
     # Persist so downstream endpoints (Automations, Monitors, dbt tab)
     # can read via project_service.get_project without re-hydrating.
@@ -5180,6 +5254,158 @@ async def _call_llm(system_prompt: str, user_prompt: str, prior_turns: list[dict
 _call_claude = _call_llm
 
 
+async def _call_llm_with_mcp(
+    system_prompt: str,
+    user_prompt: str,
+    project: "Project",
+    prior_turns: list[dict] | None = None,
+    max_tool_iterations: int = 4,
+) -> tuple[str, list[str]]:
+    """Like _call_llm, but for a live Dagster+ connection, gives the model
+    real tool access via Dagster+'s hosted MCP server (live run status,
+    asset health, run logs, Insights metrics, ...) instead of only
+    reasoning over whatever static snapshot we baked into the prompt.
+    Falls back to plain _call_llm for local projects, or if the MCP
+    session can't be established (non-fatal -- a chat turn should still
+    answer from context rather than fail outright).
+
+    Returns (answer, tool_names_used) -- the caller can surface which
+    tools were consulted so users see when the assistant looked something
+    up live vs. answered from the page's own context."""
+    if not getattr(project, "is_dagster_plus", False) or not project.dagster_plus_org or not project.dagster_plus_token:
+        return await _call_llm(system_prompt, user_prompt, prior_turns), []
+
+    from ..services.dagster_plus_mcp import DagsterPlusMcpSession, DagsterPlusMcpError
+
+    try:
+        async with DagsterPlusMcpSession(
+            project.dagster_plus_org, project.dagster_plus_token, project.dagster_plus_region,
+        ) as mcp:
+            tools = await mcp.list_tools()
+            # Tool schemas require a `deployment_name` argument the model
+            # has no way to know -- hint it so it doesn't have to ask the
+            # user or guess.
+            hinted_prompt = (
+                f"{user_prompt}\n\n"
+                f"(For any tool call needing a deployment_name, use \"{project.dagster_plus_deployment}\".)"
+            )
+            return await _run_mcp_tool_loop(system_prompt, hinted_prompt, prior_turns, mcp, tools, max_tool_iterations)
+    except DagsterPlusMcpError as e:
+        print(f"[mcp] session failed, falling back to context-only answer: {e}", flush=True)
+        return await _call_llm(system_prompt, user_prompt, prior_turns), []
+
+
+async def _run_mcp_tool_loop(
+    system_prompt: str,
+    user_prompt: str,
+    prior_turns: list[dict] | None,
+    mcp: "Any",
+    tools: list[dict],
+    max_iterations: int,
+) -> tuple[str, list[str]]:
+    """Provider-specific agentic loop: send messages + tool schemas, and
+    whenever the model asks to call a tool, execute it against the live
+    MCP session and feed the result back, repeating until the model
+    answers in plain text or we hit max_iterations (bounds latency/cost
+    against a model that keeps calling tools)."""
+    import os as _os
+    import json as _json
+    import httpx as _httpx
+    from ..services.dagster_plus_mcp import DagsterPlusMcpError
+
+    anthropic_key = _os.getenv("ANTHROPIC_API_KEY")
+    openai_key = _os.getenv("OPENAI_API_KEY")
+    if not anthropic_key and not openai_key:
+        raise HTTPException(status_code=400, detail="No LLM API key configured.")
+
+    normalized: list[dict] = []
+    for turn in (prior_turns or []):
+        role = turn.get("role")
+        content = turn.get("content")
+        if role in ("user", "assistant") and content:
+            normalized.append({"role": role, "content": content})
+
+    tools_used: list[str] = []
+
+    async def _exec_tool(name: str, arguments: dict) -> str:
+        tools_used.append(name)
+        try:
+            return await mcp.call_tool(name, arguments)
+        except DagsterPlusMcpError as e:
+            # Feed the error back to the model as the tool result rather
+            # than failing the whole turn -- it can often route around a
+            # bad argument (e.g. retry with a different filter) or just
+            # tell the user it couldn't look something up.
+            return f"Error calling {name}: {e}"
+
+    if anthropic_key:
+        anthropic_tools = [
+            {"name": t["name"], "description": t.get("description", ""), "input_schema": t.get("inputSchema") or {"type": "object", "properties": {}}}
+            for t in tools
+        ]
+        messages: list[dict] = normalized + [{"role": "user", "content": user_prompt}]
+        async with _httpx.AsyncClient(timeout=60.0) as client:
+            for _ in range(max_iterations):
+                r = await client.post(
+                    "https://api.anthropic.com/v1/messages",
+                    headers={"x-api-key": anthropic_key, "anthropic-version": "2023-06-01", "content-type": "application/json"},
+                    json={
+                        "model": ANTHROPIC_MODEL, "max_tokens": 2048, "system": system_prompt,
+                        "messages": messages, "tools": anthropic_tools, "temperature": 0.3,
+                    },
+                )
+                if r.status_code != 200:
+                    raise HTTPException(status_code=502, detail=f"Anthropic error {r.status_code}: {r.text[:400]}")
+                data = r.json()
+                blocks = data.get("content") or []
+                messages.append({"role": "assistant", "content": blocks})
+                if data.get("stop_reason") != "tool_use":
+                    text = next((b.get("text", "") for b in blocks if b.get("type") == "text"), "")
+                    return text.strip(), tools_used
+                tool_results = []
+                for b in blocks:
+                    if b.get("type") != "tool_use":
+                        continue
+                    result_text = await _exec_tool(b.get("name", ""), b.get("input") or {})
+                    tool_results.append({"type": "tool_result", "tool_use_id": b.get("id"), "content": result_text})
+                messages.append({"role": "user", "content": tool_results})
+        return "I looked into this but couldn't finish in time -- try a narrower question.", tools_used
+
+    # OpenAI path.
+    openai_tools = [
+        {"type": "function", "function": {"name": t["name"], "description": t.get("description", ""), "parameters": t.get("inputSchema") or {"type": "object", "properties": {}}}}
+        for t in tools
+    ]
+    messages = [{"role": "system", "content": system_prompt}] + normalized + [{"role": "user", "content": user_prompt}]
+    async with _httpx.AsyncClient(timeout=60.0) as client:
+        for _ in range(max_iterations):
+            r = await client.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers={"Authorization": f"Bearer {openai_key}", "content-type": "application/json"},
+                json={"model": OPENAI_MODEL, "messages": messages, "tools": openai_tools, "temperature": 0.3, "max_tokens": 2048},
+            )
+            if r.status_code != 200:
+                raise HTTPException(status_code=502, detail=f"OpenAI error {r.status_code}: {r.text[:400]}")
+            data = r.json()
+            choices = data.get("choices") or []
+            if not choices:
+                raise HTTPException(status_code=502, detail="OpenAI returned no choices.")
+            msg = choices[0].get("message") or {}
+            tool_calls = msg.get("tool_calls") or []
+            messages.append(msg)
+            if not tool_calls:
+                return (msg.get("content") or "").strip(), tools_used
+            for tc in tool_calls:
+                fn = tc.get("function") or {}
+                try:
+                    args = _json.loads(fn.get("arguments") or "{}")
+                except _json.JSONDecodeError:
+                    args = {}
+                result_text = await _exec_tool(fn.get("name", ""), args)
+                messages.append({"role": "tool", "tool_call_id": tc.get("id"), "content": result_text})
+    return "I looked into this but couldn't finish in time -- try a narrower question.", tools_used
+
+
 # ---------------------------------------------------------------------------
 # Auto Coverage -- Sifflet-style "suggest a monitoring baseline for me"
 # for a single asset. Heuristics-only for now: freshness (when the asset
@@ -5749,6 +5975,10 @@ class PageAskRequest(BaseModel):
 
 class PageAskResponse(BaseModel):
     answer: str
+    # Names of any Dagster+ MCP tools the assistant called live while
+    # answering (e.g. ["list_runs", "get_asset"]) -- empty for local
+    # projects, or when the answer came entirely from page context.
+    tools_used: list[str] = []
 
 
 async def _run_insights(system_prompt: str, context_lines: list[str], intro: str) -> PageInsightsResponse:
@@ -5867,9 +6097,18 @@ async def dbt_page_ask(project_id: str, request: PageAskRequest):
         "You are a senior data engineer answering questions about a dbt project. "
         "Reference specific model names + counts from the context. Concise "
         "answers (3-8 sentences)."
+        + (
+            " You also have live tools against this org's Dagster+ deployment -- "
+            "use them (e.g. list_runs, get_run_logs, get_asset) when the question "
+            "needs current state or a specific failure reason the static context "
+            "below doesn't cover, rather than guessing."
+            if getattr(project, "is_dagster_plus", False) else ""
+        )
     )
-    answer = await _call_llm(sys, f"CONTEXT:\n{chr(10).join(lines)}\n\nQUESTION: {request.question}", prior_turns=request.history)
-    return PageAskResponse(answer=answer)
+    answer, tools_used = await _call_llm_with_mcp(
+        sys, f"CONTEXT:\n{chr(10).join(lines)}\n\nQUESTION: {request.question}", project, prior_turns=request.history,
+    )
+    return PageAskResponse(answer=answer, tools_used=tools_used)
 
 
 # ---- Ingestions page --------------------------------------------------
@@ -5878,12 +6117,16 @@ async def dbt_page_ask(project_id: str, request: PageAskRequest):
 async def ingestions_page_insights(project_id: str):
     """AI insights on the ingestion fleet — reads the ingestion event
     log to spot failures, stale sources, missing schedules."""
-    from ..services.ingestion_history import read_events
     project = project_service.get_project(project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
-    root = project_service._get_project_dir(project)
-    events = read_events(root, limit=500)
+    if getattr(project, "is_dagster_plus", False):
+        from .assets import _cloud_ingestion_events
+        events = await _cloud_ingestion_events(project, 500)
+    else:
+        from ..services.ingestion_history import read_events
+        root = project_service._get_project_dir(project)
+        events = read_events(root, limit=500)
 
     # Aggregate: per-asset success/failure counts + most recent status
     per_asset: dict[str, dict] = {}
@@ -5922,12 +6165,20 @@ async def ingestions_page_insights(project_id: str):
 
 @router.post('/{project_id}/ingestions/ask', response_model=PageAskResponse)
 async def ingestions_page_ask(project_id: str, request: PageAskRequest):
-    from ..services.ingestion_history import read_events
     project = project_service.get_project(project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
-    root = project_service._get_project_dir(project)
-    events = read_events(root, limit=500)
+    # Cloud has no local ingestion-history JSONL to read (no project
+    # directory at all for a pure connection) -- this used to silently
+    # answer from zero context. Reuse the same real-materialization-history
+    # source the Ingestions tab itself now uses.
+    if getattr(project, "is_dagster_plus", False):
+        from .assets import _cloud_ingestion_events
+        events = await _cloud_ingestion_events(project, 500)
+    else:
+        from ..services.ingestion_history import read_events
+        root = project_service._get_project_dir(project)
+        events = read_events(root, limit=500)
     lines = [f"INGESTIONS_EVENTS ({len(events)}):"]
     for e in events[-60:]:
         lines.append(f"  • {e.get('ts')} · {e.get('type')} · {e.get('asset_key')} · {e.get('status')}"
@@ -5936,9 +6187,18 @@ async def ingestions_page_ask(project_id: str, request: PageAskRequest):
     sys = (
         "You are a data platform SRE answering questions about ingestion health. "
         "Reference specific asset keys + timestamps. Concise answers."
+        + (
+            " You also have live tools against this org's Dagster+ deployment -- "
+            "use them (e.g. list_runs, get_run_logs, get_asset) when the question "
+            "needs current run state or a specific failure reason the event log "
+            "below doesn't cover."
+            if getattr(project, "is_dagster_plus", False) else ""
+        )
     )
-    answer = await _call_llm(sys, f"CONTEXT:\n{chr(10).join(lines)}\n\nQUESTION: {request.question}", prior_turns=request.history)
-    return PageAskResponse(answer=answer)
+    answer, tools_used = await _call_llm_with_mcp(
+        sys, f"CONTEXT:\n{chr(10).join(lines)}\n\nQUESTION: {request.question}", project, prior_turns=request.history,
+    )
+    return PageAskResponse(answer=answer, tools_used=tools_used)
 
 
 # ---- Automation page --------------------------------------------------
@@ -6432,6 +6692,10 @@ class MonitorHistoryPoint(BaseModel):
     value_label: str | None = None
     expected_min: float | None = None
     expected_max: float | None = None
+    # The Dagster run that produced this check evaluation -- only
+    # populated for Dagster+ (cloud); local monitor_events.jsonl doesn't
+    # track a run id per check execution.
+    run_id: str | None = None
 
 
 class MonitorHistoryResponse(BaseModel):
@@ -6788,6 +7052,12 @@ async def dbt_model_preview(project_id: str, request: DbtModelPreviewRequest):
     project = project_service.get_project(project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
+    if request.dbt_relative_path == "__cloud__":
+        return DbtModelPreviewResponse(
+            success=False,
+            error="Preview isn't available for Dagster+-hydrated dbt models — there's no local "
+                  "dbt project to compile against. Connect the dbt repo locally to preview data.",
+        )
     root = project_service._get_project_dir(project)
     dbt_root = (root / request.dbt_relative_path).resolve()
     if not (dbt_root / 'dbt_project.yml').exists():

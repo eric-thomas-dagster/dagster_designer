@@ -7,8 +7,82 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from app.core.config import settings
+from app.services.project_service import project_service
+from app.services.dagster_plus_client import (
+    query as dagster_plus_query,
+    JOBS_QUERY,
+    LAUNCH_RUN_MUTATION,
+    DagsterPlusError,
+)
 
 router = APIRouter(prefix="/pipelines", tags=["pipelines"])
+
+
+async def _list_cloud_jobs(project) -> list[dict]:
+    """Real jobs for a Dagster+ connection -- listed via
+    repositoriesOrError.nodes[].pipelines rather than a dedicated query
+    (Dagster+'s schema still calls jobs "pipelines" internally). Creating
+    a NEW job is local-only (it means writing Python source Dagster+ has
+    no equivalent for), but listing and launching EXISTING ones works the
+    same way local's `dg launch` does, just via GraphQL instead of a
+    project-local venv (which a pure cloud connection never has)."""
+    try:
+        data = await dagster_plus_query(
+            project.dagster_plus_org or "",
+            project.dagster_plus_deployment or "",
+            project.dagster_plus_token or "",
+            JOBS_QUERY,
+            region=project.dagster_plus_region,
+        )
+    except DagsterPlusError as e:
+        raise HTTPException(status_code=502, detail=f"Failed to fetch jobs from Dagster+: {e}")
+    result = data.get("repositoriesOrError") or {}
+    if result.get("__typename") != "RepositoryConnection":
+        raise HTTPException(status_code=502, detail=result.get("message") or "Dagster+ returned an unexpected response for jobs.")
+    jobs = []
+    for repo in (result.get("nodes") or []):
+        location_name = (repo.get("location") or {}).get("name", "")
+        for p in (repo.get("pipelines") or []):
+            name = p.get("name", "")
+            if name.startswith("__"):
+                continue  # Dagster's own auto-generated "materialize everything" job, not user-created
+            jobs.append({
+                "id": f"{location_name}::{name}",
+                "name": name,
+                "description": p.get("description") or "",
+                "location_name": location_name,
+                "repository_name": repo.get("name", ""),
+                "schedules": [s.get("name") for s in (p.get("schedules") or [])],
+                "sensors": [s.get("name") for s in (p.get("sensors") or [])],
+            })
+    return jobs
+
+
+async def _launch_cloud_job(project, location_name: str, repository_name: str, job_name: str) -> str:
+    """Returns the new run's id, or raises HTTPException with Dagster+'s
+    own error message on failure (invalid config, name conflicts, etc)."""
+    try:
+        data = await dagster_plus_query(
+            project.dagster_plus_org or "",
+            project.dagster_plus_deployment or "",
+            project.dagster_plus_token or "",
+            LAUNCH_RUN_MUTATION,
+            variables={"selector": {
+                "jobName": job_name,
+                "repositoryName": repository_name,
+                "repositoryLocationName": location_name,
+            }},
+            region=project.dagster_plus_region,
+        )
+    except DagsterPlusError as e:
+        raise HTTPException(status_code=502, detail=f"Failed to launch job: {e}")
+    result = data.get("launchRun") or {}
+    if result.get("__typename") == "LaunchRunSuccess":
+        return (result.get("run") or {}).get("runId", "")
+    if result.get("__typename") == "RunConfigValidationInvalid":
+        errors = "; ".join(e.get("message", "") for e in (result.get("errors") or []))
+        raise HTTPException(status_code=400, detail=errors or "Invalid run config.")
+    raise HTTPException(status_code=400, detail=result.get("message") or "Failed to launch job.")
 
 
 class PipelineCreateRequest(BaseModel):
@@ -602,6 +676,11 @@ async def list_pipelines(project_id: str):
     Returns:
         List of pipelines
     """
+    cloud_project = project_service.get_project(project_id)
+    if cloud_project and getattr(cloud_project, "is_dagster_plus", False):
+        jobs = await _list_cloud_jobs(cloud_project)
+        return {"project_id": project_id, "pipelines": jobs, "total": len(jobs)}
+
     try:
         # Get project path
         project_file = (settings.projects_dir / f"{project_id}.json").resolve()
@@ -706,6 +785,13 @@ class LaunchJobRequest(BaseModel):
     """Request to launch a job."""
     config: dict | None = None  # Run config (ops, resources, execution, loggers)
     tags: dict[str, str] | None = None  # Run tags
+    # Only meaningful for Dagster+ (cloud) jobs -- a bare job name alone
+    # doesn't uniquely identify one there the way it does locally (a
+    # deployment can have several code locations each with a job of the
+    # same name). See CloudJob.id's "location::name" shape in the list
+    # endpoint above, which the frontend splits back apart to fill these in.
+    location_name: str | None = None
+    repository_name: str | None = None
 
 
 class LaunchJobResponse(BaseModel):
@@ -730,6 +816,16 @@ async def launch_job(project_id: str, job_name: str, request: LaunchJobRequest):
     project = project_service.get_project(project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
+
+    if getattr(project, "is_dagster_plus", False):
+        if not request.location_name or not request.repository_name:
+            raise HTTPException(status_code=400, detail="Launching a Dagster+ job needs its location_name and repository_name (from the job list).")
+        # request.config / request.tags aren't wired through to the cloud
+        # launch yet -- default run config only for now. Local's launch
+        # already supports both; extending the cloud path the same way is
+        # a reasonable follow-up, not done here to keep this pass scoped.
+        run_id = await _launch_cloud_job(project, request.location_name, request.repository_name, job_name)
+        return LaunchJobResponse(success=True, message=f"Launched run {run_id}", stdout="", stderr="")
 
     # Get project path - construct it the same way as during project creation
     project_name_sanitized = project.name.lower().replace(" ", "_").replace("-", "_")

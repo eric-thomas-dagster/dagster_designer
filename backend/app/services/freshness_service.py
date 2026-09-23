@@ -4,7 +4,6 @@ from pathlib import Path
 import yaml
 
 from ..models.freshness import FreshnessPolicy
-from ..api.env_vars import EnvVariable
 
 
 class FreshnessService:

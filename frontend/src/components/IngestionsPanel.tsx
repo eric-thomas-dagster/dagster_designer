@@ -1,12 +1,12 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Download, Cloud, Database, FileText, Globe, Sparkles, Boxes, CheckCircle2, AlertTriangle, Play, Settings, Activity, TrendingUp, Loader2, XCircle, Layers, CalendarClock, Clock, X } from 'lucide-react';
+import { Download, Cloud, Database, FileText, Globe, Sparkles, Boxes, CheckCircle2, AlertTriangle, Play, Settings, Activity, TrendingUp, Loader2, XCircle, Layers, CalendarClock, Clock, X, Tag, Lock, Radar } from 'lucide-react';
 import { useProjectStore } from '@/hooks/useProject';
 import { assetsApi, projectsApi, partitionsApi, type IngestionEvent, type BackfillRequest } from '@/services/api';
 import { AiAssistantPanel } from './AiAssistantPanel';
 import { notify } from './Notifications';
 import { AddDataDialog } from './AddDataDialog';
 import { PartitionBackfill } from './PartitionBackfill';
-import type { ComponentInstance } from '@/types';
+import type { ComponentInstance, GraphNode } from '@/types';
 
 interface IngestionsPanelProps {
   onAddDataSource: (componentType: string) => void;
@@ -82,8 +82,35 @@ function isIngestionType(componentType: string): boolean {
   return INGESTION_TYPE_PATTERNS.some((rx) => rx.test(componentType));
 }
 
+// For cloud-hydrated / manually-tagged assets that have no real local
+// ComponentInstance to point at (nothing to edit, no config form, often
+// no local venv at all) -- stand in a read-only row that carries just
+// enough shape for the table/drawer to render.
+function syntheticComponentFromNode(node: GraphNode): ComponentInstance {
+  const data = node.data as any;
+  const assetKey = (data.asset_key as string) || node.id;
+  return {
+    id: node.id,
+    component_type: (data.component_type as string) || 'asset',
+    label: (data.label as string) || assetKey.split('/').pop() || assetKey,
+    description: data.description || undefined,
+    attributes: { asset_name: assetKey },
+    is_asset_factory: false,
+  };
+}
+
 export function IngestionsPanel({ onAddDataSource, onEditComponent }: IngestionsPanelProps) {
   const { currentProject } = useProjectStore();
+  const isCloud = !!(currentProject as any)?.is_dagster_plus;
+  // Assets the user explicitly tagged as ingestion sources (from the
+  // asset detail page's "Mark as ingestion source" toggle) -- surfaces
+  // regardless of what the component_type/computeKind heuristic below
+  // decides, since it has no way to notice e.g. a plain Python asset
+  // that calls a REST API and writes to Snowflake.
+  const manualTagSet = useMemo(
+    () => new Set(currentProject?.manual_ingestion_asset_keys || []),
+    [currentProject?.manual_ingestion_asset_keys],
+  );
   const [addDataOpen, setAddDataOpen] = useState(false);
   const [runningId, setRunningId] = useState<string | null>(null);
   // {asset_key: {columns, dtypes}} — powers the "rows ingested" hint.
@@ -135,8 +162,42 @@ export function IngestionsPanel({ onAddDataSource, onEditComponent }: Ingestions
         map.get(t)!.push({ label: c.label || c.id, cron });
       }
     }
+    // Cloud-hydrated graph nodes carry accurately-attributed
+    // per-asset schedules directly on node.data (via Dagster+'s
+    // targetingInstigators) -- `currentProject.components` is always
+    // empty for a pure Dagster+ connection, so without this every
+    // cloud ingestion row fell through to "manual" regardless of
+    // whether Dagster+ actually runs it on a cron.
+    if (isCloud) {
+      for (const n of currentProject.graph.nodes) {
+        const data = n.data as any;
+        const assetKey = (data?.asset_key as string) || n.id;
+        for (const s of (data?.schedules as { name?: string; cron?: string }[] | undefined) || []) {
+          if (!map.has(assetKey)) map.set(assetKey, []);
+          map.get(assetKey)!.push({ label: s.name || 'schedule', cron: s.cron });
+        }
+      }
+    }
     return map;
-  }, [currentProject]);
+  }, [currentProject, isCloud]);
+
+  // Sensor-triggered cloud assets aren't on a cron, but they're still
+  // automated (not "manual") -- tracked separately so the Schedule
+  // column can render a distinct "sensor" indicator instead of lumping
+  // them in with truly-manual, untriggered ingestions.
+  const sensorByAssetKey = useMemo(() => {
+    const map = new Map<string, { name: string }[]>();
+    if (!currentProject || !isCloud) return map;
+    for (const n of currentProject.graph.nodes) {
+      const data = n.data as any;
+      const assetKey = (data?.asset_key as string) || n.id;
+      for (const s of (data?.sensors as { name?: string }[] | undefined) || []) {
+        if (!map.has(assetKey)) map.set(assetKey, []);
+        map.get(assetKey)!.push({ name: s.name || 'sensor' });
+      }
+    }
+    return map;
+  }, [currentProject, isCloud]);
 
   // Partition config lives on the graph node (Dagster's partitioning is
   // separate from the component's own attribute bag). A node with a
@@ -176,37 +237,87 @@ export function IngestionsPanel({ onAddDataSource, onEditComponent }: Ingestions
 
   const ingestions = useMemo(() => {
     if (!currentProject) return [];
-    return currentProject.components
-      .filter((c) => isIngestionType(c.component_type))
-      .map((c) => {
-        const kind = classifyType(c.component_type, c.label || c.id);
-        const assetKey = (c.attributes?.asset_name as string) || c.id;
-        const configured = isConfigured(c.attributes || {});
-        const schema = schemas[assetKey];
-        const history = eventsByAssetKey.get(assetKey) ?? [];
-        const materializes = history.filter((e) => e.type === 'materialize');
-        const lastRun = materializes[materializes.length - 1];
-        const previews = history.filter((e) => e.type === 'preview');
-        const lastPreview = previews[previews.length - 1];
-        const partition = partitionByAssetKey.get(assetKey);
-        const schedules = scheduleByAssetKey.get(assetKey) ?? [];
-        return {
-          component: c,
-          assetKey,
-          kind,
-          configured,
-          columnCount: schema?.columns?.length ?? null,
-          previewed: !!schema,
-          history,
-          materializes,
-          lastRun,
-          lastPreview,
-          partition,
-          schedules,
-          latestStatus: lastRun?.status ?? null,
-        };
+    const seen = new Set<string>();
+    const candidates: Array<{ component: ComponentInstance; assetKey: string; readOnly: boolean; manuallyTagged: boolean }> = [];
+
+    // Local components matching the component_type heuristic.
+    for (const c of currentProject.components) {
+      if (!isIngestionType(c.component_type)) continue;
+      const assetKey = (c.attributes?.asset_name as string) || c.id;
+      if (seen.has(assetKey)) continue;
+      seen.add(assetKey);
+      candidates.push({ component: c, assetKey, readOnly: false, manuallyTagged: manualTagSet.has(assetKey) });
+    }
+
+    // Cloud-hydrated graph nodes matching the same heuristic --
+    // `currentProject.components` is always empty for a pure Dagster+
+    // connection (no local defs.py), so without this the table stays
+    // empty even when hydration already classified plenty of assets as
+    // ingestion-like via computeKind/description/no-upstream sniffing.
+    if (isCloud) {
+      for (const n of currentProject.graph.nodes) {
+        if (n.node_kind !== 'asset') continue;
+        const data = n.data as any;
+        if (!isIngestionType((data.component_type as string) || '')) continue;
+        const assetKey = (data.asset_key as string) || n.id;
+        if (seen.has(assetKey)) continue;
+        seen.add(assetKey);
+        candidates.push({ component: syntheticComponentFromNode(n), assetKey, readOnly: true, manuallyTagged: manualTagSet.has(assetKey) });
+      }
+    }
+
+    // Manually-tagged assets the heuristic missed entirely. If it's a
+    // local asset backed by a real component, use that (fully editable
+    // /runnable) -- otherwise fall back to a read-only synthetic row.
+    for (const assetKey of manualTagSet) {
+      if (seen.has(assetKey)) continue;
+      const node = currentProject.graph.nodes.find((n) => (((n.data as any)?.asset_key as string) || n.id) === assetKey);
+      if (!node) continue;
+      seen.add(assetKey);
+      const componentId = (node.data as any)?.component_id as string | undefined;
+      const realComponent = !isCloud && componentId
+        ? currentProject.components.find((c) => c.id === componentId)
+        : undefined;
+      candidates.push({
+        component: realComponent || syntheticComponentFromNode(node),
+        assetKey,
+        readOnly: !realComponent,
+        manuallyTagged: true,
       });
-  }, [currentProject, schemas, eventsByAssetKey, partitionByAssetKey, scheduleByAssetKey]);
+    }
+
+    return candidates.map(({ component: c, assetKey, readOnly, manuallyTagged }) => {
+      const kind = classifyType(c.component_type, c.label || c.id);
+      const configured = readOnly ? true : isConfigured(c.attributes || {});
+      const schema = schemas[assetKey];
+      const history = eventsByAssetKey.get(assetKey) ?? [];
+      const materializes = history.filter((e) => e.type === 'materialize');
+      const lastRun = materializes[materializes.length - 1];
+      const previews = history.filter((e) => e.type === 'preview');
+      const lastPreview = previews[previews.length - 1];
+      const partition = partitionByAssetKey.get(assetKey);
+      const schedules = scheduleByAssetKey.get(assetKey) ?? [];
+      const sensors = sensorByAssetKey.get(assetKey) ?? [];
+      return {
+        component: c,
+        assetKey,
+        kind,
+        configured,
+        readOnly,
+        manuallyTagged,
+        columnCount: schema?.columns?.length ?? null,
+        previewed: !!schema,
+        history,
+        materializes,
+        lastRun,
+        lastPreview,
+        partition,
+        schedules,
+        sensors,
+        latestStatus: lastRun?.status ?? null,
+      };
+    });
+  }, [currentProject, schemas, eventsByAssetKey, partitionByAssetKey, scheduleByAssetKey, sensorByAssetKey, isCloud, manualTagSet]);
 
   const kpis = useMemo(() => {
     const total = ingestions.length;
@@ -260,14 +371,14 @@ export function IngestionsPanel({ onAddDataSource, onEditComponent }: Ingestions
     });
   };
   const selectAllFiltered = () => {
-    setSelectedIds(new Set(filteredIngestions.filter((i) => i.configured).map((i) => i.component.id)));
+    setSelectedIds(new Set(filteredIngestions.filter((i) => i.configured && !i.readOnly).map((i) => i.component.id)));
   };
   const clearSelection = () => setSelectedIds(new Set());
 
   const handleRunSelected = async () => {
     if (!currentProject || selectedIds.size === 0) return;
     const assetKeys = ingestions
-      .filter((i) => selectedIds.has(i.component.id) && i.configured)
+      .filter((i) => selectedIds.has(i.component.id) && i.configured && !i.readOnly)
       .map((i) => i.assetKey);
     if (assetKeys.length === 0) return;
     setRunningBulk(true);
@@ -435,21 +546,29 @@ export function IngestionsPanel({ onAddDataSource, onEditComponent }: Ingestions
         </button>
       </div>
 
-      {/* AI Assistant — fleet-level insights + chat. Hidden on cloud
-          (read-only, so its "add / restructure" ideas can't be acted on). */}
-      {currentProject && !(currentProject as any).is_dagster_plus && (
+      {/* AI Assistant — fleet-level insights + chat. Was hidden on cloud
+          (read-only, so its old "add / restructure" ideas couldn't be
+          acted on) -- now shown there too since cloud gives it live
+          Dagster+ tool access (real run status, failure reasons) via
+          MCP, which is genuinely useful even for a read-only project. */}
+      {currentProject && (
         <div className="px-8 pt-4">
           <AiAssistantPanel
             title="AI Assistant · Ingestions"
             subtitle="Failure diagnosis, stale sources, and coverage across your ingestion fleet."
-            suggestions={[
+            suggestions={isCloud ? [
+              "What's failing right now?",
+              'Why did the last run of X fail?',
+              'Which sources look stale?',
+              "What's my deployment's recent activity?",
+            ] : [
               'What ingestions are failing?',
               "Which sources look stale?",
               'What should I materialize next?',
               'Where are we spending the most time?',
             ]}
             fetchInsights={() => projectsApi.pageInsights(currentProject.id, 'ingestions') as any}
-            ask={(q, h) => projectsApi.pageAsk(currentProject.id, 'ingestions', { question: q, history: h }).then(r => r.answer)}
+            ask={(q, h) => projectsApi.pageAsk(currentProject.id, 'ingestions', { question: q, history: h }).then(r => ({ answer: r.answer, toolsUsed: r.tools_used }))}
           />
         </div>
       )}
@@ -663,7 +782,7 @@ export function IngestionsPanel({ onAddDataSource, onEditComponent }: Ingestions
                   <th className="px-3 py-2 w-8">
                     <input
                       type="checkbox"
-                      checked={selectedIds.size > 0 && filteredIngestions.every((i) => selectedIds.has(i.component.id) || !i.configured)}
+                      checked={selectedIds.size > 0 && filteredIngestions.every((i) => selectedIds.has(i.component.id) || !i.configured || i.readOnly)}
                       onChange={(e) => (e.target.checked ? selectAllFiltered() : clearSelection())}
                       className="w-3.5 h-3.5"
                       title="Select all configured"
@@ -680,7 +799,7 @@ export function IngestionsPanel({ onAddDataSource, onEditComponent }: Ingestions
               </thead>
               <tbody>
                 {filteredIngestions.map((row) => {
-                  const { component, assetKey, kind, configured, materializes, lastRun, partition, schedules } = row;
+                  const { component, assetKey, kind, configured, readOnly, manuallyTagged, materializes, lastRun, partition, schedules, sensors } = row;
                   const KindIcon = KIND_META[kind].icon;
                   const isSelected = selectedIds.has(component.id);
                   return (
@@ -700,14 +819,30 @@ export function IngestionsPanel({ onAddDataSource, onEditComponent }: Ingestions
                           type="checkbox"
                           checked={isSelected}
                           onChange={() => toggleSelect(component.id)}
-                          disabled={!configured}
+                          disabled={!configured || readOnly}
                           className="w-3.5 h-3.5"
-                          title={configured ? 'Select for bulk actions' : 'Configure first'}
+                          title={readOnly ? 'Read-only -- no local component to run' : configured ? 'Select for bulk actions' : 'Configure first'}
                         />
                       </td>
                       <td className="px-4 py-2.5">
                         <div className="font-medium text-gray-900 flex items-center gap-1.5">
                           {component.label || component.id}
+                          {manuallyTagged && (
+                            <span
+                              className="inline-flex items-center gap-0.5 px-1.5 py-0.5 text-[10px] rounded bg-violet-50 text-violet-700 border border-violet-200"
+                              title="Manually tagged as an ingestion source"
+                            >
+                              <Tag className="w-2.5 h-2.5" /> tagged
+                            </span>
+                          )}
+                          {readOnly && (
+                            <span
+                              className="inline-flex items-center gap-0.5 px-1.5 py-0.5 text-[10px] rounded bg-gray-100 text-gray-600 border border-gray-200"
+                              title="Read-only -- cloud-hydrated or has no local component to edit/run"
+                            >
+                              <Lock className="w-2.5 h-2.5" /> read-only
+                            </span>
+                          )}
                           {partition && (
                             <span
                               className="inline-flex items-center gap-0.5 px-1.5 py-0.5 text-[10px] rounded bg-indigo-50 text-indigo-700 border border-indigo-200"
@@ -738,6 +873,11 @@ export function IngestionsPanel({ onAddDataSource, onEditComponent }: Ingestions
                               </div>
                             ))}
                             {schedules.length > 2 && <span className="text-[10px] text-gray-400">+{schedules.length - 2}</span>}
+                          </div>
+                        ) : sensors.length > 0 ? (
+                          <div className="inline-flex items-center gap-1 text-gray-700" title={sensors.map((s) => s.name).join(', ')}>
+                            <Radar className="w-3 h-3 text-gray-500" />
+                            <span className="text-[11px]">sensor{sensors.length > 1 ? `s (${sensors.length})` : ''}</span>
                           </div>
                         ) : (
                           <span className="text-gray-400 italic">manual</span>
@@ -783,9 +923,9 @@ export function IngestionsPanel({ onAddDataSource, onEditComponent }: Ingestions
                         <div className="inline-flex items-center gap-1">
                           <button
                             onClick={() => handleRun(assetKey, component.id)}
-                            disabled={!configured || runningId === component.id}
+                            disabled={!configured || readOnly || runningId === component.id}
                             className="inline-flex items-center gap-1 px-2 py-1 text-xs bg-primary text-primary-foreground rounded hover:bg-accent disabled:opacity-40 disabled:cursor-not-allowed"
-                            title={configured ? 'Materialize the latest partition (or full) now' : 'Configure required fields first'}
+                            title={readOnly ? 'Read-only -- no local component to run' : configured ? 'Materialize the latest partition (or full) now' : 'Configure required fields first'}
                           >
                             <Play className="w-3 h-3" />
                             {runningId === component.id ? 'Running…' : 'Run'}
@@ -793,7 +933,7 @@ export function IngestionsPanel({ onAddDataSource, onEditComponent }: Ingestions
                           {partition && (
                             <button
                               onClick={() => setBackfillAssetKey(assetKey)}
-                              disabled={!configured}
+                              disabled={!configured || readOnly}
                               className="inline-flex items-center gap-1 px-2 py-1 text-xs text-indigo-700 border border-indigo-200 bg-indigo-50 rounded hover:bg-indigo-100 disabled:opacity-40 disabled:cursor-not-allowed"
                               title="Backfill specific partitions — e.g. re-run just 2026-07-04, or every partition after a schema change"
                             >
@@ -801,13 +941,15 @@ export function IngestionsPanel({ onAddDataSource, onEditComponent }: Ingestions
                               Backfill
                             </button>
                           )}
-                          <button
-                            onClick={() => onEditComponent(component)}
-                            className="inline-flex items-center gap-1 px-2 py-1 text-xs text-gray-700 hover:bg-gray-100 rounded"
-                            title="Configure this ingestion"
-                          >
-                            <Settings className="w-3 h-3" />
-                          </button>
+                          {!readOnly && (
+                            <button
+                              onClick={() => onEditComponent(component)}
+                              className="inline-flex items-center gap-1 px-2 py-1 text-xs text-gray-700 hover:bg-gray-100 rounded"
+                              title="Configure this ingestion"
+                            >
+                              <Settings className="w-3 h-3" />
+                            </button>
+                          )}
                         </div>
                       </td>
                     </tr>
@@ -828,12 +970,12 @@ export function IngestionsPanel({ onAddDataSource, onEditComponent }: Ingestions
           <RowDetailDrawer
             target={target}
             onClose={() => setDrawerFor(null)}
-            onEdit={() => {
+            onEdit={target.readOnly ? undefined : () => {
               onEditComponent(target.component);
               setDrawerFor(null);
             }}
             onRun={() => handleRun(target.assetKey, target.component.id)}
-            onBackfill={target.partition ? () => setBackfillAssetKey(target.assetKey) : undefined}
+            onBackfill={target.partition && !target.readOnly ? () => setBackfillAssetKey(target.assetKey) : undefined}
             running={runningId === target.component.id}
           />
         );
@@ -1063,7 +1205,7 @@ function RowDetailDrawer({
 }: {
   target: any;
   onClose: () => void;
-  onEdit: () => void;
+  onEdit?: () => void;
   onRun: () => void;
   onBackfill?: () => void;
   running: boolean;
@@ -1104,7 +1246,9 @@ function RowDetailDrawer({
               value={
                 target.schedules.length > 0
                   ? target.schedules.map((s: any) => s.cron || 'scheduled').join(', ')
-                  : 'manual'
+                  : (target.sensors as any[]).length > 0
+                    ? (target.sensors as any[]).map((s) => s.name).join(', ') + ' (sensor)'
+                    : 'manual'
               }
             />
             <Fact
@@ -1124,7 +1268,8 @@ function RowDetailDrawer({
           <div className="flex items-center gap-2 pt-2 flex-wrap">
             <button
               onClick={onRun}
-              disabled={!target.configured || running}
+              disabled={!target.configured || target.readOnly || running}
+              title={target.readOnly ? 'Read-only -- no local component to run' : undefined}
               className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium bg-primary text-primary-foreground rounded disabled:opacity-40"
             >
               {running ? <Loader2 className="w-3 h-3 animate-spin" /> : <Play className="w-3 h-3" />}
@@ -1141,13 +1286,15 @@ function RowDetailDrawer({
                 Backfill…
               </button>
             )}
-            <button
-              onClick={onEdit}
-              className="inline-flex items-center gap-1 px-2.5 py-1 text-xs text-gray-700 hover:bg-gray-100 rounded"
-            >
-              <Settings className="w-3 h-3" />
-              Configure
-            </button>
+            {onEdit && (
+              <button
+                onClick={onEdit}
+                className="inline-flex items-center gap-1 px-2.5 py-1 text-xs text-gray-700 hover:bg-gray-100 rounded"
+              >
+                <Settings className="w-3 h-3" />
+                Configure
+              </button>
+            )}
           </div>
         </div>
 

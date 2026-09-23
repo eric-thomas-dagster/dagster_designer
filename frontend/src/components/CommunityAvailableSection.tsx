@@ -4,6 +4,7 @@ import { Cloud, Download, Loader2 } from 'lucide-react';
 import { useProjectStore } from '@/hooks/useProject';
 import { notify } from './Notifications';
 import { API_BASE } from '@/services/api';
+import { ComponentIcon } from './ComponentIcon';
 
 interface ManifestComponent {
   id: string;
@@ -11,6 +12,7 @@ interface ManifestComponent {
   category: string;
   description?: string;
   tags?: string[];
+  icon?: string;
 }
 
 interface InstalledComponent {
@@ -158,7 +160,7 @@ export function CommunityAvailableSection({
                 title={comp.description || comp.name}
                 className="w-full flex items-center gap-2 px-2.5 py-2 border border-dashed border-gray-300 bg-white rounded-md hover:border-primary/50 hover:bg-primary/5 transition-all group text-left disabled:opacity-60"
               >
-                <Cloud className="w-4 h-4 text-gray-400 group-hover:text-primary flex-shrink-0" />
+                <ComponentIcon icon={comp.icon} title={comp.name} size={16} />
                 <div className="min-w-0 flex-1">
                   <div className="text-sm text-gray-900 truncate">{comp.name}</div>
                   {comp.description && (

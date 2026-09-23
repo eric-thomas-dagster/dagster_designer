@@ -158,15 +158,23 @@ def snapshot_dbt_run_results(project_dir: Path, run_results: dict[str, Any]) -> 
         this_ts = completed or ts_iso
         if seen.get(uid) == this_ts:
             continue
+        failures = r.get("failures") if isinstance(r.get("failures"), int) else None
         record_event(
             project_dir,
             monitor_id=uid,
             kind="dbt_test",
             status=(r.get("status") or "unknown"),
             duration_ms=(int(r.get("execution_time", 0) * 1000) if r.get("execution_time") is not None else None),
-            failures=(r.get("failures") if isinstance(r.get("failures"), int) else None),
+            failures=failures,
             message=(r.get("message") or None),
             ts=this_ts,
+            # Surfaces as a numeric chart in the Checks tab (asset details)
+            # and Monitors' own history view -- "failed row count over
+            # time" is the one number dbt's own test output always gives
+            # us, so use it rather than leaving every local check
+            # historyless of a metric the way cloud-only checks were.
+            value=(float(failures) if failures is not None else None),
+            value_label="failed rows",
         )
         written += 1
     return written

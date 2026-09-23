@@ -16,7 +16,7 @@ import { CronBuilder } from './CronBuilder';
 import { Launchpad } from './Launchpad';
 import { notify } from './Notifications';
 import { useProjectStore } from '@/hooks/useProject';
-import { pipelinesApi, primitivesApi, templatesApi, projectsApi , API_BASE } from '@/services/api';
+import { pipelinesApi, primitivesApi, templatesApi, projectsApi, type PipelineListItem, API_BASE } from '@/services/api';
 import {
   Workflow, Plus, Save, Clock, Radar, Play, Trash2, X, Grid, List,
   Layers, Database, Users, CheckCircle, Tag, Edit2, Code, Download, Upload, AlertTriangle
@@ -78,17 +78,26 @@ export function PipelineBuilder() {
   // Launchpad state
   const [showLaunchpad, setShowLaunchpad] = useState(false);
   const [selectedJobName, setSelectedJobName] = useState<string>('');
+  const [selectedJobCloudRef, setSelectedJobCloudRef] = useState<{ locationName: string; repositoryName: string } | null>(null);
 
   // Handler for launching jobs
-  const handleLaunchJob = (jobName: string) => {
-    setSelectedJobName(jobName);
+  const handleLaunchJob = (pipeline: PipelineListItem) => {
+    setSelectedJobName(pipeline.name);
+    setSelectedJobCloudRef(
+      pipeline.location_name && pipeline.repository_name
+        ? { locationName: pipeline.location_name, repositoryName: pipeline.repository_name }
+        : null,
+    );
     setShowLaunchpad(true);
   };
 
   const handleLaunchpadSubmit = async (config?: Record<string, any>, tags?: Record<string, string>) => {
     if (!currentProject || !selectedJobName) return;
     try {
-      const result = await pipelinesApi.launch(currentProject.id, selectedJobName, config, tags);
+      const result = await pipelinesApi.launch(
+        currentProject.id, selectedJobName, config, tags,
+        selectedJobCloudRef?.locationName, selectedJobCloudRef?.repositoryName,
+      );
       if (result.success) {
         notify.success(`Job ${selectedJobName} launched successfully!`);
       } else {
@@ -142,6 +151,10 @@ export function PipelineBuilder() {
   ) || [];
 
   const pipelines = pipelinesData?.pipelines || [];
+  // Creating a job means writing Python source -- fundamentally local-only,
+  // Dagster+ has no equivalent. Listing + launching existing jobs works
+  // for both (see pipelinesApi.list/launch's cloud branches).
+  const isCloudProject = !!(currentProject as any)?.is_dagster_plus;
   const sensorTypes = sensorTypesData?.sensor_types || [];
 
   // Pipeline configuration state
@@ -790,20 +803,24 @@ export function PipelineBuilder() {
       <aside className="w-64 bg-white border-r border-gray-200 flex flex-col flex-shrink-0">
           <div className="h-[49px] px-4 bg-white border-b border-gray-200 flex items-center flex-shrink-0">
             <h3 className="text-xs font-semibold text-gray-700 uppercase tracking-wider">
-              Your Pipelines
+              {isCloudProject ? 'Your Jobs' : 'Your Pipelines'}
             </h3>
           </div>
           <div className="flex-1 overflow-y-auto">
             {pipelines.length === 0 ? (
               <div className="p-6 text-center">
                 <Workflow className="w-8 h-8 text-gray-300 mx-auto mb-3" />
-                <p className="text-sm text-gray-600 mb-4">No pipelines yet. Create one to get started!</p>
-                <button
-                  onClick={handleNewPipeline}
-                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-primary-foreground bg-primary rounded-md hover:bg-accent"
-                >
-                  <Plus className="w-4 h-4" /> New Pipeline
-                </button>
+                <p className="text-sm text-gray-600 mb-4">
+                  {isCloudProject ? 'No jobs found in this deployment.' : 'No pipelines yet. Create one to get started!'}
+                </p>
+                {!isCloudProject && (
+                  <button
+                    onClick={handleNewPipeline}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-primary-foreground bg-primary rounded-md hover:bg-accent"
+                  >
+                    <Plus className="w-4 h-4" /> New Pipeline
+                  </button>
+                )}
               </div>
             ) : (
               <div className="divide-y divide-gray-200">
@@ -813,15 +830,17 @@ export function PipelineBuilder() {
                     className={`p-4 cursor-pointer hover:bg-gray-50 transition-colors ${
                       selectedPipeline?.id === pipeline.id ? 'bg-blue-50' : ''
                     }`}
-                    onClick={() => handleSelectPipeline(pipeline)}
+                    onClick={() => !isCloudProject && handleSelectPipeline(pipeline)}
                   >
                     <div className="flex items-start justify-between">
-                      <div className="flex-1">
+                      <div className="flex-1 min-w-0">
                         <h4 className="text-sm font-medium text-gray-900">{pipeline.name}</h4>
                         {pipeline.description && (
                           <p className="text-xs text-gray-600 mt-1">{pipeline.description}</p>
                         )}
-                        {(pipeline as any).file && (
+                        {pipeline.location_name ? (
+                          <p className="text-xs text-gray-500 mt-1 truncate">{pipeline.location_name}</p>
+                        ) : (pipeline as any).file && (
                           <p className="text-xs text-gray-500 mt-1">
                             {((pipeline as any).file as string).split('/').pop()}
                           </p>
@@ -831,23 +850,25 @@ export function PipelineBuilder() {
                         <button
                           onClick={(e) => {
                             e.stopPropagation();
-                            handleLaunchJob(pipeline.name);
+                            handleLaunchJob(pipeline);
                           }}
                           className="p-1.5 text-blue-600 hover:bg-blue-50 rounded transition-colors"
                           title="Launch job"
                         >
                           <Play className="w-4 h-4" />
                         </button>
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            handleDeletePipeline(pipeline.id);
-                          }}
-                          className="p-1 text-gray-400 hover:bg-gray-100 rounded"
-                          title="To delete, remove files manually"
-                        >
-                          <Trash2 className="w-4 h-4" />
-                        </button>
+                        {!isCloudProject && (
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleDeletePipeline(pipeline.id);
+                            }}
+                            className="p-1 text-gray-400 hover:bg-gray-100 rounded"
+                            title="To delete, remove files manually"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        )}
                       </div>
                     </div>
                   </div>
@@ -861,29 +882,37 @@ export function PipelineBuilder() {
       <div className="flex-1 flex flex-col min-w-0">
         {/* Header row — sits only above the main area, not the sidebar */}
         <div className="h-[49px] bg-white border-b border-gray-200 px-4 flex items-center justify-end gap-1.5 flex-shrink-0">
-          <button
-            onClick={handleExportYAML}
-            className="flex items-center gap-1.5 px-2.5 py-1.5 text-sm text-gray-700 hover:bg-gray-100 rounded"
-            title="Export pipeline as YAML"
-          >
-            <Download className="w-4 h-4" />
-            <span>Export YAML</span>
-          </button>
-          <button
-            onClick={handleImportYAML}
-            className="flex items-center gap-1.5 px-2.5 py-1.5 text-sm text-gray-700 hover:bg-gray-100 rounded"
-            title="Import pipeline from YAML"
-          >
-            <Upload className="w-4 h-4" />
-            <span>Import YAML</span>
-          </button>
-          <button
-            onClick={handleNewPipeline}
-            className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-primary-foreground bg-primary rounded-md hover:bg-accent"
-          >
-            <Plus className="w-4 h-4" />
-            <span>New Pipeline</span>
-          </button>
+          {isCloudProject ? (
+            <span className="text-xs text-gray-500">
+              Jobs are defined in this deployment's code — launch existing ones here, create new ones from the source repo.
+            </span>
+          ) : (
+            <>
+              <button
+                onClick={handleExportYAML}
+                className="flex items-center gap-1.5 px-2.5 py-1.5 text-sm text-gray-700 hover:bg-gray-100 rounded"
+                title="Export pipeline as YAML"
+              >
+                <Download className="w-4 h-4" />
+                <span>Export YAML</span>
+              </button>
+              <button
+                onClick={handleImportYAML}
+                className="flex items-center gap-1.5 px-2.5 py-1.5 text-sm text-gray-700 hover:bg-gray-100 rounded"
+                title="Import pipeline from YAML"
+              >
+                <Upload className="w-4 h-4" />
+                <span>Import YAML</span>
+              </button>
+              <button
+                onClick={handleNewPipeline}
+                className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-primary-foreground bg-primary rounded-md hover:bg-accent"
+              >
+                <Plus className="w-4 h-4" />
+                <span>New Pipeline</span>
+              </button>
+            </>
+          )}
         </div>
 
         <div className="flex-1 flex overflow-hidden">

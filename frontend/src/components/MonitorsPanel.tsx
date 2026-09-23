@@ -13,6 +13,7 @@ import { AutoCoverageModal } from './AssetDetailPage';
 import { assetsApi } from '@/services/api';
 import { notify } from './Notifications';
 import { usePageActions } from '@/hooks/usePageActions';
+import { classifyStatus, statusTextClass } from '@/lib/status';
 
 type Monitor = Awaited<ReturnType<typeof projectsApi.listMonitors>>['monitors'][number];
 type Status = 'passing' | 'failing' | 'warn' | 'never_run';
@@ -26,10 +27,10 @@ const KIND_META: Record<Monitor['kind'], { label: string; icon: any; tone: strin
 const bucket = (m: Monitor): Status => {
   // Local vocabulary: pass|success|fail|error|warn. Dagster+ (cloud)
   // returns SUCCEEDED|FAILED|SKIPPED from AssetCheckExecutionResolvedStatus.
-  const s = (m.last_status || '').toLowerCase();
-  if (s === 'pass' || s === 'success' || s === 'succeeded') return 'passing';
-  if (s === 'fail' || s === 'error' || s === 'runtime error' || s === 'failed') return 'failing';
-  if (s === 'warn') return 'warn';
+  const c = classifyStatus(m.last_status);
+  if (c === 'success') return 'passing';
+  if (c === 'failure') return 'failing';
+  if (c === 'warning') return 'warn';
   return 'never_run';
 };
 
@@ -46,9 +47,10 @@ const bucket = (m: Monitor): Status => {
  */
 interface MonitorsPanelProps {
   onOpenFile?: (path: string) => void;
+  onOpenRun?: (runId: string) => void;
 }
 
-export function MonitorsPanel({ onOpenFile }: MonitorsPanelProps) {
+export function MonitorsPanel({ onOpenFile, onOpenRun }: MonitorsPanelProps) {
   const { currentProject } = useProjectStore();
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -120,6 +122,7 @@ export function MonitorsPanel({ onOpenFile }: MonitorsPanelProps) {
         projectId={currentProject.id}
         onBack={() => setSelected(null)}
         onOpenFile={onOpenFile}
+        onOpenRun={onOpenRun}
         onDeleted={() => { setSelected(null); refresh(); }}
       />
     );
@@ -734,7 +737,7 @@ function MonitorDrawer({ monitor, onClose, onOpenFile }: { monitor: Monitor; onC
                   {history.events.slice().reverse().slice(0, 40).map((e, i) => (
                     <li key={i} className="px-2 py-1.5 flex items-center gap-2 text-[11px]">
                       <HistoryRowIcon status={e.status} />
-                      <span className="text-gray-800 font-mono">{e.status}</span>
+                      <span className={`font-mono ${statusTextClass(e.status)}`}>{e.status}</span>
                       {e.failures != null && e.failures > 0 && (
                         <span className="text-rose-700 font-medium">{e.failures} failed</span>
                       )}
@@ -905,17 +908,18 @@ function PassFailStrip({ events }: { events: Array<{ status: string }> }) {
   return (
     <div className="flex items-center gap-0.5 px-2 py-1.5 bg-gray-50 border-b border-gray-100">
       {slots.map((e, i) => {
-        const s = (e.status || '').toLowerCase();
-        const tone = s === 'pass' || s === 'success' ? 'bg-emerald-500'
-          : s === 'fail' || s === 'error' || s === 'runtime error' ? 'bg-rose-500'
-          : s === 'warn' ? 'bg-amber-500'
+        const c = classifyStatus(e.status);
+        const tone = c === 'success' ? 'bg-emerald-500'
+          : c === 'failure' ? 'bg-rose-500'
+          : c === 'warning' ? 'bg-amber-500'
+          : c === 'skipped' ? 'bg-slate-400'
           : 'bg-gray-300';
         return (
           <span
             key={i}
             className={`inline-block ${tone} rounded-sm`}
             style={{ width: 6, height: 12 }}
-            title={s}
+            title={e.status}
           />
         );
       })}
@@ -939,10 +943,11 @@ function RowSparkline({ statuses }: { statuses: string[] }) {
   return (
     <div className="flex items-center gap-[1.5px]" title={`Last ${slots.length} run${slots.length === 1 ? '' : 's'} (oldest → newest)`}>
       {slots.map((s, i) => {
-        const l = (s || '').toLowerCase();
-        const tone = l === 'pass' || l === 'success' ? 'bg-emerald-500'
-          : l === 'fail' || l === 'error' || l === 'runtime error' ? 'bg-rose-500'
-          : l === 'warn' ? 'bg-amber-500'
+        const c = classifyStatus(s);
+        const tone = c === 'success' ? 'bg-emerald-500'
+          : c === 'failure' ? 'bg-rose-500'
+          : c === 'warning' ? 'bg-amber-500'
+          : c === 'skipped' ? 'bg-slate-400'
           : 'bg-gray-300';
         return <span key={i} className={`inline-block ${tone} rounded-sm`} style={{ width: 3, height: 12 }} />;
       })}
@@ -951,10 +956,11 @@ function RowSparkline({ statuses }: { statuses: string[] }) {
 }
 
 function HistoryRowIcon({ status }: { status: string }) {
-  const s = (status || '').toLowerCase();
-  if (s === 'pass' || s === 'success') return <CheckCircle2 className="w-3 h-3 text-emerald-500 flex-shrink-0" />;
-  if (s === 'fail' || s === 'error' || s === 'runtime error') return <XCircle className="w-3 h-3 text-rose-500 flex-shrink-0" />;
-  if (s === 'warn') return <AlertTriangle className="w-3 h-3 text-amber-500 flex-shrink-0" />;
+  const c = classifyStatus(status);
+  if (c === 'success') return <CheckCircle2 className="w-3 h-3 text-emerald-500 flex-shrink-0" />;
+  if (c === 'failure') return <XCircle className="w-3 h-3 text-rose-500 flex-shrink-0" />;
+  if (c === 'warning') return <AlertTriangle className="w-3 h-3 text-amber-500 flex-shrink-0" />;
+  if (c === 'skipped') return <Clock className="w-3 h-3 text-slate-400 flex-shrink-0" />;
   return <Clock className="w-3 h-3 text-gray-300 flex-shrink-0" />;
 }
 

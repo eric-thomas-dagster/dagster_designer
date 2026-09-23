@@ -1,13 +1,25 @@
-import { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   Bell, Plus, Trash2, X, Upload, Download, ChevronRight, ChevronLeft,
   Loader2, CheckCircle2, Table as TableIcon, Play,
   FolderOpen, Clock, Activity, TrendingUp, Cloud, Info, Copy, Edit3,
+  Code2, Target, Send, Mail, MessageSquare, PhoneCall, Webhook, Users as UsersIcon,
 } from 'lucide-react';
 import { useProjectStore } from '@/hooks/useProject';
-import { alertsApi, type AlertPolicy, type AlertPolicyType, type AlertsFile } from '@/services/api';
-import { notify } from './Notifications';
+import { alertsApi, type AlertPolicy, type AlertPolicyType, type AlertsFile, type CloudAlertsFile, type CloudAlertPolicy } from '@/services/api';
+import { notify, confirmDialog } from './Notifications';
 import { Notice } from './Notice';
+
+const CLOUD_ALERT_TEMPLATE = {
+  name: 'new_alert_policy',
+  description: '',
+  enabled: true,
+  event_types: ['ASSET_HEALTH_DEGRADED'],
+  notification_service: {
+    slack: { slack_workspace_name: '', slack_channel_name: '' },
+  },
+  alert_targets: [],
+};
 
 /**
  * Alert Policies surface -- lists local policies (parsed from the
@@ -19,11 +31,25 @@ import { Notice } from './Notice';
  */
 export function AlertsPanel() {
   const { currentProject } = useProjectStore();
-  const [state, setState] = useState<AlertsFile | null>(null);
+  const [state, setState] = useState<AlertsFile | CloudAlertsFile | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [wizardMode, setWizardMode] = useState<{ mode: 'create' } | { mode: 'edit'; policy: AlertPolicy } | null>(null);
   const [syncOpen, setSyncOpen] = useState(false);
+  // Cloud alert editing -- a raw JSON document editor rather than a
+  // structured wizard (see CLOUD_ALERT_TEMPLATE's comment / CloudAlertPolicy
+  // docs): Dagster+'s document schema has union-shaped fields (alert_targets,
+  // notification_service) that Dagster+ itself validates server-side, so
+  // there's no need to re-implement that validation here just to offer a
+  // friendlier form.
+  const [cloudEditorFor, setCloudEditorFor] = useState<{ isNew: boolean; text: string } | null>(null);
+  const [cloudSaving, setCloudSaving] = useState(false);
+  const [mutingId, setMutingId] = useState<string | null>(null);
+  // Clicking a policy used to jump straight into the raw JSON editor --
+  // fine for making a change, bad for just wanting to see what a policy
+  // does. This shows a parsed, readable summary first; "Edit as JSON"
+  // inside it drops into the same raw editor as before.
+  const [detailFor, setDetailFor] = useState<CloudAlertPolicy | null>(null);
 
   const isCloudProject = !!(currentProject as any)?.is_dagster_plus;
 
@@ -44,17 +70,21 @@ export function AlertsPanel() {
   useEffect(() => { refresh(); /* eslint-disable-next-line */ }, [currentProject?.id]);
 
   const handleSave = async (updated: AlertPolicy, isEdit: boolean, originalName?: string) => {
-    if (!currentProject || !state) return;
+    // Only ever invoked from the local (non-cloud) editing UI below, where
+    // the backend always returns AlertsFile -- CloudAlertsFile is
+    // read-only and never routes here.
+    const localState = state as AlertsFile | null;
+    if (!currentProject || !localState) return;
     let next: AlertPolicy[];
     if (isEdit && originalName) {
-      next = state.policies.map((p) => (p.name === originalName ? updated : p));
+      next = localState.policies.map((p) => (p.name === originalName ? updated : p));
     } else {
       // Reject duplicate name inline (backend also guards).
-      if (state.policies.some((p) => p.name === updated.name)) {
+      if (localState.policies.some((p) => p.name === updated.name)) {
         notify.error(`A policy named "${updated.name}" already exists.`);
         return;
       }
-      next = [...state.policies, updated];
+      next = [...localState.policies, updated];
     }
     try {
       const r = await alertsApi.save(currentProject.id, next);
@@ -78,20 +108,192 @@ export function AlertsPanel() {
     }
   };
 
+  const handleCloudSave = async () => {
+    if (!currentProject || !cloudEditorFor) return;
+    let document: Record<string, any>;
+    try {
+      document = JSON.parse(cloudEditorFor.text);
+    } catch (e: any) {
+      notify.error(`Invalid JSON: ${e?.message || e}`);
+      return;
+    }
+    setCloudSaving(true);
+    try {
+      const r = await alertsApi.saveCloud(currentProject.id, document);
+      setState(r);
+      setCloudEditorFor(null);
+      notify.success(`Saved "${document.name}". Dagster+ may take a moment to reflect it.`);
+    } catch (e: any) {
+      notify.error(e?.response?.data?.detail || e?.message || 'Failed to save policy.');
+    } finally {
+      setCloudSaving(false);
+    }
+  };
+
+  const handleCloudDelete = async (policy: CloudAlertPolicy) => {
+    if (!currentProject) return;
+    const ok = await confirmDialog(`Delete alert policy "${policy.name}"? This deletes it from Dagster+ directly -- there's no undo.`, { title: 'Delete alert policy', destructive: true });
+    if (!ok) return;
+    try {
+      const r = await alertsApi.removeCloud(currentProject.id, policy.name);
+      setState(r);
+      notify.success(`Deleted "${policy.name}".`);
+    } catch (e: any) {
+      notify.error(e?.response?.data?.detail || e?.message || 'Delete failed.');
+    }
+  };
+
+  const handleCloudMute = async (policy: CloudAlertPolicy, seconds: number | null) => {
+    if (!currentProject) return;
+    setMutingId(policy.id);
+    try {
+      const r = await alertsApi.muteCloud(currentProject.id, policy.id, seconds);
+      setState(r);
+      notify.success(seconds ? `Muted "${policy.name}".` : `Unmuted "${policy.name}".`);
+    } catch (e: any) {
+      notify.error(e?.response?.data?.detail || e?.message || 'Failed to update mute state.');
+    } finally {
+      setMutingId(null);
+    }
+  };
+
   if (isCloudProject) {
+    const cloudPolicies = (state && 'is_cloud' in state) ? state.policies : [];
     return (
-      <div className="h-full flex items-center justify-center bg-gray-50">
-        <div className="text-center max-w-md p-6">
-          <Cloud className="w-10 h-10 mx-auto mb-3 text-blue-500" />
-          <h3 className="text-base font-semibold text-gray-900">Alerts live in the repo, not the cloud connection</h3>
-          <p className="text-sm text-gray-600 mt-2">
-            Alert policies are authored as YAML that gets committed to your Dagster project's repo.
-            Open the local project (not this Dagster+ connection) to author or sync alerts.
-          </p>
+      <div className="h-full flex flex-col overflow-hidden">
+        <div className="flex-shrink-0 px-4 py-3 border-b border-gray-200 bg-white flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2 min-w-0">
+            <Cloud className="w-4 h-4 text-blue-500 flex-shrink-0" />
+            <span className="text-sm text-gray-700 truncate">Live from Dagster+ — edits apply directly, no local file involved.</span>
+          </div>
+          <button
+            onClick={() => setCloudEditorFor({ isNew: true, text: JSON.stringify(CLOUD_ALERT_TEMPLATE, null, 2) })}
+            className="flex-shrink-0 inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-primary-foreground bg-primary rounded-md hover:bg-accent"
+          >
+            <Plus className="w-4 h-4" />
+            New policy
+          </button>
         </div>
+        {loading && cloudPolicies.length === 0 ? (
+          <div className="flex-1 flex items-center justify-center text-gray-500 text-sm">
+            <Loader2 className="w-4 h-4 animate-spin mr-2" /> Loading alert policies…
+          </div>
+        ) : error ? (
+          <div className="flex-1 flex items-center justify-center text-red-600 text-sm p-6 text-center">{error}</div>
+        ) : cloudPolicies.length === 0 ? (
+          <div className="flex-1 flex items-center justify-center text-gray-500 text-sm">No alert policies configured.</div>
+        ) : (
+          <div className="flex-1 overflow-y-auto divide-y divide-gray-200">
+            {cloudPolicies.map((p) => {
+              const isMuted = !!p.muted_until && p.muted_until * 1000 > Date.now();
+              return (
+              <div key={p.id} className="p-4 hover:bg-gray-50 group cursor-pointer" onClick={() => setDetailFor(p)}>
+                <div className="flex items-center gap-2">
+                  <Bell className={`w-4 h-4 flex-shrink-0 ${p.enabled ? 'text-blue-500' : 'text-gray-300'}`} />
+                  <h3 className="text-sm font-semibold text-gray-900">{p.name}</h3>
+                  {!p.enabled && (
+                    <span className="text-[10px] uppercase tracking-wide bg-gray-100 text-gray-500 px-1.5 py-0.5 rounded">Disabled</span>
+                  )}
+                  {p.is_code_backed && (
+                    <span className="text-[10px] uppercase tracking-wide bg-purple-50 text-purple-600 border border-purple-200 px-1.5 py-0.5 rounded" title="Defined in this project's Python code -- edit there, not here.">
+                      Code-defined
+                    </span>
+                  )}
+                  {isMuted && (
+                    <span className="text-[10px] uppercase tracking-wide bg-amber-50 text-amber-600 border border-amber-200 px-1.5 py-0.5 rounded" title={`Muted until ${new Date(p.muted_until! * 1000).toLocaleString()}`}>
+                      Muted
+                    </span>
+                  )}
+                  <div className="ml-auto flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity" onClick={(e) => e.stopPropagation()}>
+                    <button
+                      onClick={() => handleCloudMute(p, isMuted ? null : 60 * 60 * 24)}
+                      disabled={mutingId === p.id}
+                      className={`p-1.5 rounded disabled:opacity-50 ${isMuted ? 'text-amber-600 hover:bg-amber-50' : 'text-gray-500 hover:bg-gray-100'}`}
+                      title={isMuted ? 'Unmute' : 'Mute for 24 hours'}
+                    >
+                      {mutingId === p.id ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Clock className="w-3.5 h-3.5" />}
+                    </button>
+                    <button
+                      onClick={() => setDetailFor(p)}
+                      className="p-1.5 text-blue-600 hover:bg-blue-50 rounded"
+                      title={p.is_code_backed ? 'View details (defined in code -- read-only)' : 'View details / edit'}
+                    >
+                      <Edit3 className="w-3.5 h-3.5" />
+                    </button>
+                    <button
+                      onClick={() => !p.is_code_backed && handleCloudDelete(p)}
+                      disabled={p.is_code_backed}
+                      className="p-1.5 text-red-600 hover:bg-red-50 rounded disabled:opacity-30 disabled:cursor-not-allowed"
+                      title={p.is_code_backed ? "Defined in code -- can't delete here" : 'Delete'}
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                </div>
+                {p.description && <p className="text-xs text-gray-600 mt-1 ml-6">{p.description}</p>}
+                <div className="flex items-center flex-wrap gap-x-4 gap-y-1 mt-2 ml-6 text-xs text-gray-500">
+                  {p.notification_type && <span>Via: {p.notification_type}</span>}
+                  {p.target_types.length > 0 && <span>Target: {p.target_types.join(', ')}</span>}
+                  {p.event_types.length > 0 && <span>Events: {p.event_types.join(', ')}</span>}
+                </div>
+              </div>
+              );
+            })}
+          </div>
+        )}
+
+        {detailFor && (
+          <CloudAlertDetailPanel
+            policy={detailFor}
+            onClose={() => setDetailFor(null)}
+            onEditJson={() => {
+              setCloudEditorFor({ isNew: false, text: JSON.stringify(detailFor.document ?? { name: detailFor.name }, null, 2) });
+              setDetailFor(null);
+            }}
+            onMute={(seconds) => handleCloudMute(detailFor, seconds)}
+            onDelete={() => { setDetailFor(null); handleCloudDelete(detailFor); }}
+            muting={mutingId === detailFor.id}
+          />
+        )}
+
+        {cloudEditorFor && (
+          <div className="fixed inset-0 bg-black/40 z-[110] flex items-center justify-center p-4" onClick={() => !cloudSaving && setCloudEditorFor(null)}>
+            <div className="bg-white rounded-lg shadow-xl w-full max-w-2xl max-h-[85vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
+              <div className="px-6 py-4 border-b border-gray-200 flex items-center justify-between">
+                <h3 className="text-base font-semibold text-gray-900">{cloudEditorFor.isNew ? 'New alert policy' : 'Edit alert policy'}</h3>
+                <button onClick={() => setCloudEditorFor(null)} className="text-gray-400 hover:text-gray-600"><X className="w-4 h-4" /></button>
+              </div>
+              <div className="px-6 py-4 flex-1 overflow-y-auto">
+                <p className="text-xs text-gray-500 mb-2">
+                  Raw policy document, in the same shape Dagster+ stores it -- Dagster+ validates this server-side on save.
+                </p>
+                <textarea
+                  value={cloudEditorFor.text}
+                  onChange={(e) => setCloudEditorFor({ ...cloudEditorFor, text: e.target.value })}
+                  className="w-full h-80 font-mono text-xs border border-gray-300 rounded p-3 focus:outline-none focus:ring-2 focus:ring-primary/30"
+                  spellCheck={false}
+                />
+              </div>
+              <div className="px-6 py-3 border-t border-gray-200 flex justify-end gap-2">
+                <button onClick={() => setCloudEditorFor(null)} disabled={cloudSaving} className="px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-100 rounded-md disabled:opacity-50">
+                  Cancel
+                </button>
+                <button onClick={handleCloudSave} disabled={cloudSaving} className="px-4 py-2 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-md disabled:opacity-50 flex items-center gap-1.5">
+                  {cloudSaving && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                  Save
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     );
   }
+
+  // Local (non-cloud) editing UI below -- the backend only ever returns
+  // CloudAlertsFile for is_dagster_plus projects, which returned early
+  // above, so state here is always the local, write-capable shape.
+  const localState = state as AlertsFile | null;
 
   return (
     <div className="h-full flex flex-col overflow-hidden">
@@ -100,15 +302,15 @@ export function AlertsPanel() {
           on the left and action buttons on the right. */}
       <div className="flex-shrink-0 bg-white border-b border-gray-200 px-4 py-2 flex items-center justify-between gap-4">
         <div className="text-xs text-gray-500 min-w-0 truncate">
-          {state?.path && <>YAML: <span className="font-mono">{state.path}</span></>}
-          {state?.policies?.length !== undefined && (
-            <span className="ml-2">· {state.policies.length} {state.policies.length === 1 ? 'policy' : 'policies'}</span>
+          {localState?.path && <>YAML: <span className="font-mono">{localState.path}</span></>}
+          {localState?.policies?.length !== undefined && (
+            <span className="ml-2">· {localState.policies.length} {localState.policies.length === 1 ? 'policy' : 'policies'}</span>
           )}
         </div>
         <div className="flex items-center gap-2 flex-shrink-0">
           <button
             onClick={() => setSyncOpen(true)}
-            disabled={!state || state.policies.length === 0}
+            disabled={!localState || localState.policies.length === 0}
             className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm text-gray-700 border border-gray-300 rounded hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
             title="Push local alerts to Dagster+ (destructive) or pull from Dagster+ into the local YAML"
           >
@@ -135,7 +337,7 @@ export function AlertsPanel() {
       <div className="flex-1 overflow-y-auto p-6">
         {loading && <div className="text-center py-12 text-gray-500"><Loader2 className="w-6 h-6 animate-spin mx-auto mb-2" />Loading alerts…</div>}
         {error && <div className="p-3 bg-rose-50 border border-rose-200 rounded text-sm text-rose-800">{error}</div>}
-        {!loading && !error && state && state.policies.length === 0 && (
+        {!loading && !error && localState && localState.policies.length === 0 && (
           <div className="text-center py-16">
             <Bell className="w-12 h-12 mx-auto mb-4 text-gray-300" />
             <p className="text-base font-medium text-gray-700">No alert policies yet</p>
@@ -151,9 +353,9 @@ export function AlertsPanel() {
             </button>
           </div>
         )}
-        {!loading && !error && state && state.policies.length > 0 && (
+        {!loading && !error && localState && localState.policies.length > 0 && (
           <PoliciesTable
-            policies={state.policies}
+            policies={localState.policies}
             onEdit={(p) => setWizardMode({ mode: 'edit', policy: p })}
             onDelete={handleDelete}
           />
@@ -1060,4 +1262,183 @@ function isTargetsValid(p: AlertPolicy): boolean {
     case 'agent_downtime': return true;
     case 'insight_metric': return !!p.insight_metric?.metric && p.insight_metric?.threshold !== null && p.insight_metric?.threshold !== undefined;
   }
+}
+
+// ---------- Cloud alert detail panel (read-only structured view) ----------
+//
+// Clicking a policy used to jump straight into the raw JSON editor --
+// technically complete but not a great "let me see what this alert does"
+// experience. This parses Dagster+'s document shape into a readable
+// summary; "Edit as JSON" drops into the same raw editor as before for
+// actually changing it (see CLOUD_ALERT_TEMPLATE's comment for why
+// editing itself stays JSON-based).
+
+const NOTIFICATION_SERVICE_META: Record<string, { icon: any; label: string }> = {
+  slack: { icon: MessageSquare, label: 'Slack' },
+  email: { icon: Mail, label: 'Email' },
+  ms_teams: { icon: UsersIcon, label: 'Microsoft Teams' },
+  microsoft_teams: { icon: UsersIcon, label: 'Microsoft Teams' },
+  pagerduty: { icon: PhoneCall, label: 'PagerDuty' },
+  webhook: { icon: Webhook, label: 'Webhook' },
+};
+
+function humanizeKey(e: string): string {
+  return e.replace(/([a-z])([A-Z])/g, '$1 $2').split(/[_\s]+/).filter(Boolean).map((w) => w[0].toUpperCase() + w.slice(1)).join(' ');
+}
+
+function CloudAlertDetailPanel({
+  policy, onClose, onEditJson, onMute, onDelete, muting,
+}: {
+  policy: CloudAlertPolicy;
+  onClose: () => void;
+  onEditJson: () => void;
+  onMute: (seconds: number | null) => void;
+  onDelete: () => void;
+  muting: boolean;
+}) {
+  const doc = policy.document || {};
+  const isMuted = !!policy.muted_until && policy.muted_until * 1000 > Date.now();
+  const svc = (doc.notification_service || {}) as Record<string, any>;
+  const svcKey = Object.keys(svc)[0];
+  const svcMeta = svcKey ? NOTIFICATION_SERVICE_META[svcKey] : null;
+  const targets: any[] = Array.isArray(doc.alert_targets) ? doc.alert_targets : [];
+
+  return (
+    <div className="fixed inset-0 z-[110] flex" onClick={onClose}>
+      <div className="flex-1 bg-black/30" />
+      <div className="w-[440px] max-w-full bg-white h-full shadow-2xl flex flex-col overflow-hidden" onClick={(e) => e.stopPropagation()}>
+        <div className="px-4 py-3 border-b border-gray-200 flex items-start justify-between gap-2">
+          <div className="min-w-0">
+            <div className="flex items-center gap-2 min-w-0">
+              <Bell className={`w-4 h-4 flex-shrink-0 ${policy.enabled ? 'text-blue-500' : 'text-gray-300'}`} />
+              <h3 className="text-sm font-semibold text-gray-900 truncate">{policy.name}</h3>
+            </div>
+            <div className="flex items-center gap-1.5 mt-1.5 flex-wrap">
+              {!policy.enabled && <Badge tone="gray">Disabled</Badge>}
+              {policy.is_code_backed && <Badge tone="purple">Code-defined</Badge>}
+              {isMuted && <Badge tone="amber">Muted until {new Date(policy.muted_until! * 1000).toLocaleString()}</Badge>}
+              {policy.source && <Badge tone="gray">{policy.source}</Badge>}
+            </div>
+          </div>
+          <button onClick={onClose} className="p-1 hover:bg-gray-100 rounded flex-shrink-0" aria-label="Close"><X className="w-4 h-4 text-gray-500" /></button>
+        </div>
+
+        <div className="p-4 space-y-4 overflow-y-auto flex-1">
+          {policy.description && <p className="text-xs text-gray-600">{policy.description}</p>}
+
+          <DetailSection title="Triggers on" icon={<Activity className="w-3.5 h-3.5" />}>
+            {policy.event_types.length === 0 ? (
+              <p className="text-xs text-gray-400 italic">No event types configured.</p>
+            ) : (
+              <div className="flex flex-wrap gap-1">
+                {policy.event_types.map((e) => (
+                  <span key={e} className="px-1.5 py-0.5 text-[11px] rounded bg-blue-50 text-blue-700 border border-blue-100">{humanizeKey(e)}</span>
+                ))}
+              </div>
+            )}
+          </DetailSection>
+
+          <DetailSection title="Notification" icon={<Send className="w-3.5 h-3.5" />}>
+            {!svcKey ? (
+              <p className="text-xs text-gray-400 italic">No notification service configured.</p>
+            ) : (
+              <div className="flex items-start gap-2">
+                {svcMeta ? <svcMeta.icon className="w-4 h-4 text-gray-500 flex-shrink-0 mt-0.5" /> : <Code2 className="w-4 h-4 text-gray-500 flex-shrink-0 mt-0.5" />}
+                <div className="min-w-0 flex-1">
+                  <div className="text-xs font-medium text-gray-800">{svcMeta?.label || humanizeKey(svcKey)}</div>
+                  <KeyValueList obj={svc[svcKey]} />
+                </div>
+              </div>
+            )}
+          </DetailSection>
+
+          <DetailSection title="Targets" icon={<Target className="w-3.5 h-3.5" />}>
+            {targets.length === 0 ? (
+              <p className="text-xs text-gray-400 italic">
+                {policy.target_types.length > 0 ? policy.target_types.join(', ') : 'Applies to everything in this deployment.'}
+              </p>
+            ) : (
+              <div className="space-y-2">
+                {targets.map((t, i) => {
+                  const key = t && typeof t === 'object' ? Object.keys(t)[0] : undefined;
+                  return (
+                    <div key={i} className="border border-gray-100 rounded p-2 bg-gray-50">
+                      <div className="text-[11px] font-medium text-gray-700 mb-1">{key ? humanizeKey(key) : `Target ${i + 1}`}</div>
+                      <KeyValueList obj={key ? t[key] : t} />
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </DetailSection>
+        </div>
+
+        <div className="px-4 py-3 border-t border-gray-200 flex items-center gap-2">
+          <button
+            onClick={() => onMute(isMuted ? null : 60 * 60 * 24)}
+            disabled={muting || policy.is_code_backed}
+            className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium text-gray-700 border border-gray-200 rounded hover:bg-gray-50 disabled:opacity-40"
+          >
+            {muting ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Clock className="w-3.5 h-3.5" />}
+            {isMuted ? 'Unmute' : 'Mute 24h'}
+          </button>
+          {!policy.is_code_backed && (
+            <button
+              onClick={onDelete}
+              className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium text-red-600 border border-red-200 rounded hover:bg-red-50"
+            >
+              <Trash2 className="w-3.5 h-3.5" /> Delete
+            </button>
+          )}
+          <button
+            onClick={onEditJson}
+            disabled={policy.is_code_backed}
+            title={policy.is_code_backed ? "Defined in code -- can't edit here" : undefined}
+            className="ml-auto inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium text-blue-700 bg-blue-50 border border-blue-200 rounded hover:bg-blue-100 disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            <Code2 className="w-3.5 h-3.5" /> Edit as JSON
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function DetailSection({ title, icon, children }: { title: string; icon: React.ReactNode; children: React.ReactNode }) {
+  return (
+    <div>
+      <h4 className="text-[10px] uppercase tracking-wider text-gray-500 mb-1.5 flex items-center gap-1">{icon} {title}</h4>
+      {children}
+    </div>
+  );
+}
+
+function Badge({ tone, children }: { tone: 'gray' | 'purple' | 'amber'; children: React.ReactNode }) {
+  const cls = tone === 'purple' ? 'bg-purple-50 text-purple-600 border-purple-200'
+    : tone === 'amber' ? 'bg-amber-50 text-amber-600 border-amber-200'
+    : 'bg-gray-100 text-gray-500 border-gray-200';
+  return <span className={`text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded border ${cls}`}>{children}</span>;
+}
+
+// Renders an unknown nested object (notification_service's per-service
+// config, alert_targets entries) as a plain key: value list -- Dagster+'s
+// document schema has enough union-shaped variants that hand-modeling
+// every one isn't worth it just for a read-only summary.
+function KeyValueList({ obj }: { obj: any }) {
+  if (obj === null || obj === undefined) return null;
+  if (typeof obj !== 'object') return <span className="text-xs text-gray-600">{String(obj)}</span>;
+  const entries = Array.isArray(obj) ? obj.map((v, i) => [String(i), v] as const) : Object.entries(obj);
+  if (entries.length === 0) return <p className="text-xs text-gray-400 italic">—</p>;
+  return (
+    <dl className="text-xs space-y-0.5">
+      {entries.map(([k, v]) => (
+        <div key={k} className="flex gap-1.5">
+          <dt className="text-gray-500 flex-shrink-0">{humanizeKey(k)}:</dt>
+          <dd className="text-gray-800 truncate">
+            {v === null || v === undefined ? '—' : typeof v === 'object' ? JSON.stringify(v) : String(v)}
+          </dd>
+        </div>
+      ))}
+    </dl>
+  );
 }

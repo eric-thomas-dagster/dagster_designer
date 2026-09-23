@@ -16,7 +16,7 @@ import { PrimitivesManager } from './components/PrimitivesManager';
 import { ResourcesManager } from './components/ResourcesManager';
 import { PipelineBuilder } from './components/PipelineBuilder';
 import { DagsterStartupModal } from './components/DagsterStartupModal';
-import { AssetDetailPage } from './components/AssetDetailPage';
+import { AssetDetailPage, type Tab as AssetDetailTab } from './components/AssetDetailPage';
 import { AlertsPanel } from './components/AlertsPanel';
 import { RunsPanel } from './components/RunsPanel';
 import { DataPreviewModal } from './components/DataPreviewModal';
@@ -28,13 +28,14 @@ import { useRunNotifications } from './hooks/useRunNotifications';
 import { setActiveTabGlobal } from './services/activeTab';
 import { onMenuAction, onQuitRequested, confirmQuit, openExternalUrl, isTauri } from './services/tauri';
 import { hasUnsavedChanges } from './hooks/useUnsavedChanges';
-import { Network, FileCode, Zap, Package, ExternalLink, Settings, Workflow, ChevronDown, Skull, AlertTriangle, X, Loader2, CheckCircle, XCircle, PanelLeftClose, PanelLeft, Clock, Play, Radar, Timer, Download, Database, ShieldCheck, Cloud, Bell } from 'lucide-react';
+import { Network, FileCode, Zap, Package, ExternalLink, Settings, Workflow, ChevronDown, Skull, AlertTriangle, X, Loader2, CheckCircle, XCircle, PanelLeftClose, PanelLeft, Clock, Play, Radar, Timer, Download, Database, ShieldCheck, Cloud, Bell, BarChart3 } from 'lucide-react';
 import { IngestionsPanel } from './components/IngestionsPanel';
+import { InsightsPanel } from './components/InsightsPanel';
 import { DbtPanel } from './components/DbtPanel';
 import { MonitorsPanel } from './components/MonitorsPanel';
 import { AiAssistantPanel } from './components/AiAssistantPanel';
 import { projectsApi as _projectsApi } from './services/api';
-import { dagsterUIApi, projectsApi, filesApi, primitivesApi } from './services/api';
+import { dagsterUIApi, projectsApi, filesApi, primitivesApi, dagsterPlusOrgBaseUrl } from './services/api';
 import type { ComponentInstance } from './types';
 import { API_BASE } from '@/services/api';
 
@@ -245,6 +246,11 @@ function App() {
   // Triggered from catalog rows and the "View full details" button in
   // the PropertyPanel; null means the overlay is closed.
   const [detailNodeId, setDetailNodeId] = useState<string | null>(null);
+  // Which tab AssetDetailPage should open on -- set alongside detailNodeId
+  // when a caller wants to land somewhere other than Overview (e.g.
+  // drilling into an asset's Insights tab from the deployment-level
+  // Insights page). Cleared whenever the overlay closes.
+  const [detailInitialTab, setDetailInitialTab] = useState<AssetDetailTab | undefined>(undefined);
   const [isDragging, setIsDragging] = useState(false);
   const [activeMainTab, setActiveMainTabState] = useState('assets');
   // Also broadcasts to the module-level activeTab store so page components
@@ -253,6 +259,32 @@ function App() {
   const setActiveMainTab = (tab: string) => {
     setActiveMainTabState(tab);
     setActiveTabGlobal(tab);
+  };
+  // Deep-link into the Runs tab from elsewhere (e.g. a materialization
+  // event in AssetDetailPage's Events tab) -- seeds RunsPanel's initial
+  // selection so it opens straight to that run instead of the list.
+  const [runToOpen, setRunToOpen] = useState<string | null>(null);
+  const handleOpenRun = (runId: string) => {
+    setRunToOpen(runId);
+    setActiveMainTab('runs');
+  };
+  // Radix's Tabs.onValueChange only fires when the clicked trigger's value
+  // differs from the current one -- re-clicking the already-active nav item
+  // is a no-op by default, so a user drilled into a detail view (a specific
+  // run, a specific monitor) who clicks that same nav item again to "go
+  // back to the list" saw nothing happen. Each nav trigger's onClick bumps
+  // this counter unconditionally; panels with no lifted-up "selected item"
+  // state key off it to force a remount back to their default/list view.
+  const [tabResetNonce, setTabResetNonce] = useState<Record<string, number>>({});
+  const handleNavClick = (value: string) => {
+    if (value !== activeMainTab) return;
+    if (value === 'assets') {
+      setDetailNodeId(null);
+      setDetailInitialTab(undefined);
+      return;
+    }
+    if (value === 'runs') setRunToOpen(null);
+    setTabResetNonce((prev) => ({ ...prev, [value]: (prev[value] || 0) + 1 }));
   };
   const [templateBuilderTab, setTemplateBuilderTab] = useState<string | null>(null);
   const [templateBuilderAssetKey, setTemplateBuilderAssetKey] = useState<string | null>(null);
@@ -702,14 +734,9 @@ function App() {
     // new tab. Uses org's default deployment path when the project
     // isn't pinned to a specific one.
     if ((currentProject as any).is_dagster_plus) {
-      const org = ((currentProject as any).dagster_plus_org || '')
-        .replace(/^https?:\/\//, '')
-        .replace(/\.dagster\.(cloud|plus).*$/, '')
-        .split('/')[0];
+      const base = dagsterPlusOrgBaseUrl(currentProject as any);
       const dep = (currentProject as any).dagster_plus_deployment || '';
-      const url = dep
-        ? `https://${org}.dagster.cloud/${dep}/home`
-        : `https://${org}.dagster.cloud/`;
+      const url = dep ? `${base}/${dep}/home` : `${base}/`;
       openExternalUrl(url);
       return;
     }
@@ -763,6 +790,16 @@ function App() {
   };
 
   const isCloudProject = !!currentProject && !!(currentProject as any).is_dagster_plus;
+  // Not gated on whether any pipelines exist yet -- for local projects
+  // this tab IS the entry point for creating the first one (its empty
+  // state has the "New Pipeline" button), so hiding it whenever the
+  // count is zero would remove the only way to ever get to one. Always
+  // shown locally, always hidden for cloud: cloud jobs already have a
+  // full home with real detail views in the Automation tab, and this
+  // tab's canvas-builder UI (a local-only concept -- there's no
+  // Designer-authored "Pipeline" for a live Dagster+ connection) has
+  // nothing useful to show for a native job beyond "you can run it".
+  const hasPipelines = !isCloudProject;
   const navItems = [
     { value: 'assets', label: 'Assets', icon: Network },
     { value: 'ingestions', label: 'Ingestions', icon: Download },
@@ -770,7 +807,14 @@ function App() {
     { value: 'monitors', label: 'Monitors', icon: ShieldCheck },
     { value: 'alerts', label: 'Alerts', icon: Bell },
     { value: 'runs', label: 'Runs', icon: Play },
-    { value: 'pipelines', label: 'Pipelines', icon: Workflow },
+    // Insights (usage/cost/reliability metrics) only exists for Dagster+
+    // connections -- it's tracked by Dagster+'s own Insights product,
+    // nothing local to show for a non-cloud project.
+    ...(isCloudProject ? [{ value: 'insights', label: 'Insights', icon: BarChart3 }] : []),
+    // hasPipelines is always false for cloud (see above) -- this tab is
+    // Designer's own pipeline-builder canvas, a local-only concept, so
+    // it's only ever shown when the project actually has one.
+    ...(hasPipelines ? [{ value: 'pipelines', label: 'Pipelines', icon: Workflow }] : []),
     { value: 'primitives', label: 'Automation', icon: Zap },
     { value: 'library', label: 'Library', icon: Package },
     // Code tab is meaningless for Dagster+ projects (no local codebase
@@ -863,6 +907,7 @@ function App() {
                       key={value}
                       value={value}
                       onMouseEnter={onHover}
+                      onClick={() => handleNavClick(value)}
                       className={`group flex items-center ${navCollapsed ? 'justify-center px-2' : 'gap-3 px-3'} py-2 rounded-md text-sm font-medium transition-colors focus:outline-none ${
                         isTauri
                           ? 'text-gray-600 hover:text-gray-900 hover:bg-black/5 data-[state=active]:bg-indigo-50 data-[state=active]:text-indigo-900 dark:text-white/70 dark:hover:text-white dark:hover:bg-white/5 dark:data-[state=active]:bg-[hsl(var(--selected))] dark:data-[state=active]:text-white'
@@ -1031,7 +1076,10 @@ function App() {
               <div className="flex-1 min-w-0 flex flex-col">
                 <AssetDetailPage
                   nodeId={detailNodeId}
-                  onClose={() => setDetailNodeId(null)}
+                  initialTab={detailInitialTab}
+                  onClose={() => { setDetailNodeId(null); setDetailInitialTab(undefined); }}
+                  onNavigate={(nextNodeId) => setDetailNodeId(nextNodeId)}
+                  onOpenRun={handleOpenRun}
                   onNewPrimitiveForAsset={(category, assetKey) => {
                     setTemplateBuilderAssetKey(assetKey);
                     setTemplateBuilderTab(category);
@@ -1178,6 +1226,32 @@ function App() {
             <IngestionsPanel onAddDataSource={setAddingComponentType} onEditComponent={setEditingComponent} />
           </Tabs.Content>
 
+          {/* Insights Tab Content — deployment-level Dagster+ usage/cost/
+              reliability metrics, with drill-down into a specific asset's
+              own Insights tab. Cloud-only (see navItems). */}
+          <Tabs.Content value="insights" className="flex-1 overflow-hidden">
+            <InsightsPanel
+              onOpenAsset={(nodeId) => {
+                // AssetDetailPage's overlay only actually renders inside
+                // the Assets tab's content -- without switching there too,
+                // detailNodeId gets set but nothing visible happens since
+                // Insights' own Tabs.Content stays the active (visible) one.
+                // Opens on Overview (the default), not that asset's own
+                // Insights tab -- landing straight back on Insights after
+                // drilling in from Insights felt like it went nowhere.
+                setActiveMainTab('assets');
+                setDetailNodeId(nodeId);
+              }}
+              onOpenJob={(jobName) => {
+                // No dedicated job detail page exists -- reuse the same
+                // details dialog the Automation tab's Jobs list already
+                // has (PrimitivesManager's openPrimitive mechanism).
+                setActiveMainTab('primitives');
+                setPrimitiveToOpen({ category: 'job', name: jobName });
+              }}
+            />
+          </Tabs.Content>
+
           {/* dbt Tab Content — model catalog + docs + one-click runs
               over any dbt project (local or cloned) in this project. */}
           <Tabs.Content value="dbt" className="flex-1 overflow-hidden">
@@ -1189,7 +1263,7 @@ function App() {
               and dbt tests. Read-only v1 — write flow (schedule / add /
               history / charts) lands next. */}
           <Tabs.Content value="monitors" className="flex-1 overflow-hidden">
-            <MonitorsPanel onOpenFile={handleOpenFile} />
+            <MonitorsPanel key={tabResetNonce.monitors || 0} onOpenFile={handleOpenFile} onOpenRun={handleOpenRun} />
           </Tabs.Content>
 
           {/* Alerts Tab Content */}
@@ -1199,7 +1273,10 @@ function App() {
 
           {/* Runs Tab Content */}
           <Tabs.Content value="runs" className="flex-1 overflow-hidden">
-            <RunsPanel />
+            <RunsPanel
+              key={runToOpen ? `run-${runToOpen}` : `runs-${tabResetNonce.runs || 0}`}
+              initialRunId={runToOpen ?? undefined}
+            />
           </Tabs.Content>
 
           {/* Pipelines Tab Content */}
@@ -1221,7 +1298,7 @@ function App() {
                       'Any redundant components?',
                     ]}
                     fetchInsights={() => _projectsApi.pageInsights(currentProject.id, 'pipelines') as any}
-                    ask={(q, h) => _projectsApi.pageAsk(currentProject.id, 'pipelines', { question: q, history: h }).then(r => r.answer)}
+                    ask={(q, h) => _projectsApi.pageAsk(currentProject.id, 'pipelines', { question: q, history: h }).then(r => ({ answer: r.answer, toolsUsed: r.tools_used }))}
                   />
                 </div>
               )}
@@ -1257,7 +1334,7 @@ function App() {
                       'Are my sensors covering the right assets?',
                     ]}
                     fetchInsights={() => _projectsApi.pageInsights(currentProject.id, 'automation') as any}
-                    ask={(q, h) => _projectsApi.pageAsk(currentProject.id, 'automation', { question: q, history: h }).then(r => r.answer)}
+                    ask={(q, h) => _projectsApi.pageAsk(currentProject.id, 'automation', { question: q, history: h }).then(r => ({ answer: r.answer, toolsUsed: r.tools_used }))}
                   />
                 </div>
               )}
@@ -1266,6 +1343,7 @@ function App() {
                 onOpenFile={handleOpenFile}
                 openPrimitive={primitiveToOpen}
                 onOpenPrimitiveConsumed={() => setPrimitiveToOpen(null)}
+                onOpenAsset={(nodeId) => { setActiveMainTab('assets'); setDetailNodeId(nodeId); }}
               />
             </div>
           </Tabs.Content>

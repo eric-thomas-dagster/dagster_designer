@@ -29,6 +29,7 @@ export function ConnectDagsterPlusDialog({ open, onOpenChange, onConnected }: Co
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
   const [org, setOrg] = useState('');
+  const [region, setRegion] = useState<'us' | 'eu'>('us');
   const [deployment, setDeployment] = useState('');
   const [token, setToken] = useState('');
   const [location, setLocation] = useState('');
@@ -44,7 +45,7 @@ export function ConnectDagsterPlusDialog({ open, onOpenChange, onConnected }: Co
   } | null>(null);
 
   const reset = () => {
-    setName(''); setDescription(''); setOrg(''); setDeployment(''); setToken('');
+    setName(''); setDescription(''); setOrg(''); setRegion('us'); setDeployment(''); setToken('');
     setLocation(''); setTesting(false); setConnecting(false); setTestResult(null);
     setShowToken(false);
   };
@@ -61,6 +62,7 @@ export function ConnectDagsterPlusDialog({ open, onOpenChange, onConnected }: Co
         name: name.trim() || org.trim(),
         description: description.trim() || undefined,
         org: org.trim(),
+        region,
         // Pass empty string when user left this blank — the backend then
 // hits the org-level /graphql and follows Dagster+'s 307 redirect
 // to the org's default deployment (which varies per org — hooli's
@@ -88,6 +90,7 @@ deployment: deployment.trim(),
         name: name.trim() || `${org.trim()}${deployment.trim() ? ' (' + deployment.trim() + ')' : ''}`,
         description: description.trim() || undefined,
         org: org.trim(),
+        region,
         // Pass empty string when user left this blank — the backend then
 // hits the org-level /graphql and follows Dagster+'s 307 redirect
 // to the org's default deployment (which varies per org — hooli's
@@ -147,6 +150,24 @@ deployment: deployment.trim(),
                   className="w-full px-3 py-2 text-sm font-mono border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500" />
               </div>
               <div>
+                <label className="text-[10px] uppercase tracking-wider text-gray-500 mb-1 block">Region</label>
+                <div className="inline-flex rounded border border-gray-300 overflow-hidden w-full">
+                  {(['us', 'eu'] as const).map((r) => (
+                    <button
+                      key={r}
+                      type="button"
+                      onClick={() => setRegion(r)}
+                      className={`flex-1 px-3 py-2 text-sm font-medium transition-colors ${
+                        region === r ? 'bg-blue-600 text-white' : 'bg-white text-gray-600 hover:bg-gray-50'
+                      }`}
+                    >
+                      {r.toUpperCase()}
+                    </button>
+                  ))}
+                </div>
+                <p className="text-[10px] text-gray-500 mt-0.5">Where your org is hosted -- check your Dagster+ URL (…eu.dagster.cloud → EU).</p>
+              </div>
+              <div>
                 <label className="text-[10px] uppercase tracking-wider text-gray-500 mb-1 block">Deployment (optional)</label>
                 <input
                   value={deployment} onChange={(e) => setDeployment(e.target.value)}
@@ -182,7 +203,7 @@ deployment: deployment.trim(),
                   <Info className="w-3 h-3" />
                   Create one at&nbsp;
                   <a
-                    href={`https://${(org || 'ORG').replace('.dagster.cloud', '').replace('.dagster.plus', '').split('/')[0]}.dagster.cloud/settings/tokens`}
+                    href={`https://${(org || 'ORG').replace('.dagster.cloud', '').replace('.dagster.plus', '').split('/')[0]}.${region === 'eu' ? 'eu.dagster.cloud' : 'dagster.cloud'}/settings/tokens`}
                     target="_blank"
                     rel="noopener noreferrer"
                     className="text-blue-600 hover:underline inline-flex items-center gap-0.5"

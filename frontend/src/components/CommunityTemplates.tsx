@@ -5,6 +5,7 @@ import { List, type RowComponentProps } from 'react-window';
 import { useProjectStore } from '@/hooks/useProject';
 import { notify } from './Notifications';
 import { API_BASE } from '@/services/api';
+import { ComponentIcon } from './ComponentIcon';
 
 interface ComponentTemplate {
   id: string;
@@ -57,7 +58,7 @@ function TemplateRow({ index, style, components, onSelect }: RowComponentProps<R
         className="w-full h-full flex items-center gap-3 px-3 my-1 rounded-md border border-gray-200 bg-white hover:border-primary/40 hover:shadow-sm transition-colors text-left group"
       >
         <div className="w-8 h-8 rounded bg-primary/10 text-primary flex items-center justify-center flex-shrink-0">
-          <Package className="w-4 h-4" />
+          <ComponentIcon icon={c.icon} title={c.name} size={16} />
         </div>
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2 min-w-0">
