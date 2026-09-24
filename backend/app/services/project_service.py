@@ -3023,6 +3023,18 @@ if customizations_path.exists():
                 # Check direct subdirectory for definitions.py
                 if (subdir / "definitions.py").exists():
                     print(f"   Found definitions.py in {subdir.name}/ - this is a Dagster project")
+                    # Same src-layout gap as the nested-subdirectory case below:
+                    # a flat layout (repo/pyproject.toml + repo/<package>/definitions.py,
+                    # no subdir of its own pyproject.toml) is just as common as a
+                    # subdir that owns its own pyproject.toml. Returning `subdir`
+                    # unconditionally here made downstream code treat it as its own
+                    # installable sub-project ("uv pip install -e ." run from
+                    # <package>/, which fails outright -- confirmed live against
+                    # dagster_elt_project, whose pyproject.toml lives at the repo
+                    # root right next to the package directory).
+                    if not (subdir / "pyproject.toml").exists() and (repo_dir / "pyproject.toml").exists():
+                        print(f"   ({subdir.name}/ has no pyproject.toml of its own -- using repo root instead, standard src-layout)")
+                        return ("dagster", repo_dir)
                     return ("dagster", subdir)
 
                 # Check nested subdirectory (e.g., jaffle_shop/jaffle_shop/definitions.py)
