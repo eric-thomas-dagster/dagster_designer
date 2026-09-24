@@ -583,7 +583,7 @@ export const projectsApi = {
 
   listDagsterPlusDeployments: async (
     projectId: string,
-  ): Promise<{ current: string | null; deployments: Array<{ deployment_name: string; deployment_id: string | null; deployment_type: string | null; deployment_status: string | null }> }> => {
+  ): Promise<{ current: string | null; deployments: Array<{ deployment_name: string; deployment_id: string | null; deployment_type: string | null; deployment_status: string | null }>; default_deployment: string | null }> => {
     const response = await api.get(`/projects/${projectId}/dagster-plus/deployments`);
     return response.data as any;
   },

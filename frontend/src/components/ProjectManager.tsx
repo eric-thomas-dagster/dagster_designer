@@ -1247,6 +1247,7 @@ function DeploymentPicker({ projectId, currentDeployment, onSwitched }: {
   const [loading, setLoading] = useState(false);
   const [switching, setSwitching] = useState(false);
   const [deployments, setDeployments] = useState<Array<{ deployment_name: string; deployment_status: string | null }>>([]);
+  const [defaultDeployment, setDefaultDeployment] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const toggle = async () => {
@@ -1257,6 +1258,7 @@ function DeploymentPicker({ projectId, currentDeployment, onSwitched }: {
       setError(null);
       try {
         const r = await projectsApi.listDagsterPlusDeployments(projectId);
+        setDefaultDeployment(r.default_deployment);
         setDeployments(r.deployments);
       } catch (e: any) {
         setError(e?.response?.data?.detail || e?.message || 'Failed to list deployments');
@@ -1327,25 +1329,9 @@ function DeploymentPicker({ projectId, currentDeployment, onSwitched }: {
             {!loading && !error && deployments.length === 0 && (
               <div className="px-3 py-2 text-xs text-gray-500 italic">No deployments found.</div>
             )}
-            {!loading && !error && (
-              <button
-                onClick={() => pick('')}
-                disabled={usingDefault || switching}
-                className={`w-full flex items-center justify-between gap-2 px-3 py-2 text-sm hover:bg-blue-50 border-b border-gray-100 ${usingDefault ? 'bg-blue-50/70' : ''} disabled:cursor-not-allowed`}
-                title="Follow the org's default deployment (via GraphQL redirect). Recommended when you don't want to pin to a specific one."
-              >
-                <div className="flex items-center gap-2 min-w-0">
-                  <Cloud className={`w-3.5 h-3.5 flex-shrink-0 ${usingDefault ? 'text-blue-600' : 'text-gray-400'}`} />
-                  <div className="min-w-0">
-                    <div className={`italic truncate ${usingDefault ? 'text-blue-700 font-medium' : 'text-gray-900'}`}>org default</div>
-                    <div className="text-[10px] text-gray-500">follow org-level redirect</div>
-                  </div>
-                </div>
-                {usingDefault && <CheckCircle className="w-3.5 h-3.5 text-emerald-600 flex-shrink-0" />}
-              </button>
-            )}
             {deployments.map((d) => {
-              const active = d.deployment_name === currentDeployment;
+              const isDefault = d.deployment_name === defaultDeployment;
+              const active = d.deployment_name === currentDeployment || (usingDefault && isDefault);
               return (
                 <button
                   key={d.deployment_name}
@@ -1356,7 +1342,17 @@ function DeploymentPicker({ projectId, currentDeployment, onSwitched }: {
                   <div className="flex items-center gap-2 min-w-0">
                     <Cloud className={`w-3.5 h-3.5 flex-shrink-0 ${active ? 'text-blue-600' : 'text-gray-400'}`} />
                     <div className="min-w-0">
-                      <div className={`font-mono truncate ${active ? 'text-blue-700 font-medium' : 'text-gray-900'}`}>{d.deployment_name}</div>
+                      <div className="flex items-center gap-1.5">
+                        <span className={`font-mono truncate ${active ? 'text-blue-700 font-medium' : 'text-gray-900'}`}>{d.deployment_name}</span>
+                        {isDefault && (
+                          <span
+                            className="text-[9px] uppercase tracking-wider px-1 py-0.5 rounded bg-blue-100 text-blue-800 border border-blue-200 flex-shrink-0"
+                            title="Org default (from /graphql redirect target)"
+                          >
+                            default
+                          </span>
+                        )}
+                      </div>
                       {d.deployment_status && (
                         <div className="text-[10px] text-gray-500">{d.deployment_status}</div>
                       )}

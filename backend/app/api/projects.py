@@ -472,13 +472,17 @@ class DagsterPlusDeployment(BaseModel):
 class DagsterPlusDeploymentsResponse(BaseModel):
     current: str | None
     deployments: list[DagsterPlusDeployment]
+    # Which of the above is the org's actual default (the /graphql
+    # redirect target) -- lets the picker mark it with a "default" badge
+    # instead of offering a separate, unnamed "org default" pseudo-entry.
+    default_deployment: str | None = None
 
 
 @router.get("/{project_id}/dagster-plus/deployments", response_model=DagsterPlusDeploymentsResponse)
 async def list_dagster_plus_deployments(project_id: str):
     """List every deployment in the org so the ribbon picker can offer
     a switch. Reads at the org level (no deployment path in the URL)."""
-    from ..services.dagster_plus_client import query, DagsterPlusError, DEPLOYMENTS_QUERY
+    from ..services.dagster_plus_client import query, DagsterPlusError, DEPLOYMENTS_QUERY, probe_default_deployment
     project = project_service.get_project(project_id)
     if not project or not project.is_dagster_plus:
         raise HTTPException(status_code=404, detail="Not a Dagster+ project.")
@@ -512,9 +516,18 @@ async def list_dagster_plus_deployments(project_id: str):
         )
         for d in (data.get("fullDeployments") or [])
     ]
+    default_deployment: str | None = None
+    try:
+        default_deployment = await probe_default_deployment(
+            project.dagster_plus_org or "", project.dagster_plus_token or "", region=project.dagster_plus_region,
+        )
+    except Exception as e:
+        # Non-fatal -- the picker just won't show a "default" badge.
+        print(f"[dagster+] default deployment probe failed during list: {e}", flush=True)
     return DagsterPlusDeploymentsResponse(
         current=project.dagster_plus_deployment,
         deployments=deps,
+        default_deployment=default_deployment,
     )
 
 
