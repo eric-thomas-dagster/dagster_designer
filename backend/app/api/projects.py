@@ -104,6 +104,78 @@ async def create_project(project_create: ProjectCreate, background_tasks: Backgr
     return project
 
 
+class ComponentSourceYamlUpdate(BaseModel):
+    """Request to patch a component instance's `attributes:` block directly
+    in its own defs.yaml, for a project whose normal component-save path
+    (regenerate YAML from Designer's own bookkeeping) is a no-op --
+    imported projects, where that file is hand-written and Designer has no
+    business regenerating it wholesale."""
+    source_path: str = Field(..., description="'path/to/defs.yaml' or 'path/to/defs.yaml:line', as carried on a GraphNode's data.source")
+    attributes: dict[str, Any] = Field(..., description="The full current attributes from the config form")
+    original_attributes: dict[str, Any] = Field(default_factory=dict, description="Attributes as loaded, before this edit -- only keys that actually changed get written")
+
+
+@router.put("/{project_id}/component-source-yaml")
+async def update_component_source_yaml(project_id: str, request: ComponentSourceYamlUpdate):
+    """Patch just the changed top-level `attributes:` keys of a component
+    instance directly in its own defs.yaml file, preserving everything
+    else -- comments, key order, unrelated fields -- via ruamel.yaml's
+    round-trip mode.
+
+    This is deliberately narrow: it only rewrites keys that differ from
+    `original_attributes`, and it replaces each changed key's value
+    wholesale rather than trying to merge nested structures, so an edit
+    inside a big nested field (e.g. a JSON-textarea edit to
+    assets_by_item_name) loses comments WITHIN that one field but nothing
+    else in the file. That's the same tradeoff the config modal's own
+    nested-object editor already makes (raw JSON textarea), just carried
+    through to the write.
+    """
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    project_dir = project_service._get_project_dir(project).resolve()
+    file_path_str = request.source_path.split(":")[0]
+    yaml_path = (project_dir / file_path_str).resolve()
+
+    if not yaml_path.is_relative_to(project_dir):
+        raise HTTPException(status_code=400, detail="Source path escapes the project directory")
+    if yaml_path.suffix not in (".yaml", ".yml"):
+        raise HTTPException(status_code=400, detail="Source path is not a YAML file")
+    if not yaml_path.exists():
+        raise HTTPException(status_code=404, detail=f"Source file not found: {file_path_str}")
+
+    try:
+        from ruamel.yaml import YAML
+        yaml = YAML()
+        yaml.preserve_quotes = True
+        yaml.width = 4096  # avoid ruamel re-wrapping long lines it never touched
+
+        with open(yaml_path) as f:
+            doc = yaml.load(f)
+
+        if doc is None or "attributes" not in doc:
+            raise HTTPException(status_code=400, detail="This file has no 'attributes:' block to update")
+
+        changed_keys = []
+        for key, new_value in request.attributes.items():
+            old_value = request.original_attributes.get(key)
+            if new_value != old_value:
+                doc["attributes"][key] = new_value
+                changed_keys.append(key)
+
+        if changed_keys:
+            with open(yaml_path, "w") as f:
+                yaml.dump(doc, f)
+
+        return {"success": True, "changed_keys": changed_keys, "path": file_path_str}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to update {file_path_str}: {e}")
+
+
 # ---------------------------------------------------------------------------
 # Dagster+ (cloud) connections. A "Dagster+ project" is a project
 # record with is_dagster_plus=True and a stored user token — no local

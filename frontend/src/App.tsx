@@ -679,17 +679,47 @@ function App() {
     // project once it's imported (backend/app/services/project_service.py --
     // every one of those steps skips on project.is_imported, confirmed by
     // tracing it live), not just for components Designer didn't generate
-    // itself. Letting this proceed would PUT successfully, look like it
-    // saved, and silently discard the edit -- nothing on disk would change,
-    // and a later `dg list defs` would just re-read the old values. Block it
-    // here with a clear explanation instead of a confusing "it didn't work"
-    // days later; editing the real defs.yaml directly (the code-editor
-    // button next to a "From defs.yaml" entry in the Project Components
-    // list) is the only thing that actually persists today.
+    // itself. Route imported-project saves through a narrower endpoint that
+    // patches just the changed attributes directly into the component's own
+    // defs.yaml (ruamel.yaml round-trip -- preserves comments/formatting on
+    // everything it doesn't touch) instead of silently no-op'ing.
     if (currentProject.is_imported) {
-      notify.error(
-        "Can't save component changes for an imported project yet -- edits here wouldn't be written back to its defs.yaml. Open the file directly to edit it (the code-editor button next to this component in the Project Components list)."
-      );
+      const sourceNode = currentProject.graph.nodes.find((n) => n.data?.component_id === component.id);
+      const sourcePath = sourceNode?.data?.source;
+      if (!sourcePath) {
+        notify.error("Can't find this component's source defs.yaml to save changes.");
+        return;
+      }
+      try {
+        const res = await fetch(`${API_BASE}/projects/${currentProject.id}/component-source-yaml`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            source_path: sourcePath,
+            attributes: component.attributes,
+            original_attributes: sourceNode?.data?.component_attributes || {},
+          }),
+        });
+        const body = await res.json().catch(() => ({} as any));
+        if (!res.ok) throw new Error(body.detail || 'Save failed');
+        if (body.changed_keys?.length) {
+          notify.success(`Saved ${body.changed_keys.join(', ')} to ${body.path}`);
+          // Re-run dg list defs to see the edit reflected -- a plain
+          // reload would just re-fetch the same stale graph already on
+          // disk. Needed for anything that could change assets themselves
+          // (e.g. an assets_by_item_name edit), not just display values.
+          await projectsApi.regenerateAssets(currentProject.id, false);
+          const { loadProject } = useProjectStore.getState();
+          await loadProject(currentProject.id);
+        } else {
+          notify.info('No changes to save.');
+        }
+      } catch (error) {
+        console.error('Failed to save component to source YAML:', error);
+        notify.error(`Failed to save: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      }
+      setEditingComponent(null);
+      setAddingComponentType(null);
       return;
     }
 

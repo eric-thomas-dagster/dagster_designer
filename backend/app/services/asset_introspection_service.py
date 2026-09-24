@@ -796,8 +796,15 @@ class AssetIntrospectionService:
                         import yaml
                         from pathlib import Path
 
-                        # Extract folder name from path like "src/project_name/defs/my_asset/defs.yaml"
-                        match = re.search(r'/defs/([^/]+)/defs\.yaml', asset_source)
+                        # Extract folder path from something like "src/project_name/defs/my_asset/defs.yaml"
+                        # -- greedy so it also matches nested groupings like
+                        # "defs/activation/tableau/defs.yaml" (one path segment used
+                        # to be assumed, [^/]+; a project organizing its components
+                        # into category subdirectories under defs/ -- confirmed live,
+                        # chicago_bulls_analytics groups ingestion/activation/etc --
+                        # silently failed to match at all, so component attributes/
+                        # type never got attached to any of its assets).
+                        match = re.search(r'/defs/(.+)/defs\.yaml', asset_source)
                         if match:
                             asset_folder = match.group(1)
                             print(f"[Asset Introspection] Found unregistered component instance in folder: {asset_folder}", flush=True)
@@ -863,7 +870,7 @@ class AssetIntrospectionService:
                     import yaml
                     from pathlib import Path
 
-                    match = re.search(r'/defs/([^/]+)/defs\.yaml', asset_source)
+                    match = re.search(r'/defs/(.+)/defs\.yaml', asset_source)
                     if match:
                         asset_folder = match.group(1)
                         yaml_path = Path(project_dir) / asset_source.split(':')[0]
