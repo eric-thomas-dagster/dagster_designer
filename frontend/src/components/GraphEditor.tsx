@@ -565,8 +565,23 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
   useEffect(() => {
     if (isFirstExpandEffect.current) {
       isFirstExpandEffect.current = false;
+      console.log('[GraphEditor] fitView-on-change effect: skipping initial mount');
       return;
     }
+    // TEMPORARY diagnostic -- confirms whether this effect is firing at
+    // all when a filter/expand/collapse change happens, and how many
+    // nodes it's about to fit around. Remove once the "zoom doesn't
+    // change" report is confirmed fixed.
+    console.log('[GraphEditor] fitView-on-change effect firing:', {
+      expandedGroupsSize: expandedGroups.size,
+      collapseToGroups,
+      groupFilter,
+      kindFilter,
+      codeLocationFilter,
+      tagFilter,
+      ownerFilter,
+      nodeCountNow: getNodes().length,
+    });
     // A single requestAnimationFrame wasn't enough for a filter change
     // specifically: filtering can both remove nodes AND, when combined
     // with collapse-to-groups, swap individually-measured asset cards for
@@ -586,7 +601,10 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
     let raf2 = 0;
     const raf1 = requestAnimationFrame(() => {
       raf2 = requestAnimationFrame(() => {
-        fitView({ padding: 0.2, duration: 300, nodes: getNodes() });
+        const targetNodes = getNodes();
+        console.log('[GraphEditor] calling fitView with', targetNodes.length, 'nodes, sample dims:',
+          targetNodes.slice(0, 3).map((n) => ({ id: n.id, width: n.width, height: n.height, position: n.position })));
+        fitView({ padding: 0.2, duration: 300, nodes: targetNodes });
       });
     });
     return () => {
