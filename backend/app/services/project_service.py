@@ -1587,7 +1587,7 @@ if custom_lineage_edges:
             return
 
         project_dir = self._get_project_dir(project)
-        defs_dir = project_dir / "src" / project.directory_name / "defs"
+        defs_dir = project_dir / "src" / self.get_project_root_module(project) / "defs"
 
         if not defs_dir.exists():
             return
@@ -1638,7 +1638,7 @@ if custom_lineage_edges:
 
             # Get component directory first
             project_dir = self._get_project_dir(project)
-            component_dir = project_dir / "src" / project.directory_name / "defs" / component.id
+            component_dir = project_dir / "src" / self.get_project_root_module(project) / "defs" / component.id
 
             if not component_dir.exists():
                 print(f"[Partition] Component directory not found: {component_dir}")
@@ -1696,7 +1696,7 @@ if custom_lineage_edges:
 
             # Get component directory
             project_dir = self._get_project_dir(project)
-            component_dir = project_dir / "src" / project.directory_name / "defs" / component.id
+            component_dir = project_dir / "src" / self.get_project_root_module(project) / "defs" / component.id
 
             if not component_dir.exists():
                 print(f"[Freshness] Component directory not found: {component_dir}")
