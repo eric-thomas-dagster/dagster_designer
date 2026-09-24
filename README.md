@@ -556,7 +556,7 @@ The property panel automatically generates form fields based on Pydantic schemas
 ## Roadmap
 
 ### High Priority
-- [ ] **Partitioned Assets** - Support for time-based and static partitioned assets with partition mapping
+- [ ] **Richer partition selection** - Launchpad can materialize a single partition now (picks the latest by default, dropdown to choose another), matching Dagster's own Launchpad for the single-partition case. Still missing the other selection modes Dagster's native UI supports: a partition range, multi-select of specific partitions, and "all missing" -- currently the only way to backfill more than one partition at a time is IngestionsPanel's separate backfill modal, which isn't reachable from the graph/Launchpad flow.
 - [ ] **Job Submission UI** - Submit and trigger job runs directly from the designer with parameter configuration
 - [ ] **Run Config Editor** - Visual editor for setting run configuration, tags, and operational parameters
 - [ ] **Type-Aware Lineage** - Smart dependency validation based on input/output types (e.g., DataFrame → DataFrame connections only)
