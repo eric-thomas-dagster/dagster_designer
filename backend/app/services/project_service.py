@@ -1398,10 +1398,7 @@ if custom_lineage_edges:
         venv_dir = project_dir / ".venv"
 
         # Get the path to pip in the venv
-        if sys.platform == "win32":
-            pip_path = venv_dir / "Scripts" / "pip.exe"
-        else:
-            pip_path = venv_dir / "bin" / "pip"
+        pip_path = venv_bin_path(venv_dir, "pip")
 
         if not pip_path.exists():
             print(f"Pip not found in virtualenv for project {project.id} at {pip_path}")
@@ -1431,21 +1428,13 @@ if custom_lineage_edges:
         """Get the path to python executable in the project's virtualenv."""
         project_dir = self._get_project_dir(project)
         venv_dir = project_dir / ".venv"
-
-        if sys.platform == "win32":
-            return venv_dir / "Scripts" / "python.exe"
-        else:
-            return venv_dir / "bin" / "python"
+        return venv_bin_path(venv_dir, "python")
 
     def _get_project_dg_path(self, project: Project) -> Path:
         """Get the path to dg executable in the project's virtualenv."""
         project_dir = self._get_project_dir(project)
         venv_dir = project_dir / ".venv"
-
-        if sys.platform == "win32":
-            return venv_dir / "Scripts" / "dg.exe"
-        else:
-            return venv_dir / "bin" / "dg"
+        return venv_bin_path(venv_dir, "dg")
 
     def _scaffold_project_with_create_dagster(self, project: Project):
         """Scaffold project using create-dagster command."""
@@ -1770,7 +1759,7 @@ if custom_lineage_edges:
                 import time
 
                 # Use uv pip install with --python flag
-                venv_python = str((venv_dir / "bin" / "python3").absolute())
+                venv_python = str(venv_bin_path(venv_dir, "python").resolve())
                 result = subprocess.run(
                     [find_uv_binary("uv"), "pip", "install", "--python", venv_python, "dagster-dg-cli", "dagster-dg-core"],
                     cwd=str(project_dir),
@@ -1812,7 +1801,7 @@ if custom_lineage_edges:
 
                 # Step 3: Install core Dagster packages explicitly with correct versions
                 log(f"📦 Step 3/3: Installing core Dagster packages...")
-                venv_python = str((venv_dir / "bin" / "python3").absolute())
+                venv_python = str(venv_bin_path(venv_dir, "python").resolve())
                 result = subprocess.run(
                     [find_uv_binary("uv"), "pip", "install", "--python", venv_python,
                      "dagster", "dagster-webserver", "dagster-cloud", "dagster-dbt"],
