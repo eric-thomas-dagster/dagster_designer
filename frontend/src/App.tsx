@@ -21,7 +21,8 @@ import { AlertsPanel } from './components/AlertsPanel';
 import { RunsPanel } from './components/RunsPanel';
 import { DataPreviewModal } from './components/DataPreviewModal';
 import { DagsterCloudChip } from './components/DagsterCloudChip';
-import { SandboxStatusPill } from './components/SandboxStatusPill';
+import { SandboxStatusPill, pillLabel as sandboxPillLabel } from './components/SandboxStatusPill';
+import { useDesignerLoc } from './hooks/useDesignerLoc';
 import { GitCommitDialog } from './components/GitCommitDialog';
 import { PublishServerlessDialog } from './components/PublishServerlessDialog';
 import { AddMonitorDialog } from './components/AddMonitorDialog';
@@ -393,6 +394,27 @@ function App() {
     : isProjectLoading
       ? 'Loading project…'
       : null;
+  // Lifted here (rather than left inside SandboxStatusPill, which used to
+  // own this poll itself) so the loading overlay just below can also react
+  // to it -- the pill alone was the ONLY feedback while the local sandbox
+  // subprocess (create-dagster scaffold + uv sync + dg dev boot) comes up,
+  // easy to miss, confirmed live: connecting to a real Dagster+ org looked
+  // like nothing was happening for the ~30-60s that can take.
+  const isDagsterPlusProject = !!(currentProject as any)?.is_dagster_plus;
+  const { status: sandboxStatus } = useDesignerLoc(currentProject?.id ?? null, isDagsterPlusProject);
+  const sandboxProvisioning =
+    isDagsterPlusProject &&
+    !!sandboxStatus?.status &&
+    sandboxStatus.status !== 'ready' &&
+    sandboxStatus.status !== 'error';
+  // Only fills in once the project itself has finished loading (the cloud
+  // fetch above takes priority) -- both can briefly overlap right after a
+  // fresh connect, and the project-loading copy should win until it clears.
+  const sandboxLoadingLabel = !loadingCloudLabel && sandboxProvisioning
+    ? `Local sandbox: ${sandboxPillLabel(sandboxStatus!.status)}…`
+    : null;
+  const overlayLabel = loadingCloudLabel ?? sandboxLoadingLabel;
+  const overlayTitle = loadingCloudLabel ? 'Loading project' : 'Setting up Dagster+ sandbox';
   const queryClient = useQueryClient();
 
   // Clear the selection whenever the currently-selected node vanishes from
@@ -967,8 +989,13 @@ function App() {
           projects since cloud hydration (assets + checks + schedules +
           sensors) takes 2-6s on typical orgs. Local projects blip
           through it. Non-blocking backdrop so users can still hit
-          menus if they need to. */}
-      {loadingCloudLabel && (
+          menus if they need to. Also covers the local sandbox subprocess
+          (create-dagster scaffold + uv sync + dg dev boot) coming up for a
+          Dagster+ project -- that used to have no prominent indicator at
+          all, just a small header pill, confirmed live to look like
+          nothing was happening for the ~30-60s it can take right after a
+          fresh connect. */}
+      {overlayLabel && (
         <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/20 backdrop-blur-sm pointer-events-none">
           <div className="bg-white border border-gray-200 rounded-xl shadow-2xl px-6 py-5 flex items-center gap-4 pointer-events-auto">
             <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-blue-500 to-cyan-500 flex items-center justify-center flex-shrink-0 relative">
@@ -976,8 +1003,8 @@ function App() {
               <span className="absolute -inset-1 rounded-lg border-2 border-blue-400/40 animate-ping" />
             </div>
             <div className="min-w-0">
-              <div className="text-sm font-semibold text-gray-900">Loading project</div>
-              <div className="text-xs text-gray-500 mt-0.5">{loadingCloudLabel}</div>
+              <div className="text-sm font-semibold text-gray-900">{overlayTitle}</div>
+              <div className="text-xs text-gray-500 mt-0.5">{overlayLabel}</div>
               <div className="mt-2 h-1 w-64 bg-gray-100 rounded overflow-hidden">
                 <div className="h-full w-1/3 bg-gradient-to-r from-blue-500 to-cyan-500 rounded animate-pulse" style={{ animation: 'progressSlide 1.4s ease-in-out infinite' }} />
               </div>
@@ -1151,6 +1178,7 @@ function App() {
                     <SandboxStatusPill
                       projectId={currentProject.id}
                       isDagsterPlus
+                      status={sandboxStatus}
                       onPromoted={() => {
                         refreshDrafts();
                         setDraftsPanelOpen(true);

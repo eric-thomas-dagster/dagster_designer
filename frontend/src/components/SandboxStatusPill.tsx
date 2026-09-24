@@ -1,12 +1,12 @@
 import { useEffect, useRef, useState } from 'react';
 import { Boxes, Loader2, AlertTriangle, CheckCircle2, ChevronDown, GitPullRequestArrow, Rocket } from 'lucide-react';
-import { useDesignerLoc } from '@/hooks/useDesignerLoc';
 import {
   designerLocApi,
   authoredApi,
   draftsApi,
   type AuthoredDeployment,
   type AuthoredLocation,
+  type DesignerLocStatus,
 } from '@/services/api';
 import { notify } from './Notifications';
 
@@ -18,18 +18,25 @@ import { notify } from './Notifications';
  * purely informational: it tells the user whether the sandbox is
  * ready to accept authored components (M2). Clicking expands a
  * popover with boot detail for debugging.
+ *
+ * `status` is owned by the caller (a single lifted useDesignerLoc, see
+ * App.tsx) rather than polled here directly -- this component used to
+ * call the hook itself, but a second, more prominent indicator
+ * (App.tsx's loading overlay) needs the same status too, and two
+ * independent hook instances would each poll /status and call /ensure
+ * on their own.
  */
 interface SandboxStatusPillProps {
   projectId: string | null;
   isDagsterPlus: boolean;
+  status: DesignerLocStatus | null;
   /** Fired after a sandbox component is successfully turned into a
    *  Draft against a real target — caller opens the Drafts panel so
    *  the user lands somewhere that shows what just happened. */
   onPromoted?: () => void;
 }
 
-export function SandboxStatusPill({ projectId, isDagsterPlus, onPromoted }: SandboxStatusPillProps) {
-  const { status } = useDesignerLoc(projectId, isDagsterPlus);
+export function SandboxStatusPill({ projectId, isDagsterPlus, status, onPromoted }: SandboxStatusPillProps) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
 
@@ -322,7 +329,7 @@ function pillIcon(status: string) {
   }
 }
 
-function pillLabel(status: string): string {
+export function pillLabel(status: string): string {
   switch (status) {
     case 'ready':
       return 'ready';
