@@ -234,17 +234,11 @@ export function ProjectManager() {
     }
   };
 
-  const loadExampleProject = (example: 'jaffle' | 'snowflake_quickstart') => {
+  const loadExampleProject = (example: 'jaffle') => {
     setSelectedTemplate(example);
-    if (example === 'jaffle') {
-      setNewProjectName('Jaffle Shop');
-      setNewProjectGitRepo('https://github.com/dbt-labs/jaffle-shop-classic.git');
-      setNewProjectGitBranch('main');
-    } else if (example === 'snowflake_quickstart') {
-      setNewProjectName('Snowflake Quickstart');
-      setNewProjectGitRepo('https://github.com/dbt-labs/dbt-init.git');
-      setNewProjectGitBranch('main');
-    }
+    setNewProjectName('Jaffle Shop');
+    setNewProjectGitRepo('https://github.com/dbt-labs/jaffle-shop-classic.git');
+    setNewProjectGitBranch('main');
   };
 
   const handleExport = async () => {
@@ -881,21 +875,6 @@ export function ProjectManager() {
                     </div>
                     <div className={`text-xs ${selectedTemplate === 'jaffle' ? 'text-blue-700' : 'text-gray-600'}`}>
                       Classic dbt example project
-                    </div>
-                  </button>
-                  <button
-                    onClick={() => loadExampleProject('snowflake_quickstart')}
-                    className={`w-full text-left px-3 py-2 text-sm border rounded-md transition-all ${
-                      selectedTemplate === 'snowflake_quickstart'
-                        ? 'border-blue-600 bg-blue-50 ring-2 ring-blue-200'
-                        : 'border-gray-300 hover:bg-gray-50'
-                    }`}
-                  >
-                    <div className={`font-medium ${selectedTemplate === 'snowflake_quickstart' ? 'text-blue-900' : ''}`}>
-                      Snowflake Quickstart
-                    </div>
-                    <div className={`text-xs ${selectedTemplate === 'snowflake_quickstart' ? 'text-blue-700' : 'text-gray-600'}`}>
-                      dbt project template for Snowflake
                     </div>
                   </button>
                 </div>
