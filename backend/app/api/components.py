@@ -1,11 +1,119 @@
 """API endpoints for component registry."""
 
+import json
+import os
+import subprocess
+import time
+
 from fastapi import APIRouter, HTTPException
 
-from ..models.component import ComponentRegistryResponse
+from ..core.uv_binary import venv_bin_path
+from ..models.component import ComponentRegistryResponse, ComponentSchema
 from ..services.component_registry import component_registry
 
 router = APIRouter(prefix="/components", tags=["components"])
+
+
+# Cache for `dg utils inspect-component` results -- a real subprocess call into
+# the project's own venv. The schema can't change without the project's component
+# code changing (which happens on save/reload, not while a config modal is open),
+# so a short TTL avoids re-running it on every "Advanced" click without risking a
+# stale schema surviving a real edit for long.
+_dg_component_schema_cache: dict[tuple[str, str], tuple[float, "ComponentSchema | None"]] = {}
+_DG_SCHEMA_CACHE_TTL_SECONDS = 30
+
+
+def _get_component_schema_via_dg(project, component_type: str) -> "ComponentSchema | None":
+    """Resolve a component's schema by asking the project's OWN `dg` CLI,
+    instead of guessing from a checked-in schema.json (may not exist) or
+    parsing Python source with `ast` (the pre-existing fallback below this
+    function's call site -- fragile: no $ref resolution, no nested models,
+    whole classes of pydantic field types silently mis-typed).
+
+    `dg utils inspect-component <type> --defs-yaml-json-schema` runs the
+    project's own component class through pydantic's real
+    `model_json_schema()` and returns the exact schema `dg` itself uses --
+    correct for ANY component `dg` can see in that venv, including a
+    project-local subclass of a registry component (confirmed live: a demo
+    project's `DemoFabricWorkspaceComponent`, which adds fields like
+    `demo_mode`/`assets_by_item_name` over its parent, resolved with all of
+    them present and correctly typed -- something no schema.json convention
+    or AST parse could get right without being told about the subclass).
+    """
+    cache_key = (project.id, component_type)
+    now = time.time()
+    if cache_key in _dg_component_schema_cache:
+        cached_at, cached_value = _dg_component_schema_cache[cache_key]
+        if now - cached_at < _DG_SCHEMA_CACHE_TTL_SECONDS:
+            return cached_value
+
+    from ..services.project_service import project_service
+
+    project_dir = project_service._get_project_dir(project)
+    venv_dir = project_dir / ".venv"
+    dg_path = venv_bin_path(venv_dir, "dg")
+    if not dg_path.exists():
+        _dg_component_schema_cache[cache_key] = (now, None)
+        return None
+
+    work_dir = project_dir
+    if project.dagster_package_subdir:
+        work_dir = project_dir / project.dagster_package_subdir
+
+    env = os.environ.copy()
+    env.pop("PYTHONHOME", None)
+    env.pop("VIRTUAL_ENV", None)
+    env["PATH"] = f"{dg_path.parent}{os.pathsep}{env.get('PATH', '')}"
+
+    try:
+        result = subprocess.run(
+            [str(dg_path.resolve()), "utils", "inspect-component", component_type, "--defs-yaml-json-schema"],
+            cwd=str(work_dir),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        _dg_component_schema_cache[cache_key] = (now, None)
+        return None
+
+    if result.returncode != 0:
+        _dg_component_schema_cache[cache_key] = (now, None)
+        return None
+
+    try:
+        full_schema = json.loads(result.stdout)
+        attributes_schema = full_schema.get("properties", {}).get("attributes")
+        if not isinstance(attributes_schema, dict):
+            _dg_component_schema_cache[cache_key] = (now, None)
+            return None
+
+        # `dg` splits nested-model $defs between the outer envelope
+        # (type + attributes) and the attributes sub-schema itself, but every
+        # $ref inside `attributes` uses the same "#/$defs/X" form regardless
+        # of which bucket its target actually landed in -- confirmed live.
+        # Merging both into one $defs at the level we're returning
+        # (attributes) makes every $ref resolvable there instead of only some.
+        merged_defs = {**full_schema.get("$defs", {}), **attributes_schema.get("$defs", {})}
+        schema_out = dict(attributes_schema)
+        if merged_defs:
+            schema_out["$defs"] = merged_defs
+
+        component = ComponentSchema(
+            name=component_type.split(".")[-1],
+            type=component_type,
+            module="project",
+            category="custom",
+            description=full_schema.get("description") or None,
+            icon="package",
+            schema=schema_out,
+        )
+        _dg_component_schema_cache[cache_key] = (now, component)
+        return component
+    except (json.JSONDecodeError, AttributeError):
+        _dg_component_schema_cache[cache_key] = (now, None)
+        return None
 
 
 @router.get("", response_model=ComponentRegistryResponse)
@@ -73,6 +181,17 @@ async def get_component(component_type: str, project_id: str | None = None):
 
         project = project_service.get_project(project_id)
         if project:
+            # Try the project's own `dg` CLI first -- accurate for ANY
+            # component dg can see in that venv (built-in, community-
+            # installed, or a hand-written project-local class/subclass),
+            # and doesn't depend on a schema.json existing on disk at all.
+            # Falls through to the schema.json / AST-parsing paths below
+            # only if this project has no usable venv yet or dg doesn't
+            # recognize the type for some other reason.
+            dg_schema = _get_component_schema_via_dg(project, component_type)
+            if dg_schema:
+                return dg_schema
+
             project_dir = project_service._get_project_dir(project)
             # Use the actual directory name from the project, not just the sanitized name
             # The directory name includes the project ID prefix (e.g., project_acaa97f2_my_test_project)
