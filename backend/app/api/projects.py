@@ -150,6 +150,16 @@ async def update_component_source_yaml(project_id: str, request: ComponentSource
         from ruamel.yaml import YAML
         yaml = YAML()
         yaml.preserve_quotes = True
+        # Matches the "extra-indented dash" convention these hand-written
+        # defs.yaml files use (mapping key at col N, list dash at N+2,
+        # content at N+4) -- ruamel's own un-configured default is
+        # "dash flush with the parent key," which round-trip mode doesn't
+        # always override per-node, and re-indented an untouched nested
+        # list on a real file when left unset. Confirmed live: without
+        # this, saving an unrelated scalar field also silently reformatted
+        # a completely different block-sequence field elsewhere in the
+        # same file.
+        yaml.indent(mapping=2, sequence=4, offset=2)
         yaml.width = 4096  # avoid ruamel re-wrapping long lines it never touched
 
         with open(yaml_path) as f:
