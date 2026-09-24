@@ -314,6 +314,15 @@ export function PropertyPanel({ nodeId, onConfigureComponent, onOpenFile, onNewP
   const [saveResult, setSaveResult] = useState<{ success: boolean; message: string } | null>(null);
   const [showMaterializeMenu, setShowMaterializeMenu] = useState(false);
   const [showLaunchpad, setShowLaunchpad] = useState(false);
+  // Stable array reference for Launchpad's assetKeys prop -- see the
+  // identical fix in GraphEditor.tsx for why an inline [assetKey] literal
+  // here breaks the picker: Launchpad's own partition-fetch effect depends
+  // on this array by reference, and a fresh one on every render restarts
+  // that fetch before it can ever finish long enough to render the picker.
+  const launchpadAssetKeys = useMemo(
+    () => [node?.data.asset_key || node?.id || ''],
+    [node?.data.asset_key, node?.id],
+  );
   const [showBackfillModal, setShowBackfillModal] = useState(false);
   const [showAddDbtModel, setShowAddDbtModel] = useState(false);
   const [showGitCommit, setShowGitCommit] = useState(false);
@@ -1922,7 +1931,7 @@ export function PropertyPanel({ nodeId, onConfigureComponent, onOpenFile, onNewP
             onOpenChange={setShowLaunchpad}
             projectId={currentProject.id}
             mode="materialize"
-            assetKeys={[node.data.asset_key || node.id]}
+            assetKeys={launchpadAssetKeys}
             onLaunch={handleLaunchpadSubmit}
             defaultConfig={assetDefaultConfig || {}}
             configSchema={assetConfigSchema || {}}

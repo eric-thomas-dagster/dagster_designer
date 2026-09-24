@@ -647,6 +647,17 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
   // Launchpad state
   const [showLaunchpad, setShowLaunchpad] = useState(false);
   const [launchpadAssetKey, setLaunchpadAssetKey] = useState<string>('');
+  // Stable array reference for Launchpad's assetKeys prop -- passing a
+  // fresh `[launchpadAssetKey]` literal inline recreates the array on
+  // every render of this component, and Launchpad's own partition-info
+  // fetch effect depends on that array by reference. Every re-render
+  // (this component has several unrelated reasons to re-render while the
+  // dialog is open) would restart that fetch from scratch -- resetting
+  // partitionDef to null each time -- so it could lose the race against
+  // its own next restart and never actually finish long enough to render
+  // the picker. Reproduced as "Launchpad opens but no partition picker"
+  // even once the fetch itself was confirmed to return correct data.
+  const launchpadAssetKeys = React.useMemo(() => [launchpadAssetKey], [launchpadAssetKey]);
 
   // "Run to here" — materializes an asset + all upstream (via `+asset` selection)
   // and then auto-opens the DataPreviewModal on that asset. Simple Alteryx/Lakeflow
@@ -3356,7 +3367,7 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
           onOpenChange={setShowLaunchpad}
           projectId={currentProject.id}
           mode="materialize"
-          assetKeys={[launchpadAssetKey]}
+          assetKeys={launchpadAssetKeys}
           onLaunch={handleLaunchpadSubmit}
           defaultConfig={{}}
           configSchema={{}}
