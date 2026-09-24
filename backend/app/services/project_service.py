@@ -2936,6 +2936,21 @@ if customizations_path.exists():
                     for nested_subdir in subdir.iterdir():
                         if nested_subdir.is_dir() and (nested_subdir / "definitions.py").exists():
                             print(f"   Found definitions.py in {subdir.name}/{nested_subdir.name}/ - this is a Dagster project")
+                            # The comment above assumes `subdir` itself has the
+                            # pyproject.toml (e.g. repo/project_name/pyproject.toml
+                            # + repo/project_name/project_name/definitions.py) --
+                            # but the equally common standard "src layout"
+                            # (repo/pyproject.toml + repo/src/<package>/definitions.py)
+                            # instead has pyproject.toml at the true repo root,
+                            # with `subdir` (src/) never containing one at all.
+                            # Returning `subdir` there makes downstream code treat
+                            # src/ as its own installable sub-project, which it
+                            # isn't -- `uv pip install -e .` run from src/ fails
+                            # outright ("does not appear to be a Python project").
+                            # Prefer whichever of the two actually has one.
+                            if not (subdir / "pyproject.toml").exists() and (repo_dir / "pyproject.toml").exists():
+                                print(f"   ({subdir.name}/ has no pyproject.toml of its own -- using repo root instead, standard src-layout)")
+                                return ("dagster", repo_dir)
                             return ("dagster", subdir)  # Return parent dir with pyproject.toml
                 except Exception:
                     pass
