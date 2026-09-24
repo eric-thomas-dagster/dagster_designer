@@ -2,6 +2,7 @@ import { useEffect, useRef } from 'react';
 import { runsApi } from '@/services/api';
 import { sendNativeNotification } from '@/services/tauri';
 import { notify } from '@/components/Notifications';
+import { getNotifyOnRunCompletion } from '@/lib/runNotificationsPref';
 import { useProjectStore } from './useProject';
 
 const TERMINAL_STATUSES = new Set(['SUCCESS', 'FAILURE', 'CANCELED']);
@@ -41,15 +42,18 @@ export function useRunNotifications() {
           if (!justFinished) continue;
 
           const label = run.job_name || run.pipeline_name || 'Run';
+          // In-app toast always fires; the native OS notification is
+          // gated behind the Preferences toggle (default on).
+          const nativeEnabled = getNotifyOnRunCompletion();
           if (status === 'SUCCESS') {
             notify.success(`${label} succeeded`);
-            sendNativeNotification('Run succeeded', label);
+            if (nativeEnabled) sendNativeNotification('Run succeeded', label);
           } else if (status === 'FAILURE') {
             notify.error(`${label} failed`);
-            sendNativeNotification('Run failed', label);
+            if (nativeEnabled) sendNativeNotification('Run failed', label);
           } else if (status === 'CANCELED') {
             notify.warning(`${label} was canceled`);
-            sendNativeNotification('Run canceled', label);
+            if (nativeEnabled) sendNativeNotification('Run canceled', label);
           }
         }
       } catch {
