@@ -17,6 +17,35 @@ from ..core.uv_binary import venv_bin_path
 from .codegen_service import CodegenService
 
 
+def _normalize_tags(raw_tags: Any) -> list[str]:
+    """Coerces `dg list defs --json`'s tag representation to plain strings.
+
+    Every frontend consumer of node.data.tags (the tag filter dropdown, the
+    search box, the asset detail page) assumes a string[] -- true for tags
+    that come through as plain strings, but `dg list defs --json` can emit
+    them as {"key": ..., "value": ...} objects instead (confirmed against a
+    real project with tags like {"key": "compute_platform", "value":
+    "databricks"}). Rendering one of those directly as a React child
+    crashes the whole graph view with "Objects are not valid as a React
+    child" and no error boundary catches it -- reproduced live importing
+    eric-thomas-dagster/Yellow_Taxi_Orchestration_PoC. Normalizing once
+    here, at the boundary where this data enters our own model, means every
+    downstream consumer keeps the string[] contract it already assumes
+    instead of needing its own defensive handling.
+    """
+    normalized: list[str] = []
+    for t in raw_tags or []:
+        if isinstance(t, str):
+            normalized.append(t)
+        elif isinstance(t, dict):
+            key = t.get("key", "")
+            value = t.get("value", "")
+            normalized.append(f"{key}:{value}" if value else key)
+        elif t is not None:
+            normalized.append(str(t))
+    return normalized
+
+
 # Simple in-memory cache for asset introspection to avoid re-running slow dg list defs
 # Cache structure: {project_id: (timestamp, assets_data)}
 _assets_cache: Dict[str, Tuple[float, dict]] = {}
@@ -859,7 +888,7 @@ class AssetIntrospectionService:
                         "owners": asset.get("owners", []),
                         "kinds": asset.get("kinds", []),
                         "source": asset_source,  # Use the updated source with Python file path
-                        "tags": asset.get("tags", []),
+                        "tags": _normalize_tags(asset.get("tags", [])),
                         "is_executable": asset.get("is_executable", True),
                         "automation_condition": asset.get("automation_condition"),
                         "deps": asset.get("deps", []),  # Include dependencies
