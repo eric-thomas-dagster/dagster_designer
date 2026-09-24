@@ -284,6 +284,7 @@ class ProjectService:
                         )
                         project.components.append(dbt_component)
                         self._render_cookiecutter_dbt_template(dbt_target_dir, project.name)
+                        self._modernize_dbt_packages_yml(dbt_target_dir)
                         # Create/enhance profiles.yml and .env for dbt
                         self._create_dbt_profiles(dbt_target_dir, project_dir)
 
@@ -347,6 +348,7 @@ class ProjectService:
                                 # Create/enhance profiles.yml for this dbt project
                                 dbt_target_dir = project_dir / component_path
                                 self._render_cookiecutter_dbt_template(dbt_target_dir, project.name)
+                                self._modernize_dbt_packages_yml(dbt_target_dir)
                                 self._create_dbt_profiles(dbt_target_dir, project_dir)
 
                             # Generate YAML files for all components
@@ -406,6 +408,7 @@ class ProjectService:
                                 # Create/enhance profiles.yml for this dbt project
                                 dbt_target_dir = project_dir / component_path
                                 self._render_cookiecutter_dbt_template(dbt_target_dir, project.name)
+                                self._modernize_dbt_packages_yml(dbt_target_dir)
                                 self._create_dbt_profiles(dbt_target_dir, project_dir)
 
                             # Generate YAML files for all components
@@ -2831,6 +2834,55 @@ if customizations_path.exists():
                 rendered_count += 1
 
         print(f"✅ Rendered {rendered_count} template file(s)" + (f" for warehouse='{warehouse}'" if warehouse else " (no specific warehouse detected from the project name -- rendered with warehouse-specific config left out, which is still valid; edit dbt_project.yml/profiles.yml by hand for your actual warehouse)"))
+
+    def _modernize_dbt_packages_yml(self, dbt_dir: Path) -> None:
+        """Bumps known-ancient dbt_utils pins in packages.yml to a version dbt can actually install.
+
+        Old dbt projects (anything scaffolded pre-2021 or so) commonly pin an
+        exact pre-1.0 dbt_utils version under its old `fishtown-analytics/`
+        org name (dbt Labs' old name) -- e.g. `fishtown-analytics/dbt_utils:
+        0.6.4`. `dbt deps`/`dbt parse` reject that outright against a modern
+        dbt-core install ("This version of dbt is not supported with the
+        'dbt_utils' package"), which blocks the project from loading at all,
+        before a user ever gets a chance to see whether the project itself
+        even works.
+
+        Only touches an exact-pin version starting with "0." (pre-1.0, always
+        incompatible with current dbt-core) under either the old or current
+        org name -- an already-modern pin, or a version expressed as a range
+        (e.g. [">=1.0.0", "<2.0.0"]), is left alone rather than guessed at.
+        This can't verify the bumped version still matches how the project's
+        own SQL calls dbt_utils macros (signatures did change across majors),
+        but that would surface as a normal, comprehensible dbt macro error at
+        `dbt run` -- strictly more debuggable than never getting past `dbt
+        parse` at all, which is the alternative.
+        """
+        packages_yml = dbt_dir / "packages.yml"
+        if not packages_yml.exists():
+            return
+        try:
+            data = yaml.safe_load(packages_yml.read_text())
+        except Exception:
+            return
+        if not isinstance(data, dict) or not isinstance(data.get("packages"), list):
+            return
+
+        changed = False
+        for entry in data["packages"]:
+            if not isinstance(entry, dict):
+                continue
+            package = entry.get("package", "")
+            if package.split("/")[-1] != "dbt_utils":
+                continue
+            version = entry.get("version")
+            if isinstance(version, str) and version.startswith("0."):
+                print(f"📦 Bumping ancient pin {package}=={version} -> dbt-labs/dbt_utils >=1.1.0,<2.0.0 (packages.yml)")
+                entry["package"] = "dbt-labs/dbt_utils"
+                entry["version"] = [">=1.1.0", "<2.0.0"]
+                changed = True
+
+        if changed:
+            packages_yml.write_text(yaml.dump(data, default_flow_style=False, sort_keys=False))
 
     def _detect_project_type(self, repo_dir: Path) -> tuple[str, Path | None]:
         """Detect the type of project in the given directory.
