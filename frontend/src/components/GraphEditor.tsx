@@ -3153,6 +3153,16 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
         const allAssets = nodes.filter((n) => n.data?.node_kind === 'asset' && matchesUserFilters(n));
         const primaryAssets = allAssets.filter((n) => !n.data?.is_connection);
         const connectionAssets = allAssets.filter((n) => !!n.data?.is_connection);
+        // No location filter picked and the project actually spans more
+        // than one code location -- break the primary table into one
+        // section per location instead of one undifferentiated list,
+        // matching Automation/Insights/Monitors/Ingestions.
+        const groupCatalogByLocation = codeLocationFilter === 'all' && allCodeLocations.length > 1;
+        const catalogLocationGroups: Array<{ location: string | null; rows: Node[] }> = groupCatalogByLocation
+          ? Array.from(new Set(primaryAssets.map((n) => (n.data?.code_location as string) || 'Unknown location')))
+              .sort()
+              .map((loc) => ({ location: loc, rows: primaryAssets.filter((n) => ((n.data?.code_location as string) || 'Unknown location') === loc) }))
+          : [{ location: null, rows: primaryAssets }];
         // Group connection assets by source (top-level path segment:
         // "Databricks", "GCP_SALESENG", ...).
         const connectionsBySource: Record<string, Node[]> = {};
@@ -3292,7 +3302,18 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
               <table className="w-full text-sm">
                 {headerRow}
                 <tbody>
-                  {primaryAssets.map(renderRow)}
+                  {catalogLocationGroups.map((group) => (
+                    <React.Fragment key={group.location ?? '__flat__'}>
+                      {group.location && (
+                        <tr className="bg-gray-50">
+                          <td colSpan={11} className="px-4 py-1.5 text-[11px] font-semibold text-gray-600">
+                            {group.location} <span className="font-normal text-gray-400">({group.rows.length})</span>
+                          </td>
+                        </tr>
+                      )}
+                      {group.rows.map(renderRow)}
+                    </React.Fragment>
+                  ))}
                   {primaryAssets.length === 0 && (
                     <tr><td colSpan={11} className="px-4 py-8 text-center text-xs text-gray-500 italic">No assets match the current filters.</td></tr>
                   )}
