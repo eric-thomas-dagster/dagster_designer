@@ -908,9 +908,25 @@ def main():
             try:
                 result = func(context, **kwargs)
             except Exception as e:
-                # If it's a pandas UndefinedVariableError, add helpful context about available columns
-                import pandas as pd
-                if "UndefinedVariableError" in str(type(e).__name__) or "is not defined" in str(e):
+                # If it's a pandas UndefinedVariableError, add helpful context about available columns.
+                # pandas is NOT a hard dependency of this script (or of every project it
+                # runs against) -- a project with no pandas dependency at all (e.g. one
+                # built on dlt/sling instead) doesn't have it in its venv, and the bare
+                # `import pandas as pd` used to sit directly in this except block, so it
+                # ran for EVERY asset exception regardless of cause. That raised its own
+                # ModuleNotFoundError right here, which then propagated up and got caught
+                # by main()'s outer handler instead of the real one -- the user saw
+                # "Failed to execute asset: No module named 'pandas'" no matter what the
+                # asset had actually failed on, with the genuine error and traceback lost
+                # entirely. Confirmed live against a real project with no pandas dependency.
+                try:
+                    import pandas as pd
+                    is_pandas_error = "UndefinedVariableError" in str(type(e).__name__) or "is not defined" in str(e)
+                except ImportError:
+                    pd = None
+                    is_pandas_error = False
+
+                if is_pandas_error:
                     # Try to find DataFrames in kwargs to show available columns
                     available_columns = {}
                     for key, value in kwargs.items():
@@ -956,8 +972,17 @@ def main():
 
             # Convert result to JSON-serializable format
             if result is not None:
-                import pandas as pd
-                if isinstance(result, pd.DataFrame):
+                # pandas isn't a hard dependency of every project this script runs
+                # against (see the matching guard above) -- treat "not installed" the
+                # same as "result isn't a DataFrame" instead of crashing outright.
+                try:
+                    import pandas as pd
+                    result_is_dataframe = isinstance(result, pd.DataFrame)
+                except ImportError:
+                    pd = None
+                    result_is_dataframe = False
+
+                if result_is_dataframe:
                     columns = result.columns.tolist()
                     dtypes = {col: str(dtype) for col, dtype in result.dtypes.items()}
                     full_row_count = len(result)
