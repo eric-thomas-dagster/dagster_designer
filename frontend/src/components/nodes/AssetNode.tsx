@@ -191,12 +191,15 @@ export const AssetNode = memo(({ data, selected, id }: NodeProps) => {
               <span>Needs config</span>
             </div>
           )}
-          {/* Group badge - only show if not "default". Doubles as a
-              "collapse this group" affordance when the asset is
-              currently rendered inside an expanded group (in which
-              case its data.onCollapseGroup callback is set by the
-              GraphEditor's per-group expand logic). */}
-          {hasGroup && data.group_name !== 'default' && (
+          {/* Group badge - only show if not "default", UNLESS it's also the
+              "collapse this group" control (data.onCollapseGroup set by the
+              GraphEditor's per-group expand logic): suppressing a
+              "default"-named badge is fine when it's just informational
+              noise, but not when it's the only way to re-collapse an
+              expanded "default" group -- confirmed live, a real imported
+              project's group literally named "default" left no visible way
+              to collapse it back to a card once expanded. */}
+          {hasGroup && (data.group_name !== 'default' || data.onCollapseGroup) && (
             <button
               type="button"
               onClick={(e) => {
