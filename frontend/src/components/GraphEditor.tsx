@@ -2286,6 +2286,22 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
     }
     return Array.from(s).sort();
   }, [nodes]);
+  // Collapsing a single group from the FLAT view (collapseToGroups=false,
+  // the default a project opens in -- every group already shown expanded)
+  // is a different operation from handleCollapseGroup above, which only
+  // makes sense once collapseToGroups is already on: there's no
+  // "expandedGroups opt-out set" yet to remove this group from. Turning
+  // grouped mode on with every OTHER group pre-added to expandedGroups
+  // reproduces exactly the same visual result the user is already
+  // looking at, minus the one group they clicked -- collapsing just that
+  // one without having to first collapse everything and re-expand the
+  // rest by hand. Confirmed this was the actual gap live: the user's
+  // project "opens with all groups expanded" (the default flat view) and
+  // there was no way at all to collapse just one from there.
+  const handleCollapseGroupFromFlatView = useCallback((g: string) => {
+    setCollapseToGroups(true);
+    setExpandedGroups(new Set(allGroups.filter((name) => name !== g)));
+  }, [allGroups]);
   const allKinds = React.useMemo(() => {
     const s = new Set<string>();
     for (const n of nodes) {
@@ -3325,6 +3341,7 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
           <GroupOverlay
             nodes={displayNodes.filter((n) => !collapseToGroups || expandedGroups.has(n.data?.group_name as string))}
             setNodes={setNodes}
+            onCollapseGroup={collapseToGroups ? handleCollapseGroup : handleCollapseGroupFromFlatView}
           />
         )}
         <Background variant={BackgroundVariant.Dots} gap={16} size={1} />
@@ -3486,7 +3503,7 @@ function ConnectionSection({
 }
 
 // Component to render group bounding boxes with proper viewport transformation
-function GroupOverlay({ nodes, setNodes }: { nodes: Node[]; setNodes: React.Dispatch<React.SetStateAction<Node[]>> }) {
+function GroupOverlay({ nodes, setNodes, onCollapseGroup }: { nodes: Node[]; setNodes: React.Dispatch<React.SetStateAction<Node[]>>; onCollapseGroup: (groupName: string) => void }) {
   const { x, y, zoom } = useViewport();
   // SVG fill/stroke are plain XML attributes, not CSS -- they don't pick up
   // Tailwind's dark: classes or our .dark CSS overrides at all, which is
@@ -3567,14 +3584,6 @@ function GroupOverlay({ nodes, setNodes }: { nodes: Node[]; setNodes: React.Disp
         width: maxX - minX,
         height: maxY - minY,
         codeLocations: codeLocationSet.size > 1 ? Array.from(codeLocationSet) : [],
-        // Every member node of an expanded group carries the SAME
-        // "collapse this group" callback (set by groupedView, see
-        // handleCollapseGroup) -- any one of them has it. Previously the
-        // only place this was surfaced was a small per-asset-card badge
-        // (easy to miss, and hidden entirely for a group literally named
-        // "default"); putting a real button in this already-visible
-        // title bar is the explicit, discoverable control instead.
-        onCollapseGroup: groupNodes[0]?.data?.onCollapseGroup as (() => void) | undefined,
       };
     });
 
@@ -3659,7 +3668,7 @@ function GroupOverlay({ nodes, setNodes }: { nodes: Node[]; setNodes: React.Disp
               alignItems: 'center',
               justifyContent: 'space-between',
               paddingLeft: '10px',
-              paddingRight: bound.onCollapseGroup ? '4px' : '10px',
+              paddingRight: '4px',
               color: 'white',
               fontSize: '11px',
               fontWeight: '600',
@@ -3703,7 +3712,7 @@ function GroupOverlay({ nodes, setNodes }: { nodes: Node[]; setNodes: React.Disp
                 </span>
               )}
             </div>
-            {bound.onCollapseGroup && (
+            {(
               <button
                 type="button"
                 onMouseDown={(e) => {
@@ -3716,9 +3725,9 @@ function GroupOverlay({ nodes, setNodes }: { nodes: Node[]; setNodes: React.Disp
                 onClick={(e) => {
                   e.preventDefault();
                   e.stopPropagation();
-                  bound.onCollapseGroup!();
+                  onCollapseGroup(bound.groupName);
                 }}
-                title={`Collapse ${bound.groupName} back to a group card`}
+                title={`Collapse ${bound.groupName} to a group card`}
                 aria-label={`Collapse ${bound.groupName}`}
                 style={{
                   flexShrink: 0,
