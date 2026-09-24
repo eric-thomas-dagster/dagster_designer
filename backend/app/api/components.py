@@ -182,6 +182,89 @@ def _get_component_schema_via_dg(project, component_type: str) -> "ComponentSche
         return None
 
 
+# Cache for `dg list components` results, same rationale as the schema cache above.
+_dg_project_components_cache: dict[str, tuple[float, list[dict]]] = {}
+_DG_LIST_CACHE_TTL_SECONDS = 30
+
+
+@router.get("/project/{project_id}/custom")
+async def list_project_custom_components(project_id: str):
+    """List component types defined by the project's OWN code -- not
+    Designer's built-in registry, not a community-installed component (both
+    already covered by the palette's other sections).
+
+    `dg list components --json` enumerates every component type visible in
+    the project's venv, which includes framework/vendor components it
+    happens to depend on (dagster.*, dagster_dbt.*, ...) alongside anything
+    the project itself defines. Filtering to keys under the project's own
+    root_module namespace (e.g. "stellantis_financial_services.") isolates
+    just the hand-written ones -- confirmed live, this correctly picks out
+    a project's own DemoFabricWorkspaceComponent while excluding the
+    dozens of dagster.* built-ins the same `dg list components` call
+    also returns for that project.
+    """
+    from ..services.project_service import project_service
+
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    now = time.time()
+    if project_id in _dg_project_components_cache:
+        cached_at, cached_value = _dg_project_components_cache[project_id]
+        if now - cached_at < _DG_LIST_CACHE_TTL_SECONDS:
+            return {"components": cached_value}
+
+    project_dir = project_service._get_project_dir(project)
+    venv_dir = project_dir / ".venv"
+    dg_path = venv_bin_path(venv_dir, "dg")
+    if not dg_path.exists():
+        return {"components": []}
+
+    root_module = project_service.get_project_root_module(project)
+    work_dir = project_dir / project.dagster_package_subdir if project.dagster_package_subdir else project_dir
+
+    env = os.environ.copy()
+    env.pop("PYTHONHOME", None)
+    env.pop("VIRTUAL_ENV", None)
+    env["PATH"] = f"{dg_path.parent}{os.pathsep}{env.get('PATH', '')}"
+
+    try:
+        result = subprocess.run(
+            [str(dg_path.resolve()), "list", "components", "--json"],
+            cwd=str(work_dir),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return {"components": []}
+
+    if result.returncode != 0:
+        return {"components": []}
+
+    try:
+        items = json.loads(result.stdout).get("items", [])
+    except json.JSONDecodeError:
+        return {"components": []}
+
+    prefix = f"{root_module}."
+    custom = [
+        {
+            "type": item["key"],
+            "name": item["key"].rsplit(".", 1)[-1],
+            "description": (item.get("summary") or "").split("\n\n")[0],
+            "category": "custom",
+            "icon": "package",
+        }
+        for item in items
+        if isinstance(item.get("key"), str) and item["key"].startswith(prefix)
+    ]
+    _dg_project_components_cache[project_id] = (now, custom)
+    return {"components": custom}
+
+
 @router.get("", response_model=ComponentRegistryResponse)
 async def list_components(category: str | None = None):
     """List all available Dagster components.

@@ -56,6 +56,27 @@ export function ComponentPalette({ onComponentClick }: ComponentPaletteProps) {
     enabled: !!currentProject,
   });
 
+  // Component types defined by the project's OWN code (a hand-written
+  // component, or a subclass of a registry one) -- not Designer's built-in
+  // registry, not a community install. Discovered live via the project's
+  // own `dg list components --json`, scoped server-side to its module
+  // namespace. Clicking one opens the same ComponentConfigModal flow as
+  // any other entry here; its schema comes from useComponent's dg-based
+  // fallback (see components.py) rather than a manifest.
+  const { data: projectCustomComponents } = useQuery({
+    queryKey: ['project-custom-components', currentProject?.id],
+    queryFn: async () => {
+      if (!currentProject) return { components: [] };
+      const response = await fetch(`${API_BASE}/components/project/${currentProject.id}/custom`);
+      if (!response.ok) return { components: [] };
+      return response.json() as Promise<{
+        components: Array<{ type: string; name: string; description: string; category: string; icon?: string }>;
+      }>;
+    },
+    enabled: !!currentProject,
+    staleTime: 30 * 1000,
+  });
+
   // Fetch the full community-templates manifest up-front — the palette
   // browses ALL of it (grouped by category), not just search results.
   // ~900 items but it's a single JSON blob and react-query caches it.
@@ -146,6 +167,10 @@ export function ComponentPalette({ onComponentClick }: ComponentPaletteProps) {
   // Filter installed community components — asset-producing only, and match search.
   const filteredInstalledComponents = (installedComponents?.components || []).filter(
     (comp) => isAssetProducing(comp.category) && matchesQuery(comp.name, comp.description, comp.category),
+  );
+
+  const filteredProjectCustomComponents = (projectCustomComponents?.components || []).filter((comp) =>
+    matchesQuery(comp.name, comp.description, comp.category),
   );
 
   // Every uninstalled manifest component that matches the current search
@@ -281,6 +306,35 @@ export function ComponentPalette({ onComponentClick }: ComponentPaletteProps) {
                 <span className="text-sm font-medium text-gray-900">Python Asset</span>
                 <Plus className="w-3.5 h-3.5 text-blue-400 ml-auto group-hover:text-blue-600" />
               </button>
+            )}
+
+            {/* Project-local custom components — hand-written in this
+                project's own code (including a subclass of a registry
+                component), discovered live via the project's own `dg` CLI.
+                Not tied to a category chip since there's usually only a
+                handful; always shown at the top when present. */}
+            {filteredProjectCustomComponents.length > 0 && (
+              <div className="space-y-1.5">
+                <div className="text-xs font-semibold text-gray-500 uppercase tracking-wider px-1 pt-2 flex items-center justify-between">
+                  <span>Project Components</span>
+                  <span className="text-gray-400 font-normal">{filteredProjectCustomComponents.length}</span>
+                </div>
+                {filteredProjectCustomComponents.map((comp) => (
+                  <button
+                    key={comp.type}
+                    onClick={() => onComponentClick(comp.type)}
+                    className="w-full flex items-start space-x-2 px-2.5 py-2 bg-white border border-gray-200 rounded-md hover:border-blue-300 hover:bg-blue-50/40 transition-all text-left"
+                  >
+                    <ComponentIcon icon={comp.icon} className="w-4 h-4 text-gray-500 mt-0.5 flex-shrink-0" />
+                    <div className="min-w-0">
+                      <div className="text-sm font-medium text-gray-900 truncate">{comp.name}</div>
+                      {comp.description && (
+                        <div className="text-xs text-gray-500 line-clamp-2">{comp.description}</div>
+                      )}
+                    </div>
+                  </button>
+                ))}
+              </div>
             )}
 
             {/* Community-manifest still loading? Show a subtle inline note so
