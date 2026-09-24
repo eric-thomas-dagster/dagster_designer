@@ -1,6 +1,7 @@
 """Service for managing pipeline projects."""
 
 import json
+import re
 import shlex
 import uuid
 import subprocess
@@ -1510,6 +1511,74 @@ if custom_lineage_edges:
         except Exception as e:
             print(f"⚠️  Error checking hatchling force-include paths: {e}")
 
+    def _ensure_env_file_from_example(self, project_dir: Path) -> list[str]:
+        """Bootstraps a .env from .env.example/.env.sample for a freshly
+        imported project that doesn't have one yet, activating documented
+        defaults for commented-out lines where it looks safe to.
+
+        A real, hand-written Dagster project commonly reads required config
+        via bare `os.getenv("SOME_VAR")` with no fallback in its own Python
+        code, even when its own .env.example documents a default in a
+        comment (e.g. "# ELT_REPO_BRANCH=main -- optional, defaults to
+        'main'") -- the defaulting only exists as documentation, not code.
+        Without any .env at all, that surfaces as a raw pydantic
+        ValidationError ("Input should be a valid string", input_value=None)
+        deep in the project's own component, which is a confusing dead end
+        for anyone importing a real-world repo. Confirmed live importing a
+        real "ELT" demo project.
+
+        This can't reliably tell a genuine default ("main", "pipelines",
+        "localhost") from an illustrative placeholder for a credential
+        ("your_password", "sk_test_your_key", "/path/to/creds.json") just
+        from the .env.example format -- so it only activates a commented
+        default when the value doesn't look like a placeholder (a small
+        denylist of common placeholder markers), and never touches a
+        variable that's already uncommented (even if empty) -- those are
+        already "on", intentionally blank, and up to the user to fill in via
+        Designer's own env vars panel.
+
+        Returns the list of variable names it activated, for logging.
+        """
+        env_path = project_dir / ".env"
+        if env_path.exists():
+            return []
+
+        example_path = project_dir / ".env.example"
+        if not example_path.exists():
+            example_path = project_dir / ".env.sample"
+        if not example_path.exists():
+            return []
+
+        placeholder_markers = [
+            "your_", "you_", "example", "changeme", "change_me", "<", ">",
+            "xxx", "todo", "replace", "fixme", "path/to", "sk_test_",
+            "sk_live_", "ghp_your", "_here", "placeholder", "xxxx",
+        ]
+
+        activated: list[str] = []
+        out_lines: list[str] = []
+        try:
+            for line in example_path.read_text().splitlines():
+                stripped = line.strip()
+                match = re.match(r"^#\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+)$", stripped)
+                if match:
+                    key, value = match.group(1), match.group(2).strip()
+                    if value and not any(m in value.lower() for m in placeholder_markers):
+                        out_lines.append(f"{key}={value}")
+                        activated.append(key)
+                        continue
+                out_lines.append(line)
+
+            env_path.write_text("\n".join(out_lines) + "\n")
+            if activated:
+                print(f"📝 Created .env from {example_path.name}, activated documented defaults: {', '.join(activated)}")
+                print(f"   Review/edit these (and any other required variables) in the project's Environment Variables panel.")
+            else:
+                print(f"📝 Created .env from {example_path.name} (no safe defaults to activate -- all variables still need real values)")
+        except Exception as e:
+            print(f"⚠️  Error bootstrapping .env from {example_path.name}: {e}")
+        return activated
+
     def _scaffold_project_with_create_dagster(self, project: Project):
         """Scaffold project using create-dagster command."""
         # Sanitize project name for Python module (must start with letter/underscore)
@@ -1808,6 +1877,10 @@ if custom_lineage_edges:
         log(f"📂 Project directory: {project_dir}")
         log(f"⚙️  Using UV directly (not uvx) for faster performance")
         log(f"📦 UV cache: ~/.cache/uv/ (730+ packages cached)")
+
+        activated_env_vars = self._ensure_env_file_from_example(project_dir)
+        if activated_env_vars:
+            log(f"📝 Created .env with documented defaults for: {', '.join(activated_env_vars)} (review in the project's Environment Variables panel)")
 
         try:
             # For imported Dagster projects with subdirectory structure, handle differently
@@ -2635,9 +2708,16 @@ if custom_lineage_edges:
         from pathlib import Path
         from collections import defaultdict
 
-        # Skip code generation for imported Dagster projects - they have their own structure
-        if project.dagster_package_subdir:
-            print(f"⏭️  Skipping definitions.py generation for imported Dagster project (code in {project.dagster_package_subdir}/)")
+        # Skip code generation for imported Dagster projects - they have their own structure.
+        # Same gap as _generate_component_yaml_files had: dagster_package_subdir alone
+        # misses a plain src-layout or flat-layout import with no subdir at all (e.g.
+        # pyproject.toml + <package>/definitions.py at the repo root) -- module_dir below
+        # unconditionally assumes a "src/<directory_name>/" layout that such a project
+        # never has, so building definitions_file from it points at a path that doesn't
+        # exist, confirmed live as a 500 on regenerate-assets ("No such file or directory:
+        # .../src/project_<id>_<slug>/definitions.py") for exactly this kind of project.
+        if project.dagster_package_subdir or project.is_imported:
+            print(f"⏭️  Skipping definitions.py generation for imported Dagster project" + (f" (code in {project.dagster_package_subdir}/)" if project.dagster_package_subdir else ""))
             return
 
         project_dir = self._get_project_dir(project)

@@ -238,6 +238,17 @@ class AssetIntrospectionService:
                 # Drop PYTHONHOME too -- it can point the interpreter at the
                 # wrong stdlib if inherited from outside this process.
                 run_env.pop("PYTHONHOME", None)
+                # This whole backend process runs from its OWN venv
+                # (backend/.venv), which sets VIRTUAL_ENV in its own
+                # environment -- inherited here otherwise, it makes `dg`
+                # print a "the active virtual environment does not match
+                # the project virtual environment" warning on every single
+                # invocation for every project, which is just noise (dg is
+                # invoked by its resolved path, not via PATH lookup, so
+                # this was never affecting which `dg` actually ran) but
+                # clutters real error output when something else also goes
+                # wrong, confirmed live.
+                run_env.pop("VIRTUAL_ENV", None)
                 print(f"[Asset Introspection] Running dg list defs for project {project.id}...", flush=True)
                 result = subprocess.run(
                     [str(dg_path.resolve()), "list", "defs", "--json"],
@@ -356,6 +367,11 @@ class AssetIntrospectionService:
                 # immediately instead of actually introspecting anything.
                 run_env = os.environ.copy()
                 run_env.pop("PYTHONHOME", None)
+                # See the sync _run_dg_list_defs above -- this backend's own
+                # venv sets VIRTUAL_ENV, which otherwise leaks into every dg
+                # invocation and prints a spurious "venv mismatch" warning
+                # for every project, confirmed live.
+                run_env.pop("VIRTUAL_ENV", None)
                 proc = await asyncio.create_subprocess_exec(
                     dg_cmd, "list", "defs", "--json",
                     stdout=asyncio.subprocess.PIPE,
