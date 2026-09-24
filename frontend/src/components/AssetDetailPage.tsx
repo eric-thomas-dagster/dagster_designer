@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   Play, ChevronRight, ChevronDown, Layers as LayersIcon, Database, CheckCircle2, AlertTriangle,
@@ -79,6 +79,16 @@ export function AssetDetailPage({ nodeId, onClose, onNewPrimitiveForAsset, onNav
     () => currentProject?.graph.nodes.find((n) => n.id === nodeId) as GraphNode | undefined,
     [currentProject, nodeId],
   );
+  const isPartitioned = !!(node?.data as any)?.is_partitioned;
+
+  // Navigating to a different asset (via Lineage tab clicks, etc.) reuses
+  // this same component instance rather than remounting it, so a tab
+  // selection can outlive the asset it was chosen for -- e.g. leaving
+  // Partitions selected while landing on an asset that isn't partitioned.
+  // Bounce back to Overview when that happens.
+  useEffect(() => {
+    if (activeTab === 'partitions' && !isPartitioned) setActiveTab('overview');
+  }, [nodeId, isPartitioned, activeTab]);
 
   if (!currentProject || !node) return null;
 
@@ -164,7 +174,7 @@ export function AssetDetailPage({ nodeId, onClose, onNewPrimitiveForAsset, onNav
 
       {/* Tabs */}
       <div className="flex-shrink-0 border-b border-gray-200 px-6 flex items-center gap-1">
-        {TABS.map((t) => (
+        {TABS.filter((t) => t.id !== 'partitions' || isPartitioned).map((t) => (
           <button
             key={t.id}
             onClick={() => setActiveTab(t.id)}
