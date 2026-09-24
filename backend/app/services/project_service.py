@@ -286,6 +286,7 @@ class ProjectService:
                         project.components.append(dbt_component)
                         self._render_cookiecutter_dbt_template(dbt_target_dir, project.name)
                         self._modernize_dbt_packages_yml(dbt_target_dir)
+                        self._set_dbt_indirect_selection_cautious(dbt_target_dir)
                         # Create/enhance profiles.yml and .env for dbt
                         self._create_dbt_profiles(dbt_target_dir, project_dir)
 
@@ -350,6 +351,7 @@ class ProjectService:
                                 dbt_target_dir = project_dir / component_path
                                 self._render_cookiecutter_dbt_template(dbt_target_dir, project.name)
                                 self._modernize_dbt_packages_yml(dbt_target_dir)
+                                self._set_dbt_indirect_selection_cautious(dbt_target_dir)
                                 self._create_dbt_profiles(dbt_target_dir, project_dir)
 
                             # Generate YAML files for all components
@@ -410,6 +412,7 @@ class ProjectService:
                                 dbt_target_dir = project_dir / component_path
                                 self._render_cookiecutter_dbt_template(dbt_target_dir, project.name)
                                 self._modernize_dbt_packages_yml(dbt_target_dir)
+                                self._set_dbt_indirect_selection_cautious(dbt_target_dir)
                                 self._create_dbt_profiles(dbt_target_dir, project_dir)
 
                             # Generate YAML files for all components
@@ -1893,6 +1896,17 @@ if custom_lineage_edges:
         if activated_env_vars:
             log(f"📝 Created .env with documented defaults for: {', '.join(activated_env_vars)} (review in the project's Environment Variables panel)")
 
+        # Universal, project-type-agnostic hook (unlike the cookiecutter-dbt
+        # scaffolding call sites above, which only run for a project Designer
+        # itself wraps a fresh Dagster scaffold around) -- an imported
+        # project that's ALREADY a full Dagster project with an embedded dbt
+        # component (confirmed live: chicago_bulls_analytics) never goes
+        # through those, so it needs this fix applied here instead, keyed
+        # off wherever its dbt_project.yml actually lives rather than any
+        # particular import code path.
+        for dbt_dir in self._find_dbt_projects_recursive(project_dir):
+            self._set_dbt_indirect_selection_cautious(dbt_dir)
+
         try:
             # For imported Dagster projects with subdirectory structure, handle differently
             if project.is_imported and project.dagster_package_subdir:
@@ -3101,6 +3115,62 @@ if customizations_path.exists():
 
         if changed:
             packages_yml.write_text(yaml.dump(data, default_flow_style=False, sort_keys=False))
+
+    def _set_dbt_indirect_selection_cautious(self, dbt_dir: Path) -> None:
+        """Sets `flags.indirect_selection: cautious` in dbt_project.yml if
+        the project doesn't already declare one.
+
+        dbt's default ("eager") indirect selection includes a test in a
+        build the moment ANY model it touches is selected -- materializing
+        just `stg_game_schedule` also pulls in a relationship test defined
+        on a completely different sibling model (stg_player_tracking) that
+        merely references it, and that test then fails outright ("Table
+        ... does not exist") since the sibling was never selected/built.
+        Confirmed live on a real project. This is a standing dbt gotcha for
+        any partial/single-model build, and Designer's whole per-asset
+        materialize/preview workflow IS exactly that -- a user materializing
+        one asset at a time to see what happens, not "build everything."
+        "cautious" is dbt's own documented fix: only include a test when
+        every model it touches is either selected or already built.
+        https://docs.getdbt.com/reference/node-selection/syntax#test-selection-examples
+
+        Never overrides an indirect_selection the project already set
+        explicitly -- that's a deliberate choice (e.g. "eager" specifically
+        to catch cross-model integrity issues even in partial CI builds),
+        not an oversight to silently correct.
+
+        Uses ruamel.yaml's round-trip mode so this doesn't strip comments
+        from a hand-written dbt_project.yml -- these demo/real-world
+        projects tend to be heavily annotated.
+        """
+        dbt_project_yml = dbt_dir / "dbt_project.yml"
+        if not dbt_project_yml.exists():
+            return
+        try:
+            from ruamel.yaml import YAML
+            ryaml = YAML()
+            ryaml.preserve_quotes = True
+            ryaml.indent(mapping=2, sequence=4, offset=2)
+
+            with open(dbt_project_yml, "r") as f:
+                data = ryaml.load(f)
+            if not isinstance(data, dict):
+                return
+
+            flags = data.get("flags")
+            if isinstance(flags, dict) and "indirect_selection" in flags:
+                return
+
+            if flags is None:
+                data["flags"] = {"indirect_selection": "cautious"}
+            else:
+                flags["indirect_selection"] = "cautious"
+
+            print("🎯 Setting flags.indirect_selection: cautious in dbt_project.yml (avoids cross-model test failures when materializing one asset at a time)")
+            with open(dbt_project_yml, "w") as f:
+                ryaml.dump(data, f)
+        except Exception as e:
+            print(f"⚠️  Error setting indirect_selection in dbt_project.yml: {e}")
 
     def _detect_project_type(self, repo_dir: Path) -> tuple[str, Path | None]:
         """Detect the type of project in the given directory.
