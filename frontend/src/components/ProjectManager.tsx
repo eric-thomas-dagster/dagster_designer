@@ -440,10 +440,14 @@ export function ProjectManager() {
 
     setIsValidating(true);
 
-    // Update validation status in store to show banner
-    const projectStore = useProjectStore.getState();
-    projectStore.validationStatus = 'validating';
-    projectStore.validationError = null;
+    // Update validation status in store to show banner. Must go through
+    // setState (not a direct mutation of getState()'s object) -- Zustand
+    // only notifies subscribers on setState, so a direct mutation changes
+    // the value but leaves the banner rendered with whatever it last saw,
+    // which showed up as the banner getting stuck on a stale "failed"
+    // result even after a later check (e.g. from clicking into the
+    // validation dialog) had already succeeded.
+    useProjectStore.setState({ validationStatus: 'validating', validationError: null });
 
     try {
       const result = await projectsApi.validate(currentProject.id);
@@ -453,8 +457,7 @@ export function ProjectManager() {
 
       // Update status based on validation result
       if (result.valid) {
-        projectStore.validationStatus = 'success';
-        projectStore.validationError = null;
+        useProjectStore.setState({ validationStatus: 'success', validationError: null });
         // Auto-dismiss success banner after 3 seconds
         setTimeout(() => {
           const currentStatus = useProjectStore.getState().validationStatus;
@@ -463,14 +466,12 @@ export function ProjectManager() {
           }
         }, 3000);
       } else {
-        projectStore.validationStatus = 'error';
-        projectStore.validationError = result.error || 'Validation failed';
+        useProjectStore.setState({ validationStatus: 'error', validationError: result.error || 'Validation failed' });
       }
     } catch (error: any) {
       console.error('Failed to validate project:', error);
       const errorMessage = error?.response?.data?.detail || error?.message || 'Failed to validate project';
-      projectStore.validationStatus = 'error';
-      projectStore.validationError = errorMessage;
+      useProjectStore.setState({ validationStatus: 'error', validationError: errorMessage });
     } finally {
       setIsValidating(false);
     }
