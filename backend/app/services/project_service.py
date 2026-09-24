@@ -1473,6 +1473,43 @@ if custom_lineage_edges:
                 pass
         return project.directory_name
 
+    def _ensure_hatchling_force_include_paths_exist(self, project_dir: Path) -> None:
+        """Pre-creates any hatchling force-include source paths that don't exist yet.
+
+        [tool.hatch.build.targets.wheel.force-include] maps source paths
+        (relative to the project root) to their location inside the built
+        wheel -- hatchling requires every source path to already exist on
+        disk, even for an editable install, or the build fails outright
+        with FileNotFoundError. A dg-scaffolded project with a state-backed
+        dbt component commonly force-includes a `.local_defs_state`
+        directory that's only ever created at runtime (the first time dg
+        loads the project), so a fresh git clone -- which never had that
+        runtime-only directory committed -- can't even get through `uv
+        sync` before dg ever gets a chance to create it. An empty
+        placeholder directory is all hatchling actually needs here; dg
+        populates it normally once the project loads for real.
+        """
+        pyproject_path = project_dir / "pyproject.toml"
+        if not pyproject_path.exists():
+            return
+        try:
+            pyproject_data = toml.load(pyproject_path)
+            force_include = (
+                pyproject_data.get("tool", {})
+                .get("hatch", {})
+                .get("build", {})
+                .get("targets", {})
+                .get("wheel", {})
+                .get("force-include", {})
+            )
+            for source in force_include.keys():
+                source_path = project_dir / source
+                if not source_path.exists():
+                    print(f"📁 Pre-creating hatchling force-include path (doesn't exist yet on a fresh clone): {source}")
+                    source_path.mkdir(parents=True, exist_ok=True)
+        except Exception as e:
+            print(f"⚠️  Error checking hatchling force-include paths: {e}")
+
     def _scaffold_project_with_create_dagster(self, project: Project):
         """Scaffold project using create-dagster command."""
         # Sanitize project name for Python module (must start with letter/underscore)
@@ -1934,6 +1971,23 @@ if custom_lineage_edges:
                     raise subprocess.CalledProcessError(process.returncode, process.args)
 
                 _dependency_status[project.id]['output'] = '\n'.join(output_lines)
+
+            # A dg-scaffolded project with a state-backed dbt component
+            # (dagster-dbt's own manifest-caching mechanism) commonly ships
+            # a hatchling force-include entry like "src/<pkg>/defs/
+            # .local_defs_state" -- a directory that only ever gets created
+            # at runtime, the first time dg actually loads the project and
+            # that component initializes. It's exactly the kind of thing a
+            # real repo .gitignores, so a fresh clone never has it -- but
+            # hatchling's wheel builder requires every force-include SOURCE
+            # path to already exist on disk, or the editable install fails
+            # outright with "FileNotFoundError: Forced include not found"
+            # before dg ever gets a chance to create it. Reproduced live
+            # importing eric-thomas-dagster/chicago_bulls_analytics.
+            # Pre-creating it empty is a safe, generic fix -- hatchling is
+            # happy with an empty directory, and dg populates it normally
+            # once the project actually loads.
+            self._ensure_hatchling_force_include_paths_exist(project_dir)
 
             # Install all dependencies including dev dependencies
             # We need dagster-dg-cli (dg command) for asset introspection
