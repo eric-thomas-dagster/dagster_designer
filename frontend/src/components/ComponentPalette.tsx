@@ -75,6 +75,16 @@ export function ComponentPalette({ onComponentClick }: ComponentPaletteProps) {
     },
     enabled: !!currentProject,
     staleTime: 30 * 1000,
+    // Self-heals a real timing gap: opening a project fires this alongside
+    // a flurry of other dg/asset-introspection calls, and can land before
+    // the project's venv/dg is even ready -- that attempt "succeeds" with
+    // an empty list (not a thrown error, so React Query's own retry logic
+    // never kicks in), and nothing else was wired to ever refetch it after.
+    // Confirmed live: the list was empty on open and only appeared minutes
+    // later once something else (a window refocus) happened to trigger a
+    // refetch. Poll every few seconds while genuinely empty; stop for good
+    // the moment it comes back non-empty.
+    refetchInterval: (query) => (query.state.data?.components?.length ? false : 4000),
   });
 
   // Fetch the full community-templates manifest up-front — the palette

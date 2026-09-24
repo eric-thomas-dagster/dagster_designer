@@ -78,6 +78,53 @@ def _normalize_owners(raw_owners: Any) -> list[str]:
     return normalized
 
 
+def _load_yaml_document_at_line(yaml_path: "Path", target_line: int | None) -> tuple[dict | None, int, int]:
+    """Loads the specific YAML document containing `target_line` from a file
+    that may hold several `---`-separated documents.
+
+    `dg` supports multiple component instances in one defs.yaml separated by
+    `---` (confirmed live: a real project's defs/ingestion/sftp/defs.yaml
+    holds 3 -- dg's own error output showed "defs.yaml[0]" / "[1]" / "[2]").
+    Every caller here only had a plain `yaml.safe_load()`, which raises
+    "expected a single document in the stream" on any such file --
+    confirmed live, this silently killed component_id/component_type/
+    component_attributes for every asset from a multi-instance file (sftp,
+    fivetran, tableau, hightouch), while a project's single-instance files
+    (nba_stats) worked fine and masked the bug for those assets only.
+
+    `target_line` is the line number carried on the asset's own `source`
+    field (e.g. "defs.yaml:48") -- since dg's own `[N]` indexing implies
+    each asset's source line falls within its own component's document,
+    picking whichever document's start line is the closest one at or before
+    `target_line` recovers the right instance without needing dg's own
+    internal indexing.
+
+    Returns (document, doc_index, doc_count) -- callers use doc_index to
+    build a per-instance-unique id (e.g. "ingestion/sftp[1]", matching dg's
+    own convention) instead of one shared id per FILE, which would wrongly
+    merge multiple distinct component instances in the same file into one.
+    """
+    import yaml
+
+    with open(yaml_path, "r") as f:
+        content = f.read()
+
+    docs = list(yaml.safe_load_all(content))
+    if not docs:
+        return None, 0, 0
+    if target_line is None or len(docs) == 1:
+        return docs[0], 0, len(docs)
+
+    doc_start_lines = [node.start_mark.line + 1 for node in yaml.compose_all(content)]
+    chosen_idx = 0
+    for i, start_line in enumerate(doc_start_lines):
+        if start_line <= target_line:
+            chosen_idx = i
+        else:
+            break
+    return docs[chosen_idx], chosen_idx, len(docs)
+
+
 # Simple in-memory cache for asset introspection to avoid re-running slow dg list defs
 # Cache structure: {project_id: (timestamp, assets_data)}
 _assets_cache: Dict[str, Tuple[float, dict]] = {}
@@ -813,8 +860,9 @@ class AssetIntrospectionService:
                             yaml_path = Path(project_dir) / asset_source.split(':')[0]
                             if yaml_path.exists():
                                 try:
-                                    with open(yaml_path, 'r') as f:
-                                        yaml_data = yaml.safe_load(f)
+                                    target_line = int(asset_source.rsplit(':', 1)[-1]) if ':' in asset_source else None
+                                    yaml_data, _doc_idx, _doc_count = _load_yaml_document_at_line(yaml_path, target_line)
+                                    yaml_data = yaml_data or {}
 
                                     component_type = yaml_data.get('type')
                                     if component_type:
@@ -867,7 +915,6 @@ class AssetIntrospectionService:
                 elif source_component and "/defs/" in asset_source and "/defs.yaml" in asset_source:
                     # For unregistered components discovered from YAML, read the attributes
                     import re
-                    import yaml
                     from pathlib import Path
 
                     match = re.search(r'/defs/(.+)/defs\.yaml', asset_source)
@@ -876,12 +923,19 @@ class AssetIntrospectionService:
                         yaml_path = Path(project_dir) / asset_source.split(':')[0]
                         if yaml_path.exists():
                             try:
-                                with open(yaml_path, 'r') as f:
-                                    yaml_data = yaml.safe_load(f)
+                                target_line = int(asset_source.rsplit(':', 1)[-1]) if ':' in asset_source else None
+                                yaml_data, doc_idx, doc_count = _load_yaml_document_at_line(yaml_path, target_line)
+                                yaml_data = yaml_data or {}
 
                                 component_type = yaml_data.get('type')
                                 component_attributes = yaml_data.get('attributes', {})
-                                actual_component_id = asset_folder
+                                # One id per component INSTANCE, not per file -- a file with
+                                # several `---`-separated instances (confirmed live: sftp,
+                                # fivetran, tableau, hightouch each hold 2-3) would otherwise
+                                # merge distinct components into one, matching dg's own
+                                # "defs.yaml[N]" convention for the multi-instance case only,
+                                # so a single-instance file's id stays plain.
+                                actual_component_id = f"{asset_folder}[{doc_idx}]" if doc_count > 1 else asset_folder
                                 print(f"[Asset Introspection] Read attributes from YAML for {asset_key}: {component_attributes}", flush=True)
                             except Exception as e:
                                 print(f"[Asset Introspection] Error reading attributes for {asset_key}: {e}", flush=True)
