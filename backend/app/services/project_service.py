@@ -1765,7 +1765,7 @@ if custom_lineage_edges:
                 import time
 
                 # Use uv pip install with --python flag
-                venv_python = str(venv_bin_path(venv_dir, "python").resolve())
+                venv_python = str(venv_bin_path(venv_dir, "python").absolute())
                 result = subprocess.run(
                     [find_uv_binary("uv"), "pip", "install", "--python", venv_python, "dagster-dg-cli", "dagster-dg-core"],
                     cwd=str(project_dir),
@@ -1807,7 +1807,7 @@ if custom_lineage_edges:
 
                 # Step 3: Install core Dagster packages explicitly with correct versions
                 log(f"📦 Step 3/3: Installing core Dagster packages...")
-                venv_python = str(venv_bin_path(venv_dir, "python").resolve())
+                venv_python = str(venv_bin_path(venv_dir, "python").absolute())
                 result = subprocess.run(
                     [find_uv_binary("uv"), "pip", "install", "--python", venv_python,
                      "dagster", "dagster-webserver", "dagster-cloud", "dagster-dbt"],
