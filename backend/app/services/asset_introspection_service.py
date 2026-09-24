@@ -245,17 +245,14 @@ class AssetIntrospectionService:
 
             # Get the path to dg in the project's virtualenv
             venv_dir = project_dir / ".venv"
-            if sys.platform == "win32":
-                dg_path = venv_dir / "Scripts" / "dg.exe"
-            else:
-                dg_path = venv_dir / "bin" / "dg"
+            dg_path = venv_bin_path(venv_dir, "dg")
 
             # Fall back to system dg if venv doesn't exist
             if not dg_path.exists():
                 print(f"Project virtualenv dg not found at {dg_path}, falling back to system dg")
                 dg_cmd = "dg"
             else:
-                dg_cmd = str(dg_path)
+                dg_cmd = str(dg_path.resolve())
 
             try:
                 print(f"[Asset Introspection] Running dg list defs ASYNC for project {project.id}...", flush=True)
@@ -266,35 +263,25 @@ class AssetIntrospectionService:
                     work_dir = project_dir / project.dagster_package_subdir
                     print(f"[Asset Introspection] Running from subdirectory: {project.dagster_package_subdir}/", flush=True)
 
-                # If using project venv, we need to set PATH to include venv bin
-                if dg_path.exists():
-                    # Export VIRTUAL_ENV too, not just PATH -- if it's already
-                    # set to something else (another project's venv, or this
-                    # app's own backend venv) in the environment this process
-                    # inherited, dg detects the mismatch against its own
-                    # project root and gets confused about which venv's
-                    # site-packages to actually use, breaking imports of the
-                    # project's own generated modules even though PATH
-                    # resolves dg itself correctly. Also unset PYTHONHOME,
-                    # which can point the interpreter at the wrong stdlib.
-                    venv_dir_abs = str(venv_dir.resolve())
-                    venv_bin = str((venv_dir / "bin").resolve())
-                    cmd = f"export VIRTUAL_ENV=\"{venv_dir_abs}\" PATH=\"{venv_bin}:$PATH\" && unset PYTHONHOME && dg list defs --json"
-
-                    proc = await asyncio.create_subprocess_shell(
-                        cmd,
-                        stdout=asyncio.subprocess.PIPE,
-                        stderr=asyncio.subprocess.PIPE,
-                        cwd=str(work_dir.resolve())
-                    )
-                else:
-                    # Fallback to system dg (already in PATH)
-                    proc = await asyncio.create_subprocess_exec(
-                        dg_cmd, "list", "defs", "--json",
-                        stdout=asyncio.subprocess.PIPE,
-                        stderr=asyncio.subprocess.PIPE,
-                        cwd=str(work_dir.resolve())
-                    )
+                # Call dg's own resolved binary path directly rather than
+                # activating the venv through a shell -- a venv console
+                # script already resolves its own environment correctly
+                # when invoked by full path, and `export`/`unset` are bash
+                # builtins that don't exist under cmd.exe, which is what
+                # create_subprocess_shell runs on Windows. That mismatch
+                # made this async path fail near-instantly there (unlike a
+                # genuine timeout), which is what made "Generating assets"
+                # never succeed and the definitions endpoint fall back
+                # immediately instead of actually introspecting anything.
+                run_env = os.environ.copy()
+                run_env.pop("PYTHONHOME", None)
+                proc = await asyncio.create_subprocess_exec(
+                    dg_cmd, "list", "defs", "--json",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    cwd=str(work_dir.resolve()),
+                    env=run_env,
+                )
 
                 # Wait for completion with timeout
                 try:
