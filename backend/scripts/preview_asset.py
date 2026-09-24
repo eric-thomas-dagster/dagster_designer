@@ -319,8 +319,20 @@ def _try_dbt_show_preview(asset_key: str, row_limit: int = 100):
         return None
 
     # Profiles: usually in the same directory as dbt_project.yml (per dbt-
-    # cookiecutter conventions), else the user's ~/.dbt/.
-    profiles_dir = dbt_project_dir if (dbt_project_dir / "profiles.yml").exists() else None
+    # cookiecutter conventions), but some projects keep it in a `profiles/`
+    # subdirectory instead (confirmed live: nyc_yellow_taxi/profiles/
+    # profiles.yml, not nyc_yellow_taxi/profiles.yml) -- dbt itself has no
+    # single standard location beyond "somewhere passed via --profiles-dir
+    # or DBT_PROFILES_DIR", so check both before giving up and falling back
+    # to the user's ~/.dbt/, which is what silently broke local preview for
+    # a project whose dev target is just DuckDB (no credentials needed at
+    # all) once its actual profiles.yml wasn't found here.
+    if (dbt_project_dir / "profiles.yml").exists():
+        profiles_dir = dbt_project_dir
+    elif (dbt_project_dir / "profiles" / "profiles.yml").exists():
+        profiles_dir = dbt_project_dir / "profiles"
+    else:
+        profiles_dir = None
 
     # Model name is the last segment of the asset key (dbt models are
     # identified by their name, not their path).
