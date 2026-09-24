@@ -1023,7 +1023,7 @@ async def preview_asset_data(
         raise HTTPException(status_code=404, detail="Project directory not found")
 
     # Get project module name
-    project_module = project.directory_name
+    project_module = project_service.get_project_root_module(project)
 
     # Set up environment
     import os

@@ -1442,6 +1442,37 @@ if custom_lineage_edges:
         venv_dir = project_dir / ".venv"
         return venv_bin_path(venv_dir, "dg")
 
+    def get_project_root_module(self, project: Project) -> str:
+        """The actual importable Python module name for this project.
+
+        For a project Designer scaffolded itself, this always equals
+        project.directory_name -- _patch_pyproject_for_dg sets
+        [tool.dg.project].root_module to exactly that at creation time. But
+        an imported existing Dagster project keeps whatever root_module its
+        own pyproject.toml already declared (e.g. "orchestration_poc"),
+        which has no relation to project.directory_name (Designer's own
+        `project_<id>_<slug>` folder-naming convention) at all. A caller
+        that assumes they're the same and does `import {directory_name}`
+        gets a real, confusing "No module named 'project_68355dcd_yellow'"
+        for a module that was never going to exist -- reproduced live
+        against eric-thomas-dagster/Yellow_Taxi_Orchestration_PoC (real
+        root_module "orchestration_poc"). Falls back to directory_name only
+        when pyproject.toml doesn't declare one.
+        """
+        project_dir = self._get_project_dir(project)
+        if project.dagster_package_subdir:
+            project_dir = project_dir / project.dagster_package_subdir
+        pyproject_path = project_dir / "pyproject.toml"
+        if pyproject_path.exists():
+            try:
+                pyproject_data = toml.load(pyproject_path)
+                root_module = pyproject_data.get("tool", {}).get("dg", {}).get("project", {}).get("root_module")
+                if root_module:
+                    return root_module
+            except Exception:
+                pass
+        return project.directory_name
+
     def _scaffold_project_with_create_dagster(self, project: Project):
         """Scaffold project using create-dagster command."""
         # Sanitize project name for Python module (must start with letter/underscore)

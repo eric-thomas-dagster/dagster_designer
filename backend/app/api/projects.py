@@ -3076,7 +3076,7 @@ async def get_asset_partitions(project_id: str, asset_key: str):
         raise HTTPException(status_code=404, detail="Project directory not found")
 
     # Get the project module name
-    project_module = project.directory_name
+    project_module = project_service.get_project_root_module(project)
 
     try:
         # Run the show_partitions.py script from backend directory
@@ -3177,7 +3177,7 @@ async def get_asset_config_schema(project_id: str, asset_key: str):
         raise HTTPException(status_code=404, detail="Project directory not found")
 
     # Get the project module name
-    project_module = project.directory_name
+    project_module = project_service.get_project_root_module(project)
 
     try:
         # Run the show_config.py script from backend directory
