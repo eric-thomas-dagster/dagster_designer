@@ -496,6 +496,16 @@ export function IngestionsPanel({ onAddDataSource, onEditComponent }: Ingestions
 
   const handleRun = async (assetKey: string, componentId: string) => {
     if (!currentProject) return;
+    // materialize() with no partition fails outright for a partitioned
+    // asset ("Asset has partitions, but no '--partition' option was
+    // provided") -- this panel already has its own backfill modal
+    // (handleBackfillLaunch below) built exactly for partitioned assets,
+    // so route there instead of failing blind.
+    if (await partitionsApi.isPartitioned(currentProject.id, assetKey)) {
+      notify.info(`${assetKey} is partitioned -- pick partitions to backfill.`);
+      setBackfillAssetKey(assetKey);
+      return;
+    }
     setRunningId(componentId);
     try {
       const r = await projectsApi.materialize(currentProject.id, [assetKey]);

@@ -3,7 +3,7 @@ import * as Dialog from '@radix-ui/react-dialog';
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu';
 import { X, AlertCircle, Table as TableIcon, Wand2, Save, Filter, Columns3, Trash2, Eye, EyeOff, ChevronDown, ChevronRight, SortAsc, SortDesc, Sigma, Group, Calculator, ArrowDownUp, RotateCw, Play, Loader2, Plus, Package, BarChart3 } from 'lucide-react';
 import { ColumnProfilePanel } from './ColumnProfilePanel';
-import { assetsApi, projectsApi, type AssetDataPreview } from '@/services/api';
+import { assetsApi, projectsApi, partitionsApi, type AssetDataPreview } from '@/services/api';
 import { notify } from './Notifications';
 import { CommunityTransformPicker } from './CommunityTransformPicker';
 import { ColumnProfileStrip } from './ColumnProfileStrip';
@@ -23,6 +23,11 @@ interface DataPreviewModalProps {
   /** Optional initial mode. AssetIOPanel's "Transform" button opens the modal
       pre-flipped to transform mode instead of view. */
   initialMode?: 'view' | 'transform' | 'profile';
+  /** Open the Launchpad for a partitioned asset -- only wired up where the
+   *  caller already has one available (GraphEditor). Where it's not, Run
+   *  to here just tells the user where to go instead of materializing
+   *  blind and failing. */
+  onOpenLaunchpad?: (assetKey: string) => void;
 }
 
 interface FilterCondition {
@@ -65,6 +70,7 @@ export function DataPreviewModal({
   existingComponentAttributes,
   existingComponentId,
   initialMode = 'view',
+  onOpenLaunchpad,
 }: DataPreviewModalProps) {
   const [data, setData] = useState<AssetDataPreview | null>(null);
   const [loading, setLoading] = useState(false);
@@ -393,6 +399,15 @@ export function DataPreviewModal({
   // node's play button, but triggered from inside the modal when the initial
   // preview came back with "not materialized". Keeps the click count low.
   const handleRunToHere = async () => {
+    if (await partitionsApi.isPartitioned(projectId, assetKey)) {
+      if (onOpenLaunchpad) {
+        notify.info(`${assetKey} is partitioned -- pick a partition to run.`);
+        onOpenLaunchpad(assetKey);
+      } else {
+        notify.error(`${assetKey} is partitioned -- use "Run to here" on the graph node instead, which can pick a partition.`);
+      }
+      return;
+    }
     setRunningToHere(true);
     try {
       const result = await projectsApi.materialize(projectId, [`+${assetKey}`]);

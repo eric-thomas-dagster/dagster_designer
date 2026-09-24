@@ -2360,6 +2360,23 @@ export const partitionsApi = {
     return response.data;
   },
 
+  /** Best-effort "does this asset need a partition to materialize" check --
+   *  every single-asset quick-materialize button (Run to here, the node's
+   *  own materialize action, ...) needs this same check before calling
+   *  materialize() with no partition, which `dg launch` rejects outright
+   *  ("Asset has partitions, but no '--partition' option was provided") for
+   *  any asset that has one. A lookup failure returns false rather than
+   *  throwing -- shouldn't block a plain, unpartitioned run from a flaky
+   *  partition-info call. */
+  isPartitioned: async (projectId: string, assetKey: string): Promise<boolean> => {
+    try {
+      const info = await partitionsApi.getPartitionInfo(projectId, assetKey);
+      return !!info.is_partitioned;
+    } catch {
+      return false;
+    }
+  },
+
   getConfigSchema: async (projectId: string, assetKey: string): Promise<ConfigSchemaResponse> => {
     const response = await api.get<ConfigSchemaResponse>(
       `/projects/${projectId}/assets/${encodeURIComponent(assetKey)}/config-schema`

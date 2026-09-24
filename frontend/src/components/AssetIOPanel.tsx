@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { X, Wand2, Maximize2, ChevronRight, Table as TableIcon, Play, Loader2, AlertCircle, BarChart3 } from 'lucide-react';
-import { assetsApi, projectsApi, type AssetDataPreview } from '@/services/api';
+import { assetsApi, projectsApi, partitionsApi, type AssetDataPreview } from '@/services/api';
 import { notify } from './Notifications';
 import { ColumnProfileStrip } from './ColumnProfileStrip';
 import { ColumnProfilePanel } from './ColumnProfilePanel';
@@ -14,6 +14,10 @@ interface AssetIOPanelProps {
   /** Open the full-screen DataPreviewModal on a specific asset in view /
    *  transform / profile mode. */
   onOpenPreview: (assetKey: string, mode: 'view' | 'transform' | 'profile') => void;
+  /** Open the Launchpad for a partitioned asset -- Run handles this itself
+   *  for unpartitioned assets, but a partitioned one needs a partition
+   *  picked, which only the Launchpad offers. */
+  onOpenLaunchpad: (assetKey: string) => void;
   /** User closed / dismissed the panel. */
   onClose: () => void;
 }
@@ -30,6 +34,7 @@ export function AssetIOPanel({
   selectedAssetKey,
   upstreamKeys,
   onOpenPreview,
+  onOpenLaunchpad,
   onClose,
 }: AssetIOPanelProps) {
   const [activeSide, setActiveSide] = useState<'input' | 'output'>('output');
@@ -214,6 +219,7 @@ export function AssetIOPanel({
           assetKey={currentAssetKey}
           view={activeView}
           sampleLimit={sampleLimit}
+          onOpenLaunchpad={onOpenLaunchpad}
         />
       </div>
     </div>
@@ -229,11 +235,13 @@ function PreviewTable({
   assetKey,
   view,
   sampleLimit,
+  onOpenLaunchpad,
 }: {
   projectId: string;
   assetKey: string;
   view: 'table' | 'profile';
   sampleLimit: number;
+  onOpenLaunchpad: (assetKey: string) => void;
 }) {
   const [running, setRunning] = useState(false);
   const [materializeError, setMaterializeError] = useState<string | null>(null);
@@ -262,6 +270,11 @@ function PreviewTable({
   }, [data, error]);
 
   const handleRun = async () => {
+    if (await partitionsApi.isPartitioned(projectId, assetKey)) {
+      notify.info(`${assetKey} is partitioned -- pick a partition to run.`);
+      onOpenLaunchpad(assetKey);
+      return;
+    }
     setRunning(true);
     setMaterializeError(null);
     try {

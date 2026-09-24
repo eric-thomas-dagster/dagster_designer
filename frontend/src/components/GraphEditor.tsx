@@ -3343,6 +3343,7 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
               setPreviewInitialMode(mode);
               setPreviewAssetKey(assetKey);
             }}
+            onOpenLaunchpad={handleOpenLaunchpad}
             onClose={() => setIoPanelAssetKey(null)}
           />
         );
@@ -3376,6 +3377,7 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
           assetKey={previewAssetKey}
           assetName={previewAssetKey}
           initialMode={previewInitialMode}
+          onOpenLaunchpad={handleOpenLaunchpad}
           onTransformerCreated={(updatedProject) => {
             // Response from create-transformer includes the freshly-generated
             // nodes/edges. Sync into the graph store so the new node appears

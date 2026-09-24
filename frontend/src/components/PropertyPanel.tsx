@@ -571,6 +571,16 @@ export function PropertyPanel({ nodeId, onConfigureComponent, onOpenFile, onNewP
     const handleMaterialize = async () => {
       if (!currentProject) return;
 
+      // isPartitioned is already kept in sync for the selected node (see
+      // the effect above) -- materialize() with no partition fails
+      // outright for a partitioned asset ("Asset has partitions, but no
+      // '--partition' option was provided"), so route to the Launchpad
+      // (which already handles picking one) instead of failing blind.
+      if (isPartitioned) {
+        await handleOpenLaunchpad();
+        return;
+      }
+
       setIsMaterializing(true);
       setMaterializeResult(null);
 
@@ -624,7 +634,7 @@ export function PropertyPanel({ nodeId, onConfigureComponent, onOpenFile, onNewP
       setShowLaunchpad(true);
     };
 
-    const handleLaunchpadSubmit = async (config?: Record<string, any>, tags?: Record<string, string>) => {
+    const handleLaunchpadSubmit = async (config?: Record<string, any>, tags?: Record<string, string>, partition?: string) => {
       if (!currentProject) return;
 
       setIsMaterializing(true);
@@ -632,7 +642,7 @@ export function PropertyPanel({ nodeId, onConfigureComponent, onOpenFile, onNewP
 
       try {
         const assetKey = node.data.asset_key || node.id;
-        const result = await projectsApi.materialize(currentProject.id, [assetKey], config, tags);
+        const result = await projectsApi.materialize(currentProject.id, [assetKey], config, tags, partition);
 
         setMaterializeResult({
           success: result.success,
