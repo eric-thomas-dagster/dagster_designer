@@ -61,6 +61,7 @@ def _build_cloud_primitives(project) -> Dict[str, List[Dict[str, Any]]]:
                 "description": check.get("description", ""),
                 "asset_key": node.data.get("asset_key", ""),
                 "file": check.get("source", ""),
+                "code_location": node.data.get("code_location"),
             })
         policy = node.data.get("freshness_policy")
         if not policy:
@@ -81,6 +82,7 @@ def _build_cloud_primitives(project) -> Dict[str, List[Dict[str, Any]]]:
             "asset_key": asset_key,
             "status": node.data.get("freshness_status"),
             "policy": policy,
+            "code_location": node.data.get("code_location"),
         })
     return {
         "schedules": list(dp.get("schedules", [])),

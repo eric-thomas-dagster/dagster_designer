@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { BarChart3, Loader2 } from 'lucide-react';
 import { useProjectStore } from '@/hooks/useProject';
@@ -43,7 +43,26 @@ export function InsightsPanel({ onOpenAsset, onOpenJob }: InsightsPanelProps) {
   const { currentProject } = useProjectStore();
   const [days, setDays] = useState(30);
   const [view, setView] = useState<'assets' | 'jobs'>('assets');
+  const [codeLocationFilter, setCodeLocationFilter] = useState('');
   const isCloud = !!(currentProject as any)?.is_dagster_plus;
+
+  // Asset -> code location, from the already-loaded project graph (no
+  // extra fetch needed -- every asset node carries this). Jobs get their
+  // code location straight from the breakdown API response instead.
+  const assetCodeLocations = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const n of (currentProject?.graph.nodes || [])) {
+      const loc = (n.data as any)?.code_location;
+      const key = (n.data as any)?.asset_key;
+      if (loc && key) m.set(key, loc);
+    }
+    return m;
+  }, [currentProject?.graph.nodes]);
+
+  const codeLocationOptions = useMemo(
+    () => Array.from(new Set(assetCodeLocations.values())).sort(),
+    [assetCodeLocations],
+  );
 
   const { data: deployment, isLoading: loadingDeployment, error: deploymentError } = useQuery({
     queryKey: ['deployment-insights', currentProject?.id, days],
@@ -85,16 +104,31 @@ export function InsightsPanel({ onOpenAsset, onOpenJob }: InsightsPanelProps) {
           <h2 className="text-sm font-semibold text-gray-900">Insights</h2>
           <p className="text-xs text-gray-500">Deployment-wide usage, cost, and reliability — live from Dagster+.</p>
         </div>
-        <div className="inline-flex rounded border border-gray-200 overflow-hidden flex-shrink-0">
-          {[7, 30, 60, 90, 120].map((d) => (
-            <button
-              key={d}
-              onClick={() => setDays(d)}
-              className={`px-2.5 py-1 text-xs font-medium ${days === d ? 'bg-blue-600 text-white' : 'bg-white text-gray-600 hover:bg-gray-50'}`}
+        <div className="flex items-center gap-2 flex-shrink-0">
+          {codeLocationOptions.length > 1 && (
+            <select
+              value={codeLocationFilter}
+              onChange={(e) => setCodeLocationFilter(e.target.value)}
+              className="pl-2 pr-6 py-1 text-xs border border-gray-300 rounded bg-white text-gray-700"
+              title="Filter by code location"
             >
-              {d}d
-            </button>
-          ))}
+              <option value="">All code locations</option>
+              {codeLocationOptions.map((loc) => (
+                <option key={loc} value={loc}>{loc}</option>
+              ))}
+            </select>
+          )}
+          <div className="inline-flex rounded border border-gray-200 overflow-hidden">
+            {[7, 30, 60, 90, 120].map((d) => (
+              <button
+                key={d}
+                onClick={() => setDays(d)}
+                className={`px-2.5 py-1 text-xs font-medium ${days === d ? 'bg-blue-600 text-white' : 'bg-white text-gray-600 hover:bg-gray-50'}`}
+              >
+                {d}d
+              </button>
+            ))}
+          </div>
         </div>
       </div>
 
@@ -140,6 +174,8 @@ export function InsightsPanel({ onOpenAsset, onOpenJob }: InsightsPanelProps) {
                   metricName={m.name}
                   label={m.label}
                   onOpenAsset={handleOpenAsset}
+                  codeLocationFilter={codeLocationFilter}
+                  assetCodeLocations={assetCodeLocations}
                 />
               ))}
             </div>
@@ -153,6 +189,7 @@ export function InsightsPanel({ onOpenAsset, onOpenJob }: InsightsPanelProps) {
                   metricName={m.name}
                   label={m.label}
                   onOpenJob={onOpenJob}
+                  codeLocationFilter={codeLocationFilter}
                 />
               ))}
             </div>
@@ -164,20 +201,22 @@ export function InsightsPanel({ onOpenAsset, onOpenJob }: InsightsPanelProps) {
 }
 
 function TopJobsCard({
-  projectId, days, metricName, label, onOpenJob,
+  projectId, days, metricName, label, onOpenJob, codeLocationFilter,
 }: {
   projectId: string;
   days: number;
   metricName: string;
   label: string;
   onOpenJob: (jobName: string) => void;
+  codeLocationFilter?: string;
 }) {
   const { data, isLoading } = useQuery({
     queryKey: ['insights-job-breakdown', projectId, metricName, days],
     queryFn: () => assetsApi.getJobInsightsBreakdown(projectId, metricName, days),
     staleTime: 60_000,
   });
-  const rows = (data?.rows || []).slice(0, 5);
+  const allRows = data?.rows || [];
+  const rows = (codeLocationFilter ? allRows.filter((r) => r.code_location === codeLocationFilter) : allRows).slice(0, 5);
 
   return (
     <div className="bg-white border border-gray-200 rounded-lg overflow-hidden">
@@ -212,20 +251,25 @@ function TopJobsCard({
 }
 
 function TopAssetsCard({
-  projectId, days, metricName, label, onOpenAsset,
+  projectId, days, metricName, label, onOpenAsset, codeLocationFilter, assetCodeLocations,
 }: {
   projectId: string;
   days: number;
   metricName: string;
   label: string;
   onOpenAsset: (assetKey: string) => void;
+  codeLocationFilter?: string;
+  assetCodeLocations: Map<string, string>;
 }) {
   const { data, isLoading } = useQuery({
     queryKey: ['insights-breakdown', projectId, metricName, days],
     queryFn: () => assetsApi.getInsightsBreakdown(projectId, metricName, days),
     staleTime: 60_000,
   });
-  const rows = (data?.rows || []).slice(0, 5);
+  const allRows = data?.rows || [];
+  const rows = (
+    codeLocationFilter ? allRows.filter((r) => assetCodeLocations.get(r.asset_key) === codeLocationFilter) : allRows
+  ).slice(0, 5);
 
   return (
     <div className="bg-white border border-gray-200 rounded-lg overflow-hidden">
@@ -246,7 +290,12 @@ function TopAssetsCard({
               title={`Open ${r.asset_key}`}
             >
               <span className="text-[10px] text-gray-400 font-mono w-4 flex-shrink-0">{i + 1}</span>
-              <span className="flex-1 min-w-0 font-mono text-xs text-gray-800 truncate">{r.asset_key}</span>
+              <span className="flex-1 min-w-0">
+                <div className="font-mono text-xs text-gray-800 truncate">{r.asset_key}</div>
+                {assetCodeLocations.get(r.asset_key) && (
+                  <div className="text-[10px] text-gray-400 truncate">{assetCodeLocations.get(r.asset_key)}</div>
+                )}
+              </span>
               <span className="text-xs text-gray-600 tabular-nums flex-shrink-0">{formatInsightValue(r.value, data!.unit)}</span>
             </li>
           ))}

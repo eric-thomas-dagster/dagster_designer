@@ -952,6 +952,7 @@ async def _hydrate_cloud_graph(project: Project, force: bool = False) -> None:
                     "status": (s.get("scheduleState") or {}).get("status"),
                     "pipeline_name": s.get("pipelineName"),
                     "repository": repo_label,
+                    "code_location": selector["repositoryLocationName"],
                 })
         except Exception as e:
             print(f"[dagster+] schedules for {selector} failed: {e}", flush=True)
@@ -965,6 +966,7 @@ async def _hydrate_cloud_graph(project: Project, force: bool = False) -> None:
                     "sensor_type": s.get("sensorType"),
                     "status": (s.get("sensorState") or {}).get("status"),
                     "repository": repo_label,
+                    "code_location": selector["repositoryLocationName"],
                     "linked_asset_keys": linked_keys,
                 })
                 # If the sensor names specific assets, attach it.
@@ -1310,12 +1312,21 @@ async def _hydrate_cloud_graph(project: Project, force: bool = False) -> None:
     seen_jobs: dict[str, dict] = {}
     for a in raw_assets:
         akey = "/".join(((a.get("assetKey") or {}).get("path") or []))
+        a_location = ((a.get("repository") or {}).get("location") or {}).get("name") or None
         for jn in (a.get("jobNames") or []):
             if not jn:
                 continue
-            entry = seen_jobs.setdefault(jn, {"name": jn, "asset_keys": []})
+            entry = seen_jobs.setdefault(jn, {"name": jn, "asset_keys": [], "code_locations": []})
             if akey and akey not in entry["asset_keys"]:
                 entry["asset_keys"].append(akey)
+            if a_location and a_location not in entry["code_locations"]:
+                entry["code_locations"].append(a_location)
+    # Jobs are (almost always) scoped to exactly one code location --
+    # surface a single `code_location` field for filtering, alongside
+    # the full list for the rare multi-location edge case.
+    for job in seen_jobs.values():
+        locs = job["code_locations"]
+        job["code_location"] = locs[0] if len(locs) == 1 else (", ".join(sorted(locs)) if locs else None)
     project.discovered_primitives = {
         "schedules": all_schedules,
         "sensors": all_sensors,

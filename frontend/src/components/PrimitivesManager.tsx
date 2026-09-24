@@ -48,6 +48,11 @@ export function PrimitivesManager({
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [showLaunchpad, setShowLaunchpad] = useState(false);
   const [selectedJobName, setSelectedJobName] = useState<string>('');
+  // Dagster+ projects can have many code locations -- this narrows every
+  // tab (schedules/sensors/jobs/checks/freshness) to one at a time. Local
+  // projects only ever have a single code location, so the picker stays
+  // hidden there.
+  const [codeLocationFilter, setCodeLocationFilter] = useState<string>('');
   const queryClient = useQueryClient();
 
   // Fetch all primitives (template-created only)
@@ -167,8 +172,21 @@ export function PrimitivesManager({
     }
   };
 
+  // A primitive's code location, normalized across categories. Schedules/
+  // sensors/jobs/checks/freshness-policies each get a `code_location`
+  // field from the backend for cloud projects; older cached data (or the
+  // `repository` field schedules/sensors also carry, "location::repo")
+  // is used as a fallback so this doesn't break on stale hydration.
+  const primitiveCodeLocation = (p: PrimitiveItem): string | null => {
+    if (p.code_location) return p.code_location;
+    if (typeof p.repository === 'string' && p.repository.includes('::')) {
+      return p.repository.split('::')[0];
+    }
+    return null;
+  };
+
   // Merge template-created primitives with discovered definitions
-  const getMergedPrimitives = (category: PrimitiveCategory): Array<PrimitiveItem & { isManaged: boolean }> => {
+  const getRawMergedPrimitives = (category: PrimitiveCategory): Array<PrimitiveItem & { isManaged: boolean }> => {
     const categoryKey = category === 'schedule' ? 'schedules'
       : category === 'job' ? 'jobs'
       : category === 'sensor' ? 'sensors'
@@ -212,6 +230,22 @@ export function PrimitivesManager({
 
     return [...managed, ...discovered];
   };
+
+  const getMergedPrimitives = (category: PrimitiveCategory): Array<PrimitiveItem & { isManaged: boolean }> => {
+    const items = getRawMergedPrimitives(category);
+    if (!codeLocationFilter) return items;
+    return items.filter((p) => primitiveCodeLocation(p) === codeLocationFilter);
+  };
+
+  const isCloudProject = !!(currentProject as any)?.is_dagster_plus;
+  const codeLocationOptions = isCloudProject
+    ? Array.from(new Set(
+        (['schedule', 'job', 'sensor', 'asset_check', 'freshness_policy'] as const)
+          .flatMap((c) => getRawMergedPrimitives(c))
+          .map(primitiveCodeLocation)
+          .filter((loc): loc is string => !!loc)
+      )).sort()
+    : [];
 
   // When a badge is clicked in the asset graph, switch to the right category
   // and open the details modal for that primitive.
@@ -276,6 +310,11 @@ export function PrimitivesManager({
                   {!primitive.isManaged && (
                     <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-gray-100 text-gray-600">
                       Discovered
+                    </span>
+                  )}
+                  {isCloud && primitiveCodeLocation(primitive) && (
+                    <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-blue-50 text-blue-700 border border-blue-200">
+                      {primitiveCodeLocation(primitive)}
                     </span>
                   )}
                 </div>
@@ -422,7 +461,20 @@ export function PrimitivesManager({
             );
           })}
         </Tabs.List>
-          <div className="flex items-center gap-1 pr-3">
+          <div className="flex items-center gap-2 pr-3">
+            {isCloudProject && codeLocationOptions.length > 1 && (
+              <select
+                value={codeLocationFilter}
+                onChange={(e) => setCodeLocationFilter(e.target.value)}
+                className="pl-2 pr-6 py-1.5 text-xs border border-gray-300 rounded bg-white text-gray-700"
+                title="Filter by code location"
+              >
+                <option value="">All code locations</option>
+                {codeLocationOptions.map((loc) => (
+                  <option key={loc} value={loc}>{loc}</option>
+                ))}
+              </select>
+            )}
             {!(currentProject as any)?.is_dagster_plus && (
               <button
                 onClick={() => onNewPrimitive?.(activeTab)}
