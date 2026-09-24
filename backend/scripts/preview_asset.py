@@ -655,6 +655,20 @@ def main():
         definitions_module = importlib.import_module(f"{project_module}.definitions")
         defs = definitions_module.defs
 
+        # Modern dg/component-based projects commonly export `defs` built
+        # with the @definitions decorator (e.g. `@definitions\ndef defs():
+        # return load_from_defs_folder(...)`), which wraps the real
+        # Definitions in a LazyDefinitions -- callable, not the Definitions
+        # object itself, so `hasattr(defs, 'assets')` below silently found
+        # nothing for every asset. Confirmed empty for definitions.py using
+        # exactly this pattern (returns dagster.components.definitions.
+        # LazyDefinitions(load_fn=..., has_context_arg=False)). Calling it
+        # (only ever true for the LazyDefinitions wrapper, never a real
+        # Definitions -- that's not callable) resolves it the same way `dg`
+        # itself does.
+        if callable(defs):
+            defs = defs()
+
         # Find the asset by key
         all_assets = []
         if hasattr(defs, 'assets') and defs.assets:
