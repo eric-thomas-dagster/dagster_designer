@@ -637,6 +637,20 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
     }
   }, [onNodesChangeRaw]);
   const [edges, setEdges, onEdgesChange] = useEdgesState([]);
+  // Always-current mirror of `edges`, read by arrangeGroups instead of the
+  // `edges` closure variable directly. The auto-arrange-on-load effect below
+  // calls arrangeGroups from inside a setTimeout captured at effect-run
+  // time -- that's the SAME render where setEdges(flowEdges) was just
+  // called, so the closure still holds the PREVIOUS edges (often [], from
+  // before this project's data loaded), not the ones just set. That raced
+  // every group/asset down to "no edges found," which degrades the group
+  // layout to one single column stacked alphabetically -- confirmed live,
+  // exactly the "everything reads top-to-bottom instead of left-to-right"
+  // symptom the user hit on a real imported project. Reading through a ref
+  // instead means arrangeGroups always sees the latest edges regardless of
+  // which render's closure actually invoked it.
+  const edgesRef = useRef(edges);
+  edgesRef.current = edges;
   const [selectedAssets, setSelectedAssets] = useState<string[]>([]);
   const [isMaterializing, setIsMaterializing] = useState(false);
   const [, setSchemasLoaded] = useState(false);
@@ -1266,7 +1280,7 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
     //      cross-group edges (source group → target group). Place groups in
     //      columns by layer, rows by order within layer.
     const currentNodes = getNodes();
-    const currentEdges = edges;
+    const currentEdges = edgesRef.current;
 
     const NODE_W = 220;
     const NODE_H = 100;
@@ -1505,7 +1519,10 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
     setNodes((nds) =>
       nds.map((n) => (finalPos.has(n.id) ? { ...n, position: finalPos.get(n.id)! } : n)),
     );
-  }, [setNodes, getNodes, edges]);
+    // No `edges` dependency here on purpose -- reads edgesRef.current instead
+    // (see its declaration) specifically so this function is never stale
+    // regardless of which render's closure ends up calling it.
+  }, [setNodes, getNodes]);
 
   // Auto-regenerate assets if project has components but no assets
   // Only triggers if dependencies are installed to avoid premature regeneration
