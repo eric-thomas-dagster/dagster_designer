@@ -31,13 +31,14 @@ import { DraftsPanel } from './components/DraftsPanel';
 import { useDrafts } from './hooks/useDrafts';
 import { NotificationHost, notify, confirmDialog } from './components/Notifications';
 import { SettingsHost, openSettings } from './components/SettingsDialog';
+import { PreferencesHost, openPreferences } from './components/PreferencesDialog';
 import { useProjectStore } from './hooks/useProject';
 import { useRunNotifications } from './hooks/useRunNotifications';
 import { setActiveTabGlobal } from './services/activeTab';
 import { onMenuAction, onQuitRequested, confirmQuit, openExternalUrl, getPlatform, isTauri } from './services/tauri';
 import { WindowsCaptionButtons } from './components/WindowsCaptionButtons';
 import { hasUnsavedChanges } from './hooks/useUnsavedChanges';
-import { Network, FileCode, Zap, Package, ExternalLink, Settings, Workflow, ChevronDown, Skull, AlertTriangle, X, Loader2, CheckCircle, XCircle, PanelLeftClose, PanelLeft, Clock, Play, Radar, Timer, Download, Database, ShieldCheck, Cloud, Bell, BarChart3 } from 'lucide-react';
+import { Network, FileCode, Zap, Package, ExternalLink, Settings, SlidersHorizontal, Workflow, ChevronDown, Skull, AlertTriangle, X, Loader2, CheckCircle, XCircle, PanelLeftClose, PanelLeft, Clock, Play, Radar, Timer, Download, Database, ShieldCheck, Cloud, Bell, BarChart3 } from 'lucide-react';
 import { IngestionsPanel } from './components/IngestionsPanel';
 import { InsightsPanel } from './components/InsightsPanel';
 import { DbtPanel } from './components/DbtPanel';
@@ -1116,9 +1117,22 @@ function App() {
             >
               {navCollapsed ? <PanelLeft className="w-4 h-4" /> : <PanelLeftClose className="w-4 h-4" />}
             </button>
-            {/* On macOS this duplicates the native Preferences menu item;
-                on Windows/Linux (no menu bar) it's the only way in, so it
-                lives here unconditionally rather than being Windows-only. */}
+            {/* On macOS these duplicate the native App menu's Settings…
+                and Preferences… items; on Windows/Linux (no menu bar)
+                they're the only way in, so they live here unconditionally
+                rather than being Windows-only. */}
+            <button
+              onClick={() => openPreferences()}
+              className={`p-1.5 rounded transition-colors ${
+                isTauri
+                  ? 'text-gray-500 hover:text-gray-900 hover:bg-black/5 dark:text-white/50 dark:hover:text-white dark:hover:bg-white/5'
+                  : 'text-white/50 hover:text-white hover:bg-white/5'
+              }`}
+              title="Preferences"
+              aria-label="Preferences"
+            >
+              <SlidersHorizontal className="w-4 h-4" />
+            </button>
             <button
               onClick={() => openSettings()}
               className={`p-1.5 rounded transition-colors ${
@@ -2183,6 +2197,7 @@ function App() {
 
       <NotificationHost />
       <SettingsHost />
+      <PreferencesHost />
     </div>
   );
 }

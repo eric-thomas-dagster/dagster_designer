@@ -8,6 +8,7 @@ import { Launchpad } from './Launchpad';
 import { notify, confirmDialog } from './Notifications';
 import { onMenuAction, isTauri, pickDirectory } from '@/services/tauri';
 import { openSettings } from './SettingsDialog';
+import { openPreferences } from './PreferencesDialog';
 import {
   FolderOpen,
   Plus,
@@ -98,6 +99,9 @@ export function ProjectManager() {
     const unlistenPromise = onMenuAction((id) => {
       switch (id) {
         case 'app:preferences':
+          openPreferences();
+          break;
+        case 'app:settings':
           openSettings();
           break;
         case 'project:new':
