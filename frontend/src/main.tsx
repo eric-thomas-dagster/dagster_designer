@@ -3,6 +3,15 @@ import ReactDOM from 'react-dom/client';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import App from './App';
 import { isTauri } from './services/tauri';
+// Self-hosted rather than index.css's old `@import url(fonts.googleapis.com/...)`
+// -- a desktop app's own text shouldn't silently fall back to a generic
+// system font just because a live network fetch to Google Fonts was slow,
+// blocked, or failed (corporate network, timing, offline), which reads as
+// "dated" for reasons that have nothing to do with the actual UI design.
+import '@fontsource/inter/400.css';
+import '@fontsource/inter/500.css';
+import '@fontsource/inter/600.css';
+import '@fontsource/inter/700.css';
 import './index.css';
 
 // Marks <html> so index.css can drop body's opaque background only in the
