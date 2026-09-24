@@ -16,6 +16,9 @@ import { usePageActions } from '@/hooks/usePageActions';
 import { classifyStatus, statusTextClass } from '@/lib/status';
 import { useGroupByCodeLocation } from '@/hooks/useGroupByCodeLocation';
 import { GroupByLocationToggle } from './GroupByLocationToggle';
+import { SortableTh, nextSortState } from './SortableTh';
+
+type MonitorSortColumn = 'label' | 'kind' | 'status' | 'source';
 
 type Monitor = Awaited<ReturnType<typeof projectsApi.listMonitors>>['monitors'][number];
 type Status = 'passing' | 'failing' | 'warn' | 'never_run';
@@ -65,6 +68,13 @@ export function MonitorsPanel({ onOpenFile, onOpenRun }: MonitorsPanelProps) {
   const [assetFilter, setAssetFilter] = useState<string>('all');
   const [locationFilter, setLocationFilter] = useState<string>('all');
   const [groupByLocationPref, setGroupByLocationPref] = useGroupByCodeLocation();
+  const [sortColumn, setSortColumn] = useState<MonitorSortColumn | null>(null);
+  const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('asc');
+  const toggleSort = (col: MonitorSortColumn) => {
+    const next = nextSortState(sortColumn, sortDirection, col);
+    setSortColumn(next.column);
+    setSortDirection(next.direction);
+  };
   const [selected, setSelected] = useState<Monitor | null>(null);
   const [showAddMonitor, setShowAddMonitor] = useState(false);
   const [showGenerate, setShowGenerate] = useState(false);
@@ -116,12 +126,34 @@ export function MonitorsPanel({ onOpenFile, onOpenRun }: MonitorsPanelProps) {
     }
     return true;
   });
+  // Undefined (the default) leaves the backend's failing-first ordering
+  // alone; clicking a header overrides it until cleared by clicking back
+  // to asc on the same column twice, matching every other sortable table.
+  const STATUS_SORT_RANK: Record<Status, number> = { failing: 0, warn: 1, passing: 2, never_run: 3 };
+  const sorted = useMemo(() => {
+    if (!sortColumn) return filtered;
+    const dir = sortDirection === 'asc' ? 1 : -1;
+    const arr = filtered.slice();
+    arr.sort((a, b) => {
+      let cmp = 0;
+      switch (sortColumn) {
+        case 'label': cmp = a.label.localeCompare(b.label); break;
+        case 'kind': cmp = KIND_META[a.kind].label.localeCompare(KIND_META[b.kind].label); break;
+        case 'status': cmp = STATUS_SORT_RANK[bucket(a)] - STATUS_SORT_RANK[bucket(b)]; break;
+        case 'source': cmp = (a.source_project ?? '').localeCompare(b.source_project ?? ''); break;
+      }
+      return cmp * dir;
+    });
+    return arr;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filtered, sortColumn, sortDirection]);
+
   const groupByLocation = isCloud && groupByLocationPref && locationFilter === 'all' && locationOptions.length > 1;
   const rowGroups: Array<{ location: string | null; rows: Monitor[] }> = groupByLocation
     ? locationOptions
-        .map((loc) => ({ location: loc, rows: filtered.filter((m) => m.code_location === loc) }))
+        .map((loc) => ({ location: loc, rows: sorted.filter((m) => m.code_location === loc) }))
         .filter((g) => g.rows.length > 0)
-    : [{ location: null, rows: filtered }];
+    : [{ location: null, rows: sorted }];
 
   usePageActions('Monitors', 'monitors', [
     { id: 'refresh', label: 'Refresh', accelerator: 'CmdOrCtrl+R', handler: refresh },
@@ -314,12 +346,12 @@ export function MonitorsPanel({ onOpenFile, onOpenRun }: MonitorsPanelProps) {
                 <thead className="bg-gray-50 border-b border-gray-100">
                   <tr>
                     <th className="text-left px-4 py-2 text-xs font-medium text-gray-700 uppercase tracking-wider w-8"></th>
-                    <th className="text-left px-2 py-2 text-xs font-medium text-gray-700 uppercase tracking-wider">Monitor</th>
+                    <SortableTh label="Monitor" col="label" sortColumn={sortColumn} sortDirection={sortDirection} onSort={toggleSort} />
                     <th className="text-left px-4 py-2 text-xs font-medium text-gray-700 uppercase tracking-wider">Target</th>
-                    <th className="text-left px-4 py-2 text-xs font-medium text-gray-700 uppercase tracking-wider">Kind</th>
-                    <th className="text-left px-4 py-2 text-xs font-medium text-gray-700 uppercase tracking-wider">Status</th>
+                    <SortableTh label="Kind" col="kind" sortColumn={sortColumn} sortDirection={sortDirection} onSort={toggleSort} />
+                    <SortableTh label="Status" col="status" sortColumn={sortColumn} sortDirection={sortDirection} onSort={toggleSort} />
                     <th className="text-left px-4 py-2 text-xs font-medium text-gray-700 uppercase tracking-wider">Trend</th>
-                    <th className="text-left px-4 py-2 text-xs font-medium text-gray-700 uppercase tracking-wider">Source</th>
+                    <SortableTh label="Source" col="source" sortColumn={sortColumn} sortDirection={sortDirection} onSort={toggleSort} />
                   </tr>
                 </thead>
                 <tbody>

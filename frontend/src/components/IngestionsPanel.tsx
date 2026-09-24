@@ -1,6 +1,7 @@
 import { Fragment, useEffect, useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { Download, Cloud, Database, FileText, Globe, Sparkles, Boxes, CheckCircle2, AlertTriangle, Play, Settings, Activity, TrendingUp, Loader2, XCircle, Layers, CalendarClock, Clock, X, Tag, Lock, Radar, ChevronUp, ChevronDown, ChevronsUpDown } from 'lucide-react';
+import { Download, Cloud, Database, FileText, Globe, Sparkles, Boxes, CheckCircle2, AlertTriangle, Play, Settings, Activity, TrendingUp, Loader2, XCircle, Layers, CalendarClock, Clock, X, Tag, Lock, Radar } from 'lucide-react';
+import { SortableTh } from './SortableTh';
 import { useProjectStore } from '@/hooks/useProject';
 import { assetsApi, projectsApi, partitionsApi, type IngestionEvent, type BackfillRequest } from '@/services/api';
 import { AiAssistantPanel } from './AiAssistantPanel';
@@ -17,34 +18,6 @@ interface IngestionsPanelProps {
 }
 
 type SortColumn = 'name' | 'kind' | 'cadence' | 'freshness' | 'status';
-
-/** Clickable, sortable column header — click toggles asc/desc on that
- *  column (resetting to asc when switching to a different one). */
-function SortableTh({ label, col, sortColumn, sortDirection, onSort }: {
-  label: string;
-  col: SortColumn;
-  sortColumn: SortColumn | null;
-  sortDirection: 'asc' | 'desc';
-  onSort: (col: SortColumn) => void;
-}) {
-  const active = sortColumn === col;
-  return (
-    <th className="text-left px-4 py-2 text-xs font-medium text-gray-700 uppercase tracking-wider">
-      <button
-        onClick={() => onSort(col)}
-        className={`inline-flex items-center gap-1 hover:text-gray-900 ${active ? 'text-gray-900' : ''}`}
-        title={`Sort by ${label.toLowerCase()}`}
-      >
-        {label}
-        {active ? (
-          sortDirection === 'asc' ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />
-        ) : (
-          <ChevronsUpDown className="w-3 h-3 text-gray-300" />
-        )}
-      </button>
-    </th>
-  );
-}
 
 // Same bin heuristics as AddDataDialog — keeping them local avoids a
 // cyclic dep and lets the two views drift independently if we ever want

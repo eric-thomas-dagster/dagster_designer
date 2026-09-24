@@ -40,6 +40,9 @@ import { notify } from './Notifications';
 import { AutoCoverageModal } from './AssetDetailPage';
 import { useGroupByCodeLocation } from '@/hooks/useGroupByCodeLocation';
 import { GroupByLocationToggle } from './GroupByLocationToggle';
+import { SortableTh, nextSortState } from './SortableTh';
+
+type CatalogSortColumn = 'asset_key' | 'group' | 'type' | 'deps' | 'downstream' | 'checks';
 import { useProjectStore } from '@/hooks/useProject';
 import { useIsDarkMode } from '@/hooks/useIsDarkMode';
 import { projectsApi, componentsApi, partitionsApi, API_BASE } from '@/services/api';
@@ -507,6 +510,13 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
   const [groupByLocationPref, setGroupByLocationPref] = useGroupByCodeLocation();
   const [tagFilter, setTagFilter] = useState<string>('all');
   const [ownerFilter, setOwnerFilter] = useState<string>('all');
+  const [catalogSortColumn, setCatalogSortColumn] = useState<CatalogSortColumn | null>(null);
+  const [catalogSortDirection, setCatalogSortDirection] = useState<'asc' | 'desc'>('asc');
+  const toggleCatalogSort = (col: CatalogSortColumn) => {
+    const next = nextSortState(catalogSortColumn, catalogSortDirection, col);
+    setCatalogSortColumn(next.column);
+    setCatalogSortDirection(next.direction);
+  };
   const { screenToFlowPosition, getNodes, fitView } = useReactFlow();
   // Prod / preview toggle for cloud projects. When true, drafts render
   // as "would-be-promoted" instead of "pending" — so leadership can
@@ -3157,8 +3167,42 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
         // catalog -- users go there specifically to browse the full
         // asset inventory including externals.
         const allAssets = nodes.filter((n) => n.data?.node_kind === 'asset' && matchesUserFilters(n));
-        const primaryAssets = allAssets.filter((n) => !n.data?.is_connection);
+        const unsortedPrimaryAssets = allAssets.filter((n) => !n.data?.is_connection);
         const connectionAssets = allAssets.filter((n) => !!n.data?.is_connection);
+
+        // Precomputed once (not per-comparison) so sorting by Deps/
+        // Downstream stays O(n log n) instead of O(n log n * edges).
+        const depsCountById = new Map<string, number>();
+        const downstreamCountById = new Map<string, number>();
+        for (const e of edges) {
+          downstreamCountById.set(e.source, (downstreamCountById.get(e.source) || 0) + 1);
+          depsCountById.set(e.target, (depsCountById.get(e.target) || 0) + 1);
+        }
+        const typeRank = (n: Node): number => {
+          if (n.data?.is_connection) return 3;
+          if (n.data?.is_external) return 2;
+          if (n.data?.is_observable) return 1;
+          return 0; // materializable
+        };
+        const sortAssetRows = (rows: Node[]): Node[] => {
+          if (!catalogSortColumn) return rows;
+          const dir = catalogSortDirection === 'asc' ? 1 : -1;
+          const arr = rows.slice();
+          arr.sort((a, b) => {
+            let cmp = 0;
+            switch (catalogSortColumn) {
+              case 'asset_key': cmp = String(a.data?.asset_key || '').localeCompare(String(b.data?.asset_key || '')); break;
+              case 'group': cmp = String(a.data?.group_name || '').localeCompare(String(b.data?.group_name || '')); break;
+              case 'type': cmp = typeRank(a) - typeRank(b); break;
+              case 'deps': cmp = (depsCountById.get(a.id) || 0) - (depsCountById.get(b.id) || 0); break;
+              case 'downstream': cmp = (downstreamCountById.get(a.id) || 0) - (downstreamCountById.get(b.id) || 0); break;
+              case 'checks': cmp = ((a.data?.checks || []).length) - ((b.data?.checks || []).length); break;
+            }
+            return cmp * dir;
+          });
+          return arr;
+        };
+        const primaryAssets = sortAssetRows(unsortedPrimaryAssets);
         // No location filter picked and the project actually spans more
         // than one code location -- break the primary table into one
         // section per location instead of one undifferentiated list,
@@ -3281,15 +3325,15 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
         const headerRow = (
           <thead className="bg-gray-50 border-b border-gray-100">
             <tr>
-              <th className="text-left px-4 py-2 text-xs font-medium text-gray-700 uppercase tracking-wider">Asset key</th>
-              <th className="text-left px-4 py-2 text-xs font-medium text-gray-700 uppercase tracking-wider">Group</th>
+              <SortableTh label="Asset key" col="asset_key" sortColumn={catalogSortColumn} sortDirection={catalogSortDirection} onSort={toggleCatalogSort} />
+              <SortableTh label="Group" col="group" sortColumn={catalogSortColumn} sortDirection={catalogSortDirection} onSort={toggleCatalogSort} />
               <th className="text-left px-4 py-2 text-xs font-medium text-gray-700 uppercase tracking-wider">Kinds</th>
-              <th className="text-left px-4 py-2 text-xs font-medium text-gray-700 uppercase tracking-wider" title="materializable / observable / external Dagster asset / warehouse connection scrape">Type</th>
+              <SortableTh label="Type" col="type" sortColumn={catalogSortColumn} sortDirection={catalogSortDirection} onSort={toggleCatalogSort} />
               <th className="text-left px-4 py-2 text-xs font-medium text-gray-700 uppercase tracking-wider">Owners</th>
               <th className="text-left px-4 py-2 text-xs font-medium text-gray-700 uppercase tracking-wider">Tags</th>
-              <th className="text-left px-4 py-2 text-xs font-medium text-gray-700 uppercase tracking-wider">Deps</th>
-              <th className="text-left px-4 py-2 text-xs font-medium text-gray-700 uppercase tracking-wider">Downstream</th>
-              <th className="text-left px-4 py-2 text-xs font-medium text-gray-700 uppercase tracking-wider">Checks</th>
+              <SortableTh label="Deps" col="deps" sortColumn={catalogSortColumn} sortDirection={catalogSortDirection} onSort={toggleCatalogSort} />
+              <SortableTh label="Downstream" col="downstream" sortColumn={catalogSortColumn} sortDirection={catalogSortDirection} onSort={toggleCatalogSort} />
+              <SortableTh label="Checks" col="checks" sortColumn={catalogSortColumn} sortDirection={catalogSortDirection} onSort={toggleCatalogSort} />
               <th className="text-left px-4 py-2 text-xs font-medium text-gray-700 uppercase tracking-wider">Description</th>
               <th className="text-right px-2 py-2 text-xs font-medium text-gray-700 uppercase tracking-wider">Actions</th>
             </tr>
@@ -3331,7 +3375,7 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
               <ConnectionSection
                 key={src}
                 source={src}
-                assets={connectionsBySource[src]}
+                assets={sortAssetRows(connectionsBySource[src])}
                 renderRow={renderRow}
                 headerRow={headerRow}
               />
