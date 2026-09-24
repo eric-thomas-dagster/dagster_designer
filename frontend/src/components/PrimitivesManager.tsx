@@ -296,9 +296,7 @@ export function PrimitivesManager({
       );
     }
 
-    return (
-      <div className="divide-y divide-gray-200">
-        {primitives.map((primitive) => (
+    const renderRow = (primitive: PrimitiveItem & { isManaged: boolean }) => (
           <div
             key={primitive.name}
             className="p-4 hover:bg-gray-50 transition-colors"
@@ -413,7 +411,41 @@ export function PrimitivesManager({
               </div>
             </div>
           </div>
-        ))}
+    );
+
+    // No location filter applied and the project actually has more than
+    // one code location -- break the flat list into one section (table)
+    // per code location instead, so users don't have to filter one at a
+    // time just to see what's where. Filtering still collapses back to a
+    // single flat list since there's nothing left to group by then.
+    if (isCloud && !codeLocationFilter && codeLocationOptions.length > 1) {
+      const groups = new Map<string, Array<PrimitiveItem & { isManaged: boolean }>>();
+      for (const p of primitives) {
+        const loc = primitiveCodeLocation(p) || 'Unknown location';
+        if (!groups.has(loc)) groups.set(loc, []);
+        groups.get(loc)!.push(p);
+      }
+      const sortedLocs = Array.from(groups.keys()).sort();
+      return (
+        <div className="divide-y-8 divide-gray-100">
+          {sortedLocs.map((loc) => (
+            <div key={loc}>
+              <div className="px-4 py-2 bg-gray-50 border-b border-gray-200 flex items-center gap-2">
+                <h4 className="text-xs font-semibold text-gray-700">{loc}</h4>
+                <span className="text-[10px] text-gray-400">{groups.get(loc)!.length}</span>
+              </div>
+              <div className="divide-y divide-gray-200">
+                {groups.get(loc)!.map(renderRow)}
+              </div>
+            </div>
+          ))}
+        </div>
+      );
+    }
+
+    return (
+      <div className="divide-y divide-gray-200">
+        {primitives.map(renderRow)}
       </div>
     );
   };

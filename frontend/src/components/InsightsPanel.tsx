@@ -216,7 +216,33 @@ function TopJobsCard({
     staleTime: 60_000,
   });
   const allRows = data?.rows || [];
-  const rows = (codeLocationFilter ? allRows.filter((r) => r.code_location === codeLocationFilter) : allRows).slice(0, 5);
+  const filteredRows = codeLocationFilter ? allRows.filter((r) => r.code_location === codeLocationFilter) : allRows;
+  const distinctLocs = new Set(allRows.map((r) => r.code_location).filter(Boolean));
+  // No location filter picked and rows actually span more than one
+  // location -- break the single top-5 ranking into one small table per
+  // location instead, so a location with real activity doesn't get
+  // crowded out of a global top-5 by a noisier one.
+  const grouped = !codeLocationFilter && distinctLocs.size > 1;
+
+  const renderRows = (rows: typeof allRows) => (
+    <ul className="divide-y divide-gray-50">
+      {rows.map((r, i) => (
+        <li
+          key={r.job_name}
+          onClick={() => onOpenJob(r.job_name)}
+          className="flex items-center gap-2 px-4 py-2 hover:bg-gray-50/70 cursor-pointer"
+          title={`Open ${r.job_name} in Automation`}
+        >
+          <span className="text-[10px] text-gray-400 font-mono w-4 flex-shrink-0">{i + 1}</span>
+          <span className="flex-1 min-w-0">
+            <div className="font-mono text-xs text-gray-800 truncate">{r.job_name}</div>
+            {!grouped && r.code_location && <div className="text-[10px] text-gray-400 truncate">{r.code_location}</div>}
+          </span>
+          <span className="text-xs text-gray-600 tabular-nums flex-shrink-0">{formatInsightValue(r.value, data!.unit)}</span>
+        </li>
+      ))}
+    </ul>
+  );
 
   return (
     <div className="bg-white border border-gray-200 rounded-lg overflow-hidden">
@@ -225,27 +251,22 @@ function TopJobsCard({
       </div>
       {isLoading ? (
         <div className="p-6 text-center text-gray-400"><Loader2 className="w-4 h-4 mx-auto animate-spin" /></div>
-      ) : rows.length === 0 ? (
+      ) : filteredRows.length === 0 ? (
         <p className="text-xs text-gray-400 italic p-4 text-center">No data for the last {days} days.</p>
-      ) : (
-        <ul className="divide-y divide-gray-50">
-          {rows.map((r, i) => (
-            <li
-              key={r.job_name}
-              onClick={() => onOpenJob(r.job_name)}
-              className="flex items-center gap-2 px-4 py-2 hover:bg-gray-50/70 cursor-pointer"
-              title={`Open ${r.job_name} in Automation`}
-            >
-              <span className="text-[10px] text-gray-400 font-mono w-4 flex-shrink-0">{i + 1}</span>
-              <span className="flex-1 min-w-0">
-                <div className="font-mono text-xs text-gray-800 truncate">{r.job_name}</div>
-                {r.code_location && <div className="text-[10px] text-gray-400 truncate">{r.code_location}</div>}
-              </span>
-              <span className="text-xs text-gray-600 tabular-nums flex-shrink-0">{formatInsightValue(r.value, data!.unit)}</span>
-            </li>
-          ))}
-        </ul>
-      )}
+      ) : grouped ? (
+        <div className="divide-y-4 divide-gray-50">
+          {Array.from(distinctLocs).sort().map((loc) => {
+            const locRows = filteredRows.filter((r) => r.code_location === loc).slice(0, 3);
+            if (locRows.length === 0) return null;
+            return (
+              <div key={loc}>
+                <div className="px-4 py-1 bg-gray-50 text-[10px] font-medium text-gray-500 truncate">{loc}</div>
+                {renderRows(locRows)}
+              </div>
+            );
+          })}
+        </div>
+      ) : renderRows(filteredRows.slice(0, 5))}
     </div>
   );
 }
@@ -267,9 +288,33 @@ function TopAssetsCard({
     staleTime: 60_000,
   });
   const allRows = data?.rows || [];
-  const rows = (
-    codeLocationFilter ? allRows.filter((r) => assetCodeLocations.get(r.asset_key) === codeLocationFilter) : allRows
-  ).slice(0, 5);
+  const filteredRows = codeLocationFilter
+    ? allRows.filter((r) => assetCodeLocations.get(r.asset_key) === codeLocationFilter)
+    : allRows;
+  const distinctLocs = new Set(allRows.map((r) => assetCodeLocations.get(r.asset_key)).filter(Boolean) as string[]);
+  const grouped = !codeLocationFilter && distinctLocs.size > 1;
+
+  const renderRows = (rows: typeof allRows) => (
+    <ul className="divide-y divide-gray-50">
+      {rows.map((r, i) => (
+        <li
+          key={r.asset_key}
+          onClick={() => onOpenAsset(r.asset_key)}
+          className="flex items-center gap-2 px-4 py-2 hover:bg-gray-50/70 cursor-pointer"
+          title={`Open ${r.asset_key}`}
+        >
+          <span className="text-[10px] text-gray-400 font-mono w-4 flex-shrink-0">{i + 1}</span>
+          <span className="flex-1 min-w-0">
+            <div className="font-mono text-xs text-gray-800 truncate">{r.asset_key}</div>
+            {!grouped && assetCodeLocations.get(r.asset_key) && (
+              <div className="text-[10px] text-gray-400 truncate">{assetCodeLocations.get(r.asset_key)}</div>
+            )}
+          </span>
+          <span className="text-xs text-gray-600 tabular-nums flex-shrink-0">{formatInsightValue(r.value, data!.unit)}</span>
+        </li>
+      ))}
+    </ul>
+  );
 
   return (
     <div className="bg-white border border-gray-200 rounded-lg overflow-hidden">
@@ -278,29 +323,22 @@ function TopAssetsCard({
       </div>
       {isLoading ? (
         <div className="p-6 text-center text-gray-400"><Loader2 className="w-4 h-4 mx-auto animate-spin" /></div>
-      ) : rows.length === 0 ? (
+      ) : filteredRows.length === 0 ? (
         <p className="text-xs text-gray-400 italic p-4 text-center">No data for the last {days} days.</p>
-      ) : (
-        <ul className="divide-y divide-gray-50">
-          {rows.map((r, i) => (
-            <li
-              key={r.asset_key}
-              onClick={() => onOpenAsset(r.asset_key)}
-              className="flex items-center gap-2 px-4 py-2 hover:bg-gray-50/70 cursor-pointer"
-              title={`Open ${r.asset_key}`}
-            >
-              <span className="text-[10px] text-gray-400 font-mono w-4 flex-shrink-0">{i + 1}</span>
-              <span className="flex-1 min-w-0">
-                <div className="font-mono text-xs text-gray-800 truncate">{r.asset_key}</div>
-                {assetCodeLocations.get(r.asset_key) && (
-                  <div className="text-[10px] text-gray-400 truncate">{assetCodeLocations.get(r.asset_key)}</div>
-                )}
-              </span>
-              <span className="text-xs text-gray-600 tabular-nums flex-shrink-0">{formatInsightValue(r.value, data!.unit)}</span>
-            </li>
-          ))}
-        </ul>
-      )}
+      ) : grouped ? (
+        <div className="divide-y-4 divide-gray-50">
+          {Array.from(distinctLocs).sort().map((loc) => {
+            const locRows = filteredRows.filter((r) => assetCodeLocations.get(r.asset_key) === loc).slice(0, 3);
+            if (locRows.length === 0) return null;
+            return (
+              <div key={loc}>
+                <div className="px-4 py-1 bg-gray-50 text-[10px] font-medium text-gray-500 truncate">{loc}</div>
+                {renderRows(locRows)}
+              </div>
+            );
+          })}
+        </div>
+      ) : renderRows(filteredRows.slice(0, 5))}
     </div>
   );
 }
