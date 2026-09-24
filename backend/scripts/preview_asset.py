@@ -908,6 +908,41 @@ def main():
             try:
                 result = func(context, **kwargs)
             except Exception as e:
+                # This mock context never has a partition key set (see
+                # create_mock_context -- has_partition_key = False,
+                # partition_key = None), because preview doesn't support
+                # picking one yet (same limitation already surfaced with a
+                # friendly message elsewhere in this file, for dbt/multi-asset
+                # groups with no materialized data). A partitioned asset's OWN
+                # code commonly derives something from context.partition_key
+                # without expecting it to be None outside a real partitioned
+                # run, and crashes with a raw, unhelpful Python error instead
+                # -- confirmed live: an AttributeError several stack frames
+                # deep inside a component's demo-data generator
+                # ("'NoneType' object has no attribute 'replace'" from
+                # `event_date.replace(...)`, event_date derived from the
+                # missing partition key). Recognizable exception types
+                # (Attribute/Type/Key -- the shapes a None-where-a-value-was-
+                # expected bug takes) on a partitioned asset get the same
+                # actionable hint instead of that raw traceback.
+                partitions_def = getattr(asset_def, 'partitions_def', None) if asset_def else None
+                if (
+                    partitions_def is not None
+                    and not getattr(context, 'has_partition_key', False)
+                    and isinstance(e, (AttributeError, TypeError, KeyError))
+                ):
+                    print(json.dumps({
+                        "success": False,
+                        "error": (
+                            f"This asset is PARTITIONED and failed while running without a "
+                            f"partition key ({type(e).__name__}: {e}) -- Designer's preview "
+                            f"panel doesn't yet support picking one. Materialize a partition "
+                            f"via Dagster's UI (`dagster dev`) or CLI, then re-open the preview "
+                            f"to see that partition's data."
+                        ),
+                    }))
+                    sys.exit(1)
+
                 # If it's a pandas UndefinedVariableError, add helpful context about available columns.
                 # pandas is NOT a hard dependency of this script (or of every project it
                 # runs against) -- a project with no pandas dependency at all (e.g. one
