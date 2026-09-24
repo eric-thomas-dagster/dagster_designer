@@ -1406,6 +1406,7 @@ function App() {
                       <ProjectComponentsList
                         onEditComponent={setEditingComponent}
                         onDeleteComponent={handleDeleteComponent}
+                        onOpenFile={handleOpenFile}
                       />
                     </div>
                   </div>
