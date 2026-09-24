@@ -2241,9 +2241,19 @@ if custom_lineage_edges:
         print(f"\n[_generate_component_yaml_files] ====== START ======", flush=True)
         sys.stdout.flush()
 
-        # Skip YAML generation for imported Dagster projects - they have their own structure
-        if project.dagster_package_subdir:
-            print(f"⏭️  Skipping component YAML generation for imported Dagster project (code in {project.dagster_package_subdir}/)")
+        # Skip YAML generation for imported Dagster projects - they have their
+        # own structure (their own defs.yaml files, own root_module, possibly
+        # no subdir at all for a plain src-layout repo). dagster_package_subdir
+        # alone doesn't catch that last case -- it's only set when the
+        # Dagster code lives in an actual subdirectory, so a src-layout
+        # import (pyproject.toml at repo root, package under src/<name>/,
+        # subdir None) fell through to code below that assumes
+        # project.directory_name is the real module name. It never is for an
+        # imported project, so this crashed with a 500 trying to write YAML
+        # into src/<wrong-name>/defs/, which doesn't exist. Reproduced live
+        # importing eric-thomas-dagster/Yellow_Taxi_Orchestration_PoC.
+        if project.dagster_package_subdir or project.is_imported:
+            print(f"⏭️  Skipping component YAML generation for imported Dagster project" + (f" (code in {project.dagster_package_subdir}/)" if project.dagster_package_subdir else ""))
             return
 
         # First ensure component classes are available
