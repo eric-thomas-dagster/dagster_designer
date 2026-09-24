@@ -56,6 +56,26 @@ CACHE_TTL_SECONDS = 60  # Cache results for 60 seconds (increased from 10s for b
 _introspection_locks: Dict[str, asyncio.Lock] = {}
 
 
+def get_project_defs_lock(project_id: str) -> asyncio.Lock:
+    """The same per-project lock _run_dg_list_defs_async uses, exposed for
+    other subprocess-spawning endpoints (asset preview, partition info,
+    config schema, ...) that load a project's defs the same way.
+
+    A state-backed component (e.g. dagster-dbt's manifest-refresh
+    mechanism) writes to a shared on-disk cache the first time -- or
+    whenever the target changes -- defs get built for a given project. Two
+    of these subprocess calls landing concurrently (introspection refreshing
+    defs while a user clicks into an asset's preview, say) can race on that
+    same cache with no coordination between them at all, since each is an
+    independent subprocess Designer doesn't otherwise synchronize. Sharing
+    this one lock across every such call site serializes them the same way
+    introspection already serializes against itself.
+    """
+    if project_id not in _introspection_locks:
+        _introspection_locks[project_id] = asyncio.Lock()
+    return _introspection_locks[project_id]
+
+
 class AssetIntrospectionService:
     """Service for discovering assets from Dagster components."""
 

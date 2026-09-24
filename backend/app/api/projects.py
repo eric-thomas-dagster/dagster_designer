@@ -3098,21 +3098,27 @@ async def get_asset_partitions(project_id: str, asset_key: str):
         # already does this; this endpoint never did.
         env["PATH"] = f"{project_python.parent}{os.pathsep}{env.get('PATH', '')}"
 
-        result = await asyncio.to_thread(
-            subprocess.run,
-            [
-                str(project_python),
-                "-m",
-                "scripts.show_partitions",
-                project_module,
-                asset_key,
-            ],
-            cwd=Path.cwd(),  # Run from backend directory
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
+        # Serialize against any other subprocess call loading this same
+        # project's defs -- see the identical lock in assets.py's preview
+        # endpoint for why (shared on-disk state-backed-component cache,
+        # no coordination between separate subprocess invocations otherwise).
+        from ..services.asset_introspection_service import get_project_defs_lock
+        async with get_project_defs_lock(project_id):
+            result = await asyncio.to_thread(
+                subprocess.run,
+                [
+                    str(project_python),
+                    "-m",
+                    "scripts.show_partitions",
+                    project_module,
+                    asset_key,
+                ],
+                cwd=Path.cwd(),  # Run from backend directory
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
 
         if result.returncode != 0:
             # Try to parse error from stderr
@@ -3205,21 +3211,27 @@ async def get_asset_config_schema(project_id: str, asset_key: str):
         # already does this; this endpoint never did.
         env["PATH"] = f"{project_python.parent}{os.pathsep}{env.get('PATH', '')}"
 
-        result = await asyncio.to_thread(
-            subprocess.run,
-            [
-                str(project_python),
-                "-m",
-                "scripts.show_config",
-                project_module,
-                asset_key,
-            ],
-            cwd=Path.cwd(),  # Run from backend directory
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
+        # Serialize against any other subprocess call loading this same
+        # project's defs -- see the identical lock in assets.py's preview
+        # endpoint for why (shared on-disk state-backed-component cache,
+        # no coordination between separate subprocess invocations otherwise).
+        from ..services.asset_introspection_service import get_project_defs_lock
+        async with get_project_defs_lock(project_id):
+            result = await asyncio.to_thread(
+                subprocess.run,
+                [
+                    str(project_python),
+                    "-m",
+                    "scripts.show_config",
+                    project_module,
+                    asset_key,
+                ],
+                cwd=Path.cwd(),  # Run from backend directory
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
 
         if result.returncode != 0:
             # Try to parse error from stderr

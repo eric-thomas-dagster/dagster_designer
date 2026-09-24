@@ -1046,22 +1046,29 @@ async def preview_asset_data(
     env["PATH"] = f"{project_python.parent}{os.pathsep}{env.get('PATH', '')}"
 
     try:
-        # Run the preview script in the project's Python environment
-        result = subprocess.run(
-            [
-                str(project_python),
-                "-m",
-                "scripts.preview_asset",
-                project_module,
-                asset_key,
-                str(sample_limit),
-            ],
-            cwd=Path.cwd(),  # Run from backend directory
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=60,  # 60 second timeout for asset execution
-        )
+        # Serialize against any other subprocess call loading this same
+        # project's defs (asset introspection, partition info, config
+        # schema, ...) -- a state-backed dbt component's manifest refresh
+        # writes to a shared on-disk cache, and two of these landing
+        # concurrently can race on it with no coordination otherwise.
+        from ..services.asset_introspection_service import get_project_defs_lock
+        async with get_project_defs_lock(project_id):
+            # Run the preview script in the project's Python environment
+            result = subprocess.run(
+                [
+                    str(project_python),
+                    "-m",
+                    "scripts.preview_asset",
+                    project_module,
+                    asset_key,
+                    str(sample_limit),
+                ],
+                cwd=Path.cwd(),  # Run from backend directory
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=60,  # 60 second timeout for asset execution
+            )
 
         if result.returncode != 0:
             # Try to parse error from output
