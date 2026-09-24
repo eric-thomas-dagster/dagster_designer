@@ -129,7 +129,7 @@ export function DagsterCloudChip({ projectId }: DagsterCloudChipProps) {
   const label = isLoading
     ? '…'
     : !config?.exists
-    ? 'No code location'
+    ? 'No location'
     : config.locations.length === 1
     ? config.locations[0].location_name || '(unnamed)'
     : `${config.locations.length} locations`;
@@ -139,7 +139,7 @@ export function DagsterCloudChip({ projectId }: DagsterCloudChipProps) {
       <button
         onClick={() => openEditor()}
         disabled={isLoading}
-        className="flex items-center gap-1.5 px-2.5 py-1 text-xs rounded-md border border-gray-200 bg-white text-gray-700 hover:border-primary/40 hover:bg-primary/5 disabled:opacity-50"
+        className="flex items-center gap-1.5 px-2.5 py-1 text-xs rounded-md border border-gray-200 bg-white text-gray-700 hover:border-primary/40 hover:bg-primary/5 disabled:opacity-50 whitespace-nowrap"
         title={
           !config?.exists
             ? 'No dagster_cloud.yaml yet — click to open the editor. Nothing is written until you hit Save.'

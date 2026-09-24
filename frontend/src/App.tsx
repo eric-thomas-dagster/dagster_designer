@@ -1082,10 +1082,10 @@ function App() {
                 {isTauri && (
                   <button
                     onClick={() => handleOpenInVSCode()}
-                    className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium border border-gray-200 bg-white text-gray-700 hover:bg-gray-50"
+                    className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium border border-gray-200 bg-white text-gray-700 hover:bg-gray-50 whitespace-nowrap"
                     title="Open this project in VS Code"
                   >
-                    Open in VS Code
+                    VS Code
                   </button>
                 )}
                 {!(currentProject as any)?.is_dagster_plus && (
@@ -1094,17 +1094,17 @@ function App() {
                     <DagsterCloudChip projectId={currentProject.id} />
                     <button
                       onClick={() => setHeaderGitCommitOpen(true)}
-                      className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium border border-gray-200 bg-white text-gray-700 hover:bg-gray-50"
+                      className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium border border-gray-200 bg-white text-gray-700 hover:bg-gray-50 whitespace-nowrap"
                       title="Commit and push this project to GitHub"
                     >
-                      Push to GitHub
+                      Push
                     </button>
                     <button
                       onClick={() => setLocalPublishOpen(true)}
-                      className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium border border-amber-200 bg-amber-50 text-amber-800 hover:bg-amber-100"
+                      className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium border border-amber-200 bg-amber-50 text-amber-800 hover:bg-amber-100 whitespace-nowrap"
                       title="Publish this project directly to a Dagster+ Serverless deployment, skipping git"
                     >
-                      Publish to Dagster+
+                      Publish
                     </button>
                   </>
                 )}
@@ -1122,7 +1122,7 @@ function App() {
                     <DropdownMenu.Root>
                       <DropdownMenu.Trigger asChild>
                         <button
-                          className="ml-1 inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium border border-indigo-200 bg-indigo-50 text-indigo-800 hover:bg-indigo-100"
+                          className="ml-1 inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium border border-indigo-200 bg-indigo-50 text-indigo-800 hover:bg-indigo-100 whitespace-nowrap"
                           title="Author a new component draft"
                         >
                           + Add
@@ -1147,7 +1147,7 @@ function App() {
                     </DropdownMenu.Root>
                     <button
                       onClick={() => setDraftsPanelOpen(true)}
-                      className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium border border-gray-200 bg-white text-gray-700 hover:bg-gray-50"
+                      className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium border border-gray-200 bg-white text-gray-700 hover:bg-gray-50 whitespace-nowrap"
                       title="View drafts pending PR promotion"
                     >
                       Drafts
@@ -1160,7 +1160,7 @@ function App() {
                     <DropdownMenu.Root>
                       <DropdownMenu.Trigger asChild>
                         <button
-                          className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium border border-gray-200 bg-white text-gray-700 hover:bg-gray-50"
+                          className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium border border-gray-200 bg-white text-gray-700 hover:bg-gray-50 whitespace-nowrap"
                           title="Land a sandbox component somewhere real"
                         >
                           Publish
@@ -1221,10 +1221,10 @@ function App() {
                 <DropdownMenu.Trigger asChild>
                   <button
                     disabled={dagsterUILoading}
-                    className="flex items-center gap-2 px-3.5 py-1.5 bg-primary text-primary-foreground text-sm font-medium rounded-md hover:bg-accent disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                    className="flex items-center gap-2 px-3.5 py-1.5 bg-primary text-primary-foreground text-sm font-medium rounded-md hover:bg-accent disabled:opacity-50 disabled:cursor-not-allowed transition-colors whitespace-nowrap"
                   >
                     <ExternalLink className="w-4 h-4" />
-                    <span>{dagsterUILoading ? 'Starting…' : 'Open Dagster UI'}</span>
+                    <span>{dagsterUILoading ? 'Starting…' : 'Dagster UI'}</span>
                     <ChevronDown className="w-3.5 h-3.5" />
                   </button>
                 </DropdownMenu.Trigger>
