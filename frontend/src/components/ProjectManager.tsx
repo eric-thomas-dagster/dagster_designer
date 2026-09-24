@@ -358,18 +358,20 @@ export function ProjectManager() {
 
     setIsRegeneratingLineage(true);
 
-    // Update asset generation status in store to show banner
-    const projectStore = useProjectStore.getState();
-    projectStore.assetGenerationStatus = 'generating';
-    projectStore.assetGenerationError = null;
+    // Update asset generation status in store to show banner. Must go
+    // through setState (not a direct mutation of getState()'s object) --
+    // see the same fix already applied to handleValidateProject's
+    // validationStatus for why: Zustand only notifies subscribers on
+    // setState, so a direct mutation changes the value but the banner
+    // keeps rendering whatever it last saw.
+    useProjectStore.setState({ assetGenerationStatus: 'generating', assetGenerationError: null });
 
     try {
       // Regenerate with layout recalculation to keep the graph beautiful
       await projectsApi.regenerateAssets(currentProject.id, true);
 
       // Update status to success immediately after API call completes
-      projectStore.assetGenerationStatus = 'success';
-      projectStore.assetGenerationError = null;
+      useProjectStore.setState({ assetGenerationStatus: 'success', assetGenerationError: null });
 
       // Reload project to get updated graph (with timeout protection)
       const loadPromise = loadProject(currentProject.id);
@@ -394,8 +396,7 @@ export function ProjectManager() {
       const errorMessage = error?.response?.data?.detail || error?.message || 'Unknown error';
 
       // Update status to error
-      projectStore.assetGenerationStatus = 'error';
-      projectStore.assetGenerationError = errorMessage;
+      useProjectStore.setState({ assetGenerationStatus: 'error', assetGenerationError: errorMessage });
 
       // Auto-dismiss error banner after 5 seconds
       setTimeout(() => {
