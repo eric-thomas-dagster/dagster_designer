@@ -487,6 +487,23 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
   // per group, edges aggregated. Auto-on for large cloud graphs
   // (>60 assets) so users see manageable structure by default.
   const [collapseToGroups, setCollapseToGroups] = useState(false);
+  // Lineage filters — apply to both graph + catalog views. Kept
+  // client-side so filtering is instant on large clouds without
+  // roundtripping the whole graph. Declared up here (rather than down
+  // with the rest of the filter UI state) so the fitView-follows-filters
+  // effect just below can depend on them without a temporal-dead-zone
+  // error referencing a const before its later declaration.
+  const [assetSearch, setAssetSearch] = useState('');
+  const [groupFilter, setGroupFilter] = useState<string>('all');
+  const [kindFilter, setKindFilter] = useState<string>('all');
+  // Same "filter by one of Dagster's own facets" idea Dagster+ applies
+  // pervasively across its own UI -- code location, tags, owner. The
+  // data was already on every node (used in free-text search and the
+  // catalog table's columns); these just add dedicated dropdowns for it,
+  // same pattern as group/kind above.
+  const [codeLocationFilter, setCodeLocationFilter] = useState<string>('all');
+  const [tagFilter, setTagFilter] = useState<string>('all');
+  const [ownerFilter, setOwnerFilter] = useState<string>('all');
   const { screenToFlowPosition, getNodes, fitView } = useReactFlow();
   // Prod / preview toggle for cloud projects. When true, drafts render
   // as "would-be-promoted" instead of "pending" — so leadership can
@@ -525,15 +542,25 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
   // locking before its neighbors' heights (and therefore its own correct
   // origin) had stabilized.
   const manuallyPositionedRef = useRef<Set<string>>(new Set());
-  // Follow the camera on expand/collapse. groupedView recomputes node
-  // positions for the WHOLE visible node set via a fresh topological
-  // layout on every toggle (not just the group that changed), so the
-  // newly-revealed assets -- and often other still-collapsed group
-  // cards -- can land anywhere, frequently outside the current
-  // viewport. Without this, clicking a group card looks like it does
-  // nothing: the click, state update, and relayout all happen
-  // correctly, the result is just off-screen. Skip the very first run
-  // (initial mount) since <ReactFlow fitView> already handles that.
+  // Follow the camera whenever a change reshapes what's visible: group
+  // expand/collapse (groupedView recomputes the WHOLE visible node set via
+  // a fresh topological layout on every toggle, not just the group that
+  // changed, so newly-revealed assets -- and often other still-collapsed
+  // group cards -- can land anywhere, frequently outside the current
+  // viewport), the global collapse-to-groups toggle, and any of the
+  // dropdown filters (group/kind/code-location/tag/owner) -- confirmed
+  // live: filtering down to one code location left the camera at
+  // whatever pan/zoom it had for the FULL graph, so the much smaller
+  // filtered result just sat there looking zoomed-out-and-empty in one
+  // corner of the viewport. Without this, a click/selection that DID
+  // work correctly looks like it did nothing, because the result is
+  // simply off-screen or tiny. Skip the very first run (initial mount)
+  // since <ReactFlow fitView> already handles that.
+  //
+  // Deliberately does NOT include assetSearch (the free-text box) --
+  // re-animating the camera on every keystroke while typing would be
+  // its own kind of jarring; that one's left to whatever the user was
+  // already looking at.
   const isFirstExpandEffect = useRef(true);
   useEffect(() => {
     if (isFirstExpandEffect.current) {
@@ -544,17 +571,16 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
       fitView({ padding: 0.2, duration: 300 });
     });
     return () => cancelAnimationFrame(raf);
-    // Deliberately depend on expandedGroups ONLY. fitView is supposed to
-    // be a stable function reference from useReactFlow() (memoized on
-    // [d3Zoom, d3Selection] internally) -- but including it here meant
-    // that if its reference ever changed for ANY reason, this effect
-    // would refire and kick off another animated fitView() call, which
-    // was contributing to the render-loop/flashing bug fixed elsewhere
-    // in this file. We only actually want this effect to run when the
-    // user expands/collapses a group, never merely because fitView's
-    // identity changed.
+    // fitView is deliberately NOT a dependency here. It's supposed to be a
+    // stable function reference from useReactFlow() (memoized on
+    // [d3Zoom, d3Selection] internally) -- but including it meant that if
+    // its reference ever changed for ANY reason, this effect would refire
+    // and kick off another animated fitView() call, which was contributing
+    // to the render-loop/flashing bug fixed elsewhere in this file. We
+    // only actually want this effect to run when one of the listed
+    // dependencies changes, never merely because fitView's identity did.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [expandedGroups]);
+  }, [expandedGroups, collapseToGroups, groupFilter, kindFilter, codeLocationFilter, tagFilter, ownerFilter]);
   // Stable callbacks so memoized GroupNode / AssetNode instances aren't
   // forced to re-render each time `groupedView` recomputes (the memo
   // creates fresh closures otherwise, defeating React.memo).
@@ -574,20 +600,6 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
       return next;
     });
   }, []);
-  // Lineage filters — apply to both graph + catalog views. Kept
-  // client-side so filtering is instant on large clouds without
-  // roundtripping the whole graph.
-  const [assetSearch, setAssetSearch] = useState('');
-  const [groupFilter, setGroupFilter] = useState<string>('all');
-  const [kindFilter, setKindFilter] = useState<string>('all');
-  // Same "filter by one of Dagster's own facets" idea Dagster+ applies
-  // pervasively across its own UI -- code location, tags, owner. The
-  // data was already on every node (used in free-text search and the
-  // catalog table's columns); these just add dedicated dropdowns for it,
-  // same pattern as group/kind above.
-  const [codeLocationFilter, setCodeLocationFilter] = useState<string>('all');
-  const [tagFilter, setTagFilter] = useState<string>('all');
-  const [ownerFilter, setOwnerFilter] = useState<string>('all');
   // View toggle — the Assets tab flips between the graph editor and
   // a searchable / filterable table (catalog). Catalog is a huge win
   // for wide cloud orgs where the graph is hard to scan.
