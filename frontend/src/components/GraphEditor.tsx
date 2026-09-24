@@ -40,7 +40,7 @@ import { notify } from './Notifications';
 import { AutoCoverageModal } from './AssetDetailPage';
 import { useProjectStore } from '@/hooks/useProject';
 import { useIsDarkMode } from '@/hooks/useIsDarkMode';
-import { projectsApi, componentsApi , API_BASE } from '@/services/api';
+import { projectsApi, componentsApi, partitionsApi, API_BASE } from '@/services/api';
 import { Play, Plus, Layers, CheckCircle, Group, Ungroup } from 'lucide-react';
 import type { GraphNode, GraphEdge, ComponentSchema } from '@/types';
 
@@ -673,6 +673,31 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
   const handleRunToHere = useCallback(
     async (assetKey: string) => {
       if (!currentProject) return;
+
+      // A partitioned asset can't be materialized without picking a
+      // partition -- `dg launch` (what materialize ultimately shells out
+      // to) rejects it outright: "Asset has partitions, but no
+      // '--partition' option was provided". Run to here never had a way to
+      // supply one (unlike the full Launchpad flow, which does), so it
+      // failed for every partitioned asset with no clear signal why.
+      // Reproduced live: an imported project where every dbt asset,
+      // including a static seed, turned out to be partitioned. Checking
+      // first and handing off to the Launchpad (already supports picking a
+      // partition) beats materializing the wrong one silently or just
+      // failing with an error easy to miss.
+      try {
+        const info = await partitionsApi.getPartitionInfo(currentProject.id, assetKey);
+        if (info.is_partitioned) {
+          notify.info(`${assetKey} is partitioned -- pick a partition to run.`);
+          setLaunchpadAssetKey(assetKey);
+          setShowLaunchpad(true);
+          return;
+        }
+      } catch {
+        // Partition-info lookup failing shouldn't block a plain run --
+        // fall through and let materialize itself surface any real error.
+      }
+
       // Flip the running flag on just this node so its Play button spins.
       setNodes((nds) =>
         nds.map((n) =>
