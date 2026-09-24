@@ -1,6 +1,6 @@
 import { Fragment, useEffect, useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { Download, Cloud, Database, FileText, Globe, Sparkles, Boxes, CheckCircle2, AlertTriangle, Play, Settings, Activity, TrendingUp, Loader2, XCircle, Layers, CalendarClock, Clock, X, Tag, Lock, Radar } from 'lucide-react';
+import { Download, Cloud, Database, FileText, Globe, Sparkles, Boxes, CheckCircle2, AlertTriangle, Play, Settings, Activity, TrendingUp, Loader2, XCircle, Layers, CalendarClock, Clock, X, Tag, Lock, Radar, ChevronUp, ChevronDown, ChevronsUpDown } from 'lucide-react';
 import { useProjectStore } from '@/hooks/useProject';
 import { assetsApi, projectsApi, partitionsApi, type IngestionEvent, type BackfillRequest } from '@/services/api';
 import { AiAssistantPanel } from './AiAssistantPanel';
@@ -14,6 +14,36 @@ import { GroupByLocationToggle } from './GroupByLocationToggle';
 interface IngestionsPanelProps {
   onAddDataSource: (componentType: string) => void;
   onEditComponent: (component: ComponentInstance) => void;
+}
+
+type SortColumn = 'name' | 'kind' | 'cadence' | 'freshness' | 'status';
+
+/** Clickable, sortable column header — click toggles asc/desc on that
+ *  column (resetting to asc when switching to a different one). */
+function SortableTh({ label, col, sortColumn, sortDirection, onSort }: {
+  label: string;
+  col: SortColumn;
+  sortColumn: SortColumn | null;
+  sortDirection: 'asc' | 'desc';
+  onSort: (col: SortColumn) => void;
+}) {
+  const active = sortColumn === col;
+  return (
+    <th className="text-left px-4 py-2 text-xs font-medium text-gray-700 uppercase tracking-wider">
+      <button
+        onClick={() => onSort(col)}
+        className={`inline-flex items-center gap-1 hover:text-gray-900 ${active ? 'text-gray-900' : ''}`}
+        title={`Sort by ${label.toLowerCase()}`}
+      >
+        {label}
+        {active ? (
+          sortDirection === 'asc' ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />
+        ) : (
+          <ChevronsUpDown className="w-3 h-3 text-gray-300" />
+        )}
+      </button>
+    </th>
+  );
 }
 
 // Same bin heuristics as AddDataDialog — keeping them local avoids a
@@ -123,8 +153,16 @@ export function IngestionsPanel({ onAddDataSource, onEditComponent }: Ingestions
   const [window, setWindow] = useState<'24h' | '7d' | '30d'>('7d');
   const [search, setSearch] = useState('');
   const [kindFilter, setKindFilter] = useState<SourceKind | 'all'>('all');
+  const [statusFilter, setStatusFilter] = useState<'all' | 'needs_config' | 'failed' | 'healthy' | 'idle'>('all');
+  const [cadenceFilter, setCadenceFilter] = useState<'all' | 'scheduled' | 'sensor' | 'manual'>('all');
   const [locationFilter, setLocationFilter] = useState<string>('all');
   const [groupByLocationPref, setGroupByLocationPref] = useGroupByCodeLocation();
+  const [sortColumn, setSortColumn] = useState<SortColumn | null>(null);
+  const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('asc');
+  const toggleSort = (col: SortColumn) => {
+    if (sortColumn !== col) { setSortColumn(col); setSortDirection('asc'); return; }
+    setSortDirection((d) => (d === 'asc' ? 'desc' : 'asc'));
+  };
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [drawerFor, setDrawerFor] = useState<string | null>(null);
   const [runningBulk, setRunningBulk] = useState(false);
@@ -371,11 +409,27 @@ export function IngestionsPanel({ onAddDataSource, onEditComponent }: Ingestions
   }, [ingestions, isCloud]);
 
   // Filtered view for the table — driven by search box + kind selector.
+  // Small ranked keys for the Status/Cadence filters + sortable columns --
+  // ranked (not just labeled) so "Status" sorts worst-first, matching the
+  // Monitors table's failing-first convention.
+  const statusKey = (row: typeof ingestions[number]): 'needs_config' | 'failed' | 'healthy' | 'idle' => {
+    if (!row.configured) return 'needs_config';
+    if (row.lastRun?.status === 'failure') return 'failed';
+    if (row.lastRun?.status === 'success') return 'healthy';
+    return 'idle';
+  };
+  const STATUS_RANK: Record<ReturnType<typeof statusKey>, number> = { needs_config: 0, failed: 1, healthy: 2, idle: 3 };
+  const cadenceKey = (row: typeof ingestions[number]): 'scheduled' | 'sensor' | 'manual' =>
+    row.schedules.length > 0 ? 'scheduled' : row.sensors.length > 0 ? 'sensor' : 'manual';
+  const CADENCE_RANK: Record<ReturnType<typeof cadenceKey>, number> = { scheduled: 0, sensor: 1, manual: 2 };
+
   const filteredIngestions = useMemo(() => {
     const q = search.trim().toLowerCase();
     return ingestions.filter((i) => {
       if (kindFilter !== 'all' && i.kind !== kindFilter) return false;
       if (locationFilter !== 'all' && i.codeLocation !== locationFilter) return false;
+      if (statusFilter !== 'all' && statusKey(i) !== statusFilter) return false;
+      if (cadenceFilter !== 'all' && cadenceKey(i) !== cadenceFilter) return false;
       if (q) {
         const blob = (
           i.component.label + ' ' + i.component.id + ' ' + i.assetKey + ' ' + i.component.component_type
@@ -384,16 +438,49 @@ export function IngestionsPanel({ onAddDataSource, onEditComponent }: Ingestions
       }
       return true;
     });
-  }, [ingestions, search, kindFilter, locationFilter]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ingestions, search, kindFilter, locationFilter, statusFilter, cadenceFilter]);
+
+  const sortedIngestions = useMemo(() => {
+    if (!sortColumn) return filteredIngestions;
+    const dir = sortDirection === 'asc' ? 1 : -1;
+    const arr = filteredIngestions.slice();
+    arr.sort((a, b) => {
+      let cmp = 0;
+      switch (sortColumn) {
+        case 'name':
+          cmp = (a.component.label || a.component.id).localeCompare(b.component.label || b.component.id);
+          break;
+        case 'kind':
+          cmp = KIND_META[a.kind].label.localeCompare(KIND_META[b.kind].label);
+          break;
+        case 'cadence':
+          cmp = CADENCE_RANK[cadenceKey(a)] - CADENCE_RANK[cadenceKey(b)];
+          break;
+        case 'freshness': {
+          const at = a.lastRun ? new Date(a.lastRun.ts).getTime() : -Infinity;
+          const bt = b.lastRun ? new Date(b.lastRun.ts).getTime() : -Infinity;
+          cmp = at - bt;
+          break;
+        }
+        case 'status':
+          cmp = STATUS_RANK[statusKey(a)] - STATUS_RANK[statusKey(b)];
+          break;
+      }
+      return cmp * dir;
+    });
+    return arr;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filteredIngestions, sortColumn, sortDirection]);
 
   // No location filter picked and sources actually span more than one
   // location -- break the flat table into one section per location.
   const groupByLocation = isCloud && groupByLocationPref && locationFilter === 'all' && locationOptions.length > 1;
   const ingestionRowGroups: Array<{ location: string | null; rows: typeof filteredIngestions }> = groupByLocation
     ? locationOptions
-        .map((loc) => ({ location: loc, rows: filteredIngestions.filter((i) => i.codeLocation === loc) }))
+        .map((loc) => ({ location: loc, rows: sortedIngestions.filter((i) => i.codeLocation === loc) }))
         .filter((g) => g.rows.length > 0)
-    : [{ location: null, rows: filteredIngestions }];
+    : [{ location: null, rows: sortedIngestions }];
 
   const toggleSelect = (id: string) => {
     setSelectedIds((prev) => {
@@ -798,6 +885,29 @@ export function IngestionsPanel({ onAddDataSource, onEditComponent }: Ingestions
                 <option key={k} value={k}>{KIND_META[k].label}</option>
               ))}
             </select>
+            <select
+              value={statusFilter}
+              onChange={(e) => setStatusFilter(e.target.value as typeof statusFilter)}
+              className="text-xs border border-gray-300 rounded px-2 py-1"
+              title="Filter by status"
+            >
+              <option value="all">All statuses</option>
+              <option value="needs_config">Needs config</option>
+              <option value="failed">Failed</option>
+              <option value="healthy">Healthy</option>
+              <option value="idle">Idle</option>
+            </select>
+            <select
+              value={cadenceFilter}
+              onChange={(e) => setCadenceFilter(e.target.value as typeof cadenceFilter)}
+              className="text-xs border border-gray-300 rounded px-2 py-1"
+              title="Filter by cadence"
+            >
+              <option value="all">All cadences</option>
+              <option value="scheduled">Scheduled</option>
+              <option value="sensor">Sensor-triggered</option>
+              <option value="manual">Manual</option>
+            </select>
             {locationOptions.length > 1 && (
               <select
                 value={locationFilter}
@@ -859,7 +969,7 @@ export function IngestionsPanel({ onAddDataSource, onEditComponent }: Ingestions
             <table className="w-full text-sm">
               <thead className="bg-gray-50 border-b border-gray-100">
                 <tr>
-                  <th className="px-3 py-2 w-8">
+                  <th className="px-3 py-2 w-8" title="Select rows to materialize together — see &quot;Materialize selected&quot; once you've checked at least one">
                     <input
                       type="checkbox"
                       checked={selectedIds.size > 0 && filteredIngestions.every((i) => selectedIds.has(i.component.id) || !i.configured || i.readOnly)}
@@ -868,12 +978,12 @@ export function IngestionsPanel({ onAddDataSource, onEditComponent }: Ingestions
                       title="Select all configured"
                     />
                   </th>
-                  <th className="text-left px-4 py-2 text-xs font-medium text-gray-700 uppercase tracking-wider">Name</th>
-                  <th className="text-left px-4 py-2 text-xs font-medium text-gray-700 uppercase tracking-wider">Kind</th>
-                  <th className="text-left px-4 py-2 text-xs font-medium text-gray-700 uppercase tracking-wider">Cadence</th>
+                  <SortableTh label="Name" col="name" sortColumn={sortColumn} sortDirection={sortDirection} onSort={toggleSort} />
+                  <SortableTh label="Kind" col="kind" sortColumn={sortColumn} sortDirection={sortDirection} onSort={toggleSort} />
+                  <SortableTh label="Cadence" col="cadence" sortColumn={sortColumn} sortDirection={sortDirection} onSort={toggleSort} />
                   <th className="text-left px-4 py-2 text-xs font-medium text-gray-700 uppercase tracking-wider">Last 8 runs</th>
-                  <th className="text-left px-4 py-2 text-xs font-medium text-gray-700 uppercase tracking-wider">Freshness</th>
-                  <th className="text-left px-4 py-2 text-xs font-medium text-gray-700 uppercase tracking-wider">Status</th>
+                  <SortableTh label="Freshness" col="freshness" sortColumn={sortColumn} sortDirection={sortDirection} onSort={toggleSort} />
+                  <SortableTh label="Status" col="status" sortColumn={sortColumn} sortDirection={sortDirection} onSort={toggleSort} />
                   <th className="text-right px-4 py-2 text-xs font-medium text-gray-700 uppercase tracking-wider">Actions</th>
                 </tr>
               </thead>
