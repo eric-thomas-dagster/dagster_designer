@@ -7916,6 +7916,12 @@ class ColumnLineageResponse(BaseModel):
     columns_by_model: dict[str, list[str]]
     edges: list[ColumnLineageEdge]
     warnings: list[str] = []
+    # False when target/manifest.json doesn't exist or has no nodes yet --
+    # distinguishes "nothing's been compiled" (needs `dbt parse`, fast, no
+    # warehouse connection) from "this specific model just has no columns:
+    # block in schema.yml" (a manifest exists but is legitimately empty for
+    # that model). The frontend shows different guidance for each.
+    manifest_found: bool = True
 
 
 def _extract_column_lineage(manifest: dict) -> tuple[dict[str, list[str]], list[ColumnLineageEdge], list[str]]:
@@ -8014,6 +8020,7 @@ async def dbt_column_lineage(project_id: str, dbt_relative_path: str | None = No
             dbt_project_relative_path='',
             columns_by_model={},
             edges=[],
+            manifest_found=False,
         )
     chosen = dbt_projects[0]
     if dbt_relative_path:
@@ -8029,6 +8036,7 @@ async def dbt_column_lineage(project_id: str, dbt_relative_path: str | None = No
         columns_by_model=cols_by_uid,
         edges=edges,
         warnings=warnings,
+        manifest_found=bool(manifest.get('nodes')),
     )
 
 

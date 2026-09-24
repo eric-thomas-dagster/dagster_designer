@@ -239,7 +239,7 @@ export function DbtColumnLineageOverlay({
               <span className="font-mono text-gray-700 text-sm">{modelName}</span>
             </div>
             <div className="text-xs text-gray-500 mt-1 ml-10">
-              Trace where each column comes from and where it flows. Bezier lines show heuristic name matches.
+              Trace where each column comes from and where it flows. Lines connect columns with matching names between models.
             </div>
           </div>
           <button onClick={onClose} className="p-1.5 hover:bg-gray-100 rounded-md text-gray-400 hover:text-gray-700" aria-label="Close">
@@ -286,7 +286,15 @@ export function DbtColumnLineageOverlay({
                 {/* This model */}
                 <div>
                   <SectionHeader label={modelName} count={1} sub={`${thisColumns.length} col${thisColumns.length === 1 ? '' : 's'}`} align="center" tone="focal" />
-                  {thisColumns.length === 0 && <EmptyHint text="No columns known — run dbt docs generate to populate the catalog." />}
+                  {thisColumns.length === 0 && (
+                    <EmptyHint
+                      text={
+                        data.manifest_found
+                          ? 'No columns declared for this model yet — add a columns: block to its schema.yml entry.'
+                          : "No dbt manifest found yet — run `dbt parse` (fast, no warehouse connection needed) to generate one."
+                      }
+                    />
+                  )}
                   <ModelBlock
                     uid={modelUniqueId}
                     title={modelName}

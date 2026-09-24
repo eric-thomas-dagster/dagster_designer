@@ -339,6 +339,7 @@ export const projectsApi = {
       confidence: number;
     }>;
     warnings: string[];
+    manifest_found: boolean;
   }> => {
     const response = await api.get(`/projects/${projectId}/dbt-column-lineage`, {
       params: dbtRelativePath ? { dbt_relative_path: dbtRelativePath } : {},
