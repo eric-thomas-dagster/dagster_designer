@@ -1952,14 +1952,38 @@ async def validate_project(project_id: str):
         # call for why: this can take up to 180s on a large project, and a
         # direct blocking call here would freeze every other request for
         # that whole time.
-        result = await asyncio.to_thread(
-            subprocess.run,
-            [str(venv_dg.absolute()), "list", "defs"],
-            cwd=str(project_dir.absolute()),
-            capture_output=True,
-            text=True,
-            timeout=180  # 180 seconds for massive dbt projects
-        )
+        #
+        # Retried once on a non-zero exit: right after a fresh install, this
+        # can race a concurrent dbt/DuckDB access from the auto-triggered
+        # asset-generation pass (the _is_running guard above only catches
+        # the case where introspection had already started by the time we
+        # checked, not one that starts a moment later), or just hit a
+        # transient first-run cost -- on Windows in particular, a freshly
+        # written dg.exe/dbt.exe commonly gets synchronously scanned by
+        # antivirus on its very first launch. This exact "fails once,
+        # succeeds moments later on manual retry" pattern is what users were
+        # seeing by re-opening validation details themselves; retrying here
+        # does that for them instead of surfacing a false failure.
+        result = None
+        for attempt in range(2):
+            result = await asyncio.to_thread(
+                subprocess.run,
+                [str(venv_dg.absolute()), "list", "defs"],
+                cwd=str(project_dir.absolute()),
+                capture_output=True,
+                text=True,
+                timeout=180  # 180 seconds for massive dbt projects
+            )
+            if result.returncode == 0 or attempt == 1:
+                break
+            if asset_introspection_service._is_running(project_id):
+                return {
+                    "valid": None,
+                    "pending": True,
+                    "message": "Asset generation is in progress. Validation will be available once assets are generated.",
+                    "details": None
+                }
+            await asyncio.sleep(2)
 
         # If return code is 0, project is valid (even if there are warnings in stderr)
         if result.returncode == 0:
