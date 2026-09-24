@@ -229,17 +229,25 @@ async def list_project_custom_components(project_id: str):
     env.pop("VIRTUAL_ENV", None)
     env["PATH"] = f"{dg_path.parent}{os.pathsep}{env.get('PATH', '')}"
 
-    try:
-        result = subprocess.run(
-            [str(dg_path.resolve()), "list", "components", "--json"],
-            cwd=str(work_dir),
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-    except (subprocess.TimeoutExpired, OSError):
-        return {"components": []}
+    # Same per-project lock every other dg/uv subprocess call against this
+    # project's shared on-disk state uses -- see the matching comment on the
+    # inspect-component call in get_component(). Without it, this raced
+    # with the flurry of other dg/asset-introspection calls that fire when
+    # a project is first opened and silently came back empty, even though a
+    # standalone call moments later succeeded -- confirmed live.
+    from ..services.asset_introspection_service import get_project_defs_lock
+    async with get_project_defs_lock(project_id):
+        try:
+            result = subprocess.run(
+                [str(dg_path.resolve()), "list", "components", "--json"],
+                cwd=str(work_dir),
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+        except (subprocess.TimeoutExpired, OSError):
+            return {"components": []}
 
     if result.returncode != 0:
         return {"components": []}
@@ -337,7 +345,20 @@ async def get_component(component_type: str, project_id: str | None = None):
             # Falls through to the schema.json / AST-parsing paths below
             # only if this project has no usable venv yet or dg doesn't
             # recognize the type for some other reason.
-            dg_schema = _get_component_schema_via_dg(project, component_type)
+            #
+            # Serialized against the same per-project lock every other dg/uv
+            # subprocess call against this project's shared on-disk state
+            # (asset introspection, preview, partition info, ...) already
+            # uses -- without it, this raced with those other calls right
+            # after opening a project (everything fires concurrently on
+            # load), returned a transient failure, and got treated exactly
+            # like "dg doesn't know this type," silently falling through
+            # instead of surfacing the real schema. Confirmed live: an
+            # endpoint that returned the right data seconds later on a
+            # standalone call returned nothing during a real project open.
+            from ..services.asset_introspection_service import get_project_defs_lock
+            async with get_project_defs_lock(project.id):
+                dg_schema = _get_component_schema_via_dg(project, component_type)
             if dg_schema:
                 return dg_schema
 
