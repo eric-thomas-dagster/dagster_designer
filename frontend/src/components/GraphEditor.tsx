@@ -3567,6 +3567,14 @@ function GroupOverlay({ nodes, setNodes }: { nodes: Node[]; setNodes: React.Disp
         width: maxX - minX,
         height: maxY - minY,
         codeLocations: codeLocationSet.size > 1 ? Array.from(codeLocationSet) : [],
+        // Every member node of an expanded group carries the SAME
+        // "collapse this group" callback (set by groupedView, see
+        // handleCollapseGroup) -- any one of them has it. Previously the
+        // only place this was surfaced was a small per-asset-card badge
+        // (easy to miss, and hidden entirely for a group literally named
+        // "default"); putting a real button in this already-visible
+        // title bar is the explicit, discoverable control instead.
+        onCollapseGroup: groupNodes[0]?.data?.onCollapseGroup as (() => void) | undefined,
       };
     });
 
@@ -3649,8 +3657,9 @@ function GroupOverlay({ nodes, setNodes }: { nodes: Node[]; setNodes: React.Disp
               cursor: 'pointer',
               display: 'flex',
               alignItems: 'center',
-              justifyContent: 'flex-start',
+              justifyContent: 'space-between',
               paddingLeft: '10px',
+              paddingRight: bound.onCollapseGroup ? '4px' : '10px',
               color: 'white',
               fontSize: '11px',
               fontWeight: '600',
@@ -3679,18 +3688,62 @@ function GroupOverlay({ nodes, setNodes }: { nodes: Node[]; setNodes: React.Disp
               e.stopPropagation();
             }}
           >
-            <span className="truncate">{bound.groupName}</span>
-            {bound.codeLocations.length > 0 && (
-              // Inline (not a second line) so the header bar's existing
-              // height -- and the -80px top padding the bounding box above
-              // already reserves for it -- doesn't need to change per group.
-              <span
-                className="truncate"
-                style={{ marginLeft: '8px', fontWeight: 400, textTransform: 'none', opacity: 0.85 }}
-                title={bound.codeLocations.join(', ')}
+            <div style={{ display: 'flex', alignItems: 'center', minWidth: 0, overflow: 'hidden' }}>
+              <span className="truncate">{bound.groupName}</span>
+              {bound.codeLocations.length > 0 && (
+                // Inline (not a second line) so the header bar's existing
+                // height -- and the -80px top padding the bounding box above
+                // already reserves for it -- doesn't need to change per group.
+                <span
+                  className="truncate"
+                  style={{ marginLeft: '8px', fontWeight: 400, textTransform: 'none', opacity: 0.85 }}
+                  title={bound.codeLocations.join(', ')}
+                >
+                  · {bound.codeLocations.join(', ')}
+                </span>
+              )}
+            </div>
+            {bound.onCollapseGroup && (
+              <button
+                type="button"
+                onMouseDown={(e) => {
+                  // Stop this reaching the header's own onMouseDown (which
+                  // selects the group's nodes instead) and reaching React
+                  // Flow's pane behind it.
+                  e.preventDefault();
+                  e.stopPropagation();
+                }}
+                onClick={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  bound.onCollapseGroup!();
+                }}
+                title={`Collapse ${bound.groupName} back to a group card`}
+                aria-label={`Collapse ${bound.groupName}`}
+                style={{
+                  flexShrink: 0,
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  width: '22px',
+                  height: '22px',
+                  marginLeft: '8px',
+                  borderRadius: '4px',
+                  border: 'none',
+                  background: 'rgba(255, 255, 255, 0.15)',
+                  color: 'white',
+                  cursor: 'pointer',
+                  fontSize: '14px',
+                  lineHeight: 1,
+                  textTransform: 'none',
+                  letterSpacing: 'normal',
+                  fontWeight: 700,
+                }}
+                onMouseEnter={(e) => { e.currentTarget.style.background = 'rgba(255, 255, 255, 0.3)'; }}
+                onMouseLeave={(e) => { e.currentTarget.style.background = 'rgba(255, 255, 255, 0.15)'; }}
               >
-                · {bound.codeLocations.join(', ')}
-              </span>
+                −
+              </button>
             )}
           </div>
         );
