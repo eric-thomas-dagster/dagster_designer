@@ -4,6 +4,16 @@ A visual pipeline designer for Dagster with drag-and-drop component editing, ins
 
 **Build Dagster pipelines visually** - Design data pipelines with a drag-and-drop interface, manage assets with custom lineage, and deploy with full Dagster CLI integration.
 
+## Download
+
+The desktop app (macOS + Windows) is built automatically from the latest commit on every push -- grab the most recent installer from the [**latest release**](https://github.com/eric-thomas-dagster/dagster-designer-desktop/releases/latest). It's a rolling build, not a stable/versioned release, so expect it to move fast.
+
+Unsigned for now, so the OS will warn on first launch:
+- **macOS**: right-click the app → Open (instead of double-clicking) to bypass Gatekeeper the first time.
+- **Windows**: click "More info" → "Run anyway" on the SmartScreen prompt.
+
+Prefer to build from source instead? See [the desktop shell's own repo](https://github.com/eric-thomas-dagster/dagster-designer-desktop) and the sections below for running the backend/frontend directly.
+
 ## Features
 
 ### 🎨 Visual Design & Editing
