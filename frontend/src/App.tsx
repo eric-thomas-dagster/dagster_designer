@@ -29,7 +29,7 @@ import { AddComponentModal, type ConfigureAuthoringPayload } from './components/
 import { DraftsPanel } from './components/DraftsPanel';
 import { useDrafts } from './hooks/useDrafts';
 import { NotificationHost, notify, confirmDialog } from './components/Notifications';
-import { SettingsHost } from './components/SettingsDialog';
+import { SettingsHost, openSettings } from './components/SettingsDialog';
 import { useProjectStore } from './hooks/useProject';
 import { useRunNotifications } from './hooks/useRunNotifications';
 import { setActiveTabGlobal } from './services/activeTab';
@@ -1047,18 +1047,35 @@ function App() {
             isTauri ? 'border-gray-200/70 dark:border-white/10' : 'border-white/10'
           }`}
         >
-          <button
-            onClick={() => setNavCollapsed((v) => !v)}
-            className={`p-1.5 rounded transition-colors ${
-              isTauri
-                ? 'text-gray-500 hover:text-gray-900 hover:bg-black/5 dark:text-white/50 dark:hover:text-white dark:hover:bg-white/5'
-                : 'text-white/50 hover:text-white hover:bg-white/5'
-            }`}
-            title={navCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
-            aria-label={navCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
-          >
-            {navCollapsed ? <PanelLeft className="w-4 h-4" /> : <PanelLeftClose className="w-4 h-4" />}
-          </button>
+          <div className={`flex items-center ${navCollapsed ? 'flex-col gap-1' : 'gap-1'}`}>
+            <button
+              onClick={() => setNavCollapsed((v) => !v)}
+              className={`p-1.5 rounded transition-colors ${
+                isTauri
+                  ? 'text-gray-500 hover:text-gray-900 hover:bg-black/5 dark:text-white/50 dark:hover:text-white dark:hover:bg-white/5'
+                  : 'text-white/50 hover:text-white hover:bg-white/5'
+              }`}
+              title={navCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+              aria-label={navCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+            >
+              {navCollapsed ? <PanelLeft className="w-4 h-4" /> : <PanelLeftClose className="w-4 h-4" />}
+            </button>
+            {/* On macOS this duplicates the native Preferences menu item;
+                on Windows/Linux (no menu bar) it's the only way in, so it
+                lives here unconditionally rather than being Windows-only. */}
+            <button
+              onClick={() => openSettings()}
+              className={`p-1.5 rounded transition-colors ${
+                isTauri
+                  ? 'text-gray-500 hover:text-gray-900 hover:bg-black/5 dark:text-white/50 dark:hover:text-white dark:hover:bg-white/5'
+                  : 'text-white/50 hover:text-white hover:bg-white/5'
+              }`}
+              title="Settings"
+              aria-label="Settings"
+            >
+              <Settings className="w-4 h-4" />
+            </button>
+          </div>
           {!navCollapsed && (
             <span className={`text-[11px] ${isTauri ? 'text-gray-400 dark:text-white/40' : 'text-white/40'}`}>v0.1</span>
           )}
