@@ -16,7 +16,6 @@ import { pickSpecializedSidebar } from './SpecializedSidebar';
 import { AddDbtModelDialog } from './AddDbtModelDialog';
 import { GitCommitDialog } from './GitCommitDialog';
 import { ColumnLineageOverlay } from './ColumnLineageOverlay';
-import { openInVSCode, getProjectsDir } from '@/services/tauri';
 
 // Icon mapping for component icons
 const iconMap: Record<string, any> = {
@@ -289,32 +288,22 @@ export function PropertyPanel({ nodeId, onConfigureComponent, onOpenFile, onNewP
   // useful -- clicking it looked like it just didn't work. Since we
   // already know exactly which defs.yaml this component's instance lives
   // in (the asset's own `source` field, e.g. "src/.../defs/foo/
-  // defs.yaml:12"), fall back to opening that file directly instead of a
-  // form we can't build.
+  // defs.yaml:12"), fall back to opening that file in Designer's own code
+  // editor instead of a form we can't build -- onOpenFile (already used a
+  // few lines below for the plain "Source Code" link) takes the raw
+  // source string, `:line` suffix and all.
   const sourceComponentDefsYamlPath = useMemo(() => {
     const source = node?.data?.source as string | undefined;
     if (!source || !source.includes('/defs/')) return null;
     if (!source.includes('defs.yaml') && !source.includes('defs.yml')) return null;
-    return source.split(':')[0];
+    return source;
   }, [node?.data?.source]);
 
-  const handleOpenAdvanced = async () => {
+  const handleOpenAdvanced = () => {
     if (!sourceComponent) return;
     if (sourceComponentSchemaError && sourceComponentDefsYamlPath) {
-      const projectsDir = await getProjectsDir();
-      if (!projectsDir || !currentProject?.directory_name) {
-        notify.error("Couldn't resolve the project folder -- only available in the desktop app.");
-        return;
-      }
-      const line = (node?.data?.source as string)?.split(':')[1];
-      try {
-        await openInVSCode(
-          `${projectsDir}/${currentProject.directory_name}/${sourceComponentDefsYamlPath}`,
-          line ? parseInt(line, 10) : undefined,
-        );
-      } catch {
-        notify.error("Couldn't open VS Code -- is it installed?");
-      }
+      if (!onOpenFile) return;
+      onOpenFile(sourceComponentDefsYamlPath);
       return;
     }
     onConfigureComponent?.(sourceComponent);
@@ -1247,13 +1236,13 @@ export function PropertyPanel({ nodeId, onConfigureComponent, onOpenFile, onNewP
                   </div>
                 </div>
                 <span className="text-xs text-purple-600 group-hover:text-purple-700">
-                  {sourceComponentSchemaError ? (sourceComponentDefsYamlPath ? 'Edit YAML →' : 'No schema, no file found') : 'Advanced →'}
+                  {sourceComponentSchemaError ? (sourceComponentDefsYamlPath ? 'Open YAML →' : 'No schema, no file found') : 'Advanced →'}
                 </span>
               </button>
               <p className="text-xs text-gray-500 mt-2">
                 {sourceComponentSchemaError ? (
                   sourceComponentDefsYamlPath
-                    ? <>This is a project-local custom component -- Designer can't introspect its config schema, so click <strong>Edit YAML</strong> to open its <code>defs.yaml</code> directly in VS Code instead.</>
+                    ? <>This is a project-local custom component -- Designer can't introspect its config schema, so click <strong>Open YAML</strong> to edit its <code>defs.yaml</code> directly in the code editor instead.</>
                     : <>This is a project-local custom component with no config schema Designer can read, and no source file found to open either.</>
                 ) : (
                   <>Click <strong>Advanced</strong> for the full config modal (SQL editor, translation rules, etc.), or edit the common fields directly below.</>
