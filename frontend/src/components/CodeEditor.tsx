@@ -17,7 +17,6 @@ import {
   Sparkles,
   Edit,
   Search,
-  ExternalLink,
 } from 'lucide-react';
 import { filesApi, type FileTreeNode } from '@/services/api';
 import { Terminal } from './Terminal';
@@ -25,13 +24,9 @@ import { DagsterExpertPanel } from './DagsterExpertPanel';
 import { notify, confirmDialog } from './Notifications';
 import { useIsDarkMode } from '@/hooks/useIsDarkMode';
 import { useUnsavedChangesStore } from '@/hooks/useUnsavedChanges';
-import { openInVSCode, getProjectsDir, isTauri } from '@/services/tauri';
 
 interface CodeEditorProps {
   projectId: string;
-  /** Used to resolve this project's absolute path for "Open in VS Code" --
-   *  undefined just hides that button rather than guessing. */
-  projectDirectoryName?: string;
   fileToOpen?: string | null;
   onFileOpened?: () => void;
 }
@@ -42,7 +37,7 @@ interface OpenFile {
   isDirty: boolean;
 }
 
-export function CodeEditor({ projectId, projectDirectoryName, fileToOpen, onFileOpened }: CodeEditorProps) {
+export function CodeEditor({ projectId, fileToOpen, onFileOpened }: CodeEditorProps) {
   const isDark = useIsDarkMode();
   const [openFiles, setOpenFiles] = useState<OpenFile[]>([]);
   const [activeFilePath, setActiveFilePath] = useState<string | null>(null);
@@ -343,20 +338,6 @@ export function CodeEditor({ projectId, projectDirectoryName, fileToOpen, onFile
     setOpenFiles((prev) =>
       prev.map((f) => (f.path === activeFilePath ? { ...f, content: value, isDirty: true } : f))
     );
-  };
-
-  const handleOpenInVSCode = async () => {
-    if (!activeFile || !projectDirectoryName) return;
-    const projectsDir = await getProjectsDir();
-    if (!projectsDir) {
-      notify.error("Couldn't resolve the projects folder -- only available in the desktop app.");
-      return;
-    }
-    try {
-      await openInVSCode(`${projectsDir}/${projectDirectoryName}/${activeFile.path}`);
-    } catch {
-      notify.error("Couldn't open VS Code -- is it installed?");
-    }
   };
 
   const handleSaveFile = () => {
@@ -886,16 +867,6 @@ export function CodeEditor({ projectId, projectDirectoryName, fileToOpen, onFile
               </div>
             </div>
             <div className="flex items-center space-x-2">
-              {isTauri && projectDirectoryName && (
-                <button
-                  onClick={handleOpenInVSCode}
-                  title="Open this file in VS Code"
-                  className="flex items-center space-x-2 px-3 py-2 text-sm text-gray-700 border border-gray-300 rounded-md hover:bg-gray-100"
-                >
-                  <ExternalLink className="w-4 h-4" />
-                  <span>VS Code</span>
-                </button>
-              )}
               <button
                 onClick={handleSaveFile}
                 disabled={!activeFile.isDirty || writeFileMutation.isPending}

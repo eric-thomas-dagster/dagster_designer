@@ -119,24 +119,6 @@ export async function openExternalUrl(url: string): Promise<void> {
 }
 
 /**
- * Opens a local path in VS Code via its `vscode://file/` deep link --
- * works identically on macOS and Windows without needing to guess a
- * platform-specific app identifier (VS Code registers this URI scheme on
- * install, the same way Slack's `slack://` or GitHub Desktop's
- * `github-desktop://` do). `line`/`column` are 1-indexed, matching VS
- * Code's own "Go to Line" convention; both optional -- omit for "just
- * open this file/folder".
- */
-export async function openInVSCode(absolutePath: string, line?: number, column?: number): Promise<void> {
-  let uri = `vscode://file/${absolutePath}`;
-  if (line != null) {
-    uri += `:${line}`;
-    if (column != null) uri += `:${column}`;
-  }
-  await openExternalUrl(uri);
-}
-
-/**
  * The folder new projects are created in (see src-tauri/src/main.rs's
  * resolve_projects_dir) -- defaults to ~/Documents/Dagster Designer, but
  * the user can point it elsewhere from Settings. Outside Tauri there's no
