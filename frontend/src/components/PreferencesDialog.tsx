@@ -2,6 +2,8 @@ import { useEffect, useState } from 'react';
 import { X, SlidersHorizontal } from 'lucide-react';
 import { useGroupByCodeLocation } from '@/hooks/useGroupByCodeLocation';
 import { GroupByLocationToggle } from './GroupByLocationToggle';
+import { useThemePref } from '@/hooks/useThemePref';
+import type { ThemePref } from '@/lib/theme';
 
 // Same lightweight module-level pub-sub as SettingsDialog.tsx, kept as a
 // separate dialog on purpose: Settings holds credentials/config you set
@@ -40,6 +42,7 @@ export function PreferencesHost() {
 
 function PreferencesDialog({ onClose }: { onClose: () => void }) {
   const [groupByLocationPref, setGroupByLocationPref] = useGroupByCodeLocation();
+  const [themePref, setThemePref] = useThemePref();
 
   return (
     <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
@@ -59,6 +62,27 @@ function PreferencesDialog({ onClose }: { onClose: () => void }) {
         </p>
 
         <div className="space-y-3">
+          <div className="flex items-center justify-between gap-3 py-2 border-t border-gray-100">
+            <div className="min-w-0">
+              <div className="text-sm text-gray-900">Appearance</div>
+              <div className="text-xs text-gray-500 mt-0.5">
+                Auto follows your Mac's Appearance setting and stays live if you change it.
+              </div>
+            </div>
+            <div className="inline-flex rounded border border-gray-200 overflow-hidden flex-shrink-0">
+              {(['light', 'dark', 'auto'] as ThemePref[]).map((v) => (
+                <button
+                  key={v}
+                  onClick={() => setThemePref(v)}
+                  className={`px-2.5 py-1 text-xs font-medium capitalize ${
+                    themePref === v ? 'bg-blue-600 text-white' : 'bg-white text-gray-600 hover:bg-gray-50'
+                  }`}
+                >
+                  {v}
+                </button>
+              ))}
+            </div>
+          </div>
           <div className="flex items-center justify-between gap-3 py-2 border-t border-gray-100">
             <div className="min-w-0">
               <div className="text-sm text-gray-900">Group by code location</div>

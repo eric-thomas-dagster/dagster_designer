@@ -13,6 +13,7 @@ import '@fontsource/inter/500.css';
 import '@fontsource/inter/600.css';
 import '@fontsource/inter/700.css';
 import './index.css';
+import { applyTheme } from './lib/theme';
 
 // Marks <html> so index.css can drop body's opaque background only in the
 // desktop app -- body sits between the (transparent, vibrancy-backed)
@@ -22,17 +23,12 @@ if (isTauri) {
   document.documentElement.classList.add('tauri');
 }
 
-// Follow the OS appearance setting (System Settings > Appearance) rather
-// than an in-app toggle, same as any other native Mac app. Applied before
-// React renders so there's no flash of the wrong theme, and kept in sync
-// live if the user changes their system appearance while the app is open.
-(() => {
-  if (!window.matchMedia) return;
-  const media = window.matchMedia('(prefers-color-scheme: dark)');
-  const apply = () => document.documentElement.classList.toggle('dark', media.matches);
-  apply();
-  media.addEventListener('change', apply);
-})();
+// Applies the user's theme preference (light/dark/auto, default auto --
+// System Settings > Appearance, same as any other native Mac app) before
+// React renders so there's no flash of the wrong theme. See lib/theme.ts
+// for the live-update behavior (OS changes while in auto, and instant
+// updates when the preference itself is changed from Preferences).
+applyTheme();
 
 const queryClient = new QueryClient({
   defaultOptions: {
