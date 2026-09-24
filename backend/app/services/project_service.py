@@ -2845,13 +2845,14 @@ if customizations_path.exists():
         """
         print(f"🔍 Detecting project type in {repo_dir}...")
 
-        # First check for multiple dbt projects in subdirectories
-        dbt_projects = self._find_dbt_projects_recursive(repo_dir)
-        if len(dbt_projects) > 1:
-            print(f"   Found {len(dbt_projects)} dbt projects in subdirectories - this is a multi-dbt project")
-            return ("multi-dbt", None)
-
-        # Check for Dagster project BEFORE dbt - many Dagster projects contain dbt projects
+        # Check for Dagster project BEFORE dbt -- many Dagster projects contain
+        # (one or more) dbt projects as a sub-component, e.g. a `dbt_projects/`
+        # directory with several real dbt projects under it alongside the
+        # project's own `src/<pkg>/definitions.py`. The multi-dbt check below
+        # would otherwise short-circuit on "found >1 dbt_project.yml" before
+        # this ever runs, misclassifying a real existing Dagster project as
+        # raw dbt projects to scaffold a fresh wrapper for -- discarding all
+        # of its actual Dagster code in the process.
         # Check for definitions.py at root
         if (repo_dir / "definitions.py").exists():
             print(f"   Found definitions.py - this is a Dagster project")
@@ -2899,7 +2900,13 @@ if customizations_path.exists():
             except Exception as e:
                 print(f"   Could not read pyproject.toml: {e}")
 
-        # Only check for standalone dbt project AFTER confirming it's not a Dagster project
+        # Only check for (multiple or standalone) dbt projects AFTER confirming
+        # it's not a Dagster project.
+        dbt_projects = self._find_dbt_projects_recursive(repo_dir)
+        if len(dbt_projects) > 1:
+            print(f"   Found {len(dbt_projects)} dbt projects in subdirectories - this is a multi-dbt project")
+            return ("multi-dbt", None)
+
         if (repo_dir / "dbt_project.yml").exists():
             print(f"   Found dbt_project.yml - this is a dbt project")
             return ("dbt", None)
