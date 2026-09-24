@@ -567,18 +567,41 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
       isFirstExpandEffect.current = false;
       return;
     }
-    const raf = requestAnimationFrame(() => {
-      fitView({ padding: 0.2, duration: 300 });
+    // A single requestAnimationFrame wasn't enough for a filter change
+    // specifically: filtering can both remove nodes AND, when combined
+    // with collapse-to-groups, swap individually-measured asset cards for
+    // brand-new group-card nodes that haven't been measured by ReactFlow's
+    // ResizeObserver yet. fitView() reads each node's CURRENT width/height
+    // off ReactFlow's internal store to compute bounds -- called before
+    // that measurement round lands, it fits around stale/zero-size
+    // dimensions for the new nodes, producing a fit that looks like nothing
+    // happened. Two rAFs (one for React's own commit + ReactFlow processing
+    // the new node list, one more for the resulting measurement pass) is
+    // the same wait-for-layout-to-settle pattern used elsewhere in this
+    // file for exactly this kind of race. Also passes nodes explicitly
+    // (getNodes(), ReactFlow's own always-current accessor -- see
+    // arrangeGroups above for the same reasoning) rather than relying on
+    // fitView's own default target, so this fits exactly what's on screen
+    // right now regardless of any other timing assumption.
+    let raf2 = 0;
+    const raf1 = requestAnimationFrame(() => {
+      raf2 = requestAnimationFrame(() => {
+        fitView({ padding: 0.2, duration: 300, nodes: getNodes() });
+      });
     });
-    return () => cancelAnimationFrame(raf);
-    // fitView is deliberately NOT a dependency here. It's supposed to be a
-    // stable function reference from useReactFlow() (memoized on
-    // [d3Zoom, d3Selection] internally) -- but including it meant that if
-    // its reference ever changed for ANY reason, this effect would refire
-    // and kick off another animated fitView() call, which was contributing
-    // to the render-loop/flashing bug fixed elsewhere in this file. We
-    // only actually want this effect to run when one of the listed
-    // dependencies changes, never merely because fitView's identity did.
+    return () => {
+      cancelAnimationFrame(raf1);
+      if (raf2) cancelAnimationFrame(raf2);
+    };
+    // fitView/getNodes are deliberately NOT dependencies here. They're
+    // supposed to be stable function references from useReactFlow()
+    // (memoized on [d3Zoom, d3Selection] internally) -- but including them
+    // meant that if either's reference ever changed for ANY reason, this
+    // effect would refire and kick off another animated fitView() call,
+    // which was contributing to the render-loop/flashing bug fixed
+    // elsewhere in this file. We only actually want this effect to run
+    // when one of the listed dependencies changes, never merely because
+    // one of those identities did.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [expandedGroups, collapseToGroups, groupFilter, kindFilter, codeLocationFilter, tagFilter, ownerFilter]);
   // Stable callbacks so memoized GroupNode / AssetNode instances aren't
