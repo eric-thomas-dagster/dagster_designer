@@ -5,6 +5,55 @@
 export const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
 
 /**
+ * 'windows' | 'macos' | 'linux' | ... -- null outside Tauri (there's no
+ * concept of "the OS" for a plain browser tab). Used to render a custom
+ * Windows-style title bar (minimize/maximize/close buttons) alongside our
+ * own header, since Windows has no macOS-style "overlay" title bar mode --
+ * decorations are either a full native title bar (which then visually
+ * duplicates our own header right below it) or none at all, and we want
+ * the latter plus our own drawn controls, matching how VS Code/Windows
+ * Terminal do this.
+ */
+export async function getPlatform(): Promise<string | null> {
+  if (!isTauri) return null;
+  try {
+    const { platform } = await import('@tauri-apps/plugin-os');
+    return platform();
+  } catch {
+    return null;
+  }
+}
+
+/** Minimize the main window. No-op outside Tauri. */
+export async function minimizeWindow(): Promise<void> {
+  if (!isTauri) return;
+  const { getCurrentWindow } = await import('@tauri-apps/api/window');
+  await getCurrentWindow().minimize();
+}
+
+/** Toggle maximize/restore on the main window. No-op outside Tauri. */
+export async function toggleMaximizeWindow(): Promise<void> {
+  if (!isTauri) return;
+  const { getCurrentWindow } = await import('@tauri-apps/api/window');
+  await getCurrentWindow().toggleMaximize();
+}
+
+/** Whether the main window is currently maximized. False outside Tauri. */
+export async function isWindowMaximized(): Promise<boolean> {
+  if (!isTauri) return false;
+  const { getCurrentWindow } = await import('@tauri-apps/api/window');
+  return getCurrentWindow().isMaximized();
+}
+
+/** Close the main window -- goes through the same quit-requested flow as
+ *  the red button / Cmd+Q (see onQuitRequested), not an immediate exit. */
+export async function closeWindow(): Promise<void> {
+  if (!isTauri) return;
+  const { getCurrentWindow } = await import('@tauri-apps/api/window');
+  await getCurrentWindow().close();
+}
+
+/**
  * Shows a native OS notification. Falls back to nothing outside Tauri --
  * callers are expected to also show an in-app toast (via `notify`) for the
  * web case, since that's the only notification a browser tab can show

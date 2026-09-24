@@ -33,7 +33,8 @@ import { SettingsHost } from './components/SettingsDialog';
 import { useProjectStore } from './hooks/useProject';
 import { useRunNotifications } from './hooks/useRunNotifications';
 import { setActiveTabGlobal } from './services/activeTab';
-import { onMenuAction, onQuitRequested, confirmQuit, openExternalUrl, openInVSCode, getProjectsDir, isTauri } from './services/tauri';
+import { onMenuAction, onQuitRequested, confirmQuit, openExternalUrl, openInVSCode, getProjectsDir, getPlatform, isTauri } from './services/tauri';
+import { WindowsCaptionButtons } from './components/WindowsCaptionButtons';
 import { hasUnsavedChanges } from './hooks/useUnsavedChanges';
 import { Network, FileCode, Zap, Package, ExternalLink, Settings, Workflow, ChevronDown, Skull, AlertTriangle, X, Loader2, CheckCircle, XCircle, PanelLeftClose, PanelLeft, Clock, Play, Radar, Timer, Download, Database, ShieldCheck, Cloud, Bell, BarChart3 } from 'lucide-react';
 import { IngestionsPanel } from './components/IngestionsPanel';
@@ -294,6 +295,12 @@ function App() {
     setTabResetNonce((prev) => ({ ...prev, [value]: (prev[value] || 0) + 1 }));
   };
   const [templateBuilderTab, setTemplateBuilderTab] = useState<string | null>(null);
+  // Windows gets its own drawn caption buttons (see WindowsCaptionButtons)
+  // since it has no macOS-style overlay title bar mode -- null until this
+  // resolves means they simply don't render for a tick on launch rather
+  // than flashing the wrong platform's chrome.
+  const [platform, setPlatform] = useState<string | null>(null);
+  useEffect(() => { getPlatform().then(setPlatform); }, []);
   const [templateBuilderAssetKey, setTemplateBuilderAssetKey] = useState<string | null>(null);
   // "New asset check" routes to the Monitors wizard instead of
   // TemplateBuilder's own asset-check generator -- that generator writes
@@ -1256,6 +1263,7 @@ function App() {
             )}
             <ProjectManager />
           </div>
+          {isTauri && platform === 'windows' && <WindowsCaptionButtons />}
         </header>
 
 

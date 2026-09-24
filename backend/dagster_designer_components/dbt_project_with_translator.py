@@ -79,11 +79,16 @@ class DbtProjectWithTranslatorComponent(dg.Component, dg.Model, dg.Resolvable):
             # resolved via $PATH -- that fails here because $PATH in whatever
             # process loads this component (Designer's backend, `dg dev`, a
             # bare `dg list defs`) doesn't necessarily include this project's
-            # own .venv/bin. dbt IS installed there (it's a project
+            # own venv bin dir. dbt IS installed there (it's a project
             # dependency), just not found by name alone. Resolve it the same
             # way sys.executable already tells us where THIS project's venv
-            # lives: dbt sits right next to the python running this code.
-            dbt_bin = Path(sys.executable).parent / "dbt"
+            # lives: dbt sits right next to the python running this code --
+            # in Scripts/ with a .exe suffix on Windows, bin/ with no suffix
+            # elsewhere (this file is copied into every project's own venv,
+            # so it can't import Designer's shared venv_bin_path() helper --
+            # small enough to duplicate the one check it needs here).
+            dbt_name = "dbt.exe" if sys.platform == "win32" else "dbt"
+            dbt_bin = Path(sys.executable).parent / dbt_name
             dbt_executable = str(dbt_bin) if dbt_bin.exists() else "dbt"
 
             return Definitions(
