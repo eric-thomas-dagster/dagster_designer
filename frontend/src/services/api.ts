@@ -818,6 +818,7 @@ export const projectsApi = {
       duration_ms: number | null;
       source_location: string | null;
       source_project: string | null;
+      code_location: string | null;
       schedule: string | null;
       tags: string[];
       description: string | null;

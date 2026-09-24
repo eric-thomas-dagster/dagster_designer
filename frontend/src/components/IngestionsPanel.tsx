@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { Fragment, useEffect, useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { Download, Cloud, Database, FileText, Globe, Sparkles, Boxes, CheckCircle2, AlertTriangle, Play, Settings, Activity, TrendingUp, Loader2, XCircle, Layers, CalendarClock, Clock, X, Tag, Lock, Radar } from 'lucide-react';
 import { useProjectStore } from '@/hooks/useProject';
@@ -121,6 +121,7 @@ export function IngestionsPanel({ onAddDataSource, onEditComponent }: Ingestions
   const [window, setWindow] = useState<'24h' | '7d' | '30d'>('7d');
   const [search, setSearch] = useState('');
   const [kindFilter, setKindFilter] = useState<SourceKind | 'all'>('all');
+  const [locationFilter, setLocationFilter] = useState<string>('all');
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [drawerFor, setDrawerFor] = useState<string | null>(null);
   const [runningBulk, setRunningBulk] = useState(false);
@@ -239,15 +240,17 @@ export function IngestionsPanel({ onAddDataSource, onEditComponent }: Ingestions
   const ingestions = useMemo(() => {
     if (!currentProject) return [];
     const seen = new Set<string>();
-    const candidates: Array<{ component: ComponentInstance; assetKey: string; readOnly: boolean; manuallyTagged: boolean }> = [];
+    const candidates: Array<{ component: ComponentInstance; assetKey: string; readOnly: boolean; manuallyTagged: boolean; codeLocation: string | null }> = [];
 
-    // Local components matching the component_type heuristic.
+    // Local components matching the component_type heuristic. Local
+    // projects only ever have one code location, so there's nothing to
+    // tag these with.
     for (const c of currentProject.components) {
       if (!isIngestionType(c.component_type)) continue;
       const assetKey = (c.attributes?.asset_name as string) || c.id;
       if (seen.has(assetKey)) continue;
       seen.add(assetKey);
-      candidates.push({ component: c, assetKey, readOnly: false, manuallyTagged: manualTagSet.has(assetKey) });
+      candidates.push({ component: c, assetKey, readOnly: false, manuallyTagged: manualTagSet.has(assetKey), codeLocation: null });
     }
 
     // Cloud-hydrated graph nodes matching the same heuristic --
@@ -263,7 +266,13 @@ export function IngestionsPanel({ onAddDataSource, onEditComponent }: Ingestions
         const assetKey = (data.asset_key as string) || n.id;
         if (seen.has(assetKey)) continue;
         seen.add(assetKey);
-        candidates.push({ component: syntheticComponentFromNode(n), assetKey, readOnly: true, manuallyTagged: manualTagSet.has(assetKey) });
+        candidates.push({
+          component: syntheticComponentFromNode(n),
+          assetKey,
+          readOnly: true,
+          manuallyTagged: manualTagSet.has(assetKey),
+          codeLocation: (data.code_location as string) || null,
+        });
       }
     }
 
@@ -284,10 +293,11 @@ export function IngestionsPanel({ onAddDataSource, onEditComponent }: Ingestions
         assetKey,
         readOnly: !realComponent,
         manuallyTagged: true,
+        codeLocation: (node.data as any)?.code_location || null,
       });
     }
 
-    return candidates.map(({ component: c, assetKey, readOnly, manuallyTagged }) => {
+    return candidates.map(({ component: c, assetKey, readOnly, manuallyTagged, codeLocation }) => {
       const kind = classifyType(c.component_type, c.label || c.id);
       const configured = readOnly ? true : isConfigured(c.attributes || {});
       const schema = schemas[assetKey];
@@ -306,6 +316,7 @@ export function IngestionsPanel({ onAddDataSource, onEditComponent }: Ingestions
         configured,
         readOnly,
         manuallyTagged,
+        codeLocation,
         columnCount: schema?.columns?.length ?? null,
         previewed: !!schema,
         history,
@@ -348,11 +359,20 @@ export function IngestionsPanel({ onAddDataSource, onEditComponent }: Ingestions
       }));
   }, [ingestions]);
 
+  // Code locations present among ingestion sources -- only meaningful
+  // for cloud projects with more than one. Drives the location filter
+  // dropdown and the "group into a table per location" behavior below.
+  const locationOptions = useMemo(() => {
+    if (!isCloud) return [];
+    return Array.from(new Set(ingestions.map((i) => i.codeLocation).filter((l): l is string => !!l))).sort();
+  }, [ingestions, isCloud]);
+
   // Filtered view for the table — driven by search box + kind selector.
   const filteredIngestions = useMemo(() => {
     const q = search.trim().toLowerCase();
     return ingestions.filter((i) => {
       if (kindFilter !== 'all' && i.kind !== kindFilter) return false;
+      if (locationFilter !== 'all' && i.codeLocation !== locationFilter) return false;
       if (q) {
         const blob = (
           i.component.label + ' ' + i.component.id + ' ' + i.assetKey + ' ' + i.component.component_type
@@ -361,7 +381,16 @@ export function IngestionsPanel({ onAddDataSource, onEditComponent }: Ingestions
       }
       return true;
     });
-  }, [ingestions, search, kindFilter]);
+  }, [ingestions, search, kindFilter, locationFilter]);
+
+  // No location filter picked and sources actually span more than one
+  // location -- break the flat table into one section per location.
+  const groupByLocation = isCloud && locationFilter === 'all' && locationOptions.length > 1;
+  const ingestionRowGroups: Array<{ location: string | null; rows: typeof filteredIngestions }> = groupByLocation
+    ? locationOptions
+        .map((loc) => ({ location: loc, rows: filteredIngestions.filter((i) => i.codeLocation === loc) }))
+        .filter((g) => g.rows.length > 0)
+    : [{ location: null, rows: filteredIngestions }];
 
   const toggleSelect = (id: string) => {
     setSelectedIds((prev) => {
@@ -766,6 +795,19 @@ export function IngestionsPanel({ onAddDataSource, onEditComponent }: Ingestions
                 <option key={k} value={k}>{KIND_META[k].label}</option>
               ))}
             </select>
+            {locationOptions.length > 1 && (
+              <select
+                value={locationFilter}
+                onChange={(e) => setLocationFilter(e.target.value)}
+                className="text-xs border border-gray-300 rounded px-2 py-1"
+                title="Filter by code location"
+              >
+                <option value="all">All code locations</option>
+                {locationOptions.map((l) => (
+                  <option key={l} value={l}>{l}</option>
+                ))}
+              </select>
+            )}
             {selectedIds.size > 0 && (
               <>
                 <div className="h-4 w-px bg-gray-200 mx-1" />
@@ -830,7 +872,16 @@ export function IngestionsPanel({ onAddDataSource, onEditComponent }: Ingestions
                 </tr>
               </thead>
               <tbody>
-                {filteredIngestions.map((row) => {
+                {ingestionRowGroups.map((group) => (
+                <Fragment key={group.location ?? '__flat__'}>
+                {group.location && (
+                  <tr className="bg-gray-50">
+                    <td colSpan={8} className="px-4 py-1.5 text-[11px] font-semibold text-gray-600">
+                      {group.location} <span className="font-normal text-gray-400">({group.rows.length})</span>
+                    </td>
+                  </tr>
+                )}
+                {group.rows.map((row) => {
                   const { component, assetKey, kind, configured, readOnly, manuallyTagged, materializes, lastRun, partition, schedules, sensors } = row;
                   const KindIcon = KIND_META[kind].icon;
                   const isSelected = selectedIds.has(component.id);
@@ -987,6 +1038,8 @@ export function IngestionsPanel({ onAddDataSource, onEditComponent }: Ingestions
                     </tr>
                   );
                 })}
+                </Fragment>
+                ))}
               </tbody>
             </table>
           )}

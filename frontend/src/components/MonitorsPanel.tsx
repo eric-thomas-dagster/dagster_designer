@@ -61,9 +61,11 @@ export function MonitorsPanel({ onOpenFile, onOpenRun }: MonitorsPanelProps) {
   const [statusFilter, setStatusFilter] = useState<'all' | Status>('all');
   const [kindFilter, setKindFilter] = useState<'all' | Monitor['kind']>('all');
   const [assetFilter, setAssetFilter] = useState<string>('all');
+  const [locationFilter, setLocationFilter] = useState<string>('all');
   const [selected, setSelected] = useState<Monitor | null>(null);
   const [showAddMonitor, setShowAddMonitor] = useState(false);
   const [showGenerate, setShowGenerate] = useState(false);
+  const isCloud = !!(currentProject as any)?.is_dagster_plus;
 
   const refresh = async () => {
     if (!currentProject) return;
@@ -90,11 +92,20 @@ export function MonitorsPanel({ onOpenFile, onOpenRun }: MonitorsPanelProps) {
     return Array.from(all).sort();
   }, [monitors]);
 
+  // Dagster+ projects with many code locations -- lets users narrow the
+  // table to one location, or (when left on "all") see it broken into
+  // one section per location instead of one undifferentiated list.
+  const locationOptions = useMemo(() => {
+    if (!isCloud) return [];
+    return Array.from(new Set(monitors.map((m) => m.code_location).filter((l): l is string => !!l))).sort();
+  }, [monitors, isCloud]);
+
   const failing = monitors.filter((m) => bucket(m) === 'failing');
   const filtered = monitors.filter((m) => {
     if (statusFilter !== 'all' && bucket(m) !== statusFilter) return false;
     if (kindFilter !== 'all' && m.kind !== kindFilter) return false;
     if (assetFilter !== 'all' && !m.target_asset_keys.includes(assetFilter)) return false;
+    if (locationFilter !== 'all' && m.code_location !== locationFilter) return false;
     if (search.trim()) {
       const q = search.trim().toLowerCase();
       const hay = `${m.label} ${m.target_asset_keys.join(' ')} ${m.kind} ${m.check_kind ?? ''} ${m.source_project ?? ''}`.toLowerCase();
@@ -102,6 +113,12 @@ export function MonitorsPanel({ onOpenFile, onOpenRun }: MonitorsPanelProps) {
     }
     return true;
   });
+  const groupByLocation = isCloud && locationFilter === 'all' && locationOptions.length > 1;
+  const rowGroups: Array<{ location: string | null; rows: Monitor[] }> = groupByLocation
+    ? locationOptions
+        .map((loc) => ({ location: loc, rows: filtered.filter((m) => m.code_location === loc) }))
+        .filter((g) => g.rows.length > 0)
+    : [{ location: null, rows: filtered }];
 
   usePageActions('Monitors', 'monitors', [
     { id: 'refresh', label: 'Refresh', accelerator: 'CmdOrCtrl+R', handler: refresh },
@@ -250,6 +267,14 @@ export function MonitorsPanel({ onOpenFile, onOpenRun }: MonitorsPanelProps) {
                 ...targets.map((t) => ({ value: t, label: t })),
               ]}
             />
+            {locationOptions.length > 1 && (
+              <FilterPill label="Location" value={locationFilter} onChange={setLocationFilter}
+                options={[
+                  { value: 'all', label: 'All code locations' },
+                  ...locationOptions.map((l) => ({ value: l, label: l })),
+                ]}
+              />
+            )}
             <span className="text-[11px] text-gray-500 ml-auto">{filtered.length} / {monitors.length}</span>
           </div>
 
@@ -292,14 +317,58 @@ export function MonitorsPanel({ onOpenFile, onOpenRun }: MonitorsPanelProps) {
                   </tr>
                 </thead>
                 <tbody>
-                  {filtered.map((m) => {
+                  {rowGroups.map((group) => (
+                    <MonitorRowGroup key={group.location ?? '__flat__'} group={group} onSelect={setSelected} />
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Drawer */}
+      {selected && (
+        <MonitorDrawer monitor={selected} onClose={() => setSelected(null)} onOpenFile={onOpenFile} />
+      )}
+
+      {/* Add-monitor wizard */}
+      <AddMonitorDialog
+        open={showAddMonitor}
+        onOpenChange={setShowAddMonitor}
+        projectId={currentProject.id}
+        onSaved={refresh}
+      />
+
+      {/* Generate with AI */}
+      <GenerateMonitorsDialog
+        open={showGenerate}
+        onOpenChange={setShowGenerate}
+        projectId={currentProject.id}
+        onGenerated={refresh}
+      />
+    </div>
+  );
+}
+
+function MonitorRowGroup({ group, onSelect }: { group: { location: string | null; rows: Monitor[] }; onSelect: (m: Monitor) => void }) {
+  return (
+    <>
+      {group.location && (
+        <tr className="bg-gray-50">
+          <td colSpan={7} className="px-4 py-1.5 text-[11px] font-semibold text-gray-600">
+            {group.location} <span className="font-normal text-gray-400">({group.rows.length})</span>
+          </td>
+        </tr>
+      )}
+      {group.rows.map((m) => {
                     const Kind = KIND_META[m.kind];
                     const b = bucket(m);
                     return (
                       <tr
                         key={m.id}
                         className="border-b border-gray-50 last:border-0 hover:bg-gray-50/50 cursor-pointer"
-                        onClick={() => setSelected(m)}
+                        onClick={() => onSelect(m)}
                       >
                         <td className="px-4 py-2.5">
                           <StatusIcon status={b} />
@@ -348,35 +417,8 @@ export function MonitorsPanel({ onOpenFile, onOpenRun }: MonitorsPanelProps) {
                         </td>
                       </tr>
                     );
-                  })}
-                </tbody>
-              </table>
-            )}
-          </div>
-        </div>
-      )}
-
-      {/* Drawer */}
-      {selected && (
-        <MonitorDrawer monitor={selected} onClose={() => setSelected(null)} onOpenFile={onOpenFile} />
-      )}
-
-      {/* Add-monitor wizard */}
-      <AddMonitorDialog
-        open={showAddMonitor}
-        onOpenChange={setShowAddMonitor}
-        projectId={currentProject.id}
-        onSaved={refresh}
-      />
-
-      {/* Generate with AI */}
-      <GenerateMonitorsDialog
-        open={showGenerate}
-        onOpenChange={setShowGenerate}
-        projectId={currentProject.id}
-        onGenerated={refresh}
-      />
-    </div>
+      })}
+    </>
   );
 }
 

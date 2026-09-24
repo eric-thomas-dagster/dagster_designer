@@ -1309,24 +1309,33 @@ async def _hydrate_cloud_graph(project: Project, force: bool = False) -> None:
     # level in a way that gives us description / status, so we derive
     # the list from asset-to-job attribution instead. Better than
     # nothing and matches what users see in the Dagster+ UI.
-    seen_jobs: dict[str, dict] = {}
+    #
+    # A job name is only unique WITHIN a code location -- e.g. Dagster's
+    # own implicit "__ASSET_JOB" (or any user-chosen name reused across
+    # repos) exists once per repository, all sharing the same name. Keyed
+    # by name alone, this used to silently merge those into one entry
+    # (wrong asset_keys attribution, and a code_location that read as
+    # every location comma-joined once that field got added). Keying by
+    # (location, name) keeps each repo's job as its own row, matching how
+    # Dagster+'s own UI treats jobs as scoped to a single code location.
+    seen_jobs: dict[tuple[str | None, str], dict] = {}
     for a in raw_assets:
         akey = "/".join(((a.get("assetKey") or {}).get("path") or []))
         a_location = ((a.get("repository") or {}).get("location") or {}).get("name") or None
         for jn in (a.get("jobNames") or []):
-            if not jn:
+            # Dagster auto-creates an implicit job (name starts with "__",
+            # e.g. "__ASSET_JOB") per repository to cover assets that
+            # aren't wired into a real @job -- not something a user ever
+            # created or would want to browse/launch, and since every
+            # repo gets one under the same name, it was the single
+            # biggest source of the name collision this function guards
+            # against above. Matches the same skip in
+            # get_job_insights_breakdown.
+            if not jn or jn.startswith("__"):
                 continue
-            entry = seen_jobs.setdefault(jn, {"name": jn, "asset_keys": [], "code_locations": []})
+            entry = seen_jobs.setdefault((a_location, jn), {"name": jn, "asset_keys": [], "code_location": a_location})
             if akey and akey not in entry["asset_keys"]:
                 entry["asset_keys"].append(akey)
-            if a_location and a_location not in entry["code_locations"]:
-                entry["code_locations"].append(a_location)
-    # Jobs are (almost always) scoped to exactly one code location --
-    # surface a single `code_location` field for filtering, alongside
-    # the full list for the rare multi-location edge case.
-    for job in seen_jobs.values():
-        locs = job["code_locations"]
-        job["code_location"] = locs[0] if len(locs) == 1 else (", ".join(sorted(locs)) if locs else None)
     project.discovered_primitives = {
         "schedules": all_schedules,
         "sensors": all_sensors,
@@ -5416,6 +5425,7 @@ class Monitor(BaseModel):
     duration_ms: int | None = None
     source_location: str | None = None  # file / defs.yaml where this monitor lives
     source_project: str | None = None   # dbt project name or component instance id
+    code_location: str | None = None    # Dagster+ code location this monitor's asset lives in (cloud only)
     schedule: str | None = None         # cron or 'on_materialization' if attached
     tags: list[str] = []
     description: str | None = None
@@ -5556,6 +5566,7 @@ async def list_monitors(project_id: str):
                 description=check.get('description'),
                 source_location=check.get('source') or node.data.get('source'),
                 source_project=node.data.get('component_id') or component_type.rsplit('.', 1)[-1] if component_type else None,
+                code_location=node.data.get('code_location'),
                 last_status=check.get('last_status'),
                 last_run_at=_coerce_ts(check.get('last_run_at')),
             ))

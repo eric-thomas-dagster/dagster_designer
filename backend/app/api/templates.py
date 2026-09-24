@@ -750,6 +750,7 @@ async def _list_cloud_resources(project) -> dict:
                 "line_number": 0,
                 "resource_type": resource_type,
                 "description": res.get("description") or "",
+                "code_location": location_name or None,
             }
             if "iomanager" in resource_type.lower().replace("_", ""):
                 io_managers.append(entry)

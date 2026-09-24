@@ -14,6 +14,7 @@ interface ResourceListItem {
   name: string;
   file: string;
   line_number: number;
+  code_location?: string | null;
 }
 
 interface ResourcesListResponse {
@@ -68,6 +69,7 @@ export function ResourcesManager({ onOpenFile }: ResourcesManagerProps = {}) {
   const { currentProject } = useProjectStore();
   const isCloudProject = !!(currentProject as any)?.is_dagster_plus;
   const [activeTab, setActiveTab] = useState<ResourceType>('io_manager');
+  const [resourceLocationFilter, setResourceLocationFilter] = useState<string>('all');
 
   // Fetch installed resources + IO managers so the user can see what's already
   // in the project and jump to their source in the Code tab.
@@ -270,44 +272,81 @@ export function ResourcesManager({ onOpenFile }: ResourcesManagerProps = {}) {
       </div>
 
       {/* Existing items — mirrors Automation's list style */}
-      {activeTab !== 'env_vars' && installed && (
-        <div className="flex-shrink-0 bg-white border-b border-gray-200 px-4 py-2 flex items-start gap-3 flex-wrap max-h-48 overflow-y-auto">
-          <span className="text-xs font-semibold text-gray-500 uppercase tracking-wider pt-1">
-            Installed
-          </span>
-          {(() => {
-            const items = activeTab === 'io_manager' ? installed.io_managers : installed.resources;
-            if (items.length === 0) {
-              return (
-                <span className="text-xs text-gray-400">
-                  {isCloudProject ? 'None found in this deployment.' : 'None yet — fill the form below and click Save to add one'}
-                </span>
-              );
-            }
-            return items.map((item) => (
-              <button
-                key={item.name}
-                onClick={() => {
-                  if (!onOpenFile || !installed.resources_file) return;
-                  onOpenFile(`${installed.resources_file}:${item.line_number}`);
-                }}
-                className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs bg-white border border-gray-200 rounded-md hover:border-primary/40 hover:bg-primary/5"
-                title={`Open ${item.file}:${item.line_number}`}
-              >
-                <FileCode className="w-3 h-3 text-gray-400" />
-                <span className="font-mono">{item.name}</span>
-              </button>
-            ));
-          })()}
+      {activeTab !== 'env_vars' && installed && (() => {
+        const items = activeTab === 'io_manager' ? installed.io_managers : installed.resources;
+        const locationOptions = isCloudProject
+          ? Array.from(new Set(items.map((i) => i.code_location).filter((l): l is string => !!l))).sort()
+          : [];
+        const filteredItems = resourceLocationFilter === 'all'
+          ? items
+          : items.filter((i) => i.code_location === resourceLocationFilter);
+        const groupByLocation = isCloudProject && resourceLocationFilter === 'all' && locationOptions.length > 1;
+        const chip = (item: ResourceListItem) => (
           <button
-            onClick={() => refetchInstalled()}
-            className="ml-auto p-1 text-gray-400 hover:text-gray-600 rounded"
-            title="Refresh list"
+            key={item.name}
+            onClick={() => {
+              if (!onOpenFile || !installed.resources_file) return;
+              onOpenFile(`${installed.resources_file}:${item.line_number}`);
+            }}
+            className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs bg-white border border-gray-200 rounded-md hover:border-primary/40 hover:bg-primary/5"
+            title={`Open ${item.file}:${item.line_number}`}
           >
-            <RefreshCw className="w-3.5 h-3.5" />
+            <FileCode className="w-3 h-3 text-gray-400" />
+            <span className="font-mono">{item.name}</span>
           </button>
-        </div>
-      )}
+        );
+        return (
+          <div className="flex-shrink-0 bg-white border-b border-gray-200 px-4 py-2 flex flex-col gap-2 max-h-48 overflow-y-auto">
+            <div className="flex items-center gap-3 flex-wrap">
+              <span className="text-xs font-semibold text-gray-500 uppercase tracking-wider">
+                Installed
+              </span>
+              {locationOptions.length > 1 && (
+                <select
+                  value={resourceLocationFilter}
+                  onChange={(e) => setResourceLocationFilter(e.target.value)}
+                  className="text-xs border border-gray-300 rounded px-2 py-0.5"
+                  title="Filter by code location"
+                >
+                  <option value="all">All code locations</option>
+                  {locationOptions.map((l) => (
+                    <option key={l} value={l}>{l}</option>
+                  ))}
+                </select>
+              )}
+              <button
+                onClick={() => refetchInstalled()}
+                className="ml-auto p-1 text-gray-400 hover:text-gray-600 rounded"
+                title="Refresh list"
+              >
+                <RefreshCw className="w-3.5 h-3.5" />
+              </button>
+            </div>
+            {filteredItems.length === 0 ? (
+              <span className="text-xs text-gray-400">
+                {isCloudProject ? 'None found in this deployment.' : 'None yet — fill the form below and click Save to add one'}
+              </span>
+            ) : groupByLocation ? (
+              locationOptions.map((loc) => {
+                const locItems = filteredItems.filter((i) => i.code_location === loc);
+                if (locItems.length === 0) return null;
+                return (
+                  <div key={loc} className="flex items-start gap-2 flex-wrap">
+                    <span className="text-[10px] text-gray-400 pt-1.5 flex-shrink-0 w-32 truncate" title={loc}>{loc}</span>
+                    <div className="flex items-start gap-2 flex-wrap flex-1">
+                      {locItems.map(chip)}
+                    </div>
+                  </div>
+                );
+              })
+            ) : (
+              <div className="flex items-start gap-2 flex-wrap">
+                {filteredItems.map(chip)}
+              </div>
+            )}
+          </div>
+        );
+      })()}
 
       {/* Community catalog for the currently-selected tab. Lives above the
           split-panel form so users can install a community resource/IO manager
