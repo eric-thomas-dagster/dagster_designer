@@ -1332,9 +1332,19 @@ if custom_lineage_edges:
 
     def _update_project_dependencies(self, project: Project):
         """Update pyproject.toml with dependencies for all project components."""
-        # Skip for imported Dagster projects - they manage their own dependencies
-        if project.dagster_package_subdir:
-            print(f"⏭️  Skipping dependency update for imported Dagster project (code in {project.dagster_package_subdir}/)")
+        # Skip for imported Dagster projects - they manage their own dependencies.
+        # Same guard gap as _generate_component_yaml_files/_generate_definitions_with_
+        # asset_customizations: dagster_package_subdir alone misses a plain
+        # src-layout or flat-layout import with no subdir. Worse than those two --
+        # this one doesn't just build a bogus path, it actively rewrites a real
+        # project's pyproject.toml via Python's `toml` library, which doesn't
+        # preserve tomlkit-compatible table ordering. That corrupted a real
+        # project's [tool.dg] table into a structure `dg` itself then refuses to
+        # parse ("Expected 'tool.dg' to be Table, but got OutOfOrderTableProxy"),
+        # breaking every subsequent `dg` invocation against that project until the
+        # file is manually fixed. Confirmed live.
+        if project.dagster_package_subdir or project.is_imported:
+            print(f"⏭️  Skipping dependency update for imported Dagster project" + (f" (code in {project.dagster_package_subdir}/)" if project.dagster_package_subdir else ""))
             return
 
         project_dir = self._get_project_dir(project)
@@ -1396,9 +1406,10 @@ if custom_lineage_edges:
 
     def _install_project_dependencies(self, project: Project):
         """Install dependencies into the project's virtualenv."""
-        # Skip for imported Dagster projects - they manage their own dependencies
-        if project.dagster_package_subdir:
-            print(f"⏭️  Skipping dependency installation for imported Dagster project (code in {project.dagster_package_subdir}/)")
+        # Skip for imported Dagster projects - they manage their own dependencies.
+        # Same guard gap as _update_project_dependencies just above -- see there.
+        if project.dagster_package_subdir or project.is_imported:
+            print(f"⏭️  Skipping dependency installation for imported Dagster project" + (f" (code in {project.dagster_package_subdir}/)" if project.dagster_package_subdir else ""))
             return
 
         project_dir = self._get_project_dir(project).resolve()
