@@ -1036,6 +1036,14 @@ async def preview_asset_data(
 
     # Get the project's Python executable
     project_python = project_service._get_project_python_path(project)
+    # Without this, a state-backed dbt component's manifest refresh (run as
+    # part of just loading definitions, before any asset actually executes)
+    # constructs its own internal DbtCliResource with the bare string "dbt",
+    # resolved via PATH -- not found without the venv's own bin dir on it,
+    # failing pydantic validation ("The dbt executable 'dbt' does not
+    # exist") before the preview ever gets a chance to run. materialize()
+    # already does this (see projects.py); this endpoint never did.
+    env["PATH"] = f"{project_python.parent}{os.pathsep}{env.get('PATH', '')}"
 
     try:
         # Run the preview script in the project's Python environment

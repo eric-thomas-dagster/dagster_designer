@@ -3091,6 +3091,12 @@ async def get_asset_partitions(project_id: str, asset_key: str):
 
         # Get the project's Python executable
         project_python = project_service._get_project_python_path(project)
+        # Without this, a state-backed dbt component's manifest refresh
+        # (part of just loading definitions) constructs its own internal
+        # DbtCliResource with the bare string "dbt", resolved via PATH --
+        # not found without the venv's own bin dir on it. materialize()
+        # already does this; this endpoint never did.
+        env["PATH"] = f"{project_python.parent}{os.pathsep}{env.get('PATH', '')}"
 
         result = await asyncio.to_thread(
             subprocess.run,
@@ -3192,6 +3198,12 @@ async def get_asset_config_schema(project_id: str, asset_key: str):
 
         # Get the project's Python executable
         project_python = project_service._get_project_python_path(project)
+        # Without this, a state-backed dbt component's manifest refresh
+        # (part of just loading definitions) constructs its own internal
+        # DbtCliResource with the bare string "dbt", resolved via PATH --
+        # not found without the venv's own bin dir on it. materialize()
+        # already does this; this endpoint never did.
+        env["PATH"] = f"{project_python.parent}{os.pathsep}{env.get('PATH', '')}"
 
         result = await asyncio.to_thread(
             subprocess.run,

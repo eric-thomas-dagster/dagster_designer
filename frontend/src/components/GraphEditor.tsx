@@ -735,6 +735,21 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
   // Handlers for asset context menu
   const handleMaterializeAsset = useCallback(async (assetKey: string) => {
     if (!currentProject) return;
+    // Same partition check as handleRunToHere just above -- this is a
+    // separate quick-materialize entry point (the node's own context menu),
+    // not routed through it, so it had the identical gap: no way to supply
+    // a partition, so it failed outright on any partitioned asset.
+    try {
+      const info = await partitionsApi.getPartitionInfo(currentProject.id, assetKey);
+      if (info.is_partitioned) {
+        notify.info(`${assetKey} is partitioned -- pick a partition to run.`);
+        setLaunchpadAssetKey(assetKey);
+        setShowLaunchpad(true);
+        return;
+      }
+    } catch {
+      // Partition-info lookup failing shouldn't block a plain run.
+    }
     try {
       const result = await projectsApi.materialize(currentProject.id, [assetKey]);
       if (result.success) {
