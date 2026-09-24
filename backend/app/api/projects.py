@@ -2057,7 +2057,7 @@ async def validate_project(project_id: str):
     except subprocess.TimeoutExpired:
         return {
             "valid": False,
-            "error": "Validation timed out after 30 seconds",
+            "error": "Validation timed out after 180 seconds",
             "details": None
         }
     except Exception as e:

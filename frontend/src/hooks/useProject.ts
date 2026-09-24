@@ -331,8 +331,14 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
                     set({ assetGenerationStatus: 'idle' });
                   }
                 }, 2000);
-              } else if (attempts < 30) {
-                // Has components but no assets yet - keep trying
+              } else if (attempts < 180) {
+                // Has components but no assets yet - keep trying. 180 attempts
+                // at 1/sec matches the backend's own `dg list defs` timeout
+                // (180s, see asset_introspection_service.py) -- a lower cap
+                // here was tuned against Mac's fast subprocess cold-starts and
+                // gave false "timed out" errors on Windows, where uv/dg cold
+                // starts (antivirus scanning, no bytecode cache yet) commonly
+                // take well past 30s on a fresh project.
                 setTimeout(() => checkAssets(attempts + 1), 1000);
               } else {
                 console.warn('⚠️  Asset generation timed out');
