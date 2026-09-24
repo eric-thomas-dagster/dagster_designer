@@ -321,8 +321,22 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
                     set({ assetGenerationStatus: 'idle' });
                   }
                 }, 3000);
-              } else if (!hasComponents) {
-                // Blank project with no components - no assets expected, this is success
+              } else if (!hasComponents && attempts >= 5) {
+                // No Designer-managed components after a few seconds of
+                // retrying, and still no assets -- likely a genuinely blank
+                // project. We can't trust !hasComponents on attempt 0: for a
+                // real imported Dagster/dbt project (e.g. a git-repo import),
+                // `project.components` (Designer's own component-instance
+                // concept) is NEVER populated by that import path, while
+                // asset generation is a separate, slower background step
+                // (`dg list defs`) that's often still running at this point.
+                // Declaring "success" here on the first check produced a
+                // false positive -- the graph looked permanently empty even
+                // though the backend went on to generate real nodes/edges
+                // seconds later, because nothing re-polled after this branch
+                // gave up. Now this only fires after the same grace period
+                // as the "has components" case below, by which point a
+                // truly blank project really has nothing more coming.
                 console.log('✅ Blank project ready (no components, no assets)');
                 set({ assetGenerationStatus: 'success', assetGenerationError: null });
                 get().loadProject(projectId);
@@ -332,9 +346,11 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
                   }
                 }, 2000);
               } else if (attempts < 180) {
-                // Has components but no assets yet - keep trying. 180 attempts
-                // at 1/sec matches the backend's own `dg list defs` timeout
-                // (180s, see asset_introspection_service.py) -- a lower cap
+                // Keep trying, whether or not project.components is
+                // populated -- see above, that signal alone can't tell us
+                // asset generation is genuinely done. 180 attempts at 1/sec
+                // matches the backend's own `dg list defs` timeout (180s,
+                // see asset_introspection_service.py) -- a lower cap
                 // here was tuned against Mac's fast subprocess cold-starts and
                 // gave false "timed out" errors on Windows, where uv/dg cold
                 // starts (antivirus scanning, no bytecode cache yet) commonly
