@@ -7,7 +7,6 @@ import { GitCommitDialog } from './GitCommitDialog';
 import { Launchpad } from './Launchpad';
 import { notify, confirmDialog } from './Notifications';
 import { onMenuAction, isTauri, pickDirectory } from '@/services/tauri';
-import { openSettings } from './SettingsDialog';
 import { openPreferences } from './PreferencesDialog';
 import {
   FolderOpen,
@@ -100,9 +99,6 @@ export function ProjectManager() {
       switch (id) {
         case 'app:preferences':
           openPreferences();
-          break;
-        case 'app:settings':
-          openSettings();
           break;
         case 'project:new':
           closeAllDialogs();
