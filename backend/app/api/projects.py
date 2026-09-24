@@ -26,6 +26,16 @@ from ..services import promotion_config
 
 router = APIRouter(prefix="/projects", tags=["projects"])
 
+# Tracks the background asset-generation step of _install_dependencies_and_generate_assets
+# separately from dependency-status, which only covers `uv sync`. The frontend used to
+# infer "asset generation is done" from heuristics on the saved project (node count,
+# whether project.components was populated) polled on a short, arbitrary timer -- for a
+# project whose first `dg list defs` has to build a dbt manifest from scratch, that step
+# alone commonly takes 20-30+ seconds, well past any heuristic's grace period, causing a
+# false "this project has no assets" conclusion before generation had actually finished.
+# Polling this explicit status instead removes the guessing entirely.
+_asset_generation_status: dict[str, dict[str, Any]] = {}
+
 
 class CloneRepoRequest(BaseModel):
     """Request to clone a git repository."""
@@ -59,6 +69,7 @@ async def _install_dependencies_and_generate_assets(project: Project):
 
     # After dependencies are installed, regenerate assets
     print(f"[Background] Dependencies installed for {project.name}. Generating assets...")
+    _asset_generation_status[project.id] = {"status": "generating", "error": None, "node_count": None}
     try:
         asset_introspection_service.clear_cache(project.id)
         asset_nodes, asset_edges = await asset_introspection_service.get_assets_for_project_async(project, recalculate_layout=True)
@@ -69,8 +80,10 @@ async def _install_dependencies_and_generate_assets(project: Project):
         project_service._save_project(project)
 
         print(f"[Background] ✅ Assets generated and saved for {project.name}: {len(asset_nodes)} nodes, {len(asset_edges)} edges")
+        _asset_generation_status[project.id] = {"status": "success", "error": None, "node_count": len(asset_nodes)}
     except Exception as e:
         print(f"[Background] ❌ Failed to generate assets for {project.name}: {e}")
+        _asset_generation_status[project.id] = {"status": "error", "error": str(e), "node_count": None}
 
 
 @router.post("", response_model=Project, status_code=201)
@@ -517,6 +530,27 @@ async def get_dependency_status(project_id: str):
     """
     status = project_service.get_dependency_status(project_id)
     return status
+
+
+@router.get("/{project_id}/asset-generation-status")
+async def get_asset_generation_status(project_id: str):
+    """Get the status of the background asset-generation step that follows
+    dependency installation for a project created from a git repo.
+
+    Returns:
+        {
+            "status": "idle" | "generating" | "success" | "error",
+            "error": str | null,
+            "node_count": int | null
+        }
+
+    "idle" means this project never went through the automatic
+    install-then-generate background flow (e.g. it was imported from a local
+    path, or the backend restarted and lost in-memory status) -- callers
+    should not treat that as "definitely no assets," just "nothing to wait on
+    here."
+    """
+    return _asset_generation_status.get(project_id, {"status": "idle", "error": None, "node_count": None})
 
 
 @router.post("/import", response_model=Project, status_code=201)

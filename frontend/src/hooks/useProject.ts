@@ -306,14 +306,35 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
           // Poll for assets to be ready (backend generates them automatically)
           set({ assetGenerationStatus: 'generating', assetGenerationError: null });
 
+          // Poll the backend's own asset-generation status instead of
+          // guessing from the saved project (node count, whether
+          // project.components got populated). That heuristic approach had
+          // two failure modes, both confirmed live against a real imported
+          // Dagster+dbt project (chicago_bulls_analytics): (1) a real
+          // imported project's project.components is NEVER populated by
+          // that import path regardless of whether it has assets, so
+          // treating "no components" as "no assets coming" declared false
+          // success before generation started; (2) even after retrying on
+          // that signal, a short grace period isn't enough -- this
+          // project's first `dg list defs` has to build a dbt manifest from
+          // scratch and took ~30s end to end, so a 5s grace period still
+          // gave a false "blank project" verdict mid-generation. Polling an
+          // explicit status the backend sets itself
+          // (_install_dependencies_and_generate_assets in projects.py)
+          // removes the guessing entirely.
           const checkAssets = async (attempts = 0) => {
             try {
-              const project = await projectsApi.get(projectId);
-              const hasAssets = project.graph?.nodes && project.graph.nodes.length > 0;
-              const hasComponents = project.components && project.components.length > 0;
+              const { data: genStatus } = await api.get(`/projects/${projectId}/asset-generation-status`);
 
-              if (hasAssets) {
-                console.log('✅ Assets generated successfully');
+              if (genStatus.status === 'success' || (genStatus.status === 'idle' && attempts >= 2)) {
+                // 'idle' on the first couple of attempts can just mean the
+                // background task hasn't flipped its status to 'generating'
+                // yet (a narrow start-of-flow race) -- give it a couple
+                // retries before trusting it as "this project never went
+                // through the automatic background flow" (e.g. the backend
+                // restarted mid-generation and lost its in-memory status)
+                // and falling back to whatever's on disk.
+                console.log(`✅ Asset generation ${genStatus.status} (${genStatus.node_count ?? '?'} nodes)`);
                 set({ assetGenerationStatus: 'success', assetGenerationError: null });
                 get().loadProject(projectId);
                 setTimeout(() => {
@@ -321,36 +342,14 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
                     set({ assetGenerationStatus: 'idle' });
                   }
                 }, 3000);
-              } else if (!hasComponents && attempts >= 5) {
-                // No Designer-managed components after a few seconds of
-                // retrying, and still no assets -- likely a genuinely blank
-                // project. We can't trust !hasComponents on attempt 0: for a
-                // real imported Dagster/dbt project (e.g. a git-repo import),
-                // `project.components` (Designer's own component-instance
-                // concept) is NEVER populated by that import path, while
-                // asset generation is a separate, slower background step
-                // (`dg list defs`) that's often still running at this point.
-                // Declaring "success" here on the first check produced a
-                // false positive -- the graph looked permanently empty even
-                // though the backend went on to generate real nodes/edges
-                // seconds later, because nothing re-polled after this branch
-                // gave up. Now this only fires after the same grace period
-                // as the "has components" case below, by which point a
-                // truly blank project really has nothing more coming.
-                console.log('✅ Blank project ready (no components, no assets)');
-                set({ assetGenerationStatus: 'success', assetGenerationError: null });
+              } else if (genStatus.status === 'error') {
+                console.warn('⚠️  Asset generation failed:', genStatus.error);
+                set({ assetGenerationStatus: 'error', assetGenerationError: genStatus.error || 'Asset generation failed' });
                 get().loadProject(projectId);
-                setTimeout(() => {
-                  if (get().assetGenerationStatus === 'success') {
-                    set({ assetGenerationStatus: 'idle' });
-                  }
-                }, 2000);
               } else if (attempts < 180) {
-                // Keep trying, whether or not project.components is
-                // populated -- see above, that signal alone can't tell us
-                // asset generation is genuinely done. 180 attempts at 1/sec
-                // matches the backend's own `dg list defs` timeout (180s,
-                // see asset_introspection_service.py) -- a lower cap
+                // status === 'generating' -- keep polling. 180 attempts at
+                // 1/sec matches the backend's own `dg list defs` timeout
+                // (180s, see asset_introspection_service.py) -- a lower cap
                 // here was tuned against Mac's fast subprocess cold-starts and
                 // gave false "timed out" errors on Windows, where uv/dg cold
                 // starts (antivirus scanning, no bytecode cache yet) commonly
