@@ -46,6 +46,38 @@ def _normalize_tags(raw_tags: Any) -> list[str]:
     return normalized
 
 
+def _normalize_owners(raw_owners: Any) -> list[str]:
+    """Coerces `dg list defs --json`'s owner representation to plain strings.
+
+    Same bug class as _normalize_tags: every frontend consumer of
+    node.data.owners assumes a string[] (AssetNode's tooltip does
+    data.owners.join(', ')), but `dg list defs --json` can emit owners as
+    {"email": ...} objects instead of plain "user@example.com" strings
+    (confirmed against a real project, eric-thomas-dagster/
+    chicago_bulls_analytics, whose defs.yaml declares owners this way).
+    PillList and other components render each owner directly as a React
+    child, so an un-normalized object crashes the whole view the same way
+    un-normalized tags did -- assets were generated correctly on the
+    backend (confirmed via the saved project JSON) but nothing rendered.
+    """
+    normalized: list[str] = []
+    for o in raw_owners or []:
+        if isinstance(o, str):
+            normalized.append(o)
+        elif isinstance(o, dict):
+            if o.get("email"):
+                normalized.append(o["email"])
+            elif o.get("team"):
+                normalized.append(f"team:{o['team']}")
+            else:
+                value = next(iter(o.values()), "")
+                if value:
+                    normalized.append(str(value))
+        elif o is not None:
+            normalized.append(str(o))
+    return normalized
+
+
 # Simple in-memory cache for asset introspection to avoid re-running slow dg list defs
 # Cache structure: {project_id: (timestamp, assets_data)}
 _assets_cache: Dict[str, Tuple[float, dict]] = {}
@@ -905,7 +937,7 @@ class AssetIntrospectionService:
                         "name": asset_key,  # Add name field for side panel
                         "description": asset.get("description", ""),
                         "group_name": asset.get("group", "default"),
-                        "owners": asset.get("owners", []),
+                        "owners": _normalize_owners(asset.get("owners", [])),
                         "kinds": asset.get("kinds", []),
                         "source": asset_source,  # Use the updated source with Python file path
                         "tags": _normalize_tags(asset.get("tags", [])),
