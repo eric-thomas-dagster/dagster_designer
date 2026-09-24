@@ -809,6 +809,24 @@ def main():
         # resource_key) that the mock context truly can't satisfy.
         required_keys = set(getattr(asset_def, 'required_resource_keys', None) or []) - {'io_manager'}
         if required_keys:
+            # Before giving up: a local .duckdb file needs no credentials and
+            # can only be opened read-only here, so querying it directly poses
+            # none of the risk this whole check exists to avoid (accidentally
+            # opening a real, possibly-production warehouse connection during
+            # a "preview" click). This same fallback already existed for dbt
+            # assets specifically -- it applies just as well to a regular
+            # Python asset that happens to write to a local DuckDB-backed
+            # "warehouse" resource (a common pattern in hand-written demo
+            # projects, confirmed live: a real project's raw/game_schedule
+            # asset, freshly materialized into a real demo_warehouse.duckdb
+            # table, still couldn't be previewed at all before this because
+            # the required_resource_keys check exited before ever getting a
+            # chance to look for one).
+            duckdb_result = _try_duckdb_preview(asset_key, sample_limit)
+            if duckdb_result is not None:
+                print(json.dumps(duckdb_result))
+                sys.exit(0)
+
             print(json.dumps({
                 "success": False,
                 "error": (
