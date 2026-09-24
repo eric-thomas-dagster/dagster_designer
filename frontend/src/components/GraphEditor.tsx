@@ -501,26 +501,30 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
   // didn't expect.
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
 
-  // Groups whose expanded-view layout has already been applied. When a
-  // group is freshly expanded we lay out its assets via the mixed-DAG
-  // longest-path layout; after that first placement, subsequent renders
-  // must keep whatever position the user has dragged the asset to. If
-  // we re-applied the layout every render, drags would snap right back.
-  // groupedView itself is the one that ADDS a group here -- but only once
-  // every member's real measured height is known (see heightForAsset there);
-  // adding it eagerly the instant it's expanded would lock in a layout
-  // computed from guessed heights, before ReactFlow has ever measured the
-  // newly-mounted cards.
-  const laidOutGroupsRef = useRef<Set<string>>(new Set());
-  useEffect(() => {
-    // Only drop groups that aren't expanded any more here, so they get a
-    // fresh (measured) layout next time they're re-expanded.
-    const next = new Set<string>();
-    for (const g of laidOutGroupsRef.current) {
-      if (expandedGroups.has(g)) next.add(g);
-    }
-    laidOutGroupsRef.current = next;
-  }, [expandedGroups]);
+  // Node ids the user has explicitly dragged while inside an expanded
+  // group -- groupedView's tiling computation (below) always recomputes
+  // fresh positions for everything else, every render, so a drag needs
+  // an explicit opt-out or it would snap right back the next time
+  // anything else in the graph changes.
+  //
+  // This used to be handled the other way around: once a group's assets
+  // all reported a real measured height (ReactFlow measures asynchronously
+  // after mount), that group "locked" and permanently stopped recomputing
+  // ANY of its members' positions, trusting raw node state from then on.
+  // That's broken by construction for this layout: the inter-group tiling
+  // in groupedView is a HOLISTIC computation where every group's origin
+  // depends on every OTHER group's current block size, so freezing one
+  // group's positions from an earlier render while its neighbors keep
+  // recomputing as THEIR heights settle (very much still happening
+  // mid-flight when many groups expand at once) leaves that frozen group
+  // sitting wherever it happened to be at lock time -- no longer
+  // consistent with where the CURRENT tiling computation places everyone
+  // else around it. Confirmed live: "Expand all" on a real ~20-group
+  // Dagster+ org produced visibly overlapping group boxes, not just a
+  // messy-but-non-overlapping layout -- exactly this race, one group
+  // locking before its neighbors' heights (and therefore its own correct
+  // origin) had stabilized.
+  const manuallyPositionedRef = useRef<Set<string>>(new Set());
   // Follow the camera on expand/collapse. groupedView recomputes node
   // positions for the WHOLE visible node set via a fresh topological
   // layout on every toggle (not just the group that changed), so the
@@ -632,6 +636,18 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
   // this file.
   const onNodesChange = useCallback((changes: any[]) => {
     const real = changes.filter((c) => !(typeof c.id === 'string' && c.id.startsWith('__group__::')));
+    // A `type: 'position'` change with `dragging: false` is ReactFlow's own
+    // signal that a user drag gesture just ended on this node (position
+    // changes we apply ourselves, via groupedView's computed layout, are
+    // prop-driven and never flow through this change-event path at all --
+    // only real pointer interaction does). Record it so groupedView keeps
+    // trusting this node's own position instead of recomputing it fresh
+    // next render, without needing to gate that on anything else.
+    for (const c of real) {
+      if (c.type === 'position' && c.dragging === false && typeof c.id === 'string') {
+        manuallyPositionedRef.current.add(c.id);
+      }
+    }
     if (real.length > 0) {
       onNodesChangeRaw(real);
     }
@@ -2634,19 +2650,6 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
     // for collapsed groups, individual asset nodes (with new positions)
     // for expanded ones.
     const outNodes: Node[] = [];
-    // `outNodes` is what actually renders (passed straight through as
-    // ReactFlow's controlled `nodes` prop), but it's never written back
-    // into the raw `nodes` state (see useNodesState above) -- so once a
-    // group locks (below) and starts trusting `n.position` instead of
-    // recomputing posById, that position read comes from raw state, which
-    // still has this asset's PRE-layout position (wherever it sat before
-    // ever being expanded). Expanding a second group re-renders this
-    // memo, and the already-locked first group's nodes would silently
-    // snap back to that stale position -- looking exactly like unrelated
-    // groups overlapping. Collected here and flushed into raw state by
-    // the effect right after this memo, so a locked node's remembered
-    // position actually matches what was last shown on screen.
-    const newlyLocked: { id: string; position: { x: number; y: number } }[] = [];
     const emittedGroupIds = new Set<string>();
     for (const [g, info] of Object.entries(groupInfo)) {
       if (isGroupExpanded(g)) continue;
@@ -2682,26 +2685,17 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
     }
     for (const [g, info] of Object.entries(groupInfo)) {
       if (!isGroupExpanded(g)) continue;
-      // Only apply the DAG layout position on renders before this group's
-      // members all have a real measured height yet. Subsequent renders
-      // (including those triggered by the user dragging an asset) trust
-      // the node's own position so drags persist. A freshly-expanded
-      // group's nodes aren't measured on the render that first shows them
-      // (see heightForAsset's fallback above), so lock only once every
-      // member has reported a real height -- that render's posById is the
-      // accurate one worth keeping.
-      const alreadyLaidOut = laidOutGroupsRef.current.has(g);
-      let justLocked = false;
-      if (!alreadyLaidOut) {
-        const allMeasured = info.assets.every((a) => typeof a.height === 'number' && a.height > 0);
-        if (allMeasured) {
-          laidOutGroupsRef.current.add(g);
-          justLocked = true;
-        }
-      }
+      // Always the freshly computed tiling position, EXCEPT for a node the
+      // user has explicitly dragged (manuallyPositionedRef, populated by
+      // onNodesChange above) -- recomputing every render is what keeps this
+      // holistic layout internally consistent as heights settle and other
+      // groups expand/collapse around it (see manuallyPositionedRef's own
+      // comment for why the previous "lock once measured" approach broke
+      // that guarantee). heightForAsset's fallback keeps this from being
+      // visually jarring before real heights land -- worst case here is a
+      // brief, self-correcting shift, not a permanently wrong position.
       for (const n of info.assets) {
-        const resolvedPosition = alreadyLaidOut ? n.position : (posById[n.id] || n.position);
-        if (justLocked) newlyLocked.push({ id: n.id, position: resolvedPosition });
+        const resolvedPosition = manuallyPositionedRef.current.has(n.id) ? n.position : (posById[n.id] || n.position);
         outNodes.push({
           ...n,
           position: resolvedPosition,
@@ -2729,17 +2723,8 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
       } as Edge;
     });
 
-    return { nodes: outNodes, edges: outEdges, newlyLocked };
+    return { nodes: outNodes, edges: outEdges };
   }, [collapseToGroups, expandedGroups, perAssetDisplay, edges, handleExpandGroup, handleCollapseGroup]);
-
-  // Flush freshly-locked group layouts into raw node state (see
-  // `newlyLocked`'s comment above) so they survive the next unrelated
-  // re-render instead of snapping back to their pre-expand position.
-  useEffect(() => {
-    if (!groupedView?.newlyLocked?.length) return;
-    const byId = new Map(groupedView.newlyLocked.map((p) => [p.id, p.position]));
-    setNodes((nds) => nds.map((n) => (byId.has(n.id) ? { ...n, position: byId.get(n.id)! } : n)));
-  }, [groupedView, setNodes]);
 
   const baseDisplayNodes = groupedView ? groupedView.nodes : perAssetDisplay;
   const displayEdges = groupedView ? groupedView.edges : edges;
