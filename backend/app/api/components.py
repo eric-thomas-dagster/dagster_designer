@@ -23,6 +23,67 @@ _dg_component_schema_cache: dict[tuple[str, str], tuple[float, "ComponentSchema 
 _DG_SCHEMA_CACHE_TTL_SECONDS = 30
 
 
+def _normalize_json_schema_for_ui(schema, defs: dict, _depth: int = 0):
+    """Collapses raw pydantic-v2 JSON Schema conventions into the flatter
+    shape ComponentConfigModal already knows how to render (a `type` key
+    directly on every field) -- the same shape Designer's built-in registry
+    and the community schema.json convention both already use.
+
+    Two conventions `dg utils inspect-component` emits that the modal's
+    field-type dispatch (`fieldSchema.type`) can't see through on its own:
+
+    1. `$ref` pointers into `$defs` for nested models (e.g. `workspace`'s
+       FabricResource) -- left unresolved, the modal has no `type` or
+       `properties` to render at all.
+    2. `anyOf: [<real type>, {"type": "string"}]` on EVERY Component field,
+       not just genuinely Optional ones -- this is Dagster's own
+       "real value OR a `{{ env.VAR }}` template string" convention for
+       Resolvable component fields, confirmed live against a real project
+       (every one of demo_mode/workspace/assets_by_item_name/... has this
+       shape). `fieldSchema.type` is undefined on the wrapper itself, so a
+       boolean field fell through to a plain text input showing its raw
+       Python-side default, and an object field rendered as
+       "[object Object]" -- both symptoms the user hit live, both from this
+       same cause. The real type is always the FIRST anyOf branch (`null`
+       or the template-string `type: string` variant comes after), so
+       picking branch 0 recovers the correct widget type both for this
+       convention and for ordinary `Optional[X]` fields.
+    """
+    if _depth > 12 or not isinstance(schema, dict):
+        return schema
+
+    if "$ref" in schema:
+        def_name = schema["$ref"].split("/")[-1]
+        resolved = defs.get(def_name)
+        if isinstance(resolved, dict):
+            merged = {**resolved, **{k: v for k, v in schema.items() if k != "$ref"}}
+            return _normalize_json_schema_for_ui(merged, defs, _depth + 1)
+        return schema
+
+    for union_key in ("anyOf", "oneOf"):
+        branches = schema.get(union_key)
+        if branches and "type" not in schema:
+            non_null = [b for b in branches if isinstance(b, dict) and b.get("type") != "null"]
+            if non_null:
+                chosen = _normalize_json_schema_for_ui(dict(non_null[0]), defs, _depth + 1)
+                merged = dict(chosen)
+                for k, v in schema.items():
+                    if k != union_key and k not in merged:
+                        merged[k] = v
+                return merged
+
+    out = dict(schema)
+    if isinstance(out.get("properties"), dict):
+        out["properties"] = {
+            k: _normalize_json_schema_for_ui(v, defs, _depth + 1)
+            for k, v in out["properties"].items()
+        }
+    if isinstance(out.get("items"), dict):
+        out["items"] = _normalize_json_schema_for_ui(out["items"], defs, _depth + 1)
+
+    return out
+
+
 def _get_component_schema_via_dg(project, component_type: str) -> "ComponentSchema | None":
     """Resolve a component's schema by asking the project's OWN `dg` CLI,
     instead of guessing from a checked-in schema.json (may not exist) or
@@ -97,6 +158,11 @@ def _get_component_schema_via_dg(project, component_type: str) -> "ComponentSche
         # (attributes) makes every $ref resolvable there instead of only some.
         merged_defs = {**full_schema.get("$defs", {}), **attributes_schema.get("$defs", {})}
         schema_out = dict(attributes_schema)
+        if isinstance(schema_out.get("properties"), dict):
+            schema_out["properties"] = {
+                field_name: _normalize_json_schema_for_ui(field_schema, merged_defs)
+                for field_name, field_schema in schema_out["properties"].items()
+            }
         if merged_defs:
             schema_out["$defs"] = merged_defs
 
