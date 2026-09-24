@@ -283,6 +283,7 @@ class ProjectService:
                             is_asset_factory=True,
                         )
                         project.components.append(dbt_component)
+                        self._render_cookiecutter_dbt_template(dbt_target_dir, project.name)
                         # Create/enhance profiles.yml and .env for dbt
                         self._create_dbt_profiles(dbt_target_dir, project_dir)
 
@@ -345,6 +346,7 @@ class ProjectService:
 
                                 # Create/enhance profiles.yml for this dbt project
                                 dbt_target_dir = project_dir / component_path
+                                self._render_cookiecutter_dbt_template(dbt_target_dir, project.name)
                                 self._create_dbt_profiles(dbt_target_dir, project_dir)
 
                             # Generate YAML files for all components
@@ -403,6 +405,7 @@ class ProjectService:
 
                                 # Create/enhance profiles.yml for this dbt project
                                 dbt_target_dir = project_dir / component_path
+                                self._render_cookiecutter_dbt_template(dbt_target_dir, project.name)
                                 self._create_dbt_profiles(dbt_target_dir, project_dir)
 
                             # Generate YAML files for all components
@@ -2756,6 +2759,78 @@ if customizations_path.exists():
         # Default to duckdb
         print("No adapter detected, defaulting to duckdb")
         return 'duckdb'
+
+    def _render_cookiecutter_dbt_template(self, dbt_dir: Path, project_name: str) -> None:
+        """Renders a cookiecutter-style dbt project template in place, if one is detected.
+
+        Some "starter project" repos (e.g. dbt-labs/dbt-init) aren't actually
+        real dbt projects -- they're Jinja templates meant to be rendered by a
+        separate scaffolding tool first, using a `project.*` variable
+        namespace (project.name, project.warehouse, ...). Cloned as-is, their
+        dbt_project.yml isn't even valid YAML (raw `{% if ... %}` tags), so
+        `DbtProject(...)` fails immediately with a YAML scanner error.
+
+        A real dbt_project.yml never uses Jinja itself (only model/macro SQL
+        does, with a completely different variable set -- ref(), source(),
+        var(), ... -- never "project."), so finding `{{`/`{%` in it at all is
+        already a strong, low-false-positive signal that this is one of these
+        templates rather than a normal project. When detected, renders every
+        text file in the directory with a best-effort set of values (derived
+        from the new project's own name) so the result becomes a normal,
+        loadable dbt project instead of erroring out.
+        """
+        import re
+        import jinja2
+
+        dbt_project_yml = dbt_dir / "dbt_project.yml"
+        if not dbt_project_yml.exists():
+            return
+        try:
+            original = dbt_project_yml.read_text()
+        except Exception:
+            return
+        if "{{" not in original and "{%" not in original:
+            return
+
+        print(f"🍪 Detected a cookiecutter-style dbt template at {dbt_dir} (unrendered {{{{ project.* }}}} Jinja) -- rendering it")
+
+        slug = re.sub(r'[^a-z0-9_]', '_', project_name.lower()).strip('_') or 'my_project'
+        name_lower = project_name.lower()
+        warehouse = next(
+            (w for w in ("snowflake", "bigquery", "postgres", "redshift") if w in name_lower),
+            None,
+        )
+        context = {
+            "project": {
+                "name": slug,
+                "profile_name": slug,
+                "client_name": slug,
+                "dir_name": slug,
+                "warehouse": warehouse,
+            }
+        }
+
+        env = jinja2.Environment()
+        rendered_count = 0
+        for path in dbt_dir.rglob("*"):
+            if not path.is_file() or ".git" in path.parts:
+                continue
+            try:
+                text = path.read_text()
+            except (UnicodeDecodeError, ValueError):
+                continue  # binary file, leave it alone
+            if "{{" not in text and "{%" not in text:
+                continue
+            try:
+                new_text = env.from_string(text).render(**context)
+            except jinja2.TemplateError as e:
+                print(f"⚠️  Failed to render template file {path}: {e}")
+                continue
+            if new_text != text:
+                path.write_text(new_text)
+                rendered_count += 1
+
+        print(f"✅ Rendered {rendered_count} template file(s)" + (f" for warehouse='{warehouse}'" if warehouse else " (no specific warehouse detected from the project name -- rendered with warehouse-specific config left out, which is still valid; edit dbt_project.yml/profiles.yml by hand for your actual warehouse)"))
 
     def _detect_project_type(self, repo_dir: Path) -> tuple[str, Path | None]:
         """Detect the type of project in the given directory.
