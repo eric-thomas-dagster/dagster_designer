@@ -4,6 +4,8 @@ import { BarChart3, Loader2 } from 'lucide-react';
 import { useProjectStore } from '@/hooks/useProject';
 import { assetsApi, INSIGHTS_BREAKDOWN_METRICS, INSIGHTS_JOB_BREAKDOWN_METRICS } from '@/services/api';
 import { InsightMetricCard, formatInsightValue } from './InsightMetricCard';
+import { useGroupByCodeLocation } from '@/hooks/useGroupByCodeLocation';
+import { GroupByLocationToggle } from './GroupByLocationToggle';
 
 interface InsightsPanelProps {
   /** Jump to a specific asset's own Insights tab (drill-down). */
@@ -44,6 +46,7 @@ export function InsightsPanel({ onOpenAsset, onOpenJob }: InsightsPanelProps) {
   const [days, setDays] = useState(30);
   const [view, setView] = useState<'assets' | 'jobs'>('assets');
   const [codeLocationFilter, setCodeLocationFilter] = useState('');
+  const [groupByLocationPref, setGroupByLocationPref] = useGroupByCodeLocation();
   const isCloud = !!(currentProject as any)?.is_dagster_plus;
 
   // Asset -> code location, from the already-loaded project graph (no
@@ -118,6 +121,9 @@ export function InsightsPanel({ onOpenAsset, onOpenJob }: InsightsPanelProps) {
               ))}
             </select>
           )}
+          {codeLocationOptions.length > 1 && (
+            <GroupByLocationToggle value={groupByLocationPref} onChange={setGroupByLocationPref} />
+          )}
           <div className="inline-flex rounded border border-gray-200 overflow-hidden">
             {[7, 30, 60, 90, 120].map((d) => (
               <button
@@ -176,6 +182,7 @@ export function InsightsPanel({ onOpenAsset, onOpenJob }: InsightsPanelProps) {
                   onOpenAsset={handleOpenAsset}
                   codeLocationFilter={codeLocationFilter}
                   assetCodeLocations={assetCodeLocations}
+                  groupByLocationPref={groupByLocationPref}
                 />
               ))}
             </div>
@@ -190,6 +197,7 @@ export function InsightsPanel({ onOpenAsset, onOpenJob }: InsightsPanelProps) {
                   label={m.label}
                   onOpenJob={onOpenJob}
                   codeLocationFilter={codeLocationFilter}
+                  groupByLocationPref={groupByLocationPref}
                 />
               ))}
             </div>
@@ -201,7 +209,7 @@ export function InsightsPanel({ onOpenAsset, onOpenJob }: InsightsPanelProps) {
 }
 
 function TopJobsCard({
-  projectId, days, metricName, label, onOpenJob, codeLocationFilter,
+  projectId, days, metricName, label, onOpenJob, codeLocationFilter, groupByLocationPref,
 }: {
   projectId: string;
   days: number;
@@ -209,6 +217,7 @@ function TopJobsCard({
   label: string;
   onOpenJob: (jobName: string) => void;
   codeLocationFilter?: string;
+  groupByLocationPref?: boolean;
 }) {
   const { data, isLoading } = useQuery({
     queryKey: ['insights-job-breakdown', projectId, metricName, days],
@@ -218,11 +227,12 @@ function TopJobsCard({
   const allRows = data?.rows || [];
   const filteredRows = codeLocationFilter ? allRows.filter((r) => r.code_location === codeLocationFilter) : allRows;
   const distinctLocs = new Set(allRows.map((r) => r.code_location).filter(Boolean));
-  // No location filter picked and rows actually span more than one
-  // location -- break the single top-5 ranking into one small table per
-  // location instead, so a location with real activity doesn't get
-  // crowded out of a global top-5 by a noisier one.
-  const grouped = !codeLocationFilter && distinctLocs.size > 1;
+  // No location filter picked, the "group by location" preference is on,
+  // and rows actually span more than one location -- break the single
+  // top-5 ranking into one small table per location instead, so a
+  // location with real activity doesn't get crowded out of a global
+  // top-5 by a noisier one.
+  const grouped = !codeLocationFilter && groupByLocationPref !== false && distinctLocs.size > 1;
 
   const renderRows = (rows: typeof allRows) => (
     <ul className="divide-y divide-gray-50">
@@ -272,7 +282,7 @@ function TopJobsCard({
 }
 
 function TopAssetsCard({
-  projectId, days, metricName, label, onOpenAsset, codeLocationFilter, assetCodeLocations,
+  projectId, days, metricName, label, onOpenAsset, codeLocationFilter, assetCodeLocations, groupByLocationPref,
 }: {
   projectId: string;
   days: number;
@@ -281,6 +291,7 @@ function TopAssetsCard({
   onOpenAsset: (assetKey: string) => void;
   codeLocationFilter?: string;
   assetCodeLocations: Map<string, string>;
+  groupByLocationPref?: boolean;
 }) {
   const { data, isLoading } = useQuery({
     queryKey: ['insights-breakdown', projectId, metricName, days],
@@ -292,7 +303,7 @@ function TopAssetsCard({
     ? allRows.filter((r) => assetCodeLocations.get(r.asset_key) === codeLocationFilter)
     : allRows;
   const distinctLocs = new Set(allRows.map((r) => assetCodeLocations.get(r.asset_key)).filter(Boolean) as string[]);
-  const grouped = !codeLocationFilter && distinctLocs.size > 1;
+  const grouped = !codeLocationFilter && groupByLocationPref !== false && distinctLocs.size > 1;
 
   const renderRows = (rows: typeof allRows) => (
     <ul className="divide-y divide-gray-50">

@@ -14,6 +14,8 @@ import { assetsApi } from '@/services/api';
 import { notify } from './Notifications';
 import { usePageActions } from '@/hooks/usePageActions';
 import { classifyStatus, statusTextClass } from '@/lib/status';
+import { useGroupByCodeLocation } from '@/hooks/useGroupByCodeLocation';
+import { GroupByLocationToggle } from './GroupByLocationToggle';
 
 type Monitor = Awaited<ReturnType<typeof projectsApi.listMonitors>>['monitors'][number];
 type Status = 'passing' | 'failing' | 'warn' | 'never_run';
@@ -62,6 +64,7 @@ export function MonitorsPanel({ onOpenFile, onOpenRun }: MonitorsPanelProps) {
   const [kindFilter, setKindFilter] = useState<'all' | Monitor['kind']>('all');
   const [assetFilter, setAssetFilter] = useState<string>('all');
   const [locationFilter, setLocationFilter] = useState<string>('all');
+  const [groupByLocationPref, setGroupByLocationPref] = useGroupByCodeLocation();
   const [selected, setSelected] = useState<Monitor | null>(null);
   const [showAddMonitor, setShowAddMonitor] = useState(false);
   const [showGenerate, setShowGenerate] = useState(false);
@@ -113,7 +116,7 @@ export function MonitorsPanel({ onOpenFile, onOpenRun }: MonitorsPanelProps) {
     }
     return true;
   });
-  const groupByLocation = isCloud && locationFilter === 'all' && locationOptions.length > 1;
+  const groupByLocation = isCloud && groupByLocationPref && locationFilter === 'all' && locationOptions.length > 1;
   const rowGroups: Array<{ location: string | null; rows: Monitor[] }> = groupByLocation
     ? locationOptions
         .map((loc) => ({ location: loc, rows: filtered.filter((m) => m.code_location === loc) }))
@@ -274,6 +277,9 @@ export function MonitorsPanel({ onOpenFile, onOpenRun }: MonitorsPanelProps) {
                   ...locationOptions.map((l) => ({ value: l, label: l })),
                 ]}
               />
+            )}
+            {locationOptions.length > 1 && (
+              <GroupByLocationToggle value={groupByLocationPref} onChange={setGroupByLocationPref} />
             )}
             <span className="text-[11px] text-gray-500 ml-auto">{filtered.length} / {monitors.length}</span>
           </div>

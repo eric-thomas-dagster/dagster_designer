@@ -38,6 +38,8 @@ import { DagsterAIBar } from './DagsterAIBar';
 import { AddDataDialog } from './AddDataDialog';
 import { notify } from './Notifications';
 import { AutoCoverageModal } from './AssetDetailPage';
+import { useGroupByCodeLocation } from '@/hooks/useGroupByCodeLocation';
+import { GroupByLocationToggle } from './GroupByLocationToggle';
 import { useProjectStore } from '@/hooks/useProject';
 import { useIsDarkMode } from '@/hooks/useIsDarkMode';
 import { projectsApi, componentsApi, partitionsApi, API_BASE } from '@/services/api';
@@ -502,6 +504,7 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
   // catalog table's columns); these just add dedicated dropdowns for it,
   // same pattern as group/kind above.
   const [codeLocationFilter, setCodeLocationFilter] = useState<string>('all');
+  const [groupByLocationPref, setGroupByLocationPref] = useGroupByCodeLocation();
   const [tagFilter, setTagFilter] = useState<string>('all');
   const [ownerFilter, setOwnerFilter] = useState<string>('all');
   const { screenToFlowPosition, getNodes, fitView } = useReactFlow();
@@ -2956,6 +2959,9 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
               {allCodeLocations.map((c) => <option key={c} value={c}>{c}</option>)}
             </select>
           )}
+          {viewMode === 'catalog' && allCodeLocations.length > 1 && (
+            <GroupByLocationToggle value={groupByLocationPref} onChange={setGroupByLocationPref} />
+          )}
           {allTags.length > 0 && (
             <select
               value={tagFilter}
@@ -3157,7 +3163,7 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
         // than one code location -- break the primary table into one
         // section per location instead of one undifferentiated list,
         // matching Automation/Insights/Monitors/Ingestions.
-        const groupCatalogByLocation = codeLocationFilter === 'all' && allCodeLocations.length > 1;
+        const groupCatalogByLocation = groupByLocationPref && codeLocationFilter === 'all' && allCodeLocations.length > 1;
         const catalogLocationGroups: Array<{ location: string | null; rows: Node[] }> = groupCatalogByLocation
           ? Array.from(new Set(primaryAssets.map((n) => (n.data?.code_location as string) || 'Unknown location')))
               .sort()

@@ -9,6 +9,8 @@ import { EnvVarsManager } from './EnvVarsManager';
 import { notify } from './Notifications';
 import { API_BASE } from '@/services/api';
 import { useIsDarkMode } from '@/hooks/useIsDarkMode';
+import { useGroupByCodeLocation } from '@/hooks/useGroupByCodeLocation';
+import { GroupByLocationToggle } from './GroupByLocationToggle';
 
 interface ResourceListItem {
   name: string;
@@ -70,6 +72,7 @@ export function ResourcesManager({ onOpenFile }: ResourcesManagerProps = {}) {
   const isCloudProject = !!(currentProject as any)?.is_dagster_plus;
   const [activeTab, setActiveTab] = useState<ResourceType>('io_manager');
   const [resourceLocationFilter, setResourceLocationFilter] = useState<string>('all');
+  const [groupByLocationPref, setGroupByLocationPref] = useGroupByCodeLocation();
 
   // Fetch installed resources + IO managers so the user can see what's already
   // in the project and jump to their source in the Code tab.
@@ -280,7 +283,7 @@ export function ResourcesManager({ onOpenFile }: ResourcesManagerProps = {}) {
         const filteredItems = resourceLocationFilter === 'all'
           ? items
           : items.filter((i) => i.code_location === resourceLocationFilter);
-        const groupByLocation = isCloudProject && resourceLocationFilter === 'all' && locationOptions.length > 1;
+        const groupByLocation = isCloudProject && groupByLocationPref && resourceLocationFilter === 'all' && locationOptions.length > 1;
         const chip = (item: ResourceListItem) => (
           <button
             key={item.name}
@@ -313,6 +316,9 @@ export function ResourcesManager({ onOpenFile }: ResourcesManagerProps = {}) {
                     <option key={l} value={l}>{l}</option>
                   ))}
                 </select>
+              )}
+              {locationOptions.length > 1 && (
+                <GroupByLocationToggle value={groupByLocationPref} onChange={setGroupByLocationPref} />
               )}
               <button
                 onClick={() => refetchInstalled()}

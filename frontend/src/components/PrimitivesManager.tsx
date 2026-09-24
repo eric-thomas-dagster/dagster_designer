@@ -23,6 +23,8 @@ import { CommunityAvailableSection } from './CommunityAvailableSection';
 import { InsightMetricCard } from './InsightMetricCard';
 import { Loader2 } from 'lucide-react';
 import { useIsDarkMode } from '@/hooks/useIsDarkMode';
+import { useGroupByCodeLocation } from '@/hooks/useGroupByCodeLocation';
+import { GroupByLocationToggle } from './GroupByLocationToggle';
 
 interface PrimitivesManagerProps {
   onNewPrimitive?: (category: string) => void;
@@ -53,6 +55,7 @@ export function PrimitivesManager({
   // projects only ever have a single code location, so the picker stays
   // hidden there.
   const [codeLocationFilter, setCodeLocationFilter] = useState<string>('');
+  const [groupByLocationPref, setGroupByLocationPref] = useGroupByCodeLocation();
   const queryClient = useQueryClient();
 
   // Fetch all primitives (template-created only)
@@ -418,7 +421,7 @@ export function PrimitivesManager({
     // per code location instead, so users don't have to filter one at a
     // time just to see what's where. Filtering still collapses back to a
     // single flat list since there's nothing left to group by then.
-    if (isCloud && !codeLocationFilter && codeLocationOptions.length > 1) {
+    if (isCloud && groupByLocationPref && !codeLocationFilter && codeLocationOptions.length > 1) {
       const groups = new Map<string, Array<PrimitiveItem & { isManaged: boolean }>>();
       for (const p of primitives) {
         const loc = primitiveCodeLocation(p) || 'Unknown location';
@@ -506,6 +509,9 @@ export function PrimitivesManager({
                   <option key={loc} value={loc}>{loc}</option>
                 ))}
               </select>
+            )}
+            {isCloudProject && codeLocationOptions.length > 1 && (
+              <GroupByLocationToggle value={groupByLocationPref} onChange={setGroupByLocationPref} />
             )}
             {!(currentProject as any)?.is_dagster_plus && (
               <button

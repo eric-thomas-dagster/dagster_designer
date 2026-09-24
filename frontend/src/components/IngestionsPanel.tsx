@@ -8,6 +8,8 @@ import { notify } from './Notifications';
 import { AddDataDialog } from './AddDataDialog';
 import { PartitionBackfill } from './PartitionBackfill';
 import type { ComponentInstance, GraphNode } from '@/types';
+import { useGroupByCodeLocation } from '@/hooks/useGroupByCodeLocation';
+import { GroupByLocationToggle } from './GroupByLocationToggle';
 
 interface IngestionsPanelProps {
   onAddDataSource: (componentType: string) => void;
@@ -122,6 +124,7 @@ export function IngestionsPanel({ onAddDataSource, onEditComponent }: Ingestions
   const [search, setSearch] = useState('');
   const [kindFilter, setKindFilter] = useState<SourceKind | 'all'>('all');
   const [locationFilter, setLocationFilter] = useState<string>('all');
+  const [groupByLocationPref, setGroupByLocationPref] = useGroupByCodeLocation();
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [drawerFor, setDrawerFor] = useState<string | null>(null);
   const [runningBulk, setRunningBulk] = useState(false);
@@ -385,7 +388,7 @@ export function IngestionsPanel({ onAddDataSource, onEditComponent }: Ingestions
 
   // No location filter picked and sources actually span more than one
   // location -- break the flat table into one section per location.
-  const groupByLocation = isCloud && locationFilter === 'all' && locationOptions.length > 1;
+  const groupByLocation = isCloud && groupByLocationPref && locationFilter === 'all' && locationOptions.length > 1;
   const ingestionRowGroups: Array<{ location: string | null; rows: typeof filteredIngestions }> = groupByLocation
     ? locationOptions
         .map((loc) => ({ location: loc, rows: filteredIngestions.filter((i) => i.codeLocation === loc) }))
@@ -807,6 +810,9 @@ export function IngestionsPanel({ onAddDataSource, onEditComponent }: Ingestions
                   <option key={l} value={l}>{l}</option>
                 ))}
               </select>
+            )}
+            {locationOptions.length > 1 && (
+              <GroupByLocationToggle value={groupByLocationPref} onChange={setGroupByLocationPref} />
             )}
             {selectedIds.size > 0 && (
               <>
