@@ -7,7 +7,7 @@ import { GitCommitDialog } from './GitCommitDialog';
 import { Launchpad } from './Launchpad';
 import { notify, confirmDialog } from './Notifications';
 import { onMenuAction, isTauri, pickDirectory } from '@/services/tauri';
-import { openPreferences } from './PreferencesDialog';
+import { openSettings } from './SettingsDialog';
 import {
   FolderOpen,
   Plus,
@@ -97,8 +97,8 @@ export function ProjectManager() {
   useEffect(() => {
     const unlistenPromise = onMenuAction((id) => {
       switch (id) {
-        case 'app:preferences':
-          openPreferences();
+        case 'app:settings':
+          openSettings();
           break;
         case 'project:new':
           closeAllDialogs();
