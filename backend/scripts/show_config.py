@@ -103,6 +103,14 @@ def main():
         definitions_module = importlib.import_module(f"{project_module}.definitions")
         defs = definitions_module.defs
 
+        # Modern dg/component-based projects commonly export defs via the
+        # @definitions decorator, which wraps the real Definitions in a
+        # callable LazyDefinitions rather than the Definitions object
+        # itself (a real Definitions is never callable) -- see the same
+        # fix in preview_asset.py for how this was confirmed live.
+        if callable(defs):
+            defs = defs()
+
         # Get the asset - iterate through asset definitions
         from dagster import AssetKey
 
