@@ -160,9 +160,13 @@ export function ProjectComponentsList({ onEditComponent, onDeleteComponent, onOp
               </div>
 
               {/* Discovered from this project's own defs.yaml (not something
-                  Designer generated) -- editing goes to the YAML directly,
-                  see the FileCode button below, rather than a form whose
-                  Save wouldn't actually persist for an imported project. */}
+                  Designer generated). Configure below opens the same
+                  schema-driven form as anything else here -- genuinely
+                  useful for browsing the real, correctly-typed config --
+                  but Save is blocked for an imported project (see
+                  handleSaveComponent in App.tsx) since it wouldn't actually
+                  write back to this file. The FileCode button is the one
+                  that actually persists edits, by opening the real YAML. */}
               <div className="mt-2 text-xs text-gray-500 bg-gray-100 px-2 py-1 rounded inline-block">
                 From defs.yaml
               </div>
@@ -170,10 +174,17 @@ export function ProjectComponentsList({ onEditComponent, onDeleteComponent, onOp
 
             <div className="flex items-center space-x-1 ml-2">
               <button
+                onClick={() => onEditComponent(component)}
+                className="p-1.5 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded transition-colors"
+                title="View configuration"
+              >
+                <Settings className="w-4 h-4" />
+              </button>
+              <button
                 onClick={() => component.sourcePath && onOpenFile(component.sourcePath)}
                 disabled={!component.sourcePath}
                 className="p-1.5 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded transition-colors disabled:opacity-40 disabled:hover:bg-transparent"
-                title={component.sourcePath ? 'Open in code editor' : 'Source file unknown'}
+                title={component.sourcePath ? 'Open in code editor to edit' : 'Source file unknown'}
               >
                 <FileCode className="w-4 h-4" />
               </button>

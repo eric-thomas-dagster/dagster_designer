@@ -115,6 +115,8 @@ export interface Project {
   directory_name?: string;
   manual_ingestion_asset_keys?: string[];
   dagster_plus_region?: 'us' | 'eu';
+  is_imported?: boolean;
+  dagster_package_subdir?: string | null;
 }
 
 export interface ProjectCreate {

@@ -674,6 +674,25 @@ function App() {
   const handleSaveComponent = async (component: ComponentInstance) => {
     if (!currentProject) return;
 
+    // update_project's component-save path (dependency update/install, YAML
+    // generation, definitions.py regeneration) is a no-op for the WHOLE
+    // project once it's imported (backend/app/services/project_service.py --
+    // every one of those steps skips on project.is_imported, confirmed by
+    // tracing it live), not just for components Designer didn't generate
+    // itself. Letting this proceed would PUT successfully, look like it
+    // saved, and silently discard the edit -- nothing on disk would change,
+    // and a later `dg list defs` would just re-read the old values. Block it
+    // here with a clear explanation instead of a confusing "it didn't work"
+    // days later; editing the real defs.yaml directly (the code-editor
+    // button next to a "From defs.yaml" entry in the Project Components
+    // list) is the only thing that actually persists today.
+    if (currentProject.is_imported) {
+      notify.error(
+        "Can't save component changes for an imported project yet -- edits here wouldn't be written back to its defs.yaml. Open the file directly to edit it (the code-editor button next to this component in the Project Components list)."
+      );
+      return;
+    }
+
     // Check if this is an edit or new component
     const existingIndex = currentProject.components.findIndex((c) => c.id === component.id);
 
