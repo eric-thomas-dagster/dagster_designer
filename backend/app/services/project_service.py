@@ -2046,6 +2046,38 @@ if custom_lineage_edges:
 
             log("✅ Dependencies installed successfully")
 
+            # `uv sync` above only installs what the project's OWN
+            # pyproject.toml/lockfile declare. The subdirectory branch above
+            # explicitly installs dagster-dg-cli/dagster-dg-core as its own
+            # step because plenty of real, hand-written Dagster projects
+            # never declare dg as a project dependency at all -- it's
+            # normally a globally-installed dev tool (`uv tool install
+            # dagster-dg-cli`), not something a project's own lockfile is
+            # expected to pin. This path skipped that step and just assumed
+            # `uv sync` would happen to provide it, which silently left the
+            # venv without a `dg` binary for such a project (confirmed live:
+            # asset introspection fell back to a system `dg` that didn't
+            # exist either, so "Generating assets" failed outright with
+            # "Project virtual environment not found at .../.venv/bin/dg").
+            # Check first and only install if missing, so a project that
+            # already declares it (the common case) isn't slowed down by a
+            # redundant install.
+            venv_dir = project_dir / ".venv"
+            venv_dg_path = venv_bin_path(venv_dir, "dg")
+            if not venv_dg_path.exists():
+                log("📦 dg CLI not found in venv (project doesn't declare it as a dependency) -- installing dagster-dg-cli and dagster-dg-core...")
+                venv_python = str(venv_bin_path(venv_dir, "python").absolute())
+                result = subprocess.run(
+                    [find_uv_binary("uv"), "pip", "install", "--python", venv_python, "dagster-dg-cli", "dagster-dg-core"],
+                    cwd=str(project_dir),
+                    capture_output=True,
+                    text=True,
+                )
+                if result.returncode != 0:
+                    log(f"❌ Failed to install dagster-dg-cli: {result.stderr}")
+                    raise subprocess.CalledProcessError(result.returncode, result.args, result.stdout, result.stderr)
+                log("✅ dagster-dg-cli installed")
+
             # Skip dagster-webserver installation during project creation for faster setup
             # It will be installed on-demand when user opens Dagster UI
             # This saves 30-60 seconds during project creation
