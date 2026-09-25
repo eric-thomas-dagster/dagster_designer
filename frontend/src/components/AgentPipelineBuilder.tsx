@@ -1,11 +1,12 @@
-import { useState } from 'react';
-import { Sparkles, X, Loader2, Check, User } from 'lucide-react';
+import { useMemo, useState } from 'react';
+import { Sparkles, X, Loader2, Check, User, ChevronDown, ChevronRight, DollarSign, Clock, Hash } from 'lucide-react';
 import { useProjectStore } from '@/hooks/useProject';
-import { useQueryClient } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { notify } from './Notifications';
-import { API_BASE } from '@/services/api';
+import { API_BASE, assetsApi } from '@/services/api';
 import { applyGeniePicks, resolveComponentIdFromCurrentProject, type GeniePickLike } from '@/lib/applyGeniePicks';
 import { parseUpstreamAssetKeys } from '@/lib/upstreamAssetKeys';
+import { parseStepMetadataFields, formatCost, formatLatency } from '@/lib/stepMetadata';
 import type { ComponentInstance } from '@/types';
 
 interface AgentPick extends GeniePickLike {
@@ -58,6 +59,154 @@ const EXAMPLE_TASKS: { label: string; task: string }[] = [
     task: 'Have two proposers debate the best answer to an incoming question, then have an arbitrator pick the winning response.',
   },
 ];
+
+const HEADLINE_FIELDS = new Set(['cost_usd', 'latency_ms', 'tokens_total', 'router_reasoning']);
+
+/**
+ * Step-level cost/token/reasoning breakdown for an EXISTING agentic-
+ * pipeline-family instance -- the payoff for the local metadata capture
+ * work (DAGSTER_HOME pinning + scripts/extract_run_metadata.py): every
+ * step is its own Dagster asset ("{prefix}_{step_id}"), and each one's
+ * latest materialization carries real cost_usd/latency_ms/tokens_total/
+ * router_reasoning/etc. metadata the component itself attaches. Reuses
+ * the same ingestion-history event log IngestionsPanel already reads
+ * (no new backend endpoint) -- just filtered down to this pipeline's own
+ * step asset keys and grouped to the latest per key.
+ */
+function LastRunPanel({
+  projectId,
+  prefix,
+  steps,
+}: {
+  projectId: string;
+  prefix: string;
+  steps: { id: string; op?: string }[];
+}) {
+  const stepAssetKeys = useMemo(() => steps.map((s) => `${prefix}_${s.id}`), [prefix, steps]);
+  const { data: history } = useQuery({
+    queryKey: ['ingestion-history-for-pipeline', projectId],
+    queryFn: () => assetsApi.ingestionHistory(projectId, 3000),
+    staleTime: 15_000,
+  });
+  const [expanded, setExpanded] = useState(false);
+  const [expandedSteps, setExpandedSteps] = useState<Set<string>>(new Set());
+
+  const latestByAssetKey = useMemo(() => {
+    const keySet = new Set(stepAssetKeys);
+    const map = new Map<string, NonNullable<typeof history>['events'][number]>();
+    for (const e of history?.events ?? []) {
+      if (e.type !== 'materialize' || e.status !== 'success' || !e.metadata || !keySet.has(e.asset_key)) continue;
+      const prev = map.get(e.asset_key);
+      if (!prev || new Date(e.ts).getTime() > new Date(prev.ts).getTime()) map.set(e.asset_key, e);
+    }
+    return map;
+  }, [history, stepAssetKeys]);
+
+  const stepRows = steps.map((step) => {
+    const assetKey = `${prefix}_${step.id}`;
+    const event = latestByAssetKey.get(assetKey);
+    const fields = event?.metadata ? parseStepMetadataFields(step.id, event.metadata) : null;
+    return { step, event, fields };
+  });
+
+  const totalCost = stepRows.reduce((s, r) => s + (Number(r.fields?.cost_usd) || 0), 0);
+  const totalLatency = stepRows.reduce((s, r) => s + (Number(r.fields?.latency_ms) || 0), 0);
+  const totalTokens = stepRows.reduce((s, r) => s + (Number(r.fields?.tokens_total) || 0), 0);
+  const anyRun = stepRows.some((r) => r.event);
+
+  if (!anyRun) {
+    return (
+      <div className="px-6 py-2 border-b border-gray-100 bg-gray-50 text-xs text-gray-400">
+        No run data yet — materialize this pipeline to see its cost/token/reasoning breakdown here.
+      </div>
+    );
+  }
+
+  return (
+    <div className="border-b border-gray-100 bg-gray-50">
+      <button
+        onClick={() => setExpanded((v) => !v)}
+        className="w-full flex items-center justify-between px-6 py-2 text-xs font-medium text-gray-700 hover:bg-gray-100"
+      >
+        <span className="flex items-center gap-1.5">
+          {expanded ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
+          Last run
+        </span>
+        <span className="flex items-center gap-3 text-gray-500 font-normal">
+          {totalCost > 0 && (
+            <span className="inline-flex items-center gap-0.5"><DollarSign className="w-3 h-3" />{formatCost(totalCost)}</span>
+          )}
+          {totalLatency > 0 && (
+            <span className="inline-flex items-center gap-0.5"><Clock className="w-3 h-3" />{formatLatency(totalLatency)}</span>
+          )}
+          {totalTokens > 0 && (
+            <span className="inline-flex items-center gap-0.5"><Hash className="w-3 h-3" />{totalTokens} tokens</span>
+          )}
+        </span>
+      </button>
+      {expanded && (
+        <div className="px-6 pb-3 space-y-1.5">
+          {stepRows.map(({ step, event, fields }) => {
+            const isStepExpanded = expandedSteps.has(step.id);
+            const extraFields = fields
+              ? Object.entries(fields).filter(([k]) => !HEADLINE_FIELDS.has(k))
+              : [];
+            return (
+              <div key={step.id} className="bg-white border border-gray-200 rounded-md">
+                <button
+                  onClick={() =>
+                    setExpandedSteps((prev) => {
+                      const next = new Set(prev);
+                      if (next.has(step.id)) next.delete(step.id);
+                      else next.add(step.id);
+                      return next;
+                    })
+                  }
+                  disabled={!event}
+                  className="w-full flex items-center justify-between px-2.5 py-1.5 text-xs text-left disabled:cursor-default"
+                >
+                  <span className="flex items-center gap-1.5 min-w-0">
+                    <span className="font-medium text-gray-800 truncate">{step.id}</span>
+                    {step.op && <span className="text-gray-400 font-mono flex-shrink-0">{step.op}</span>}
+                  </span>
+                  {event ? (
+                    <span className="flex items-center gap-2.5 text-gray-500 flex-shrink-0">
+                      {fields?.cost_usd != null && <span>{formatCost(fields.cost_usd)}</span>}
+                      {fields?.latency_ms != null && <span>{formatLatency(fields.latency_ms)}</span>}
+                      {fields?.tokens_total != null && <span>{fields.tokens_total} tok</span>}
+                      {isStepExpanded ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
+                    </span>
+                  ) : (
+                    <span className="text-gray-300 italic flex-shrink-0">not run yet</span>
+                  )}
+                </button>
+                {isStepExpanded && fields && (
+                  <div className="px-2.5 pb-2 space-y-1 border-t border-gray-100 pt-1.5">
+                    {fields.router_reasoning && (
+                      <p className="text-[11px] text-gray-600 italic">"{String(fields.router_reasoning)}"</p>
+                    )}
+                    {extraFields.length > 0 && (
+                      <div className="grid grid-cols-2 gap-x-3 gap-y-0.5 text-[11px] text-gray-500">
+                        {extraFields.map(([k, v]) => {
+                          const display = typeof v === 'object' ? JSON.stringify(v) : String(v);
+                          return (
+                            <div key={k} className="truncate" title={display}>
+                              <span className="text-gray-400">{k}:</span> {display}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
 
 /**
  * The "Agents & Pipelines" bin's scoped Genie entry point: describe what
@@ -259,6 +408,17 @@ export function AgentPipelineBuilder({
             <X className="w-5 h-5 text-gray-400 hover:text-gray-600" />
           </button>
         </div>
+
+        {editingComponent && currentProject
+          && Array.isArray(editingComponent.attributes?.steps)
+          && typeof editingComponent.attributes?.asset_name_prefix === 'string'
+          && (
+            <LastRunPanel
+              projectId={currentProject.id}
+              prefix={editingComponent.attributes.asset_name_prefix}
+              steps={editingComponent.attributes.steps}
+            />
+          )}
 
         {turns.length === 0 ? (
           <div className="px-6 py-4 flex-1 space-y-4">
