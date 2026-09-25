@@ -239,7 +239,14 @@ export function DagsterAIBar() {
           asset_name: pick.config.asset_name || pick.asset_name,
         };
         if (pick.upstream_asset_names.length > 0) {
-          attributes.upstream_asset_keys = pick.upstream_asset_names.join(', ');
+          // upstream_asset_keys is schema'd as an array on every component
+          // we've seen (sql_transform, dataframe_transformer, ...) -- this
+          // used to .join(', ') into a single comma-separated STRING,
+          // which is exactly wrong-shaped for that field (and with just
+          // one upstream, .join produces that string with no comma at
+          // all, which is why this surfaced as "a bare string instead of
+          // a list" rather than an obviously-malformed one).
+          attributes.upstream_asset_keys = pick.upstream_asset_names;
         }
         try {
           const res = await fetch(`${API_BASE}/templates/install-via-cli/${pick.component_type}`, {
