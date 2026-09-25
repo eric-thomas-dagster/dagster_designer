@@ -11,15 +11,28 @@ _sys.stdout.reconfigure(encoding="utf-8")
 _sys.stderr.reconfigure(encoding="utf-8")
 
 # Load .env early so API keys (OPENAI_API_KEY, ANTHROPIC_API_KEY, etc.) picked
-# up via os.getenv further down get populated. Looks first at the backend
-# directory's own .env, then the repo root's .env. Missing files are OK —
-# environment already-set values take precedence.
+# up via os.getenv further down get populated. Looks first at DATA_DIR/.env
+# (the same persistent location genie.py's /ai/keys endpoint now saves
+# to -- see its _ENV_PATH comment for why: a path relative to this file
+# resolves inside the packaged app's Resources/backend/, which `tauri
+# build` wipes on every rebuild, silently losing a saved API key.
+# DATA_DIR is read directly via os.getenv here rather than importing
+# app.core.config.settings, since this block intentionally runs before
+# that import so the rest of this file's os.getenv() calls see the
+# loaded values), then falls back to the old backend-relative and
+# repo-root locations for a plain dev checkout with no DATA_DIR set.
+# Missing files are OK — environment already-set values take precedence.
 import os as _os
 from pathlib import Path as _Path
 try:
     from dotenv import load_dotenv as _load_dotenv
     _here = _Path(__file__).resolve()
-    for _p in (_here.parent.parent / ".env", _here.parent.parent.parent / ".env"):
+    _candidates = []
+    _data_dir_env = _os.getenv("DATA_DIR")
+    if _data_dir_env:
+        _candidates.append(_Path(_data_dir_env) / ".env")
+    _candidates += [_here.parent.parent / ".env", _here.parent.parent.parent / ".env"]
+    for _p in _candidates:
         if _p.exists():
             _load_dotenv(_p, override=False)
             print(f"[main] Loaded env from {_p}")

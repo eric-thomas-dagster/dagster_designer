@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-from pathlib import Path
 from typing import Any
 
 from dotenv import set_key, unset_key
@@ -12,6 +11,7 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+from ..core.config import settings
 from ..services.genie_service import (
     DEFAULT_MODEL,
     GenieError,
@@ -22,9 +22,18 @@ from .assets import get_known_schemas
 
 router = APIRouter(prefix="/ai", tags=["ai"])
 
-# backend/.env -- same file main.py loads at startup and the same one the
-# "needs an API key" banner has always told users to hand-edit.
-_ENV_PATH = Path(__file__).resolve().parent.parent.parent / ".env"
+# settings.data_dir, NOT a path relative to this file. A path relative to
+# this file resolves inside the packaged app's Resources/backend/ (or
+# wherever this specific build's source lives) -- fine for a stable dev
+# checkout, but `tauri build` regenerates that directory from scratch on
+# every rebuild, SILENTLY WIPING any saved API key/workspace ID. Confirmed
+# live: a real saved ANTHROPIC_API_KEY + ANTHROPIC_WORKSPACE_ID vanished
+# after a routine rebuild+reinstall mid-session, forcing the user to
+# re-enter them. data_dir already exists for exactly this reason --
+# main.rs's own comment on it: "backend-internal working state... goes
+# under Tauri's app-data dir, which survives rebuilds, reinstalls, and app
+# updates." Same file main.py loads at startup (see its own comment).
+_ENV_PATH = settings.data_dir / ".env"
 
 
 class AiProvidersStatus(BaseModel):
