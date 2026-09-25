@@ -747,7 +747,21 @@ async def plan(
     task: str,
     existing_assets: list[dict[str, Any]] | None = None,
     model: str = DEFAULT_MODEL,
-    catalog_cap: int = 250,
+    # Was 250 -- at _catalog_lines' per-component verbosity (up to ~4000
+    # chars each once description/when_to_use/outputs/side_effects/
+    # anti_uses/example_yaml_snippets all populate), 250 components alone
+    # could push the catalog well past 30k tokens before existing_assets,
+    # the CLAUDE.md excerpt, or the system prompt even get added --
+    # actually observed: a real request hit 41,613 tokens and got
+    # rejected by OpenAI's default org-level 30k TPM rate limit (a much
+    # stricter, much more common ceiling than gpt-4o's 128k context
+    # window, which is what this cap was originally sized against). The
+    # reserved_per_category quotas in _keyword_prefilter (source/
+    # ingestion/sink: 20 each, io_manager/resource: 8 each = 76 minimum)
+    # already guarantee breadth for an end-to-end pipeline; a cap this
+    # much lower mostly just trims the low-relevance "fill remaining
+    # slots with top overall scorers" tail.
+    catalog_cap: int = 60,
     previous_plan: list[dict[str, Any]] | None = None,
     refinement: str | None = None,
 ) -> GeniePlan:
