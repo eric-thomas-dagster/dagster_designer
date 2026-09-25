@@ -3,6 +3,7 @@ import * as Dialog from '@radix-ui/react-dialog';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   X, Search, Loader2, Database, Cloud, FileText, Boxes, Globe, Sparkles, ArrowRight,
+  Users, Megaphone, LifeBuoy, Wallet, Share2, Briefcase, Radio, Activity, Shield,
 } from 'lucide-react';
 import { useProjectStore } from '@/hooks/useProject';
 import { notify } from './Notifications';
@@ -14,6 +15,12 @@ interface ManifestComponent {
   category: string;
   description: string;
   tags?: string[];
+  // Business-domain grouping authored per-component in the manifest
+  // itself (added in the "Ingestion cleanup ... add vertical taxonomy"
+  // manifest commit) -- a real classification instead of guessing from
+  // an id/name regex. Only the ingestion-shaped categories have one so
+  // far; everything else falls back to the BINS heuristic below.
+  vertical?: string | null;
 }
 
 interface AddDataDialogProps {
@@ -27,10 +34,39 @@ interface AddDataDialogProps {
 
 // Only ingestion-shaped categories from the community manifest — we want
 // this dialog to feel like "connect to a data source", not the full palette.
-const DATA_CATEGORIES = new Set(['ingestion', 'source']);
+// "security" joined ingestion/source here in the same manifest commit that
+// added `vertical` -- it recategorized audit-log-style ingestion
+// components (aws_cloudtrail_ingestion, audit_logs_to_splunk, ...) out of
+// "ingestion" into their own category; without adding it here those real
+// ingestion sources would silently vanish from this picker.
+const DATA_CATEGORIES = new Set(['ingestion', 'source', 'security']);
 
-// Sub-category bins driven by name heuristics. Ordered — first match wins.
-// Left as a table so it's easy to nudge new components into a bucket without
+// Business-vertical groups, keyed by the manifest's `vertical` value --
+// checked BEFORE the regex BINS below, since an authored classification
+// beats a name/id guess whenever one exists. Order here is also the
+// display order once mapped through VERTICAL_ORDER.
+type GroupMeta = { label: string; icon: any };
+const VERTICAL_META: Record<string, GroupMeta> = {
+  'crm-sales': { label: 'CRM & sales', icon: Users },
+  marketing: { label: 'Marketing', icon: Megaphone },
+  support: { label: 'Customer support', icon: LifeBuoy },
+  'finance-hr': { label: 'Finance & HR', icon: Wallet },
+  social: { label: 'Social media', icon: Share2 },
+  productivity: { label: 'Productivity & docs', icon: Briefcase },
+  database: { label: 'Databases & warehouses', icon: Database },
+  'cloud-storage': { label: 'Cloud storage', icon: Cloud },
+  streaming: { label: 'Streaming & event data', icon: Radio },
+  'devops-observability': { label: 'DevOps & observability', icon: Activity },
+  security: { label: 'Security & audit logs', icon: Shield },
+  internal: { label: 'Internal / platform', icon: Boxes },
+};
+const VERTICAL_ORDER = Object.keys(VERTICAL_META);
+
+// Sub-category bins driven by name heuristics -- the fallback for
+// whatever the manifest hasn't given a `vertical` yet (most non-ingestion
+// components, plus generic query/reader sources like
+// aws_cloudwatch_metrics_query). Ordered — first match wins. Left as a
+// table so it's easy to nudge new components into a bucket without
 // touching the render logic.
 type Bin = { id: string; label: string; icon: any; match: (id: string, name: string) => boolean };
 const BINS: Bin[] = [
@@ -67,8 +103,14 @@ const BINS: Bin[] = [
 ];
 const OTHER_BIN: Bin = { id: 'other', label: 'Other sources', icon: Boxes, match: () => true };
 
-function classify(comp: ManifestComponent): Bin {
-  return BINS.find((b) => b.match(comp.id, comp.name)) ?? OTHER_BIN;
+type Group = { key: string; label: string; icon: any };
+
+function classify(comp: ManifestComponent): Group {
+  if (comp.vertical && VERTICAL_META[comp.vertical]) {
+    return { key: `vertical:${comp.vertical}`, ...VERTICAL_META[comp.vertical] };
+  }
+  const bin = BINS.find((b) => b.match(comp.id, comp.name)) ?? OTHER_BIN;
+  return { key: `bin:${bin.id}`, label: bin.label, icon: bin.icon };
 }
 
 export function AddDataDialog({ open, onOpenChange, onSourcePicked }: AddDataDialogProps) {
@@ -134,17 +176,22 @@ export function AddDataDialog({ open, onOpenChange, onSourcePicked }: AddDataDia
   }, [dataComponents, q]);
 
   const grouped = useMemo(() => {
-    const buckets = new Map<string, { bin: Bin; items: ManifestComponent[] }>();
+    const buckets = new Map<string, Group & { items: ManifestComponent[] }>();
     for (const c of filtered) {
-      const bin = classify(c);
-      if (!buckets.has(bin.id)) buckets.set(bin.id, { bin, items: [] });
-      buckets.get(bin.id)!.items.push(c);
+      const g = classify(c);
+      if (!buckets.has(g.key)) buckets.set(g.key, { ...g, items: [] });
+      buckets.get(g.key)!.items.push(c);
     }
-    // Keep BINS order, then Other last.
-    const order = [...BINS.map((b) => b.id), OTHER_BIN.id];
+    // Vertical groups first (an authored classification), then the
+    // regex BINS fallback, then Other last.
+    const order = [
+      ...VERTICAL_ORDER.map((v) => `vertical:${v}`),
+      ...BINS.map((b) => `bin:${b.id}`),
+      `bin:${OTHER_BIN.id}`,
+    ];
     return order
-      .map((id) => buckets.get(id))
-      .filter((v): v is { bin: Bin; items: ManifestComponent[] } => !!v);
+      .map((key) => buckets.get(key))
+      .filter((v): v is Group & { items: ManifestComponent[] } => !!v);
   }, [filtered]);
 
   return (
@@ -197,14 +244,13 @@ export function AddDataDialog({ open, onOpenChange, onSourcePicked }: AddDataDia
               </div>
             )}
             <div className="space-y-6">
-              {grouped.map(({ bin, items }) => {
-                const Icon = bin.icon;
+              {grouped.map(({ key, label, icon: Icon, items }) => {
                 return (
-                  <section key={bin.id}>
+                  <section key={key}>
                     <div className="flex items-center gap-2 mb-2">
                       <Icon className="w-4 h-4 text-gray-500" />
                       <h3 className="text-xs font-semibold text-gray-700 uppercase tracking-wider">
-                        {bin.label}
+                        {label}
                       </h3>
                       <span className="text-xs text-gray-400">{items.length}</span>
                     </div>

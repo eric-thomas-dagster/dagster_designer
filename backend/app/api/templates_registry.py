@@ -116,6 +116,17 @@ class ComponentTemplate(BaseModel):
     # absent. Values: asset | multi_asset | asset_check | job |
     # schedule | sensor | resource | io_manager | partitions_def | other.
     produces: Optional[List[str]] = None
+    # New: business-domain grouping for ingestion/source/security
+    # components (e.g. "crm-sales", "finance-hr", "security",
+    # "cloud-storage") — lets the Add Data picker group by what the
+    # source actually IS to a business user, instead of guessing from an
+    # id/name regex. Only ~150 of 1044 components have this so far
+    # (the ingestion-shaped categories); everything else is None and
+    # falls back to the existing heuristic bins. Same silent-drop risk
+    # as every other Pydantic-modeled manifest field here — omitting it
+    # from this model would mean the field arrives from GitHub but never
+    # reaches the frontend, with no error to notice by.
+    vertical: Optional[str] = None
 
 
 class TemplateManifest(BaseModel):
