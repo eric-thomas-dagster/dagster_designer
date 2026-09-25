@@ -2875,7 +2875,11 @@ export interface IngestionEvent {
    *  always wrapped in a full run. */
   run_id?: string;
   /** Typed metadata Dagster attached to the materialization (row
-   *  counts, a markdown summary, a dashboard link, etc.) -- cloud only. */
+   *  counts, a markdown summary, a dashboard link, etc.). Populated for
+   *  Dagster+ (cloud) materializations, and for local ones too as of the
+   *  DAGSTER_HOME pinning in materialize_assets (backend/scripts/
+   *  extract_run_metadata.py normalizes both into this same shape) --
+   *  local materializes from before that change won't have it. */
   metadata?: MetadataEntry[];
 }
 

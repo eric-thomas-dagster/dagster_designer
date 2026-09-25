@@ -16,7 +16,15 @@ Event shape (one line per event):
         "bytes":      987654,                               # optional, best-effort
         "duration_ms": 4210,                                # optional
         "status":     "success" | "failure" | "running",
+        "metadata":   [{"label": "cost_usd", "value": 0.0012, "type": "FloatMetadataValue"}, ...],  # optional
     }
+
+`metadata` is real Dagster metadata pulled from the local instance right
+after a materialize (see extract_run_metadata.py + the DAGSTER_HOME
+pinning in projects.py's materialize_assets) -- this is the same shape
+the frontend's IngestionEvent.metadata already expects (previously
+populated for Dagster+ cloud projects only; local projects had no
+capture path for it at all until this field was added here).
 """
 from __future__ import annotations
 
@@ -48,6 +56,7 @@ def record_event(
     bytes_ingested: int | None = None,
     duration_ms: int | None = None,
     status: str = "success",
+    metadata: list[dict[str, Any]] | None = None,
 ) -> None:
     """Append a single event. Non-fatal on any error — the primary flow
     (materialize / preview) must never fail because logging can't."""
@@ -67,6 +76,8 @@ def record_event(
             event["bytes"] = bytes_ingested
         if duration_ms is not None:
             event["duration_ms"] = duration_ms
+        if metadata:
+            event["metadata"] = metadata
         with open(path, "a") as f:
             f.write(json.dumps(event) + "\n")
     except Exception as e:

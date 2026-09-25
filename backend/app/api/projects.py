@@ -2381,6 +2381,21 @@ async def materialize_assets(project_id: str, request: MaterializeRequest):
         project_path_abs = project_path.absolute()
         env = project_subprocess_env(project_path_abs)
 
+        # Pin a persistent, project-scoped Dagster instance directory so
+        # run/event history survives past this one subprocess. Without
+        # this, `dg launch` creates its OWN throwaway instance per
+        # invocation (a randomly-named .tmp_dagster_home_XXXXX dir) --
+        # everything in it, including real per-asset metadata
+        # (cost/tokens/latency/router-reasoning/whatever a component
+        # attaches) is unrecoverable the moment this subprocess exits.
+        # Confirmed live: verified end-to-end against a real
+        # DagsterInstance that fetch_materializations sees exactly what
+        # was logged once this directory is fixed. See
+        # scripts/extract_run_metadata.py for the read side.
+        dagster_home = project_path_abs / ".designer_dagster_home"
+        dagster_home.mkdir(exist_ok=True)
+        env["DAGSTER_HOME"] = str(dagster_home)
+
         print(f"[materialize] Using venv: {project_path_abs / '.venv'}")
 
         # Run command. `dg launch` can legitimately take a long time for a
@@ -2422,6 +2437,40 @@ async def materialize_assets(project_id: str, request: MaterializeRequest):
                 duration_ms = int((time.time() - _materialize_started_at) * 1000)
             except Exception:
                 pass
+
+            # Best-effort: pull real per-asset metadata (cost/tokens/
+            # latency/router-reasoning/whatever a component attached via
+            # MetadataValue) out of the instance we just pinned above.
+            # Never lets a metadata-extraction failure affect the
+            # materialize response itself -- this is a nice-to-have
+            # layered on top of the real result, same "logging must never
+            # break the caller" spirit as record_event's own try/except.
+            metadata_by_key: dict[str, list[dict]] = {}
+            if success:
+                try:
+                    meta_result = await asyncio.to_thread(
+                        subprocess.run,
+                        [
+                            str(venv_python.absolute()),
+                            "-m",
+                            "scripts.extract_run_metadata",
+                            str(dagster_home),
+                            ",".join(asset_keys_logged),
+                        ],
+                        cwd=Path.cwd(),  # backend dir -- same convention as preview_asset's call
+                        env=env,
+                        capture_output=True,
+                        text=True,
+                        timeout=30,
+                    )
+                    if meta_result.returncode == 0 and meta_result.stdout.strip():
+                        parsed = json.loads(meta_result.stdout.strip().splitlines()[-1])
+                        for ak, v in parsed.items():
+                            if isinstance(v, dict) and v.get("metadata"):
+                                metadata_by_key[ak] = v["metadata"]
+                except Exception as _meta_e:
+                    print(f"[materialize] Warning: Failed to extract run metadata: {_meta_e}")
+
             for ak in asset_keys_logged:
                 record_event(
                     project_path,
@@ -2429,6 +2478,7 @@ async def materialize_assets(project_id: str, request: MaterializeRequest):
                     asset_key=ak,
                     duration_ms=duration_ms,
                     status="success" if success else "failure",
+                    metadata=metadata_by_key.get(ak),
                 )
         except Exception as _log_e:
             print(f"[materialize] Warning: Failed to record ingestion event: {_log_e}")
