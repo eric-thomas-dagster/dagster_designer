@@ -64,6 +64,18 @@ _NON_ASSET_CATEGORIES = {
     "decorator", "decorators",
 }
 
+# Task-conditional hint words/substrings for whether the "ai" category
+# should be included at all (see the wants_ai check in _keyword_prefilter).
+# Short/ambiguous tokens (ai, ml, rag, nlp, ocr, gpt) are matched as whole
+# words only, to avoid e.g. "categorize by aisle" false-positiving on "ai".
+# Longer/more specific ones are matched as substrings.
+_AI_HINT_WORDS = {"ai", "ml", "llm", "rag", "nlp", "ocr", "gpt", "genai"}
+_AI_HINT_SUBSTRINGS = (
+    "claude", "anthropic", "openai", "agentic", "agent", "chatbot",
+    "embedding", "transcri", "extract", "machine learning",
+    "artificial intelligence", "large language model",
+)
+
 # Manifest cache — in-memory (15 min TTL) with a disk fallback so we survive
 # GitHub's 60/hr unauthenticated rate-limit on raw.githubusercontent.com.
 _manifest_cache: dict[str, Any] = {"data": None, "fetched_at": 0.0}
@@ -275,6 +287,22 @@ def _keyword_prefilter(
     # mention "sensor" or "resource" can no longer accidentally surface
     # one.
     components = [c for c in components if c.get("category") not in _NON_ASSET_CATEGORIES]
+
+    # Drop the "ai" category too, UNLESS the task actually hints at AI/ML --
+    # it's the single largest category (130 of 1044 components: LLM agents,
+    # ML train/predict, transcription, document extraction, etc.), and most
+    # tasks ("sum revenue by game", "dedup orders by id") have nothing to do
+    # with any of it. Conditional rather than a hard exclusion like
+    # _NON_ASSET_CATEGORIES above -- these genuinely ARE asset-producing and
+    # are the right pick when a task actually calls for one, just not
+    # something to pay prefilter budget for on every routine task.
+    _task_lower_for_ai_check = task.lower()
+    task_words = set(re.findall(r"[a-z0-9]+", _task_lower_for_ai_check))
+    wants_ai = bool(task_words & _AI_HINT_WORDS) or any(
+        s in _task_lower_for_ai_check for s in _AI_HINT_SUBSTRINGS
+    )
+    if not wants_ai:
+        components = [c for c in components if c.get("category") != "ai"]
 
     # NOTE: previously step 2 dropped components whose `requires_pip`
     # wasn't installed in Designer's BACKEND venv. That was wrong-headed
