@@ -193,7 +193,7 @@ export function AddDataDialog({ open, onOpenChange, onSourcePicked }: AddDataDia
             )}
             {!isLoading && filtered.length === 0 && (
               <div className="text-center text-sm text-gray-500 mt-8">
-                No data sources match “{query}”. Try a different term or browse the Component Palette.
+                No data sources match “{query}”. Try a different term or a broader keyword.
               </div>
             )}
             <div className="space-y-6">

@@ -151,6 +151,14 @@ export function ComponentPalette({ onComponentClick }: ComponentPaletteProps) {
     // for a form to create the way there is for dbt/Fivetran/a Python
     // asset, so they don't belong in a "drop this onto the graph" picker.
     'decorator', 'decorators',
+    // ingestion/source have their own dedicated, curated flow --
+    // AddDataDialog's DATA_CATEGORIES covers exactly these two under a
+    // single "connect a data source" UX (with sub-category bins, search
+    // tuned for source names, etc.), reachable from the Ingestions tab's
+    // "Add data" button. Showing them in the generic palette too is pure
+    // duplication of a worse experience for the same task.
+    'ingestion', 'ingestions',
+    'source', 'sources',
   ]);
   const isAssetProducing = (category: string | undefined) =>
     !NON_ASSET_CATEGORIES.has((category || '').toLowerCase());
