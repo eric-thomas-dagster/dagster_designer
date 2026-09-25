@@ -450,8 +450,15 @@ def _try_metadata_table_preview(result, row_limit: int = 100):
     return None
 
 
-def create_mock_context():
-    """Create a mock context for asset execution."""
+def create_mock_context(asset_key=None):
+    """Create a mock context for asset execution.
+
+    `asset_key`, when given a real `dg.AssetKey` for the asset being
+    previewed, is exposed as `context.asset_key` -- some components (e.g.
+    SqlTransformComponent's Jinja templating, which auto-injects
+    `{{ asset_key }}`) read this unconditionally, and its absence crashed
+    preview with "'SimpleMockContext' object has no attribute 'asset_key'"
+    even though the component itself was otherwise previewable."""
     class SimpleMockRun:
         # Sink components (e.g. dataframe_to_csv) render output paths with
         # `context.run.run_id` — we hand them a stable placeholder so preview
@@ -467,6 +474,7 @@ def create_mock_context():
             self.resources = {}
             self.run = SimpleMockRun()
             self.run_id = "preview"
+            self.asset_key = asset_key
 
         def add_output_metadata(self, metadata, output_name=None):
             if output_name:
@@ -555,7 +563,7 @@ def execute_asset_dependencies(defs, asset_key: str, executed_results: dict, vis
                 func = func.__wrapped__
 
             # Execute with mock context
-            context = create_mock_context()
+            context = create_mock_context(asset_key=keys_in_group[0] if keys_in_group else None)
 
             # Build kwargs from already executed dependencies
             import inspect
@@ -868,7 +876,7 @@ def main():
                 func = func.__wrapped__
 
             # Create mock context
-            context = create_mock_context()
+            context = create_mock_context(asset_key=found_asset)
 
             # Match parameters to executed dependencies
             import inspect

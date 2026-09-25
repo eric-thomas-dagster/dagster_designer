@@ -1672,17 +1672,28 @@ async def delete_component_instance(project_id: str, component_id: str):
         raise HTTPException(status_code=404, detail="Project not found")
 
     project_dir = project_service._get_project_dir(project)
-    directory_name = project.directory_name
 
-    # Try both flat and src layouts
-    flat_defs_dir = project_dir / directory_name / "defs" / component_id
-    src_defs_dir = project_dir / "src" / directory_name / "defs" / component_id
-
+    # `project.directory_name` is the PROJECT's own folder name under
+    # .../projects/ (e.g. "project_abf9a8c9_adsfasd") -- already baked into
+    # project_dir by _get_project_dir above. It is NOT the Python package
+    # name under src/ (e.g. "chicago_bulls_analytics"), which is whatever
+    # the project's own pyproject.toml/package layout says and routinely
+    # differs, especially for imported/git-cloned projects. Reusing it here
+    # as a stand-in for that package name (the old flat/src guesses below)
+    # built a path that never matched the real defs/ folder, so a real
+    # on-disk component instance was reported as "no on-disk folder found"
+    # and only its stale project.components JSON entry got cleaned up --
+    # confirmed live: "[Delete Component Instance] No on-disk folder for
+    # 'fct_ticket_revenue_by_game' — JSON-only cleanup" for a component
+    # whose defs.yaml was sitting right there on disk the whole time.
+    # Search for the actual defs/<component_id> folder instead of guessing
+    # its parent package name.
+    skip_parts = {'.venv', 'venv', 'node_modules', '.git', '__pycache__'}
     component_instance_dir = None
-    if flat_defs_dir.exists():
-        component_instance_dir = flat_defs_dir
-    elif src_defs_dir.exists():
-        component_instance_dir = src_defs_dir
+    for candidate in project_dir.rglob(f"defs/{component_id}"):
+        if candidate.is_dir() and not any(part in skip_parts for part in candidate.parts):
+            component_instance_dir = candidate
+            break
 
     # NOTE: don't 404 if the on-disk folder is missing. The `components`
     # list in the project JSON is the authoritative record of what
@@ -2867,17 +2878,17 @@ async def get_community_component_config(project_id: str, component_id: str):
         raise HTTPException(status_code=404, detail="Project not found")
 
     project_dir = project_service._get_project_dir(project)
-    directory_name = project.directory_name
 
-    # Try both flat and src layouts
-    flat_defs_dir = project_dir / directory_name / "defs" / component_id
-    src_defs_dir = project_dir / "src" / directory_name / "defs" / component_id
-
+    # See delete_component_instance's comment on the same bug: `directory_name`
+    # is the project's own folder name, not the src/ package name, and using
+    # it here built a path that never matched the real defs/ folder for any
+    # project where those two differ (routinely true for imported projects).
+    skip_parts = {'.venv', 'venv', 'node_modules', '.git', '__pycache__'}
     defs_yaml_path = None
-    if flat_defs_dir.exists():
-        defs_yaml_path = flat_defs_dir / "defs.yaml"
-    elif src_defs_dir.exists():
-        defs_yaml_path = src_defs_dir / "defs.yaml"
+    for candidate in project_dir.rglob(f"defs/{component_id}/defs.yaml"):
+        if not any(part in skip_parts for part in candidate.parts):
+            defs_yaml_path = candidate
+            break
 
     if not defs_yaml_path or not defs_yaml_path.exists():
         raise HTTPException(
