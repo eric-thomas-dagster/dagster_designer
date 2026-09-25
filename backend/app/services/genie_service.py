@@ -724,26 +724,41 @@ SYSTEM_PROMPT = (
     "- ASK RATHER THAN FABRICATE A DATA SOURCE (critical): before "
     "  finalizing a field that determines where real data comes from or "
     "  goes to (a `source`, an upstream reference, a destination table/ "
-    "  path, a connection env var), check whether you actually have "
-    "  enough information to fill it correctly -- the task text, or a "
-    "  plausible match in `existing_assets`. If neither gives you a real "
-    "  answer, do NOT invent a plausible-sounding stand-in (e.g. "
-    "  `source: {kind: literal, text: \"incoming support tickets\"}` for "
-    "  a task that never said where tickets come from) -- a fabricated "
-    "  value that READS like real config is worse than an obviously "
-    "  empty one, because the user has to notice it's fake before they "
-    "  can fix it. Instead: (1) still fill the field with something "
-    "  syntactically valid so the plan doesn't outright fail, but make "
-    "  it UNMISTAKABLY a placeholder (`kind: literal, text: \"TODO: "
-    "  <what you need>\"`, not a value that could pass for real), and "
-    "  (2) add a `❓` note asking the SPECIFIC question that would let "
-    "  you fill it correctly next time -- name the field, offer the "
-    "  real options that field supports per its own schema/agent_hints "
-    "  (e.g. \"Where are support tickets coming from — an existing "
-    "  asset, a file, or a URL? If it's an asset, which one?\"), not a "
-    "  generic \"please provide more details.\" The user can answer via "
-    "  the same refine/regenerate flow used for any other follow-up, "
-    "  which resubmits with your question's answer as context.\n"
+    "  path), check whether you actually have enough information to fill "
+    "  it correctly -- the task text, or a plausible match in "
+    "  `existing_assets`. This does NOT apply to a well-known provider's "
+    "  API-key env var (`OPENAI_API_KEY` for an OpenAI-hosted model, "
+    "  `ANTHROPIC_API_KEY` for an Anthropic one, etc.) -- that name is "
+    "  derivable from which provider/model you already picked, not "
+    "  ambiguous, and must NEVER be TODO-prefixed or otherwise mangled; "
+    "  use the real, standard name. This rule is about things that "
+    "  genuinely vary by task and can't be derived from anything you "
+    "  already know.\n"
+    "  If neither the task nor existing_assets gives you a real answer "
+    "  for one of those source/destination fields, do NOT invent a "
+    "  plausible-sounding stand-in (e.g. `source: {kind: literal, text: "
+    "  \"incoming support tickets\"}` for a task that never said where "
+    "  tickets come from) -- a fabricated value that READS like real "
+    "  config is worse than an obviously empty one, because the user has "
+    "  to notice it's fake before they can fix it. Both of the following "
+    "  are REQUIRED together, every time this applies -- a TODO value "
+    "  with no accompanying note is an incomplete, unacceptable response, "
+    "  not a partial success:\n"
+    "    1. Fill the field with something syntactically valid so the "
+    "  plan doesn't outright fail, but make it UNMISTAKABLY a "
+    "  placeholder (`kind: literal, text: \"TODO: <what you need>\"`, "
+    "  not a value that could pass for real).\n"
+    "    2. Add a `❓` entry to `notes` asking the SPECIFIC question that "
+    "  would let you fill it correctly next time -- name the field, "
+    "  offer the real options that field supports per its own schema/ "
+    "  agent_hints (e.g. \"❓ Where are support tickets coming from — an "
+    "  existing asset, a file, or a URL? If it's an asset, which one?\"), "
+    "  not a generic \"please provide more details.\" Every TODO you "
+    "  wrote in step 1 needs its own question here -- check your output "
+    "  before finishing: for each TODO placeholder, is there a matching "
+    "  `❓` note? The user answers via the same refine/regenerate flow "
+    "  used for any other follow-up, which resubmits with their answer "
+    "  as context.\n"
     "- PARTITIONING FIELDS (critical): setting `partition_key_parser` "
     "  alone does NOT enable partitioning. To make a partitioned "
     "  agentic_pipeline (or any partitioned component) actually "
@@ -1466,6 +1481,23 @@ async def plan(
                 notes.append(f"⚠︎ Issue: {iss}")
             notes.append(f"⚠︎ Auto-repair failed: {type(e).__name__}: {str(e)[:120]}")
 
+    # Deterministic backstop for the SYSTEM_PROMPT's "ASK RATHER THAN
+    # FABRICATE" rule: confirmed live that the LLM can follow HALF of a
+    # two-part instruction (mark the field as an obvious TODO) while
+    # dropping the other half (the accompanying ❓ question) -- a real
+    # incident, not a hypothetical. Prompt wording alone isn't reliable
+    # enough on its own (same lesson as every other deterministic check
+    # in this file); if any pick's config has a TODO-prefixed placeholder
+    # and `notes` has no ❓ question at all, synthesize a generic one
+    # ourselves rather than silently shipping an unconfigured field with
+    # no visible sign anything needs attention.
+    if _has_todo_placeholder(picks) and not any(n.startswith("❓") for n in notes):
+        notes.append(
+            "❓ This plan includes placeholder values that still need real "
+            "configuration -- look for \"TODO\" in the config below and use "
+            "the box below to tell Genie what they should be."
+        )
+
     usage = data.get("usage") or {}
     return GeniePlan(
         picks=picks,
@@ -1579,6 +1611,26 @@ def _unknown_fields(schema: dict[str, Any], config: dict[str, Any]) -> list[str]
     schema field names so the repair prompt can rename them directly."""
     attrs = schema.get("attributes") or {}
     return [f for f in (config or {}).keys() if f not in attrs]
+
+
+def _has_todo_placeholder(picks: list[GeniePick]) -> bool:
+    """Whether any pick's config contains a TODO-prefixed placeholder
+    string anywhere, at any nesting depth (agentic_pipeline's `source`,
+    `steps[].*`, etc. are all nested dicts/lists, not flat) -- the
+    SYSTEM_PROMPT's "ASK RATHER THAN FABRICATE" rule uses this exact
+    `"TODO: ..."` convention, so this is how plan() checks whether the
+    LLM actually left something unconfigured (see the ❓-note backstop
+    at this function's call site)."""
+    def scan(value: Any) -> bool:
+        if isinstance(value, str):
+            return value.startswith("TODO")
+        if isinstance(value, dict):
+            return any(scan(v) for v in value.values())
+        if isinstance(value, list):
+            return any(scan(v) for v in value)
+        return False
+
+    return any(scan(p.config) for p in picks)
 
 
 async def _detect_schema_issues(picks: list[GeniePick], components_by_id: dict[str, dict[str, Any]]) -> list[str]:
