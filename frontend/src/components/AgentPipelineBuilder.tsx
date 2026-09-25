@@ -15,6 +15,14 @@ interface AgentPlanResponse {
   notes: string[];
 }
 
+// Real text, not just a <textarea placeholder> -- a placeholder attribute
+// isn't selectable/copyable in a browser and vanishes the instant the
+// user starts typing, so "I liked that example, let me use it" had no
+// path except retyping it by hand. The "Try an example" button below
+// sets `task` to this directly instead.
+const EXAMPLE_TASK =
+  'Triage incoming support tickets: classify by urgency, draft a suggested reply, and flag anything that mentions a refund for human review.';
+
 /**
  * The "Agents & Pipelines" bin's scoped Genie entry point: describe what
  * you want in plain English, no component picker step. Unlike the general
@@ -146,11 +154,22 @@ export function AgentPipelineBuilder({ onClose }: { onClose: () => void }) {
           <textarea
             value={task}
             onChange={(e) => setTask(e.target.value)}
-            placeholder="e.g. Triage incoming support tickets: classify by urgency, draft a suggested reply, and flag anything that mentions a refund for human review."
+            placeholder="Describe what it should do…"
             rows={4}
             disabled={planning || applying}
             className="w-full px-3 py-2 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
           />
+
+          {!task && (
+            <button
+              type="button"
+              onClick={() => setTask(EXAMPLE_TASK)}
+              disabled={planning || applying}
+              className="text-xs text-primary hover:underline disabled:opacity-50 disabled:cursor-not-allowed -mt-2"
+            >
+              Try an example →
+            </button>
+          )}
 
           <button
             onClick={() => generate()}
