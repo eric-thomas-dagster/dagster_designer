@@ -203,7 +203,9 @@ def _pip_available(pkg: str) -> bool:
         return False
 
 
-def _keyword_prefilter(components: list[dict[str, Any]], task: str, cap: int = 250) -> list[dict[str, Any]]:
+def _keyword_prefilter(
+    components: list[dict[str, Any]], task: str, cap: int = 250
+) -> tuple[list[dict[str, Any]], set[str]]:
     """Filter + rank the catalog before sending it to the planner LLM.
 
     Strategy (inspired by planned_catalog_agent):
@@ -215,6 +217,12 @@ def _keyword_prefilter(components: list[dict[str, Any]], task: str, cap: int = 2
     4. Reserve slots per essential category (source/ingestion/sink/etc.) so a
        pipeline plan always has viable endpoints.
     5. Fill remaining slots with the top overall scorers.
+
+    Returns (picked, priority_ids) -- priority_ids is the subset from steps
+    0/4 (task-forced mentions + reserved-category top scorers), which
+    _catalog_lines renders at full detail; everything step 5 adds on top is
+    lower-relevance breadth filler, rendered compact instead. See the
+    priority_ids assignment below for why.
     """
     # 1. Drop hidden.
     components = [c for c in components if c.get("id") not in _HIDDEN_COMPONENT_IDS]
@@ -330,16 +338,31 @@ def _keyword_prefilter(components: list[dict[str, Any]], task: str, cap: int = 2
                 add(c)
                 cnt += 1
 
+    # priority_ids snapshots everything picked so far (forced mentions +
+    # reserved-category top scorers) -- the components most likely to
+    # actually get chosen. _catalog_lines renders these at full detail
+    # and renders everything Pass 2 adds below (lower-relevance filler,
+    # included only for breadth) as a compact one-liner instead -- lets
+    # meaningfully more components fit in the same token budget, since
+    # most of a component's rendered size comes from agent_hints fields
+    # (inputs/outputs/side_effects/anti_uses/when_to_use) that the filler
+    # tier doesn't need the planner to reason deeply about.
+    priority_ids = set(seen_ids)
+
     # Pass 2: fill remaining slots with the top overall scorers.
     for c in scored:
         if len(picked) >= cap:
             break
         add(c)
 
-    return picked
+    return picked, priority_ids
 
 
-def _catalog_lines(components: list[dict[str, Any]], description_max: int = 240) -> list[str]:
+def _catalog_lines(
+    components: list[dict[str, Any]],
+    description_max: int = 240,
+    priority_ids: set[str] | None = None,
+) -> list[str]:
     """Render the filtered catalog into terse lines for the prompt.
 
     Includes agent_hints (inputs/outputs/side_effects/anti_uses) inline when
@@ -354,9 +377,24 @@ def _catalog_lines(components: list[dict[str, Any]], description_max: int = 240)
         ("group_by columns MUST exist in upstream") — bumped to 600.
       - `inputs` bumped to 400.
     Total prompt size grows but stays well under Sonnet/GPT-4o's context.
+
+    When `priority_ids` is given, any component NOT in it renders as a
+    single compact line (id/category/tags/short description only, no
+    agent_hints) instead of the full form below. Measured against the real
+    1044-component manifest: full lines average ~450 chars; compact ones
+    are roughly 1/3 that. Reserved for _keyword_prefilter's lower-relevance
+    "fill remaining slots for breadth" tier -- the components most likely
+    to actually get picked (task-forced mentions + reserved-category top
+    scorers) always get full detail.
     """
     lines: list[str] = []
     for c in components:
+        if priority_ids is not None and c["id"] not in priority_ids:
+            desc = (c.get("description") or "")[:140]
+            cat = c.get("category") or "?"
+            tags = ",".join((c.get("tags") or [])[:3])
+            lines.append(f'- id="{c["id"]}" category={cat} tags=[{tags}] -- {desc}')
+            continue
         desc = (c.get("description") or "")[:description_max]
         cat = c.get("category") or "?"
         tags = ",".join((c.get("tags") or [])[:4])
@@ -748,26 +786,32 @@ async def plan(
     existing_assets: list[dict[str, Any]] | None = None,
     model: str = DEFAULT_MODEL,
     # None -> picked per-model below, once we know which provider this
-    # request is actually going to (Anthropic accounts commonly carry
-    # meaningfully higher default rate limits than a fresh/free-tier
-    # OpenAI org, which can be as low as 30k TPM -- there's no reason to
-    # cap both providers at the same conservative number). Pass an
-    # explicit int to override either way.
+    # request is actually going to. Pass an explicit int to override
+    # either way.
     #
-    # Was a flat 250 -- at _catalog_lines' per-component verbosity (up to
-    # ~4000 chars each once description/when_to_use/outputs/side_effects/
-    # anti_uses/example_yaml_snippets all populate), 250 components alone
-    # could push the catalog well past 30k tokens before existing_assets,
-    # the CLAUDE.md excerpt, or the system prompt even get added --
-    # actually observed: a real request hit 41,613 tokens and got
-    # rejected by OpenAI's default org-level 30k TPM rate limit (a much
-    # stricter, much more common ceiling than gpt-4o's 128k context
-    # window, which is what 250 was originally sized against). The
-    # reserved_per_category quotas in _keyword_prefilter (source/
-    # ingestion/sink: 20 each, io_manager/resource: 8 each = 76 minimum)
-    # already guarantee breadth for an end-to-end pipeline; a cap this
-    # much lower mostly just trims the low-relevance "fill remaining
-    # slots with top overall scorers" tail.
+    # History: was a flat 250, uncompacted -- at _catalog_lines' full-
+    # detail verbosity (up to ~4000 chars/component once description/
+    # when_to_use/outputs/side_effects/anti_uses all populate), 250
+    # components alone could push the catalog well past 30k tokens before
+    # existing_assets, the CLAUDE.md excerpt, or the system prompt even
+    # got added -- actually observed: a real request hit 41,613 tokens
+    # and got rejected by OpenAI's default org-level 30k TPM rate limit (a
+    # much stricter, much more common ceiling than gpt-4o's 128k context
+    # window, which 250 was originally sized against). Dropped to a flat
+    # 60/120 (OpenAI/Anthropic) as an immediate fix.
+    #
+    # _catalog_lines now renders components outside _keyword_prefilter's
+    # priority_ids (task-forced mentions + reserved-category top scorers,
+    # 76 minimum) as a compact one-liner instead of full detail -- against
+    # the real manifest (1044 components, measured via
+    # backend/.manifest_cache.json), full lines average ~450 chars,
+    # compact ones ~170-190. That lets meaningfully more components fit
+    # in the same budget: cap=200 (compact) costs about what cap=60 (full)
+    # used to (~16k vs ~9k tokens), and cap=350 costs less than the old
+    # broken cap=250 did (~22k vs the observed 41k+). New defaults below
+    # use that headroom for real breadth instead of banking all of it as
+    # margin -- still leaves several thousand tokens for existing_assets/
+    # CLAUDE.md/system/task under each provider's typical rate limit.
     catalog_cap: int | None = None,
     previous_plan: list[dict[str, Any]] | None = None,
     refinement: str | None = None,
@@ -777,7 +821,7 @@ async def plan(
 
     is_anthropic = model.lower().startswith("claude")
     if catalog_cap is None:
-        catalog_cap = 120 if is_anthropic else 60
+        catalog_cap = 350 if is_anthropic else 200
     if is_anthropic:
         api_key = os.getenv("ANTHROPIC_API_KEY")
         if not api_key:
@@ -805,8 +849,8 @@ async def plan(
     if not components:
         raise GenieError("Manifest returned no components")
 
-    filtered = _keyword_prefilter(components, task, cap=catalog_cap)
-    lines = _catalog_lines(filtered)
+    filtered, priority_ids = _keyword_prefilter(components, task, cap=catalog_cap)
+    lines = _catalog_lines(filtered, priority_ids=priority_ids)
     user_prompt = _build_user_prompt(
         task, lines, existing_assets or [], previous_plan=previous_plan, refinement=refinement,
         claude_md=claude_md,
