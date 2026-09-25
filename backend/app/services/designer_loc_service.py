@@ -25,7 +25,7 @@ from typing import Literal
 import httpx
 import psutil
 
-from ..core.uv_binary import find_uv_binary, venv_bin_path
+from ..core.uv_binary import find_uv_binary, venv_bin_path, project_subprocess_env
 
 DESIGNER_LOCS_ROOT = Path.home() / ".dagster-designer" / "designer-locs"
 DESIGNER_LOCS_ROOT.mkdir(parents=True, exist_ok=True)
@@ -371,7 +371,7 @@ def _run_dagster_component_add(state: DesignerLocState, component_id: str) -> tu
     tens of seconds.
     """
     cmd = [
-        "uvx",
+        find_uv_binary("uvx"),
         "--from", "dagster-community-components-cli",
         "dagster-component",
         "add", component_id,
@@ -383,6 +383,11 @@ def _run_dagster_component_add(state: DesignerLocState, component_id: str) -> tu
     result = subprocess.run(
         cmd,
         cwd=str(state.dir()),
+        # This sandbox dir has its own .venv (see venv_bin_path(state.dir()
+        # / ".venv", ...) elsewhere in this file) -- point VIRTUAL_ENV at
+        # it rather than leaking this backend process's own, same as every
+        # other project-scoped subprocess call.
+        env=project_subprocess_env(state.dir()),
         capture_output=True,
         text=True,
         timeout=300,
@@ -446,6 +451,7 @@ def _install_template_requirements(state: DesignerLocState, req_path: Path) -> N
     add_result = subprocess.run(
         [find_uv_binary("uv"), "add", *reqs],
         cwd=str(state.dir()),
+        env=project_subprocess_env(state.dir()),
         capture_output=True,
         text=True,
         timeout=300,
@@ -540,6 +546,7 @@ async def scaffold_component(
         result = subprocess.run(
             [find_uv_binary("uv"), "add", package_name],
             cwd=str(state.dir()),
+            env=project_subprocess_env(state.dir()),
             capture_output=True,
             text=True,
             timeout=300,

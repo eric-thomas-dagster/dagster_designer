@@ -311,8 +311,16 @@ async def _setup_dbt_cloud_import(
     """
     import subprocess
     from pathlib import Path
+    from ..core.uv_binary import project_subprocess_env
 
     print(f"[INFO] Starting background setup for dbt Cloud import...")
+
+    # uv resolves VIRTUAL_ENV over its own cwd-based project detection when
+    # it's set (uses standard Python venv resolution rules) -- inheriting
+    # this backend's own VIRTUAL_ENV verbatim (no env= at all, the previous
+    # behavior here) risked `uv add`/`uv sync` operating on the WRONG venv
+    # entirely rather than this project's own.
+    env = project_subprocess_env(Path(project_dir))
 
     # Add dbt dependencies
     print(f"[INFO] Adding dbt dependencies...")
@@ -322,6 +330,7 @@ async def _setup_dbt_cloud_import(
         subprocess.run(
             [find_uv_binary("uv"), "add", "dagster-dbt"],
             cwd=project_dir,
+            env=env,
             check=True,
             capture_output=True,
             text=True,
@@ -339,6 +348,7 @@ async def _setup_dbt_cloud_import(
             subprocess.run(
                 [find_uv_binary("uv"), "add", adapter],
                 cwd=project_dir,
+                env=env,
                 check=True,
                 capture_output=True,
                 text=True,
@@ -356,6 +366,7 @@ async def _setup_dbt_cloud_import(
         subprocess.run(
             [find_uv_binary("uv"), "sync"],
             cwd=project_dir,
+            env=env,
             check=True,
             capture_output=True,
             text=True,

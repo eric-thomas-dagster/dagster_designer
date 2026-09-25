@@ -1677,9 +1677,11 @@ if custom_lineage_edges:
                     # Passing args as a list also sidesteps the shell
                     # quoting this used to need for the default projects
                     # folder's space (~/Documents/Dagster Designer/...).
+                    from ..core.uv_binary import project_subprocess_env
                     result = subprocess.run(
                         [str(dg_path.resolve()), "scaffold", "defs", "dagster_dbt.DbtProjectComponent", folder_name, "--project-path", str(project_path)],
                         cwd=str(project_dir.resolve()),
+                        env=project_subprocess_env(project_dir),
                         capture_output=True,
                         text=True,
                         timeout=60,

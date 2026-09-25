@@ -90,9 +90,9 @@ def project_subprocess_env(project_dir: Path) -> dict[str, str]:
     return env
 
 
-def env_with_bundled_uv_on_path() -> dict[str, str]:
-    """A copy of the current environment with the bundled uv/uvx's own
-    directory prepended to PATH.
+def env_with_bundled_uv_on_path(base_env: dict[str, str] | None = None) -> dict[str, str]:
+    """A copy of `base_env` (or the current environment, if omitted) with
+    the bundled uv/uvx's own directory prepended to PATH.
 
     Needed when shelling out to a THIRD-PARTY tool (e.g. the
     dagster-community-components-cli, launched via our resolved uvx) that
@@ -100,8 +100,16 @@ def env_with_bundled_uv_on_path() -> dict[str, str]:
     source, but since we control the environment it runs in, putting our
     bundled uv on PATH lets its own subprocess calls find it exactly the
     way find_uv_binary() lets our own calls find it.
+
+    Pass `project_subprocess_env(project_dir)` as `base_env` when the
+    third-party tool is ALSO operating on a specific project's own venv
+    (e.g. a nested `uv add` run against that project) -- this function's
+    old no-argument form only ever copied the ambient environment, so
+    VIRTUAL_ENV still leaked from wherever this backend process itself
+    runs from, same class of bug as the dbt-adapter-resolution issue this
+    module's other helper (project_subprocess_env) exists to fix.
     """
-    env = os.environ.copy()
+    env = dict(base_env) if base_env is not None else os.environ.copy()
     bundled_dir = _bundled_uv_dir()
     if bundled_dir:
         env["PATH"] = f"{bundled_dir}{os.pathsep}{env.get('PATH', '')}"

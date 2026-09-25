@@ -7,7 +7,7 @@ from typing import Any
 from ..services.dagster_cli_service import dagster_cli_service
 from ..services.project_service import project_service
 from ..services.component_installer import component_installer
-from ..core.uv_binary import find_uv_binary, env_with_bundled_uv_on_path
+from ..core.uv_binary import find_uv_binary, env_with_bundled_uv_on_path, project_subprocess_env
 
 router = APIRouter(prefix="/dagster", tags=["dagster"])
 
@@ -291,7 +291,11 @@ async def install_component(request: InstallComponentRequest):
             result = subprocess.run(
                 [find_uv_binary("uvx"), "--with", "uv", "uv", "add", "dagster-dbt", adapter_package],
                 cwd=str(dagster_project_path),
-                env=env_with_bundled_uv_on_path(),
+                # Point VIRTUAL_ENV at the project's own venv (not just
+                # whatever this backend process itself runs from) AND keep
+                # the bundled uv on PATH for the nested `uv` invocation --
+                # env_with_bundled_uv_on_path() alone only did the latter.
+                env=env_with_bundled_uv_on_path(project_subprocess_env(dagster_project_path)),
                 capture_output=True,
                 text=True,
                 timeout=300,

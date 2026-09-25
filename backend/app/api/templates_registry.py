@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, List, Optional
 
 from ..services.project_service import project_service
-from ..core.uv_binary import find_uv_binary, env_with_bundled_uv_on_path
+from ..core.uv_binary import find_uv_binary, env_with_bundled_uv_on_path, project_subprocess_env
 
 router = APIRouter(prefix="/templates", tags=["templates"])
 
@@ -896,12 +896,17 @@ async def install_component(
                 print(f"[Install] Installing {len(packages_to_install)} packages: {packages_to_install}")
                 try:
                     # Use uv add to install all packages at once
-                    # This will update pyproject.toml automatically
+                    # This will update pyproject.toml automatically. uv
+                    # resolves VIRTUAL_ENV over its own cwd-based project
+                    # detection when set -- inheriting this backend's own
+                    # VIRTUAL_ENV (no env= at all, the previous behavior
+                    # here) risked installing into the wrong venv entirely.
                     result = subprocess.run(
                         [find_uv_binary("uv"), "add"] + packages_to_install,
                         check=True,
                         capture_output=True,
                         cwd=str(project_dir),
+                        env=project_subprocess_env(project_dir),
                         text=True,
                         timeout=300
                     )
@@ -990,7 +995,11 @@ async def install_component_via_cli(
             # what --manager uv above tells it to use) -- putting our
             # bundled uv on PATH here lets that internal call find it too,
             # the same way find_uv_binary() resolves it for our own calls.
-            env=env_with_bundled_uv_on_path(),
+            # Also point VIRTUAL_ENV at THIS project's own venv (not just
+            # whatever this backend process itself runs from), since that
+            # internal `uv add` call installs the new component's
+            # requirements.txt and must land them in the right venv.
+            env=env_with_bundled_uv_on_path(project_subprocess_env(project_dir)),
             capture_output=True,
             text=True,
             timeout=300,
@@ -1039,6 +1048,7 @@ async def install_component_via_cli(
                 add_result = subprocess.run(
                     [find_uv_binary("uv"), "add", *reqs],
                     cwd=str(project_dir),
+                    env=project_subprocess_env(project_dir),
                     capture_output=True,
                     text=True,
                     timeout=300,

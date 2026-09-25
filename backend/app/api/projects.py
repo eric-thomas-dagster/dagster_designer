@@ -3249,24 +3249,24 @@ async def get_asset_partitions(project_id: str, asset_key: str):
     project_module = project_service.get_project_root_module(project)
 
     try:
-        # Run the show_partitions.py script from backend directory
-        # Add project src to PYTHONPATH so it can import the project module
+        # Run the show_partitions.py script from backend directory.
+        # project_subprocess_env fixes PATH/VIRTUAL_ENV/PYTHONHOME (see its
+        # docstring) -- without that, a state-backed dbt component's
+        # manifest refresh constructs its own internal DbtCliResource that
+        # resolves "dbt" off PATH/VIRTUAL_ENV. This endpoint used to only
+        # patch PATH; layer PYTHONPATH on top since it also needs the
+        # project's src/ importable.
         import os
-        env = os.environ.copy()
+        from ..core.uv_binary import project_subprocess_env
+        env = project_subprocess_env(project_dir)
         project_src_dir = project_dir / "src"
         if "PYTHONPATH" in env:
-            env["PYTHONPATH"] = f"{project_src_dir}:{env['PYTHONPATH']}"
+            env["PYTHONPATH"] = f"{project_src_dir}{os.pathsep}{env['PYTHONPATH']}"
         else:
             env["PYTHONPATH"] = str(project_src_dir)
 
         # Get the project's Python executable
         project_python = project_service._get_project_python_path(project)
-        # Without this, a state-backed dbt component's manifest refresh
-        # (part of just loading definitions) constructs its own internal
-        # DbtCliResource with the bare string "dbt", resolved via PATH --
-        # not found without the venv's own bin dir on it. materialize()
-        # already does this; this endpoint never did.
-        env["PATH"] = f"{project_python.parent}{os.pathsep}{env.get('PATH', '')}"
 
         # Serialize against any other subprocess call loading this same
         # project's defs -- see the identical lock in assets.py's preview
@@ -3362,24 +3362,24 @@ async def get_asset_config_schema(project_id: str, asset_key: str):
     project_module = project_service.get_project_root_module(project)
 
     try:
-        # Run the show_config.py script from backend directory
-        # Add project src to PYTHONPATH so it can import the project module
+        # Run the show_config.py script from backend directory.
+        # project_subprocess_env fixes PATH/VIRTUAL_ENV/PYTHONHOME (see its
+        # docstring) -- without that, a state-backed dbt component's
+        # manifest refresh constructs its own internal DbtCliResource that
+        # resolves "dbt" off PATH/VIRTUAL_ENV. This endpoint used to only
+        # patch PATH; layer PYTHONPATH on top since it also needs the
+        # project's src/ importable.
         import os
-        env = os.environ.copy()
+        from ..core.uv_binary import project_subprocess_env
+        env = project_subprocess_env(project_dir)
         project_src_dir = project_dir / "src"
         if "PYTHONPATH" in env:
-            env["PYTHONPATH"] = f"{project_src_dir}:{env['PYTHONPATH']}"
+            env["PYTHONPATH"] = f"{project_src_dir}{os.pathsep}{env['PYTHONPATH']}"
         else:
             env["PYTHONPATH"] = str(project_src_dir)
 
         # Get the project's Python executable
         project_python = project_service._get_project_python_path(project)
-        # Without this, a state-backed dbt component's manifest refresh
-        # (part of just loading definitions) constructs its own internal
-        # DbtCliResource with the bare string "dbt", resolved via PATH --
-        # not found without the venv's own bin dir on it. materialize()
-        # already does this; this endpoint never did.
-        env["PATH"] = f"{project_python.parent}{os.pathsep}{env.get('PATH', '')}"
 
         # Serialize against any other subprocess call loading this same
         # project's defs -- see the identical lock in assets.py's preview

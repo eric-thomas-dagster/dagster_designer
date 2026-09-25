@@ -12,7 +12,7 @@ from pydantic import BaseModel
 from typing import Any
 
 from ..services.project_service import project_service
-from ..core.uv_binary import find_uv_binary, env_with_bundled_uv_on_path
+from ..core.uv_binary import find_uv_binary, env_with_bundled_uv_on_path, project_subprocess_env
 from ..services.dagster_plus_client import query as dagster_plus_query, ASSET_MATERIALIZATIONS_QUERY, DagsterPlusError
 
 router = APIRouter(prefix="/assets", tags=["assets"])
@@ -1025,25 +1025,27 @@ async def preview_asset_data(
     # Get project module name
     project_module = project_service.get_project_root_module(project)
 
-    # Set up environment
+    # Set up environment. project_subprocess_env already fixes PATH/
+    # VIRTUAL_ENV/PYTHONHOME (see its docstring) -- without that, a
+    # state-backed dbt component's manifest refresh (run as part of just
+    # loading definitions, before any asset actually executes) constructs
+    # its own internal DbtCliResource that resolves "dbt" off PATH/
+    # VIRTUAL_ENV, failing pydantic validation ("The dbt executable 'dbt'
+    # does not exist") before the preview ever gets a chance to run. This
+    # endpoint used to only patch PATH (materialize() had the full fix);
+    # layer PYTHONPATH on top since this specific call also needs the
+    # project's src/ importable.
     import os
-    env = os.environ.copy()
+    from ..core.uv_binary import project_subprocess_env
+    env = project_subprocess_env(project_dir)
     project_src_dir = project_dir / "src"
     if "PYTHONPATH" in env:
-        env["PYTHONPATH"] = f"{project_src_dir}:{env['PYTHONPATH']}"
+        env["PYTHONPATH"] = f"{project_src_dir}{os.pathsep}{env['PYTHONPATH']}"
     else:
         env["PYTHONPATH"] = str(project_src_dir)
 
     # Get the project's Python executable
     project_python = project_service._get_project_python_path(project)
-    # Without this, a state-backed dbt component's manifest refresh (run as
-    # part of just loading definitions, before any asset actually executes)
-    # constructs its own internal DbtCliResource with the bare string "dbt",
-    # resolved via PATH -- not found without the venv's own bin dir on it,
-    # failing pydantic validation ("The dbt executable 'dbt' does not
-    # exist") before the preview ever gets a chance to run. materialize()
-    # already does this (see projects.py); this endpoint never did.
-    env["PATH"] = f"{project_python.parent}{os.pathsep}{env.get('PATH', '')}"
 
     try:
         # Serialize against any other subprocess call loading this same
@@ -1484,8 +1486,11 @@ async def create_transformer_asset(project_id: str, request: CreateTransformerRe
                     # See templates_registry.py's identical install call for
                     # why: --manager uv makes the CLI itself shell out to
                     # bare "uv" internally, which needs our bundled uv on
-                    # PATH to find it.
-                    env=env_with_bundled_uv_on_path(),
+                    # PATH to find it -- and VIRTUAL_ENV must point at THIS
+                    # project's own venv, not whatever this backend process
+                    # itself runs from, since that internal `uv add` call
+                    # installs the component's requirements.txt.
+                    env=env_with_bundled_uv_on_path(project_subprocess_env(project_dir)),
                     capture_output=True, text=True, timeout=300,
                 )
                 if cli_result.returncode != 0:
