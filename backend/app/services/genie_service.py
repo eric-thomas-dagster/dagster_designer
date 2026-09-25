@@ -622,9 +622,21 @@ SYSTEM_PROMPT = (
     "rid of, or says they didn't want an existing asset, emit "
     '{"action": "remove", "asset_name": "<the EXISTING asset\'s exact name>", '
     '"reason": "..."} — no config, no component_type. asset_name for edit/'
-    "remove MUST exactly match a name from Existing assets — never invent one "
-    "or target something not in that list. Default action is \"add\" when "
-    "omitted, matching every rule below (which all describe add behavior).\n\n"
+    "remove MUST exactly match a name from Existing assets (the list "
+    "under that heading below, listing assets ALREADY in the user's "
+    "graph) — NEVER a name from your own current or previous picks in "
+    "THIS plan, and never invented. Confirmed live: told 'an existing "
+    "asset' is the data source with nothing in Existing assets remotely "
+    "matching, the model emitted action=edit targeting its OWN pipeline "
+    "pick's asset_name as if that were the existing asset -- a name it "
+    "invented (and had itself just proposed), not one from Existing "
+    "assets. If Existing assets is empty, or nothing in it is a "
+    "plausible fit, there is NO valid edit/remove target -- do not "
+    "emit one; treat this exactly like any other case where you lack "
+    "real information (see ASK RATHER THAN FABRICATE A DATA SOURCE "
+    "below: TODO-placeholder the field, set clarifying_question). "
+    "Default action is \"add\" when omitted, matching every rule below "
+    "(which all describe add behavior).\n\n"
     "RULES (strict, apply to \"add\" picks):\n"
     "- component_type MUST be an EXACT string that appears as `id=\"…\"` in the "
     "  catalog below. Do NOT shorten, singularize, or invent names. If none fits, "
@@ -793,6 +805,23 @@ SYSTEM_PROMPT = (
     "  `clarifying_question` in that next round if their answer reveals "
     "  a new gap; keep going until every TODO is resolved with a real "
     "  value, THEN set `clarifying_question` to null.\n"
+    "  A CATEGORY IS NOT A VALUE (critical, confirmed live as a real "
+    "  incident): if the user's answer only narrows the CATEGORY (they "
+    "  picked/typed \"an existing asset\" or \"a file\" from your own "
+    "  `options`) without naming a SPECIFIC thing, you still do NOT have "
+    "  a real value -- \"an existing asset\" is not itself an asset "
+    "  name. Do not treat picking that option as license to invent one "
+    "  (do NOT emit action=edit/remove at this point either -- see "
+    "  EDITING OR REMOVING EXISTING ASSETS above for exactly why that's "
+    "  wrong here). Ask a narrower follow-up instead: if the user said "
+    "  \"an existing asset\" and `existing_assets` has plausible "
+    "  candidates, set `clarifying_question.options` to their real "
+    "  names now; if `existing_assets` is empty or has no plausible "
+    "  match, say so and ask them to name it (\"There's no existing "
+    "  asset that looks like a ticket source in this project yet -- "
+    "  what's it called, or should I use placeholder text for now?\"), "
+    "  `options` null. Keep the field TODO-placeholder'd until you have "
+    "  an actual name, not a category.\n"
     "- PARTITIONING FIELDS (critical): setting `partition_key_parser` "
     "  alone does NOT enable partitioning. To make a partitioned "
     "  agentic_pipeline (or any partitioned component) actually "
@@ -1254,6 +1283,13 @@ async def plan(
 
     picks: list[GeniePick] = []
     seen_names: set[str] = {str(a["name"]) for a in (existing_assets or []) if a.get("name")}
+    # Tracked for the invalid-edit-target backstop below: confirmed live
+    # that the LLM can violate the "edit/remove must reference a real
+    # existing asset" rule (invents a name, or self-references its own
+    # pick), silently dropping the whole pick here with just a note --
+    # if clarifying_question also never got set, that's a dead end with
+    # no picks, no question, nothing actionable for the user.
+    dropped_invalid_edit_target = False
     notes: list[str] = []
 
     existing_names = {str(a["name"]) for a in (existing_assets or []) if a.get("name")}
@@ -1285,6 +1321,7 @@ async def plan(
                     f"⚠︎ Pick #{i + 1} ({action}) references unknown existing asset "
                     f"'{target_name}' — skipped."
                 )
+                dropped_invalid_edit_target = True
                 continue
             picks.append(
                 GeniePick(
@@ -1533,6 +1570,18 @@ async def plan(
             question="This plan includes placeholder values that still need real "
             "configuration -- look for \"TODO\" in the config below. What should "
             "they be?"
+        )
+
+    # Second deterministic backstop, same lesson: confirmed live that the
+    # LLM can violate "edit/remove must target a real existing asset"
+    # (invented a name, or self-referenced its own pick) -- silently
+    # dropped above with just a note, which is a dead end with no picks
+    # and no question if clarifying_question also never got set.
+    if dropped_invalid_edit_target and not picks and clarifying_question is None:
+        clarifying_question = GenieClarifyingQuestion(
+            question="I tried to reference an existing asset, but couldn't find a "
+            "real match in this project. What's it actually called, or should I "
+            "add a new one instead?"
         )
 
     usage = data.get("usage") or {}
