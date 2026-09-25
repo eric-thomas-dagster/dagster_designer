@@ -37,6 +37,33 @@ DEFAULT_MODEL = "gpt-4o"
 # be used instead.
 _HIDDEN_COMPONENT_IDS = {"dependency_graph"}
 
+# Manifest `category` values that don't produce an asset in the graph --
+# Genie only ever proposes picks that add/edit assets on the canvas, and
+# Designer has separate dedicated UI for all of these (Automations tab for
+# sensors/schedules/jobs, the asset Checks tab, the Resources panel).
+# Confirmed via the real manifest (1044 components) that none of these are
+# referenced anywhere in this file's actual pick/validation logic outside
+# the now-removed io_manager/resource reserved-quota entry.
+#
+# Mirrors ComponentPalette.tsx's NON_ASSET_CATEGORIES (the manual
+# drag-and-drop picker applies the identical exclusion, including its
+# singular/plural hedge against manifest naming inconsistency and its
+# 'infrastructure'/'decorator' entries -- a decorator wraps an *existing*
+# asset function in the user's own source, so there's no standalone
+# instance for Genie to propose either, same reasoning as that file's).
+# The two lists aren't shared code (different language/process), so
+# keep them in sync by hand if either changes.
+_NON_ASSET_CATEGORIES = {
+    "resource", "resources",
+    "sensor", "sensors",
+    "schedule", "schedules",
+    "job", "jobs",
+    "io_manager", "io_managers",
+    "check", "checks", "asset_check", "asset_checks",
+    "infrastructure",
+    "decorator", "decorators",
+}
+
 # Manifest cache — in-memory (15 min TTL) with a disk fallback so we survive
 # GitHub's 60/hr unauthenticated rate-limit on raw.githubusercontent.com.
 _manifest_cache: dict[str, Any] = {"data": None, "fetched_at": 0.0}
@@ -236,6 +263,19 @@ def _keyword_prefilter(
     # 1. Drop hidden.
     components = [c for c in components if c.get("id") not in _HIDDEN_COMPONENT_IDS]
 
+    # Drop categories that don't produce an asset in the graph. Genie's
+    # job (from the AI bar, scoped to the asset graph canvas) is picking
+    # components that add/edit ASSETS -- Designer has separate, dedicated
+    # UI for sensors, jobs, monitors, io managers, resources, and asset
+    # checks (Automations tab, Monitors tab, the asset Checks tab, the
+    # Resources panel), so none of those belong in Genie's candidate
+    # pool at all. This is a hard exclusion, not de-prioritization: these
+    # never entered the reserved-category quota (io_manager/resource) or
+    # the general keyword-scored pool either, so a task that happens to
+    # mention "sensor" or "resource" can no longer accidentally surface
+    # one.
+    components = [c for c in components if c.get("category") not in _NON_ASSET_CATEGORIES]
+
     # NOTE: previously step 2 dropped components whose `requires_pip`
     # wasn't installed in Designer's BACKEND venv. That was wrong-headed
     # — components execute in the SANDBOX venv (or the Dagster+ target's
@@ -311,21 +351,16 @@ def _keyword_prefilter(
 
     # Reserved coverage per essential category so we always show enough breadth
     # for the LLM to build an end-to-end pipeline (source → transform → sink).
-    # io_manager/resource get a much smaller reservation than the pick-able
-    # categories above -- neither genie_service's own pick logic nor its
-    # SYSTEM_PROMPT ever reasons about a resource/io_manager component as
-    # something to PICK (confirmed: no "resource"/"io_manager" string
-    # anywhere else in this file's planning/validation logic), so the old
-    # 8-each reservation was mostly dead weight, crowding out budget that
-    # could go to categories actually used for picks. Kept nonzero (not
-    # removed outright) since a resource/io_manager's NAME is still useful
-    # context for other components' resource_key-style config fields.
+    # io_manager/resource used to have a small reservation here (and 8 each
+    # before that) on the theory that their NAMEs are useful context for
+    # another component's resource_key-style field -- removed entirely now
+    # that _NON_ASSET_CATEGORIES excludes them from the candidate pool
+    # altogether (Genie only proposes asset-graph picks; Designer has
+    # separate dedicated UI for resources).
     reserved_per_category = {
         "source": 20,
         "ingestion": 20,
         "sink": 20,
-        "io_manager": 3,
-        "resource": 3,
     }
 
     picked: list[dict[str, Any]] = []
@@ -599,29 +634,27 @@ SYSTEM_PROMPT = (
     "  includes `multi_asset` or whose `when_to_use` mentions 'one "
     "  YAML' / 'one instance' / 'whole pipeline'.\n"
     "- CROSS-PICK COORDINATION (critical): when your plan contains "
-    "  multiple picks whose configs reference each other (e.g. a "
-    "  `sensor` component's `job_name` field pointing at an "
-    "  `asset_job` component's `job_name`, or an `asset_job`'s "
-    "  `asset_keys` field naming assets emitted by another pick), the "
-    "  referenced VALUES must match VERBATIM across picks. If pick B's "
-    "  `job_name` is `mir_progression_job`, then pick A's `job_name` "
-    "  reference to it must also be `mir_progression_job`, not "
-    "  `process_files_job` or a schema-example value. Trace every "
-    "  cross-reference (job names, asset keys, sensor targets, "
-    "  approval directories, run configs) and make sure both sides "
-    "  agree. Sensor→job, job→asset, gate→upstream, approval_dir → "
-    "  sink path — all of these are cross-pick references that need "
-    "  hand-alignment.\n"
+    "  multiple picks whose configs reference each other (e.g. one "
+    "  pick's `upstream_asset_keys` / `upstream_asset_key` naming an "
+    "  asset another pick emits, or a `destination_table` / "
+    "  `resource_key` one pick writes that another pick's `sql` reads "
+    "  from), the referenced VALUES must match VERBATIM across picks. "
+    "  If pick B's `asset_name` is `mir_progression_report`, then pick "
+    "  A's `upstream_asset_keys` reference to it must also be "
+    "  `mir_progression_report`, not `process_files_output` or a "
+    "  schema-example value. Trace every cross-reference (asset keys, "
+    "  table names, resource keys, file paths) and make sure both sides "
+    "  agree.\n"
     "- EXAMPLES ARE NOT VALUES (critical): when a component's "
     "  description or agent_hints show example config values (e.g. "
-    "  `data_files_sensor` / `process_files_job` / `/data/incoming` / "
+    "  `orders_raw` / `/data/incoming` / "
     "  `[orders_raw, daily_revenue]`), those are ILLUSTRATIONS, not "
     "  defaults to paste. Every string, path, and asset-key in your "
     "  config must be derived from the USER'S TASK context, or from "
     "  another pick's names in this same plan. If the user asks for a "
-    "  `mir` triage pipeline, do NOT emit `data_files_sensor` or "
-    "  `orders_raw` — emit `mir_approval_monitor`, `mir_progression_job`, "
-    "  `[mir_report_approval_gate]`, etc. When unsure, use a "
+    "  `mir` triage pipeline, do NOT emit `orders_raw` or "
+    "  `daily_revenue` — emit `mir_incoming_reports`, "
+    "  `mir_progression_report`, etc. When unsure, use a "
     "  `TODO_<field>` placeholder so the user can see what's missing "
     "  — never copy an example value that has no relationship to the "
     "  task.\n"
