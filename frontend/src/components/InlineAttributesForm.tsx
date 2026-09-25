@@ -224,6 +224,15 @@ function renderField(
       .split(',')
       .map((s) => s.trim())
       .filter(Boolean);
+    // Write back in whatever shape the schema actually declares -- this
+    // widget is reused for many fields (group_by, sort_by, partition_by,
+    // order_by, *_columns, ...) across many components, some array-typed
+    // and some a comma-separated string. Always joining to a string used
+    // to silently corrupt an array-typed field back into a string on
+    // every edit (same failure class as the upstream_asset_keys
+    // incidents, just for this field family).
+    const isArrayField = fieldType === 'array';
+    const commit = (next: string[]) => onChange(fieldName, isArrayField ? next : next.join(', '));
     return (
       <div>
         <div className="flex flex-wrap gap-1 mb-1">
@@ -232,7 +241,7 @@ function renderField(
               {c}
               <button
                 type="button"
-                onClick={() => onChange(fieldName, selected.filter((x) => x !== c).join(', '))}
+                onClick={() => commit(selected.filter((x) => x !== c))}
                 className="hover:text-blue-900"
               >
                 <X className="w-3 h-3" />
@@ -245,7 +254,7 @@ function renderField(
           onChange={(e) => {
             const c = e.target.value;
             if (!c || selected.includes(c)) return;
-            onChange(fieldName, [...selected, c].join(', '));
+            commit([...selected, c]);
           }}
           className="w-full px-2 py-1.5 text-xs border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
         >
@@ -378,6 +387,26 @@ function renderField(
       placeholder = 'Type the column name in your source data';
     }
   }
+  // No cached upstream schema yet, but the field is still array-typed --
+  // parse the typed comma-separated text before writing back instead of
+  // the plain fallback's raw-string write, which would corrupt an
+  // array-typed field the same way the chip-picker above used to.
+  if (widget === 'columns' && fieldType === 'array') {
+    const displayText = Array.isArray(value) ? value.join(', ') : (typeof value === 'string' ? value : '');
+    return (
+      <input
+        type="text"
+        value={displayText}
+        onChange={(e) => onChange(
+          fieldName,
+          e.target.value.split(',').map((s) => s.trim()).filter(Boolean)
+        )}
+        className="w-full px-2 py-1.5 text-xs border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+        placeholder={placeholder}
+      />
+    );
+  }
+
   return (
     <input
       type="text"

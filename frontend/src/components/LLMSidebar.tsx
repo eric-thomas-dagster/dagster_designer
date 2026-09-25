@@ -4,6 +4,7 @@ import { Sparkles, Zap, Eye } from 'lucide-react';
 import { assetsApi } from '@/services/api';
 import { useProjectStore } from '@/hooks/useProject';
 import { useIsDarkMode } from '@/hooks/useIsDarkMode';
+import { parseUpstreamAssetKeys } from '@/lib/upstreamAssetKeys';
 
 interface LLMSidebarProps {
   attributes: Record<string, any>;
@@ -119,7 +120,7 @@ export function LLMSidebar({ attributes, onChange, onOpenAdvanced, componentType
   }, [currentProject?.id]);
 
   const upstreamKey = (attributes.upstream_asset_key as string)
-    || (attributes.upstream_asset_keys as string)?.split(',')[0]?.trim()
+    || parseUpstreamAssetKeys(attributes.upstream_asset_keys)[0]
     || '';
   const columns = schemas[upstreamKey]?.columns ?? [];
 

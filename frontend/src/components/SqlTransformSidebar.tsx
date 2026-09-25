@@ -1,6 +1,8 @@
+import { useEffect, useState } from 'react';
 import Editor from '@monaco-editor/react';
 import { Terminal, Sparkles } from 'lucide-react';
 import { useIsDarkMode } from '@/hooks/useIsDarkMode';
+import { parseUpstreamAssetKeys } from '@/lib/upstreamAssetKeys';
 
 interface SqlTransformSidebarProps {
   attributes: Record<string, any>;
@@ -28,7 +30,25 @@ export function SqlTransformSidebar({ attributes, onChange, onOpenAdvanced }: Sq
   const sql = (attributes.sql as string) ?? '';
   const destinationTable = (attributes.destination_table as string) ?? '';
   const ifExists = (attributes.if_exists as string) ?? 'fail';
-  const upstreamKeys = (attributes.upstream_asset_keys as string) ?? '';
+  // upstream_asset_keys is schema'd as an array -- this text input edits
+  // it as a comma-separated string for a simpler UI, so it's parsed for
+  // display and re-parsed into a real array on every change (never
+  // written back as a raw string, which would corrupt the field's type).
+  // Kept as local state (rather than deriving the input's value directly
+  // from attributes on every render) so a trailing ", " while typing a
+  // second entry isn't immediately stripped by round-tripping through
+  // parseUpstreamAssetKeys before the user finishes typing it.
+  const [upstreamKeysText, setUpstreamKeysText] = useState(
+    () => parseUpstreamAssetKeys(attributes.upstream_asset_keys).join(', ')
+  );
+  useEffect(() => {
+    const incoming = parseUpstreamAssetKeys(attributes.upstream_asset_keys);
+    const current = parseUpstreamAssetKeys(upstreamKeysText);
+    if (JSON.stringify(incoming) !== JSON.stringify(current)) {
+      setUpstreamKeysText(incoming.join(', '));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [attributes.upstream_asset_keys]);
   const returnDataframe = !!attributes.return_dataframe;
 
   return (
@@ -122,8 +142,11 @@ export function SqlTransformSidebar({ attributes, onChange, onOpenAdvanced }: Sq
         </label>
         <input
           type="text"
-          value={upstreamKeys}
-          onChange={(e) => onChange('upstream_asset_keys', e.target.value)}
+          value={upstreamKeysText}
+          onChange={(e) => {
+            setUpstreamKeysText(e.target.value);
+            onChange('upstream_asset_keys', parseUpstreamAssetKeys(e.target.value));
+          }}
           placeholder="orders, customers  (comma-separated)"
           className="w-full px-2 py-1.5 text-xs font-mono border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
         />

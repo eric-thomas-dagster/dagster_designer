@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { Plus, X, Sigma } from 'lucide-react';
 import { assetsApi } from '@/services/api';
 import { useProjectStore } from '@/hooks/useProject';
+import { parseUpstreamAssetKeys } from '@/lib/upstreamAssetKeys';
 
 interface AggregateSidebarProps {
   attributes: Record<string, any>;
@@ -77,7 +78,7 @@ export function AggregateSidebar({ attributes, onChange, onOpenAdvanced }: Aggre
   }, [currentProject?.id]);
 
   const upstreamKey = (attributes.upstream_asset_key as string)
-    || (attributes.upstream_asset_keys as string)?.split(',')[0]?.trim()
+    || parseUpstreamAssetKeys(attributes.upstream_asset_keys)[0]
     || (attributes.upstream_table as string)
     || '';
   const upstreamCols = schemas[upstreamKey]?.columns ?? [];

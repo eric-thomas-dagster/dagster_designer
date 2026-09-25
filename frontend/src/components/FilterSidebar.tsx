@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { Plus, X, Filter as FilterIcon } from 'lucide-react';
 import { assetsApi } from '@/services/api';
 import { useProjectStore } from '@/hooks/useProject';
+import { parseUpstreamAssetKeys } from '@/lib/upstreamAssetKeys';
 
 interface FilterSidebarProps {
   attributes: Record<string, any>;
@@ -123,7 +124,7 @@ export function FilterSidebar({ attributes, onChange, onOpenAdvanced }: FilterSi
   }, [currentProject?.id]);
 
   const upstreamKey = (attributes.upstream_asset_key as string)
-    || (attributes.upstream_asset_keys as string)?.split(',')[0]?.trim()
+    || parseUpstreamAssetKeys(attributes.upstream_asset_keys)[0]
     || (attributes.upstream_table as string)
     || '';
   const upstreamCols = schemas[upstreamKey]?.columns ?? [];

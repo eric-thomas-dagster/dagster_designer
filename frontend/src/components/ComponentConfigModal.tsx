@@ -909,6 +909,16 @@ export function ComponentConfigModal({
           .split(',')
           .map((s: string) => s.trim())
           .filter(Boolean);
+        // Write back in whatever shape the schema actually declares --
+        // this widget is reused for many different fields (group_by,
+        // sort_by, partition_by, order_by, *_columns, ...) across many
+        // components, some of which schema this as `array` and some as a
+        // comma-separated `string`. Always joining to a string used to
+        // silently corrupt an array-typed field back into a string on
+        // every edit (the same failure class as the upstream_asset_keys
+        // incidents, just for this field family).
+        const isArrayField = fieldType === 'array';
+        const commit = (next: string[]) => handleFieldChange(fieldName, isArrayField ? next : next.join(', '));
         return (
           <div>
             <div className="flex flex-wrap gap-1 mb-1.5">
@@ -917,7 +927,7 @@ export function ComponentConfigModal({
                   {c}
                   <button
                     type="button"
-                    onClick={() => handleFieldChange(fieldName, selected.filter((x: string) => x !== c).join(', '))}
+                    onClick={() => commit(selected.filter((x: string) => x !== c))}
                     className="hover:text-blue-900"
                   >
                     <X className="w-3 h-3" />
@@ -930,7 +940,7 @@ export function ComponentConfigModal({
               onChange={(e) => {
                 const c = e.target.value;
                 if (!c || selected.includes(c)) return;
-                handleFieldChange(fieldName, [...selected, c].join(', '));
+                commit([...selected, c]);
               }}
               className="w-full px-3 py-2 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
             >
@@ -1374,6 +1384,27 @@ export function ComponentConfigModal({
       const placeholder = columnWidget
         ? (widget === 'columns' ? 'e.g. col_a, col_b (preview upstream to enable dropdown)' : 'e.g. my_column (preview upstream to enable dropdown)')
         : (fieldSchema.description || fieldName);
+
+      // No cached upstream schema yet (so the chip-picker above bailed
+      // out), but the field is still array-typed -- parse the typed
+      // comma-separated text before writing back instead of the plain
+      // fallback's raw-string write, which would corrupt an array-typed
+      // field the same way the chip-picker used to.
+      if (widget === 'columns' && fieldType === 'array') {
+        const displayText = Array.isArray(value) ? value.join(', ') : (typeof value === 'string' ? value : '');
+        return (
+          <input
+            type="text"
+            value={displayText}
+            onChange={(e) => handleFieldChange(
+              fieldName,
+              e.target.value.split(',').map((s) => s.trim()).filter(Boolean)
+            )}
+            className="w-full px-3 py-2 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+            placeholder={placeholder}
+          />
+        );
+      }
 
       return (
         <input
