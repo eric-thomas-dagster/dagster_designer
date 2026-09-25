@@ -2883,6 +2883,7 @@ export interface AiProvidersStatus {
   openai_available: boolean;
   anthropic_available: boolean;
   any_available: boolean;
+  anthropic_workspace_id_configured: boolean;
 }
 
 export const aiApi = {
@@ -2893,7 +2894,11 @@ export const aiApi = {
   // Pass a key to set it, or '' to clear it. Omit a field to leave that
   // provider's key untouched. Applied to the running backend immediately --
   // no restart needed.
-  setKeys: async (keys: { openai_api_key?: string; anthropic_api_key?: string }): Promise<AiProvidersStatus> => {
+  setKeys: async (keys: {
+    openai_api_key?: string;
+    anthropic_api_key?: string;
+    anthropic_workspace_id?: string;
+  }): Promise<AiProvidersStatus> => {
     const response = await api.post<AiProvidersStatus>('/ai/keys', keys);
     return response.data;
   },

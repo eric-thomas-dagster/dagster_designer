@@ -31,6 +31,12 @@ class AiProvidersStatus(BaseModel):
     openai_available: bool
     anthropic_available: bool
     any_available: bool
+    # Whether ANTHROPIC_WORKSPACE_ID is set -- only relevant for Anthropic
+    # keys that are org-level rather than scoped to a single workspace (see
+    # the anthropic-workspace-id header logic in genie_service.py /
+    # dagster_ai_service.py). Most keys don't need this, so it's surfaced
+    # as informational status, never required for anthropic_available.
+    anthropic_workspace_id_configured: bool = False
 
 
 @router.get("/providers", response_model=AiProvidersStatus)
@@ -44,6 +50,7 @@ async def ai_providers_status() -> AiProvidersStatus:
         openai_available=openai,
         anthropic_available=anthropic,
         any_available=openai or anthropic,
+        anthropic_workspace_id_configured=bool(os.getenv("ANTHROPIC_WORKSPACE_ID")),
     )
 
 
@@ -53,6 +60,12 @@ class SetAiKeysRequest(BaseModel):
     # plain optional strings rather than defaulting to "".
     openai_api_key: str | None = None
     anthropic_api_key: str | None = None
+    # Only needed for an Anthropic key that isn't scoped to a single
+    # workspace -- such a key 400s on every request with "This API key is
+    # not scoped to a workspace... must include the anthropic-workspace-id
+    # header". Find the workspace ID in the Anthropic console under
+    # Settings > Workspaces.
+    anthropic_workspace_id: str | None = None
 
 
 @router.post("/keys", response_model=AiProvidersStatus)
@@ -68,6 +81,7 @@ async def set_ai_keys(request: SetAiKeysRequest) -> AiProvidersStatus:
     for env_var, value in (
         ("OPENAI_API_KEY", request.openai_api_key),
         ("ANTHROPIC_API_KEY", request.anthropic_api_key),
+        ("ANTHROPIC_WORKSPACE_ID", request.anthropic_workspace_id),
     ):
         if value is None:
             continue

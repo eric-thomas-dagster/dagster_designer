@@ -52,6 +52,7 @@ function SettingsDialog({ onClose }: { onClose: () => void }) {
   const [status, setStatus] = useState<AiProvidersStatus | null>(null);
   const [openaiKey, setOpenaiKey] = useState('');
   const [anthropicKey, setAnthropicKey] = useState('');
+  const [anthropicWorkspaceId, setAnthropicWorkspaceId] = useState('');
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
@@ -63,9 +64,10 @@ function SettingsDialog({ onClose }: { onClose: () => void }) {
     // field means "leave this key alone", not "clear it". Clearing is a
     // deliberate separate action (the trash icon) so a blank field left
     // over from a previous visit can't accidentally wipe a working key.
-    const body: { openai_api_key?: string; anthropic_api_key?: string } = {};
+    const body: { openai_api_key?: string; anthropic_api_key?: string; anthropic_workspace_id?: string } = {};
     if (openaiKey.trim()) body.openai_api_key = openaiKey.trim();
     if (anthropicKey.trim()) body.anthropic_api_key = anthropicKey.trim();
+    if (anthropicWorkspaceId.trim()) body.anthropic_workspace_id = anthropicWorkspaceId.trim();
     if (Object.keys(body).length === 0) {
       onClose();
       return;
@@ -76,6 +78,7 @@ function SettingsDialog({ onClose }: { onClose: () => void }) {
       setStatus(next);
       setOpenaiKey('');
       setAnthropicKey('');
+      setAnthropicWorkspaceId('');
       notify.success('API key saved — ready to use right away, no restart needed.');
       window.dispatchEvent(new Event(PROVIDERS_CHANGED_EVENT));
     } catch (e: any) {
@@ -85,13 +88,17 @@ function SettingsDialog({ onClose }: { onClose: () => void }) {
     }
   };
 
-  const clearKey = async (which: 'openai' | 'anthropic') => {
+  const clearKey = async (which: 'openai' | 'anthropic' | 'anthropic_workspace') => {
     setSaving(true);
     try {
-      const body = which === 'openai' ? { openai_api_key: '' } : { anthropic_api_key: '' };
+      const body =
+        which === 'openai' ? { openai_api_key: '' }
+        : which === 'anthropic' ? { anthropic_api_key: '' }
+        : { anthropic_workspace_id: '' };
       const next = await aiApi.setKeys(body);
       setStatus(next);
-      notify.success(`${which === 'openai' ? 'OpenAI' : 'Anthropic'} key cleared.`);
+      const label = which === 'openai' ? 'OpenAI key' : which === 'anthropic' ? 'Anthropic key' : 'Anthropic workspace ID';
+      notify.success(`${label} cleared.`);
       window.dispatchEvent(new Event(PROVIDERS_CHANGED_EVENT));
     } catch (e: any) {
       notify.error(e?.response?.data?.detail || 'Failed to clear key.');
@@ -137,6 +144,43 @@ function SettingsDialog({ onClose }: { onClose: () => void }) {
             getKeyUrl="https://console.anthropic.com/settings/keys"
             disabled={saving}
           />
+
+          <div>
+            <div className="flex items-center justify-between mb-1">
+              <label className="text-sm font-medium text-gray-700">
+                Anthropic workspace ID <span className="text-gray-400 font-normal">(optional)</span>
+              </label>
+              {status?.anthropic_workspace_id_configured && (
+                <span className="inline-flex items-center gap-1 text-xs text-emerald-700">
+                  <CheckCircle2 className="w-3.5 h-3.5" /> Configured
+                </span>
+              )}
+            </div>
+            <div className="flex gap-2">
+              <input
+                type="text"
+                value={anthropicWorkspaceId}
+                onChange={(e) => setAnthropicWorkspaceId(e.target.value)}
+                placeholder={status?.anthropic_workspace_id_configured ? '••••••••••••  (enter a new ID to replace)' : 'wrkspc_...'}
+                disabled={saving}
+                className="flex-1 min-w-0 px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
+              />
+              {status?.anthropic_workspace_id_configured && (
+                <button
+                  onClick={() => clearKey('anthropic_workspace')}
+                  disabled={saving}
+                  className="px-3 py-2 text-sm text-red-600 border border-gray-300 rounded-md hover:bg-red-50 disabled:opacity-50"
+                >
+                  Clear
+                </button>
+              )}
+            </div>
+            <p className="text-xs text-gray-500 mt-1">
+              Only needed if your Anthropic key isn't scoped to a workspace — you'll see an error like
+              "must include the anthropic-workspace-id header" if so. Find it in the Anthropic console under
+              Settings → Workspaces.
+            </p>
+          </div>
         </div>
 
         {isTauri && <ProjectsFolderSection />}
@@ -153,7 +197,7 @@ function SettingsDialog({ onClose }: { onClose: () => void }) {
           </button>
           <button
             onClick={save}
-            disabled={saving || (!openaiKey.trim() && !anthropicKey.trim())}
+            disabled={saving || (!openaiKey.trim() && !anthropicKey.trim() && !anthropicWorkspaceId.trim())}
             className="px-4 py-2 text-sm bg-primary text-primary-foreground rounded-md hover:bg-accent disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {saving ? 'Saving…' : 'Save'}

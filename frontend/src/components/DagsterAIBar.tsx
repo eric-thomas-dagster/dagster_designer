@@ -62,7 +62,7 @@ export function DagsterAIBar() {
     const load = () => {
       aiApi.providers()
         .then((d) => { if (!cancelled) setProviders(d); })
-        .catch(() => { if (!cancelled) setProviders({ openai_available: false, anthropic_available: false, any_available: false }); });
+        .catch(() => { if (!cancelled) setProviders({ openai_available: false, anthropic_available: false, any_available: false, anthropic_workspace_id_configured: false }); });
     };
     load();
     // Refetch right after a key is saved/cleared in Settings so this banner
