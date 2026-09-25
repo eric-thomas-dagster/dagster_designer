@@ -9,6 +9,7 @@ import { ComponentPalette } from './components/ComponentPalette';
 import { ProjectComponentsList } from './components/ProjectComponentsList';
 import { ComponentConfigModal } from './components/ComponentConfigModal';
 import { AgentPipelineBuilder } from './components/AgentPipelineBuilder';
+import { AiMlHub } from './components/AiMlHub';
 import { PropertyPanel } from './components/PropertyPanel';
 import { ProjectManager } from './components/ProjectManager';
 import { CodeEditor } from './components/CodeEditor';
@@ -39,7 +40,7 @@ import { setActiveTabGlobal } from './services/activeTab';
 import { onMenuAction, onQuitRequested, confirmQuit, openExternalUrl, getPlatform, isTauri } from './services/tauri';
 import { WindowsCaptionButtons } from './components/WindowsCaptionButtons';
 import { hasUnsavedChanges } from './hooks/useUnsavedChanges';
-import { Network, FileCode, Zap, Package, ExternalLink, Settings, SlidersHorizontal, Workflow, ChevronDown, Skull, AlertTriangle, X, Loader2, CheckCircle, XCircle, PanelLeftClose, PanelLeft, Clock, Play, Radar, Timer, Download, Database, ShieldCheck, Cloud, Bell, BarChart3 } from 'lucide-react';
+import { Network, FileCode, Zap, Package, ExternalLink, Settings, SlidersHorizontal, Workflow, ChevronDown, Skull, AlertTriangle, X, Loader2, CheckCircle, XCircle, PanelLeftClose, PanelLeft, Clock, Play, Radar, Timer, Download, Database, ShieldCheck, Cloud, Bell, BarChart3, Sparkles } from 'lucide-react';
 import { IngestionsPanel } from './components/IngestionsPanel';
 import { InsightsPanel } from './components/InsightsPanel';
 import { DbtPanel } from './components/DbtPanel';
@@ -963,6 +964,7 @@ function App() {
   const navItems = [
     { value: 'assets', label: 'Assets', icon: Network },
     { value: 'ingestions', label: 'Ingestions', icon: Download },
+    { value: 'ai-ml', label: 'AI/ML', icon: Sparkles },
     { value: 'dbt', label: 'dbt', icon: Database },
     { value: 'monitors', label: 'Monitors', icon: ShieldCheck },
     { value: 'alerts', label: 'Alerts', icon: Bell },
@@ -1586,6 +1588,14 @@ function App() {
               project. Reuses AddDataDialog for the "add" flow. */}
           <Tabs.Content value="ingestions" className="flex-1 overflow-hidden">
             <IngestionsPanel onAddDataSource={setAddingComponentType} onEditComponent={setEditingComponent} />
+          </Tabs.Content>
+
+          {/* AI/ML Tab Content — single discoverable home for every
+              curated AI/ML builder (Agents & Pipelines, Document
+              Extraction, ...). Self-contained: manages its own builder
+              modals and ComponentConfigModal handoff. */}
+          <Tabs.Content value="ai-ml" className="flex-1 overflow-hidden">
+            <AiMlHub />
           </Tabs.Content>
 
           {/* Insights Tab Content — deployment-level Dagster+ usage/cost/

@@ -36,7 +36,6 @@ import { DataPreviewModal } from './DataPreviewModal';
 import { AssetIOPanel } from './AssetIOPanel';
 import { DagsterAIBar } from './DagsterAIBar';
 import { AddDataDialog } from './AddDataDialog';
-import { AgentPipelineBuilder } from './AgentPipelineBuilder';
 import { notify } from './Notifications';
 import { AutoCoverageModal } from './AssetDetailPage';
 import { useGroupByCodeLocation } from '@/hooks/useGroupByCodeLocation';
@@ -47,7 +46,7 @@ type CatalogSortColumn = 'asset_key' | 'group' | 'type' | 'deps' | 'downstream' 
 import { useProjectStore } from '@/hooks/useProject';
 import { useIsDarkMode } from '@/hooks/useIsDarkMode';
 import { projectsApi, componentsApi, partitionsApi, API_BASE } from '@/services/api';
-import { Play, Plus, Layers, CheckCircle, Group, Ungroup, Sparkles } from 'lucide-react';
+import { Play, Plus, Layers, CheckCircle, Group, Ungroup } from 'lucide-react';
 import type { GraphNode, GraphEdge, ComponentSchema } from '@/types';
 
 // Node for the "collapse to groups" mode. Fixed width (so edges hit
@@ -489,14 +488,6 @@ interface GraphEditorProps {
 
 function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onViewModeChange, onOpenAssetDetail, ribbonHost }: GraphEditorProps) {
   const [addDataOpen, setAddDataOpen] = useState(false);
-  // Same reasoning as addDataOpen -- "Build an agent or pipeline" used to
-  // only be reachable by opening the Component Palette and scrolling to
-  // the "ai" category, which made it easy to miss entirely. A prominent
-  // toolbar button next to "Add data" is the dedicated entry point;
-  // AgentPipelineBuilder is self-contained (own data fetch, own apply
-  // logic via applyGeniePicks) so mounting a second instance here needs
-  // no extra wiring beyond onClose.
-  const [showAgentBuilder, setShowAgentBuilder] = useState(false);
   // Group-collapse toggle -- folds assets by group_name into one node
   // per group, edges aggregated. Auto-on for large cloud graphs
   // (>60 assets) so users see manageable structure by default.
@@ -3080,20 +3071,6 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
             <Plus className="w-4 h-4" />
             <span>Add data</span>
           </button>
-          {/* Build an agent or pipeline — same reserved-space pattern as
-              Add data right above. Dedicated entry point: describe the
-              task in plain English, no need to find/pick a component
-              first (see AgentPipelineBuilder's own header comment). */}
-          <button
-            onClick={() => setShowAgentBuilder(true)}
-            disabled={readOnlyMode}
-            tabIndex={inGraph ? 0 : -1}
-            className={`flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-violet-700 bg-violet-50 border border-violet-200 rounded-md hover:bg-violet-100 disabled:opacity-50 disabled:cursor-not-allowed ${inGraph ? '' : 'invisible pointer-events-none'}`}
-            title={readOnlyMode ? 'Not available on Dagster+ (read-only)' : 'Describe an agent or pipeline in plain English — no need to pick a component first'}
-          >
-            <Sparkles className="w-4 h-4" />
-            <span>Build agent</span>
-          </button>
           {/* Prod / Preview toggle — cloud projects only, and only
               once at least one draft exists (otherwise the button has
               nothing to preview). Flips the visual state of every
@@ -3576,12 +3553,6 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
           onAddDataSource?.(componentType);
         }}
       />
-
-      {/* Build agent/pipeline — dedicated entry point next to Add data,
-          see showAgentBuilder above. */}
-      {showAgentBuilder && currentProject && (
-        <AgentPipelineBuilder onClose={() => setShowAgentBuilder(false)} />
-      )}
 
       {/* Auto coverage modal -- opened from the per-row shortcut in
           the catalog. Same component the detail page uses. */}
