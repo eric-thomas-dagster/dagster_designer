@@ -8,6 +8,7 @@ import { dbtAdaptersApi, type AdapterInfo , API_BASE } from '@/services/api';
 import { notify } from './Notifications';
 import type { ComponentInstance } from '@/types';
 import type { ComponentSchema } from '@/services/api';
+import { parseUpstreamAssetKeys } from '@/lib/upstreamAssetKeys';
 
 // `x-dagster-io` type fields (inputs.type, outputs.type, accepts[]) are
 // freeform strings community component authors write by hand, not a
@@ -1242,15 +1243,10 @@ export function ComponentConfigModal({
 
     // Special handling for upstream_asset_keys - show multi-select dropdown filtered by output type
     if (fieldName === 'upstream_asset_keys') {
-      // Accept either shape: a real array (the schema type every
-      // component we've seen declares) or a legacy comma-separated
-      // string. Calling .split on an array crashed this render outright
-      // (arrays have no .split()) -- confirmed live as the cause of a
-      // blank/gray screen opening this modal for a component whose
-      // upstream_asset_keys was already a correctly-typed array.
-      const selectedValues = Array.isArray(value)
-        ? value
-        : (typeof value === 'string' && value ? value.split(',').map((s: string) => s.trim()).filter(Boolean) : []);
+      // See parseUpstreamAssetKeys -- accepts either a real array (the
+      // schema type every component we've seen declares) or a legacy
+      // comma-separated string.
+      const selectedValues = parseUpstreamAssetKeys(value);
 
       // Check if component only accepts DataFrame inputs
       const acceptsDataFrames = isDataFrameType(componentSchema?.schema?.['x-dagster-io']?.inputs?.type) ||
@@ -1846,15 +1842,9 @@ export function ComponentConfigModal({
                     This transformer has a powerful visual editor with drag-and-drop configuration for all transformations including pivot/unpivot, aggregations, and more.
                   </p>
                   {(() => {
-                    // Get upstream asset key from attributes -- accept either
-                    // a real array or a legacy comma-separated string (see
-                    // the upstream_asset_keys parse comment above).
-                    const rawUpstreamKeys = formData.upstream_asset_keys;
-                    const upstreamKeys = Array.isArray(rawUpstreamKeys)
-                      ? rawUpstreamKeys
-                      : (typeof rawUpstreamKeys === 'string' && rawUpstreamKeys
-                          ? rawUpstreamKeys.split(',').map((k: string) => k.trim()).filter(Boolean)
-                          : []);
+                    // Get upstream asset key from attributes -- see
+                    // parseUpstreamAssetKeys for the shapes this accepts.
+                    const upstreamKeys = parseUpstreamAssetKeys(formData.upstream_asset_keys);
                     const firstUpstreamKey = upstreamKeys[0];
 
                     if (firstUpstreamKey && onOpenVisualEditor) {

@@ -5,6 +5,7 @@ import { assetsApi, projectsApi, partitionsApi, type AssetDataPreview } from '@/
 import { notify } from './Notifications';
 import { ColumnProfileStrip } from './ColumnProfileStrip';
 import { ColumnProfilePanel } from './ColumnProfilePanel';
+import { extractMaterializeErrorMessage } from '@/lib/materializeError';
 
 interface AssetIOPanelProps {
   projectId: string;
@@ -280,41 +281,7 @@ function PreviewTable({
     try {
       const r = await projectsApi.materialize(projectId, [`+${assetKey}`]);
       if (!r.success) {
-        // Pull the most meaningful lines out of stdout/stderr. dbt's own
-        // per-model failure block ("Failure in model X ... Catalog Error:
-        // ...") lives in STDOUT and is far more useful than Dagster's
-        // generic orchestration STDERR (RUN_FAILURE / _raise_on_error
-        // stack frames) -- but `(r.stderr || r.stdout || '')` picked
-        // stderr whenever it was non-empty, which is always for a failed
-        // run, so stdout's actual dbt error never got shown at all.
-        // Confirmed live: a real "Catalog Error: schema raw does not
-        // exist" was fully available in stdout while the panel showed
-        // only generic dagster stack frames pulled from stderr.
-        // dbt colors this line, so it's actually
-        // "\x1b[31mFailure in model ...\x1b[0m" on the wire -- strip ANSI
-        // codes first, both so the `^failure in` anchor can match it and
-        // so the displayed message doesn't carry raw escape bytes.
-        const stripAnsi = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, '');
-        const stdoutLines = stripAnsi(r.stdout || '').split('\n');
-        let failureIdx = -1;
-        stdoutLines.forEach((l, i) => {
-          if (/^failure in (model|test)/i.test(l)) failureIdx = i;
-        });
-
-        let message: string;
-        if (failureIdx !== -1) {
-          message = stdoutLines.slice(failureIdx, failureIdx + 10).join('\n').trim();
-        } else {
-          const combined = stripAnsi([r.stdout, r.stderr].filter(Boolean).join('\n'));
-          const lines = combined.split('\n');
-          const dbtLines = lines.filter((l) =>
-            /catalog error|compilation error|runtime error|ERROR creating|ERROR reverting/i.test(l)
-          );
-          const errorLines = (dbtLines.length > 0 ? dbtLines : lines.filter((l) => /error|failed/i.test(l))).slice(-6);
-          message = errorLines.length > 0
-            ? errorLines.join('\n')
-            : lines.slice(-6).join('\n') || 'unknown error';
-        }
+        const message = extractMaterializeErrorMessage(r.stdout, r.stderr);
         setMaterializeError(message);
         notify.error(`Materialize failed for ${assetKey}. See panel for details.`);
         return;
