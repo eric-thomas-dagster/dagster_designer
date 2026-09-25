@@ -311,12 +311,21 @@ def _keyword_prefilter(
 
     # Reserved coverage per essential category so we always show enough breadth
     # for the LLM to build an end-to-end pipeline (source → transform → sink).
+    # io_manager/resource get a much smaller reservation than the pick-able
+    # categories above -- neither genie_service's own pick logic nor its
+    # SYSTEM_PROMPT ever reasons about a resource/io_manager component as
+    # something to PICK (confirmed: no "resource"/"io_manager" string
+    # anywhere else in this file's planning/validation logic), so the old
+    # 8-each reservation was mostly dead weight, crowding out budget that
+    # could go to categories actually used for picks. Kept nonzero (not
+    # removed outright) since a resource/io_manager's NAME is still useful
+    # context for other components' resource_key-style config fields.
     reserved_per_category = {
         "source": 20,
         "ingestion": 20,
         "sink": 20,
-        "io_manager": 8,
-        "resource": 8,
+        "io_manager": 3,
+        "resource": 3,
     }
 
     picked: list[dict[str, Any]] = []
