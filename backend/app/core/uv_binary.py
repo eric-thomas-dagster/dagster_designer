@@ -59,6 +59,37 @@ def venv_bin_path(venv_dir: Path, name: str) -> Path:
     return venv_dir / "bin" / name
 
 
+def project_subprocess_env(project_dir: Path) -> dict[str, str]:
+    """A subprocess env for running a PROJECT's own dg/uv/dbt tooling.
+
+    Points VIRTUAL_ENV/PATH at the PROJECT's own .venv -- not just drops
+    them -- and clears PYTHONHOME. This backend process runs from its own
+    venv (backend/.venv), which sets VIRTUAL_ENV in ITS environment;
+    naively inheriting that (or popping it without replacing it) breaks
+    any dbt-backed component's nested `dbt parse`/`dbt build` subprocess,
+    which resolves its adapter plugin (dbt-duckdb, dbt-snowflake, ...) off
+    PATH/VIRTUAL_ENV, not off dg's own resolved binary path -- surfacing
+    as "Could not find adapter type duckdb!" even though the project's own
+    venv has the adapter installed. Also silences a spurious "the active
+    virtual environment does not match the project virtual environment"
+    warning `dg` prints on every invocation otherwise, which was noise
+    except when it buried a real error underneath it.
+
+    Confirmed live as the root cause of independent incidents in three
+    different call sites this session (validate_project, asset
+    introspection's dg list defs, a component-schema inspect-component
+    call), each of which had partially or fully skipped this -- one
+    tested helper instead of re-deriving it per call site.
+    """
+    venv_dir = project_dir / ".venv"
+    bin_dir = venv_bin_path(venv_dir, "dg").parent
+    env = os.environ.copy()
+    env["VIRTUAL_ENV"] = str(venv_dir.resolve())
+    env["PATH"] = f"{bin_dir}{os.pathsep}{env.get('PATH', '')}"
+    env.pop("PYTHONHOME", None)
+    return env
+
+
 def env_with_bundled_uv_on_path() -> dict[str, str]:
     """A copy of the current environment with the bundled uv/uvx's own
     directory prepended to PATH.

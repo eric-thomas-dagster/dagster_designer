@@ -2,7 +2,6 @@
 
 import asyncio
 import json
-import os
 import shlex
 import subprocess
 import sys
@@ -281,23 +280,11 @@ class AssetIntrospectionService:
                 # (this app's own install path,
                 # /Applications/Dagster Designer.app/..., and the default
                 # projects folder, ~/Documents/Dagster Designer/...).
-                # Point VIRTUAL_ENV/PATH at the PROJECT's own venv rather than
-                # just dropping them -- dg invokes dbt as a nested subprocess
-                # for dbt-backed components, and that nested process resolves
-                # its adapter plugins (dbt-duckdb, dbt-snowflake, ...) off
-                # PATH/VIRTUAL_ENV, not off dg's own resolved binary path. A
-                # bare .pop() (the old behavior here) left those pointing at
-                # this backend's OWN venv when set, or nothing at all when
-                # not -- either way, dbt's nested subprocess couldn't find
-                # the project's adapter package, surfacing as "Could not
-                # find adapter type duckdb!" even though the project's own
-                # venv has dbt-duckdb installed. Same fix already applied to
-                # validate_project/materialize_assets in projects.py.
-                venv_path_abs = (project_dir / ".venv").absolute()
-                run_env = os.environ.copy()
-                run_env.pop("PYTHONHOME", None)
-                run_env["VIRTUAL_ENV"] = str(venv_path_abs)
-                run_env["PATH"] = f"{venv_path_abs / 'bin'}:{run_env.get('PATH', '')}"
+                # See core.uv_binary.project_subprocess_env's docstring for
+                # why VIRTUAL_ENV/PATH must point at the PROJECT's own venv
+                # rather than just being dropped.
+                from ..core.uv_binary import project_subprocess_env
+                run_env = project_subprocess_env(project_dir.absolute())
                 print(f"[Asset Introspection] Running dg list defs for project {project.id}...", flush=True)
                 result = subprocess.run(
                     [str(dg_path.resolve()), "list", "defs", "--json"],
@@ -414,16 +401,9 @@ class AssetIntrospectionService:
                 # genuine timeout), which is what made "Generating assets"
                 # never succeed and the definitions endpoint fall back
                 # immediately instead of actually introspecting anything.
-                # See the sync _run_dg_list_defs above -- VIRTUAL_ENV/PATH
-                # must point at the PROJECT's own venv (not just be dropped),
-                # or a dbt-backed component's nested `dbt parse` subprocess
-                # can't find its adapter plugin (dbt-duckdb, etc.) even
-                # though it's installed right there in the project venv.
-                venv_path_abs = (project_dir / ".venv").absolute()
-                run_env = os.environ.copy()
-                run_env.pop("PYTHONHOME", None)
-                run_env["VIRTUAL_ENV"] = str(venv_path_abs)
-                run_env["PATH"] = f"{venv_path_abs / 'bin'}:{run_env.get('PATH', '')}"
+                # See core.uv_binary.project_subprocess_env's docstring.
+                from ..core.uv_binary import project_subprocess_env
+                run_env = project_subprocess_env(project_dir.absolute())
                 proc = await asyncio.create_subprocess_exec(
                     dg_cmd, "list", "defs", "--json",
                     stdout=asyncio.subprocess.PIPE,

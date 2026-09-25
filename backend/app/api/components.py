@@ -1,7 +1,6 @@
 """API endpoints for component registry."""
 
 import json
-import os
 import subprocess
 import time
 
@@ -121,10 +120,8 @@ def _get_component_schema_via_dg(project, component_type: str) -> "ComponentSche
     if project.dagster_package_subdir:
         work_dir = project_dir / project.dagster_package_subdir
 
-    env = os.environ.copy()
-    env.pop("PYTHONHOME", None)
-    env.pop("VIRTUAL_ENV", None)
-    env["PATH"] = f"{dg_path.parent}{os.pathsep}{env.get('PATH', '')}"
+    from ..core.uv_binary import project_subprocess_env
+    env = project_subprocess_env(project_dir)
 
     try:
         result = subprocess.run(
@@ -224,10 +221,8 @@ async def list_project_custom_components(project_id: str):
     root_module = project_service.get_project_root_module(project)
     work_dir = project_dir / project.dagster_package_subdir if project.dagster_package_subdir else project_dir
 
-    env = os.environ.copy()
-    env.pop("PYTHONHOME", None)
-    env.pop("VIRTUAL_ENV", None)
-    env["PATH"] = f"{dg_path.parent}{os.pathsep}{env.get('PATH', '')}"
+    from ..core.uv_binary import project_subprocess_env
+    env = project_subprocess_env(project_dir)
 
     # Same per-project lock every other dg/uv subprocess call against this
     # project's shared on-disk state uses -- see the matching comment on the

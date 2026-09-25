@@ -2136,13 +2136,8 @@ async def validate_project(project_id: str):
         # per-project dependency, not a backend one. Same fix already
         # applied to materialize_assets below; this was the one call site
         # that still leaked the ambient env.
-        import os
-        project_dir_abs = project_dir.absolute()
-        venv_path_abs = project_dir_abs / ".venv"
-        env = os.environ.copy()
-        env['VIRTUAL_ENV'] = str(venv_path_abs)
-        env['PATH'] = f"{venv_path_abs / 'bin'}:{env.get('PATH', '')}"
-        env.pop('PYTHONHOME', None)
+        from ..core.uv_binary import project_subprocess_env
+        env = project_subprocess_env(project_dir.absolute())
 
         result = None
         for attempt in range(2):
@@ -2382,17 +2377,11 @@ async def materialize_assets(project_id: str, request: MaterializeRequest):
         print(f"[materialize] Working directory: {project_path}")
 
         # Set up environment to use project's venv (use absolute paths)
-        import os
+        from ..core.uv_binary import project_subprocess_env
         project_path_abs = project_path.absolute()
-        venv_path_abs = project_path_abs / ".venv"
+        env = project_subprocess_env(project_path_abs)
 
-        env = os.environ.copy()
-        env['VIRTUAL_ENV'] = str(venv_path_abs)
-        env['PATH'] = f"{venv_path_abs / 'bin'}:{env.get('PATH', '')}"
-        # Remove any parent venv variables that might confuse dg
-        env.pop('PYTHONHOME', None)
-
-        print(f"[materialize] Using venv: {venv_path_abs}")
+        print(f"[materialize] Using venv: {project_path_abs / '.venv'}")
 
         # Run command. `dg launch` can legitimately take a long time for a
         # real dbt project -- must run in a worker thread (not called

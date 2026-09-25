@@ -887,17 +887,11 @@ async def launch_job(project_id: str, job_name: str, request: LaunchJobRequest):
         print(f"[launch_job] Working directory: {project_path}")
 
         # Set up environment to use project's venv (use absolute paths)
-        import os
+        from ..core.uv_binary import project_subprocess_env
         project_path_abs = project_path.absolute()
-        venv_path_abs = project_path_abs / ".venv"
+        env = project_subprocess_env(project_path_abs)
 
-        env = os.environ.copy()
-        env['VIRTUAL_ENV'] = str(venv_path_abs)
-        env['PATH'] = f"{venv_path_abs / 'bin'}:{env.get('PATH', '')}"
-        # Remove any parent venv variables that might confuse dg
-        env.pop('PYTHONHOME', None)
-
-        print(f"[launch_job] Using venv: {venv_path_abs}")
+        print(f"[launch_job] Using venv: {project_path_abs / '.venv'}")
 
         # Run command off the event loop -- same reasoning as the
         # materialize endpoint's identical fix: a job can legitimately run
