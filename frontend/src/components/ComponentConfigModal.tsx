@@ -179,9 +179,18 @@ export function ComponentConfigModal({
             return sourceNode?.data?.asset_key || sourceNode?.data?.label || edge.source;
           }).filter(Boolean);
 
-          // Only set upstream_asset_keys if there are upstream dependencies
+          // Only set upstream_asset_keys if there are upstream dependencies.
+          // Kept as a real array (the schema type every component we've
+          // seen declares it as) -- a `.join(', ')` here used to silently
+          // turn a correctly-typed array from component.attributes into a
+          // string, which (a) round-tripped back out as a string on Save,
+          // undoing any earlier fix that made it a real array, and (b)
+          // crashed the multi-select renderer below outright on the very
+          // first render for any component whose upstream_asset_keys was
+          // ALREADY a correct array (arrays have no .split()) -- confirmed
+          // live as the cause of a blank/gray screen on opening this modal.
           if (upstreamKeys.length > 0) {
-            updatedFormData.upstream_asset_keys = upstreamKeys.join(', ');
+            updatedFormData.upstream_asset_keys = upstreamKeys;
             console.log('[ComponentConfigModal] Populated upstream_asset_keys from graph edges:', upstreamKeys);
           }
         }
@@ -1233,8 +1242,15 @@ export function ComponentConfigModal({
 
     // Special handling for upstream_asset_keys - show multi-select dropdown filtered by output type
     if (fieldName === 'upstream_asset_keys') {
-      // Parse current value (comma-separated string to array)
-      const selectedValues = value ? value.split(',').map((s: string) => s.trim()).filter(Boolean) : [];
+      // Accept either shape: a real array (the schema type every
+      // component we've seen declares) or a legacy comma-separated
+      // string. Calling .split on an array crashed this render outright
+      // (arrays have no .split()) -- confirmed live as the cause of a
+      // blank/gray screen opening this modal for a component whose
+      // upstream_asset_keys was already a correctly-typed array.
+      const selectedValues = Array.isArray(value)
+        ? value
+        : (typeof value === 'string' && value ? value.split(',').map((s: string) => s.trim()).filter(Boolean) : []);
 
       // Check if component only accepts DataFrame inputs
       const acceptsDataFrames = isDataFrameType(componentSchema?.schema?.['x-dagster-io']?.inputs?.type) ||
@@ -1264,8 +1280,9 @@ export function ComponentConfigModal({
             value={selectedValues}
             onChange={(e) => {
               const selected = Array.from(e.target.selectedOptions, (option) => option.value);
-              // Convert array back to comma-separated string
-              handleFieldChange(fieldName, selected.join(', '));
+              // Keep as a real array -- the schema type this field
+              // actually declares (see the parse comment above).
+              handleFieldChange(fieldName, selected);
             }}
             className="w-full px-3 py-2 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
             size={Math.min(6, Math.max(3, filteredAssets.length))}
@@ -1300,7 +1317,7 @@ export function ComponentConfigModal({
                   <button
                     onClick={() => {
                       const newSelected = selectedValues.filter((k: string) => k !== assetKey);
-                      handleFieldChange(fieldName, newSelected.join(', '));
+                      handleFieldChange(fieldName, newSelected);
                     }}
                     className="hover:text-blue-900"
                   >
@@ -1829,8 +1846,15 @@ export function ComponentConfigModal({
                     This transformer has a powerful visual editor with drag-and-drop configuration for all transformations including pivot/unpivot, aggregations, and more.
                   </p>
                   {(() => {
-                    // Get upstream asset key from attributes
-                    const upstreamKeys = formData.upstream_asset_keys?.split(',').map((k: string) => k.trim()).filter(Boolean) || [];
+                    // Get upstream asset key from attributes -- accept either
+                    // a real array or a legacy comma-separated string (see
+                    // the upstream_asset_keys parse comment above).
+                    const rawUpstreamKeys = formData.upstream_asset_keys;
+                    const upstreamKeys = Array.isArray(rawUpstreamKeys)
+                      ? rawUpstreamKeys
+                      : (typeof rawUpstreamKeys === 'string' && rawUpstreamKeys
+                          ? rawUpstreamKeys.split(',').map((k: string) => k.trim()).filter(Boolean)
+                          : []);
                     const firstUpstreamKey = upstreamKeys[0];
 
                     if (firstUpstreamKey && onOpenVisualEditor) {
