@@ -114,6 +114,15 @@ export function DagsterAIBar() {
           // but apply() needs this to resolve an edit/remove pick's
           // asset_name back to a real component instance to act on.
           component_id: n.data?.component_id || n.id,
+          // Lets the backend's value-type compatibility check reason
+          // about an EXISTING asset as a pick's upstream, not just other
+          // picks in the same plan — io_output_type when a community
+          // component declared one, kinds so dbt/warehouse-backed assets
+          // (which bridge to a DataFrame via I/O manager at load time,
+          // even though they have no io_output_type of their own) can be
+          // recognized as such instead of silently skipped.
+          io_output_type: n.data?.io_output_type,
+          kinds: n.data?.kinds,
         }));
 
       const body: Record<string, any> = {

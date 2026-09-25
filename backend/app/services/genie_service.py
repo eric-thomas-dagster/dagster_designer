@@ -1190,6 +1190,33 @@ async def plan(
             picks = [pk for i, pk in enumerate(picks) if i not in drop_indices]
 
     picks_by_name: dict[str, GeniePick] = {pk.asset_name: pk for pk in picks}
+    # Existing-asset lookup, by name, for the same check below. These never
+    # carry agent_hints (that's a manifest-only concept) -- io_output_type
+    # is the frontend-sent equivalent when a community component declared
+    # one (see DagsterAIBar.tsx); most existing assets (dbt models, plain
+    # Python assets predating this field, cloud-hydrated assets) won't
+    # have it set at all.
+    existing_by_name: dict[str, dict[str, Any]] = {
+        str(a.get("name")): a for a in (existing_assets or []) if a.get("name")
+    }
+    WAREHOUSE_KINDS = {
+        "dbt", "snowflake", "bigquery", "duckdb", "postgres", "postgresql",
+        "mysql", "redshift", "databricks", "warehouse", "sql",
+    }
+
+    def _is_warehouse_backed(asset: dict[str, Any]) -> bool:
+        """True for a dbt-built or otherwise SQL-warehouse-backed existing
+        asset. Its OWN native representation is a table, not a DataFrame --
+        but the standard dagster-dbt + DuckDB/Snowflake/etc. I/O manager
+        pattern bridges table -> DataFrame automatically at load time
+        (context.load_asset_value(), same mechanism DataFrameTransformer-
+        style components use), so wiring one into a DataFrame-expecting
+        downstream is a legitimate, common pairing -- not a mismatch to
+        flag, even though it has no io_output_type of its own."""
+        if "dbt" in str(asset.get("component_type") or "").lower():
+            return True
+        return any(str(k).lower() in WAREHOUSE_KINDS for k in (asset.get("kinds") or []))
+
     for pk in picks:
         comp = components_by_id.get(pk.component_type) or {}
         pk_hints = comp.get("agent_hints") or {}
@@ -1198,19 +1225,32 @@ async def plan(
             continue
         for up_name in pk.upstream_asset_names:
             up_pick = picks_by_name.get(up_name)
-            if not up_pick:
-                # Upstream is an existing asset we don't know the type of.
-                continue
-            up_comp = components_by_id.get(up_pick.component_type) or {}
-            up_hints = up_comp.get("agent_hints") or {}
-            provides = up_hints.get("output_type", "__missing__")
+            if up_pick:
+                up_comp = components_by_id.get(up_pick.component_type) or {}
+                up_hints = up_comp.get("agent_hints") or {}
+                provides = up_hints.get("output_type", "__missing__")
+                up_label = up_pick.component_type
+            else:
+                # Upstream is an existing asset, not a new pick in this plan.
+                existing = existing_by_name.get(up_name)
+                if not existing:
+                    continue  # unknown reference -- coordination check covers that
+                provides = existing.get("io_output_type") or "__missing__"
+                up_label = existing.get("component_type") or "existing asset"
+                if provides == "__missing__" and want == "pd.DataFrame" and _is_warehouse_backed(existing):
+                    # Bridged via I/O manager -- explicitly compatible,
+                    # not just "no info" (which would fall through to the
+                    # missing-check below and warn nothing either way, but
+                    # being explicit here documents the reasoning instead
+                    # of relying on an accidental silence).
+                    continue
             if provides == "__missing__":
                 continue
             if provides != want:
                 notes.append(
                     f"⚠︎ Type mismatch: pick '{pk.asset_name}' ({pk.component_type}) "
                     f"expects input_type={want!r}, but upstream '{up_name}' "
-                    f"({up_pick.component_type}) provides output_type={provides!r}."
+                    f"({up_label}) provides output_type={provides!r}."
                 )
 
     # Cross-pick coordination repair loop. Even with the SYSTEM_PROMPT
