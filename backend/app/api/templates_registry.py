@@ -17,6 +17,20 @@ router = APIRouter(prefix="/templates", tags=["templates"])
 
 MANIFEST_URL = "https://raw.githubusercontent.com/eric-thomas-dagster/dagster-component-templates/main/manifest.json"
 
+# Common attribute-name-variant aliases we can rewrite silently instead of
+# dropping -- LLMs love to guess plausible-but-wrong field names (`path`
+# instead of `file_path`, plural `upstream_asset_keys` instead of singular
+# `upstream_asset_key`). Shared by install_component_via_cli (create) and
+# update_component_instance_attributes (edit) -- was duplicated verbatim in
+# both until a fix to one silently stopped applying to the other.
+ATTRIBUTE_ALIAS_MAP = {
+    'path': 'file_path',
+    'upstream_asset_keys': 'upstream_asset_key',
+    'upstream_asset_key': 'upstream_asset_keys',  # reverse direction
+    'output_path': 'file_path',
+    'input_asset': 'upstream_asset_key',
+}
+
 
 def detect_project_structure(project_dir: Path, project_name_sanitized: str):
     """
@@ -431,20 +445,40 @@ async def configure_component(
             project.graph.nodes = asset_nodes
             project.graph.edges = asset_edges
 
-            # Also add/update this instance in project.components -- a
-            # *separate* list from graph.nodes that e.g. IngestionsPanel
-            # filters on, not the graph. Without this, a component
-            # installed via install-via-cli shows up fine on the Assets
-            # graph but never appears in any component-instance list
-            # (Ingestions, etc.) since nothing else populates it.
-            #
-            # Deliberately NOT using project_service.discover_components_
-            # for_project here: that wipes project.components and rebuilds
-            # it purely from defs.yaml files on disk, which would silently
-            # drop synthetic entries with no file backing -- notably
-            # DependencyGraphComponent, which is how manually-drawn custom
-            # lineage edges get persisted (see genie_service.py). Just
-            # append/update this one instance instead.
+            assets_regenerated = True
+            print(f"[Configure] Successfully regenerated {len(asset_nodes)} assets")
+        except Exception as e:
+            regenerate_error = str(e)
+            print(f"[Configure] Warning: Failed to auto-regenerate assets: {e}")
+            # Don't fail the request if regeneration fails - the defs.yaml
+            # is saved either way, and the user can fix the config and
+            # re-save once they see regenerate_error.
+            import traceback
+            traceback.print_exc()
+
+        # Add/update this instance in project.components -- a *separate*
+        # list from graph.nodes that e.g. IngestionsPanel filters on, not
+        # the graph. Without this, a component installed via
+        # install-via-cli shows up fine on the Assets graph but never
+        # appears in any component-instance list (Ingestions, etc.) since
+        # nothing else populates it.
+        #
+        # Deliberately its OWN try/except, run regardless of whether
+        # introspection above succeeded -- these used to be coupled in the
+        # SAME try block, so a transient introspection failure (a real,
+        # repeatedly-seen failure mode this session) silently skipped this
+        # too, leaving project.components (and the sidebar/Ingestions
+        # panel) stale even though defs.yaml was already written to disk.
+        #
+        # Deliberately NOT using project_service.discover_components_
+        # for_project here: that wipes project.components and rebuilds
+        # it purely from defs.yaml files on disk, which would silently
+        # drop synthetic entries with no file backing -- notably
+        # DependencyGraphComponent, which is how manually-drawn custom
+        # lineage edges get persisted (see genie_service.py). Just
+        # append/update this one instance instead.
+        components_list_warning: Optional[str] = None
+        try:
             from ..models.component import ComponentInstance as _ComponentInstance
             new_instance = _ComponentInstance(
                 id=instance_name,
@@ -461,19 +495,15 @@ async def configure_component(
             else:
                 project.components.append(new_instance)
 
-            # Save the updated project
+            # Save the updated project (graph updates from above, if any,
+            # persist here too).
             project_service._save_project(project)
-
-            assets_regenerated = True
-            print(f"[Configure] Successfully regenerated {len(asset_nodes)} assets")
         except Exception as e:
-            regenerate_error = str(e)
-            print(f"[Configure] Warning: Failed to auto-regenerate assets: {e}")
-            # Don't fail the request if regeneration fails - the defs.yaml
-            # is saved either way, and the user can fix the config and
-            # re-save once they see regenerate_error.
-            import traceback
-            traceback.print_exc()
+            print(f"[Configure] Warning: could not add {instance_name} to project.components: {e}")
+            components_list_warning = (
+                f"Saved to disk, but couldn't add '{instance_name}' to the project's component "
+                f"list -- it may not show in the sidebar until the project reloads. ({e})"
+            )
 
         response = {
             "success": True,
@@ -484,6 +514,7 @@ async def configure_component(
             ),
             "yaml_file": str(yaml_file.relative_to(project_dir)),
             "assets_regenerated": assets_regenerated,
+            "components_list_warning": components_list_warning,
         }
         if regenerate_error:
             response["regenerate_error"] = regenerate_error
@@ -1114,21 +1145,13 @@ async def install_component_via_cli(
     # fails ("Additional properties not allowed"). Filter caller attributes
     # against the component's schema.json when it's available so we only
     # keep valid keys.
+    dropped_attributes: list = []
     if request.attributes:
         existing_attrs = parsed.get("attributes") or {}
         if not isinstance(existing_attrs, dict):
             existing_attrs = {}
 
         allowed_keys: Optional[set] = None
-        # Common name-variant aliases we can rewrite silently so the LLM's
-        # near-miss doesn't get dropped when there's an obvious mapping.
-        alias_map = {
-            'path': 'file_path',
-            'upstream_asset_keys': 'upstream_asset_key',
-            'upstream_asset_key': 'upstream_asset_keys',  # reverse direction
-            'output_path': 'file_path',
-            'input_asset': 'upstream_asset_key',
-        }
         # Resolve the schema.json under the installed component dir.
         try:
             candidate_dirs = list(project_dir.glob(f"src/*/components/{component_id}/schema.json"))
@@ -1152,7 +1175,7 @@ async def install_component_via_cli(
                 merged[k] = v
                 continue
             # Try aliasing.
-            aliased = alias_map.get(k)
+            aliased = ATTRIBUTE_ALIAS_MAP.get(k)
             if aliased and aliased in allowed_keys:
                 merged[aliased] = v
                 print(f"[CLI Install] Aliased attribute '{k}' → '{aliased}' for {component_id}")
@@ -1160,6 +1183,12 @@ async def install_component_via_cli(
             dropped.append(k)
         if dropped:
             print(f"[CLI Install] Dropped unknown attributes for {component_id}: {dropped} (schema keys: {sorted(allowed_keys or [])})")
+            # Surfaced in the response below -- this used to be log-only,
+            # so a dropped field (e.g. Genie writing `query` instead of
+            # `sql`) silently vanished with no signal anywhere the caller
+            # could see, even though the plan preview showed the right
+            # value right up until this exact point.
+            dropped_attributes = dropped
 
         parsed["attributes"] = merged
         try:
@@ -1222,6 +1251,7 @@ async def install_component_via_cli(
     # shows it. Previously install-via-cli only wrote defs.yaml on disk, so
     # AI-applied picks (which use this endpoint) never showed up in the
     # sidebar even though they were live in the graph.
+    components_list_warning: Optional[str] = None
     try:
         from ..models.project import ComponentInstance, ProjectUpdate
         existing_ids = {c.id for c in project.components}
@@ -1243,14 +1273,23 @@ async def install_component_via_cli(
             print(f"[CLI Install] Registered component instance '{final_instance_id}' on project.")
     except Exception as e:
         # Non-fatal — the defs.yaml is already written, so the asset will
-        # still be introspectable. Just log so the sidebar-miss is visible.
+        # still be introspectable. Surfaced in the response below (used to
+        # be log-only) since this leaves the sidebar's component list
+        # silently stale otherwise -- disk is ahead of Designer's own
+        # cached project state with no visible sign of it.
         print(f"[CLI Install] Warning: could not add {final_instance_id} to project.components: {e}")
+        components_list_warning = (
+            f"Installed on disk, but couldn't add '{final_instance_id}' to the project's "
+            f"component list -- it may not show in the sidebar until the project reloads. ({e})"
+        )
 
     return {
         "success": True,
         "component_id": component_id,
         "component_type": component_type,
         "defs_yaml": str(final_defs_yaml_path.relative_to(project_dir)),
+        "dropped_attributes": dropped_attributes,
+        "components_list_warning": components_list_warning,
     }
 
 
@@ -1301,13 +1340,6 @@ async def update_component_instance_attributes(instance_id: str, request: Update
             schema_component_id = type_parts[idx + 1]
 
     allowed_keys: Optional[set] = None
-    alias_map = {
-        'path': 'file_path',
-        'upstream_asset_keys': 'upstream_asset_key',
-        'upstream_asset_key': 'upstream_asset_keys',
-        'output_path': 'file_path',
-        'input_asset': 'upstream_asset_key',
-    }
     if schema_component_id:
         try:
             schema_candidates = list(project_dir.glob(f"src/*/components/{schema_component_id}/schema.json")) + \
@@ -1330,7 +1362,7 @@ async def update_component_instance_attributes(instance_id: str, request: Update
         if allowed_keys is None or k in allowed_keys:
             merged[k] = v
             continue
-        aliased = alias_map.get(k)
+        aliased = ATTRIBUTE_ALIAS_MAP.get(k)
         if aliased and aliased in allowed_keys:
             merged[aliased] = v
             continue
@@ -1347,6 +1379,7 @@ async def update_component_instance_attributes(instance_id: str, request: Update
     # Keep the Project Components sidebar in sync -- install_component_via_cli
     # registers a ComponentInstance entry on create; if one exists for this
     # instance, its attributes are now stale unless updated too.
+    components_list_warning: Optional[str] = None
     try:
         from ..models.project import ProjectUpdate
         existing_component = next((c for c in project.components if c.id == instance_id), None)
@@ -1357,12 +1390,20 @@ async def update_component_instance_attributes(instance_id: str, request: Update
             ]
             project_service.update_project(request.project_id, ProjectUpdate(components=updated_components))
     except Exception as e:
+        # Surfaced below (used to be log-only) -- disk already has the new
+        # attributes at this point, so this leaves the sidebar showing
+        # stale values with no visible sign of it otherwise.
         print(f"[Update Attributes] Warning: could not sync project.components for {instance_id}: {e}")
+        components_list_warning = (
+            f"Saved to disk, but couldn't update '{instance_id}' in the project's component "
+            f"list -- the sidebar may show stale values until the project reloads. ({e})"
+        )
 
     return {
         "success": True,
         "component_id": instance_id,
         "component_type": component_type,
         "attributes": merged,
-        "dropped": dropped,
+        "dropped_attributes": dropped,
+        "components_list_warning": components_list_warning,
     }

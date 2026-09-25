@@ -182,6 +182,13 @@ export function DagsterAIBar() {
     setApplying(true);
     let installed = 0;
     let failed = 0;
+    // Config fields the backend silently dropped (unrecognized name, no
+    // alias match) or a component-list sync that failed -- these used to
+    // only be logged server-side, so a real incident this session (Genie
+    // writing `query` instead of `sql`) left the user with no visible
+    // sign that anything was wrong even though the applied config was
+    // silently different from the plan they approved.
+    const warnings: string[] = [];
     try {
       for (const pick of plan.picks) {
         const action = pick.action || 'add';
@@ -217,9 +224,15 @@ export function DagsterAIBar() {
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ project_id: currentProject.id, attributes: pick.config }),
             });
+            const body = await res.json().catch(() => ({} as any));
             if (!res.ok) {
-              const body = await res.json().catch(() => ({} as any));
               throw new Error(body.detail || `HTTP ${res.status}`);
+            }
+            if (body.dropped_attributes?.length) {
+              warnings.push(`${pick.asset_name}: dropped unrecognized field(s) ${body.dropped_attributes.join(', ')}`);
+            }
+            if (body.components_list_warning) {
+              warnings.push(`${pick.asset_name}: ${body.components_list_warning}`);
             }
             installed++;
           } catch (e) {
@@ -259,9 +272,15 @@ export function DagsterAIBar() {
               instance_name: pick.asset_name,
             }),
           });
+          const body = await res.json().catch(() => ({} as any));
           if (!res.ok) {
-            const body = await res.json().catch(() => ({} as any));
             throw new Error(body.detail || `HTTP ${res.status}`);
+          }
+          if (body.dropped_attributes?.length) {
+            warnings.push(`${pick.asset_name}: dropped unrecognized field(s) ${body.dropped_attributes.join(', ')}`);
+          }
+          if (body.components_list_warning) {
+            warnings.push(`${pick.asset_name}: ${body.components_list_warning}`);
           }
           installed++;
         } catch (e) {
@@ -348,6 +367,9 @@ export function DagsterAIBar() {
         notify.error(`Dagster AI could not install any of the ${plan.picks.length} proposed picks.`);
       } else {
         notify.warning(`Dagster AI added ${installed} of ${plan.picks.length} picks; ${failed} failed. See console.`);
+      }
+      if (warnings.length > 0) {
+        notify.warning(`Some applied config differs from the plan:\n${warnings.join('\n')}`);
       }
       setPlan(null);
       setTask('');

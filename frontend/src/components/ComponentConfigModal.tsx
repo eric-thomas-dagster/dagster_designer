@@ -476,6 +476,9 @@ export function ComponentConfigModal({
           // Don't fail the whole operation if regeneration fails
         }
 
+        if (result.components_list_warning) {
+          notify.warning(result.components_list_warning);
+        }
         if (result.assets_regenerated) {
           notify.success(`Component configured successfully!\n\nYAML file: ${result.yaml_file}\n\nThe asset has been added to your project.`);
           onClose();
