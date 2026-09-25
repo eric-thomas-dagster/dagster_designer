@@ -5,6 +5,8 @@ import { useQueryClient } from '@tanstack/react-query';
 import { notify } from './Notifications';
 import { API_BASE } from '@/services/api';
 import { applyGeniePicks, resolveComponentIdFromCurrentProject, type GeniePickLike } from '@/lib/applyGeniePicks';
+import { parseUpstreamAssetKeys } from '@/lib/upstreamAssetKeys';
+import type { ComponentInstance } from '@/types';
 
 interface AgentPick extends GeniePickLike {
   reason: string;
@@ -34,10 +36,28 @@ type Turn =
 // Real text, not just a <textarea placeholder> -- a placeholder attribute
 // isn't selectable/copyable in a browser and vanishes the instant the
 // user starts typing, so "I liked that example, let me use it" had no
-// path except retyping it by hand. The "Try an example" button below
-// sets `task` to this directly instead.
-const EXAMPLE_TASK =
-  'Triage incoming support tickets: classify by urgency, draft a suggested reply, and flag anything that mentions a refund for human review.';
+// path except retyping it by hand. A handful of these (not just one)
+// covers more of the 16-op surface (route/debate/synthesize) so the
+// blank-page problem doesn't just reproduce the same single shape every
+// time -- clicking one sets `task` to its text directly.
+const EXAMPLE_TASKS: { label: string; task: string }[] = [
+  {
+    label: 'Triage support tickets',
+    task: 'Triage incoming support tickets: classify by urgency, draft a suggested reply, and flag anything that mentions a refund for human review.',
+  },
+  {
+    label: 'Summarize documents',
+    task: 'Summarize incoming documents into a short executive summary and extract key action items.',
+  },
+  {
+    label: 'Route to a specialist',
+    task: 'Route incoming questions to the right specialist (billing, technical, or general), then have that specialist draft a response.',
+  },
+  {
+    label: 'Debate the best answer',
+    task: 'Have two proposers debate the best answer to an incoming question, then have an arbitrator pick the winning response.',
+  },
+];
 
 /**
  * The "Agents & Pipelines" bin's scoped Genie entry point: describe what
@@ -62,13 +82,47 @@ const EXAMPLE_TASK =
  * and Genie may ask another question in response -- the conversation
  * continues until clarifying_question comes back null, at which point
  * "Add to graph" becomes available.
+ *
+ * `editingComponent`, when given (from ComponentConfigModal's "Edit with
+ * Genie" button on an existing whole-pipeline-family instance -- see
+ * AGENTIC_PIPELINE_FAMILY), skips the "describe from scratch" intro
+ * entirely: the conversation opens already seeded with that component's
+ * REAL current config as if Genie had just proposed it, so the user only
+ * has to say what to change. This reuses the exact same refine/regenerate
+ * mechanism as any other follow-up (send() doesn't need to know it's
+ * "editing" vs "building" -- previous_plan is previous_plan either way),
+ * which is also why _build_user_prompt's previous-plan rendering had to
+ * start including each pick's actual `config` -- without that, the model
+ * would have no visibility into what it's supposed to be editing.
  */
-export function AgentPipelineBuilder({ onClose }: { onClose: () => void }) {
+export function AgentPipelineBuilder({
+  onClose,
+  editingComponent,
+}: {
+  onClose: () => void;
+  editingComponent?: ComponentInstance | null;
+}) {
   const { currentProject } = useProjectStore();
   const queryClient = useQueryClient();
-  const [task, setTask] = useState('');
+  const seedPick: AgentPick | null = editingComponent
+    ? {
+        component_type: editingComponent.component_type,
+        asset_name: (editingComponent.attributes?.asset_name as string) || editingComponent.label || editingComponent.id,
+        upstream_asset_names: parseUpstreamAssetKeys(
+          editingComponent.attributes?.upstream_asset_keys ?? editingComponent.attributes?.upstream_asset_key,
+        ),
+        config: editingComponent.attributes || {},
+        reason: '',
+        action: 'edit',
+      }
+    : null;
+  const [task, setTask] = useState(() =>
+    editingComponent ? `Edit the existing "${seedPick!.asset_name}" pipeline` : '',
+  );
   const [reply, setReply] = useState('');
-  const [turns, setTurns] = useState<Turn[]>([]);
+  const [turns, setTurns] = useState<Turn[]>(() =>
+    seedPick ? [{ role: 'genie', plan: { picks: [seedPick], notes: [], clarifying_question: null } }] : [],
+  );
   const [planning, setPlanning] = useState(false);
   const [applying, setApplying] = useState(false);
   // Filter text for a long clarifying_question.options list (real project
@@ -84,7 +138,13 @@ export function AgentPipelineBuilder({ onClose }: { onClose: () => void }) {
   const MANY_OPTIONS_THRESHOLD = 8;
 
   const latestPlan = [...turns].reverse().find((t): t is Extract<Turn, { role: 'genie' }> => t.role === 'genie')?.plan ?? null;
-  const isReady = !!latestPlan && latestPlan.picks.length > 0 && !latestPlan.clarifying_question;
+  // In edit mode, turns starts pre-seeded with the existing pick (so the
+  // user sees its current config immediately) -- turns.length > 1 means
+  // at least one real exchange happened, not just the seed. Without this
+  // gate, "Add to graph" would be clickable before the user asked for
+  // any change at all, which would just reinstall an identical copy.
+  const isReady = !!latestPlan && latestPlan.picks.length > 0 && !latestPlan.clarifying_question
+    && (!editingComponent || turns.length > 1);
 
   // `answer`, when given, is the user's reply to Genie's last
   // clarifying_question -- resubmits with the prior plan as context so
@@ -191,7 +251,9 @@ export function AgentPipelineBuilder({ onClose }: { onClose: () => void }) {
         <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200">
           <div className="flex items-center gap-2">
             <Sparkles className="w-5 h-5 text-primary" />
-            <h2 className="text-lg font-semibold">Build an agent or pipeline</h2>
+            <h2 className="text-lg font-semibold">
+              {editingComponent ? `Edit "${seedPick!.asset_name}" with Genie` : 'Build an agent or pipeline'}
+            </h2>
           </div>
           <button onClick={onClose} aria-label="Close">
             <X className="w-5 h-5 text-gray-400 hover:text-gray-600" />
@@ -217,14 +279,22 @@ export function AgentPipelineBuilder({ onClose }: { onClose: () => void }) {
             />
 
             {!task && (
-              <button
-                type="button"
-                onClick={() => setTask(EXAMPLE_TASK)}
-                disabled={planning}
-                className="text-xs text-primary hover:underline disabled:opacity-50 disabled:cursor-not-allowed -mt-2"
-              >
-                Try an example →
-              </button>
+              <div className="-mt-2 space-y-1.5">
+                <p className="text-xs text-gray-400">Or try an example:</p>
+                <div className="flex flex-wrap gap-1.5">
+                  {EXAMPLE_TASKS.map((ex) => (
+                    <button
+                      key={ex.label}
+                      type="button"
+                      onClick={() => setTask(ex.task)}
+                      disabled={planning}
+                      className="px-2.5 py-1 text-xs border border-gray-300 text-gray-700 bg-white rounded-full hover:border-primary hover:text-primary disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      {ex.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
             )}
 
             <button
@@ -293,6 +363,10 @@ export function AgentPipelineBuilder({ onClose }: { onClose: () => void }) {
                         {turn.plan.clarifying_question ? (
                           <div className="bg-blue-50 border border-blue-200 text-blue-900 rounded-lg px-3 py-2 text-sm">
                             {turn.plan.clarifying_question.question}
+                          </div>
+                        ) : i === 0 && editingComponent ? (
+                          <div className="bg-gray-50 border border-gray-200 text-gray-700 rounded-lg px-3 py-2 text-sm">
+                            This is the current config — expand it below. What would you like to change?
                           </div>
                         ) : turn.plan.picks.length > 0 ? (
                           <div className="bg-emerald-50 border border-emerald-200 text-emerald-800 rounded-lg px-3 py-2 text-sm">

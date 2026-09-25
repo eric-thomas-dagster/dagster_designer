@@ -8,6 +8,7 @@ import { Library } from './components/Library';
 import { ComponentPalette } from './components/ComponentPalette';
 import { ProjectComponentsList } from './components/ProjectComponentsList';
 import { ComponentConfigModal } from './components/ComponentConfigModal';
+import { AgentPipelineBuilder } from './components/AgentPipelineBuilder';
 import { PropertyPanel } from './components/PropertyPanel';
 import { ProjectManager } from './components/ProjectManager';
 import { CodeEditor } from './components/CodeEditor';
@@ -242,6 +243,10 @@ function App() {
   useRunNotifications();
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [editingComponent, setEditingComponent] = useState<ComponentInstance | null>(null);
+  // Bridge from ComponentConfigModal's "Edit with Genie" button (shown
+  // only for AGENTIC_PIPELINE_FAMILY components) to AgentPipelineBuilder
+  // in edit mode -- see editingComponent prop there.
+  const [genieEditTarget, setGenieEditTarget] = useState<ComponentInstance | null>(null);
   const [addingComponentType, setAddingComponentType] = useState<string | null>(null);
   const [componentsPanelHeight, setComponentsPanelHeight] = useState(60); // Percentage
   // GraphEditor's graph/catalog toggle is lifted here so App can hide
@@ -1771,6 +1776,18 @@ function App() {
             setAddingComponentType(null);
           }}
           onOpenVisualEditor={handleOpenVisualEditor}
+          onEditWithGenie={(c) => {
+            setEditingComponent(null);
+            setAddingComponentType(null);
+            setGenieEditTarget(c);
+          }}
+        />
+      )}
+
+      {genieEditTarget && currentProject && (
+        <AgentPipelineBuilder
+          editingComponent={genieEditTarget}
+          onClose={() => setGenieEditTarget(null)}
         />
       )}
 

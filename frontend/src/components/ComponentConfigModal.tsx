@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { X, Save, Download, CheckCircle, XCircle, Loader, Plus } from 'lucide-react';
+import { X, Save, Download, CheckCircle, XCircle, Loader, Plus, Sparkles } from 'lucide-react';
 import { useComponent } from '@/hooks/useComponentRegistry';
 import { TranslationEditor } from './TranslationEditor';
 import { EnhancedDataQualityChecksBuilder } from './EnhancedDataQualityChecksBuilder';
@@ -9,6 +9,7 @@ import { notify } from './Notifications';
 import type { ComponentInstance } from '@/types';
 import type { ComponentSchema } from '@/services/api';
 import { parseUpstreamAssetKeys } from '@/lib/upstreamAssetKeys';
+import { AGENTIC_PIPELINE_FAMILY } from '@/lib/agenticPipelineFamily';
 
 // `x-dagster-io` type fields (inputs.type, outputs.type, accepts[]) are
 // freeform strings community component authors write by hand, not a
@@ -47,6 +48,13 @@ interface ComponentConfigModalProps {
   availableSchedules?: string[];
   availableSensors?: string[];
   onSaveDraft?: (attributes: Record<string, any>) => Promise<void> | void;
+  /** Offers an "Edit with Genie" escape hatch instead of the raw form,
+   *  for the whole-pipeline family (agentic_pipeline & co.) whose config
+   *  is deeply nested (steps/specialists/proposers) -- see
+   *  AGENTIC_PIPELINE_FAMILY. Only rendered when this AND `component`
+   *  (an existing instance, not a new one) are present; local mode only,
+   *  same reasoning as onSaveDraft's absence gating draft-only UI. */
+  onEditWithGenie?: (component: ComponentInstance) => void;
 }
 
 export function ComponentConfigModal({
@@ -63,6 +71,7 @@ export function ComponentConfigModal({
   availableSchedules = [],
   availableSensors = [],
   onSaveDraft,
+  onEditWithGenie,
 }: ComponentConfigModalProps) {
   const isNew = !component;
   const type = component?.component_type || componentType || '';
@@ -1777,13 +1786,24 @@ export function ComponentConfigModal({
     <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
       <div className="bg-white rounded-lg shadow-xl w-full max-w-2xl max-h-[80vh] flex flex-col">
         {/* Header */}
-        <div className="p-4 border-b border-gray-200 flex items-center justify-between">
-          <h2 className="text-lg font-semibold text-gray-900">
+        <div className="p-4 border-b border-gray-200 flex items-center justify-between gap-3">
+          <h2 className="text-lg font-semibold text-gray-900 min-w-0 truncate">
             {isNew ? 'Add' : 'Edit'} Component: {componentSchema.name}
           </h2>
-          <button onClick={onClose}>
-            <X className="w-5 h-5 text-gray-400 hover:text-gray-600" />
-          </button>
+          <div className="flex items-center gap-2 flex-shrink-0">
+            {!isNew && !isDraftMode && component && onEditWithGenie && AGENTIC_PIPELINE_FAMILY.has(component.component_type) && (
+              <button
+                onClick={() => onEditWithGenie(component)}
+                className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium text-violet-700 bg-violet-50 border border-violet-200 rounded-md hover:bg-violet-100"
+                title="Describe what to change in plain English instead of editing the raw config"
+              >
+                <Sparkles className="w-3.5 h-3.5" /> Edit with Genie
+              </button>
+            )}
+            <button onClick={onClose}>
+              <X className="w-5 h-5 text-gray-400 hover:text-gray-600" />
+            </button>
+          </div>
         </div>
 
         {/* Body */}

@@ -921,6 +921,18 @@ SYSTEM_PROMPT = (
     "  This turns a dead-end category answer into a concrete pick the "
     "  user only has to fill in a couple of real fields for, instead of "
     "  restating \"a file\" forever.\n"
+    "- WHEN TO ASK ABOUT PARTITIONING: most tasks describe a single "
+    "  unpartitioned batch pipeline and this question would just be "
+    "  noise -- only raise it when the task text itself implies "
+    "  recurring, per-item, or incremental processing (mentions \"each "
+    "  new\", \"incoming\", \"as they arrive\", \"daily\", \"per "
+    "  ticket/file/issue\", etc.) AND the task doesn't already say how "
+    "  to key it. When that signal is present, ask ONE "
+    "  `clarifying_question`: \"Should this run as a single batch each "
+    "  time, or one partition per <day/item -- whatever the task "
+    "  implies>?\", with options like [\"Single batch each run\", \"One "
+    "  partition per day\", \"One partition per <item>\"]. No such signal "
+    "  -> don't ask at all, default to unpartitioned, move on.\n"
     "- PARTITIONING FIELDS (critical): setting `partition_key_parser` "
     "  alone does NOT enable partitioning. To make a partitioned "
     "  agentic_pipeline (or any partitioned component) actually "
@@ -1147,14 +1159,40 @@ def _build_user_prompt(
         f"Existing assets in the graph:\n{existing}",
     ]
     if previous_plan:
+        # Real bug, not just a nice-to-have: this used to render only
+        # asset_name/component_type/upstream_asset_names -- never the
+        # actual `config` values -- so a refinement round had the model
+        # rewriting a pick's ENTIRE config from just its own one-line
+        # refinement instruction, with zero visibility into what it had
+        # actually set before. Harmless-looking for a pure "also handle
+        # Spanish tickets" tweak the model happens to remember from its
+        # own immediately-prior turn, but load-bearing for "Edit with
+        # Genie" on an EXISTING installed component (AgentPipelineBuilder
+        # seeds previous_plan from real config the model has never seen
+        # at all) -- without this, that edit would silently regenerate an
+        # unrelated pipeline from scratch instead of actually editing it.
+        # Per-pick cap keeps a pathologically large config (many steps)
+        # from blowing the prompt budget.
         prev_lines = []
         for i, p in enumerate(previous_plan, 1):
-            prev_lines.append(
+            header = (
                 f"  {i}. {p.get('asset_name')} = {p.get('component_type')}"
                 + (f" (from {', '.join(p.get('upstream_asset_names') or [])})"
                    if p.get('upstream_asset_names') else "")
             )
-        parts.append("Previous plan (you produced this last turn):\n" + "\n".join(prev_lines))
+            config = p.get('config')
+            if config:
+                config_json = json.dumps(config, indent=2)
+                if len(config_json) > 4000:
+                    config_json = config_json[:4000] + "\n  [...truncated]"
+                header += f"\n     current config:\n{config_json}"
+            prev_lines.append(header)
+        parts.append(
+            "Previous plan (you produced this last turn -- \"current config\" "
+            "above is its REAL current value, not a guess; keep whatever the "
+            "refinement below doesn't ask to change, and edit only what it "
+            "does):\n" + "\n".join(prev_lines)
+        )
     if refinement:
         parts.append(f"User refinement request:\n{refinement}\n\n"
                      "Adjust the previous plan per the refinement. Keep unchanged steps identical.")
