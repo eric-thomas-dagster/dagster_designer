@@ -106,6 +106,11 @@ class GeniePlanRequest(BaseModel):
     # and `dtypes` from the known-schemas cache before planning. Cheaper
     # than the frontend having to fetch schemas per-asset.
     project_id: str | None = None
+    # Optional: restricts planning to a fixed, small component-id pool
+    # instead of catalog-wide prefiltering -- see plan()'s `scope` param.
+    # Currently just "agents_pipelines" (the AI/ML page's scoped "describe
+    # your agent" flow).
+    scope: str | None = None
 
 
 class GeniePickResponse(BaseModel):
@@ -149,6 +154,7 @@ async def genie_plan(req: GeniePlanRequest) -> GeniePlanResponse:
             model=req.model or DEFAULT_MODEL,
             previous_plan=req.previous_plan,
             refinement=req.refinement,
+            scope=req.scope,
         )
     except GenieError as e:
         raise HTTPException(status_code=400, detail=str(e))

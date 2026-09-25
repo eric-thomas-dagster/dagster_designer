@@ -14,7 +14,7 @@ import json
 import os
 import re
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 import httpx
 
@@ -75,6 +75,41 @@ _AI_HINT_SUBSTRINGS = (
     "embedding", "transcri", "extract", "machine learning",
     "artificial intelligence", "large language model",
 )
+
+
+def agents_pipelines_component_ids(components: list[dict[str, Any]]) -> set[str]:
+    """The "Agents & Pipelines" bin for the AI/ML page's scoped "just
+    describe it" flow: components that genuinely ARE an agent or a
+    whole-pipeline-in-one-component, not just tagged `agentic` as a loose
+    "works well in an agent workflow" hint (that tag alone is noisy --
+    applied to plain LLM providers, classifiers, HITL gates, and
+    evaluators too, confirmed against the real manifest). Exact tags
+    `agent`/`multi-agent` are precise; `id.endswith("_agent")` catches a
+    real manifest tagging gap (vanta_evidence_response_agent has no
+    `agent` tag despite its name). Deliberately excludes id-suffix
+    `_pipeline` -- that would also pull in huggingface_pipeline (a plain
+    inference pipeline) and rag_pipeline (belongs to the separate RAG &
+    Vector Search bin's own guided-form curation, not this one).
+    """
+    trigger_tags = {"agent", "multi-agent"}
+    return {
+        c["id"]
+        for c in components
+        if c.get("category") == "ai"
+        and c.get("id")
+        and (trigger_tags & set(c.get("tags") or []) or c["id"].endswith("_agent"))
+    }
+
+
+# Registry of scoped-planning entry points -- each maps a `scope` string
+# (passed through from the API) to a resolver that picks the fixed
+# component-id pool for that scope out of the full manifest. See `scope`
+# on plan() for why: a scoped flow already fits its whole pool in the
+# token budget and doesn't need catalog-wide prefiltering.
+_SCOPE_COMPONENT_ID_RESOLVERS: dict[str, Callable[[list[dict[str, Any]]], set[str]]] = {
+    "agents_pipelines": agents_pipelines_component_ids,
+}
+
 
 # Manifest cache — in-memory (15 min TTL) with a disk fallback so we survive
 # GitHub's 60/hr unauthenticated rate-limit on raw.githubusercontent.com.
@@ -937,6 +972,15 @@ async def plan(
     catalog_cap: int | None = None,
     previous_plan: list[dict[str, Any]] | None = None,
     refinement: str | None = None,
+    # When given, skip catalog-wide prefiltering (keyword scoring,
+    # reserved-category quotas, the ai/non-asset category gates) entirely
+    # and plan against EXACTLY the fixed component-id set that scope maps
+    # to, rendered in full detail. For a scoped entry point (e.g. the
+    # Agents & Pipelines "just describe it" flow, ~16 components) where
+    # the whole candidate pool already comfortably fits the token budget
+    # and the user has already narrowed scope by which flow they opened --
+    # no need for the LLM to also pick a category out of the full ~700.
+    scope: str | None = None,
 ) -> GeniePlan:
     if not task or not task.strip():
         raise GenieError("Empty task")
@@ -971,7 +1015,17 @@ async def plan(
     if not components:
         raise GenieError("Manifest returned no components")
 
-    filtered, priority_ids = _keyword_prefilter(components, task, cap=catalog_cap)
+    scoped_ids: set[str] | None = None
+    if scope:
+        resolver = _SCOPE_COMPONENT_ID_RESOLVERS.get(scope)
+        if resolver is None:
+            raise GenieError(f"Unknown scope {scope!r}")
+        scoped_ids = resolver(components)
+    if scoped_ids is not None:
+        filtered = [c for c in components if c.get("id") in scoped_ids]
+        priority_ids = {c["id"] for c in filtered}
+    else:
+        filtered, priority_ids = _keyword_prefilter(components, task, cap=catalog_cap)
     lines = _catalog_lines(filtered, priority_ids=priority_ids)
     user_prompt = _build_user_prompt(
         task, lines, existing_assets or [], previous_plan=previous_plan, refinement=refinement,
