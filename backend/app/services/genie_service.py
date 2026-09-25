@@ -519,6 +519,20 @@ SYSTEM_PROMPT = (
     "  (b) pick a different upstream/downstream, or (c) drop the mismatched pick. "
     "  When one side has no `input_type`/`output_type` declared, don't reject — "
     "  fall back to the free-text `in:` / `out:` descriptions.\n"
+    "- WAREHOUSE-NATIVE TRANSFORMS: when the upstream you're transforming is a dbt "
+    "  model or other asset that already lives in a SQL warehouse/database (not a "
+    "  Python/pandas asset), PREFER a warehouse-native SQL component (e.g. "
+    "  `sql_transform`, `warehouse_pipeline`, or another CTAS-style id whose "
+    "  `category` is `transformation` and whose `in:`/`out:` mention SQL or a "
+    "  warehouse) over a DataFrame-based Python component (e.g. "
+    "  `dataframe_transformer`). A DataFrame-based transform needs Dagster to load "
+    "  the upstream's value back into Python via its I/O manager at run time — a "
+    "  real, common pattern, but one that depends on that specific project having "
+    "  a compatible I/O manager configured for that asset, which you cannot verify "
+    "  from the catalog. Staying warehouse-native (the SQL runs where the data "
+    "  already is) avoids that dependency entirely. Only reach for a DataFrame-"
+    "  based component when the task genuinely needs Python/pandas logic that "
+    "  isn't expressible as SQL (e.g. a specific library call, complex branching).\n"
     "- SOURCE PICKING (data generators): when the user names a domain (orders, "
     "  customers, transactions, products, support_tickets, invoices, users, etc.), "
     "  PREFER `synthetic_data_generator` — its `out:` hint enumerates fixed "
@@ -1195,27 +1209,17 @@ async def plan(
     # is the frontend-sent equivalent when a community component declared
     # one (see DagsterAIBar.tsx); most existing assets (dbt models, plain
     # Python assets predating this field, cloud-hydrated assets) won't
-    # have it set at all.
+    # have it set at all, and that's treated as genuinely unknown -- not
+    # assumed compatible just because it's dbt/warehouse-backed. Whether a
+    # given project's I/O manager actually bridges a warehouse table into
+    # a DataFrame is a real, per-project fact this check has no way to
+    # verify; the better fix for "wrong component recommended for
+    # warehouse-backed data" lives upstream, in which component the
+    # planner reaches for in the first place (see SYSTEM_PROMPT's
+    # component-selection guidance), not in silencing this check.
     existing_by_name: dict[str, dict[str, Any]] = {
         str(a.get("name")): a for a in (existing_assets or []) if a.get("name")
     }
-    WAREHOUSE_KINDS = {
-        "dbt", "snowflake", "bigquery", "duckdb", "postgres", "postgresql",
-        "mysql", "redshift", "databricks", "warehouse", "sql",
-    }
-
-    def _is_warehouse_backed(asset: dict[str, Any]) -> bool:
-        """True for a dbt-built or otherwise SQL-warehouse-backed existing
-        asset. Its OWN native representation is a table, not a DataFrame --
-        but the standard dagster-dbt + DuckDB/Snowflake/etc. I/O manager
-        pattern bridges table -> DataFrame automatically at load time
-        (context.load_asset_value(), same mechanism DataFrameTransformer-
-        style components use), so wiring one into a DataFrame-expecting
-        downstream is a legitimate, common pairing -- not a mismatch to
-        flag, even though it has no io_output_type of its own."""
-        if "dbt" in str(asset.get("component_type") or "").lower():
-            return True
-        return any(str(k).lower() in WAREHOUSE_KINDS for k in (asset.get("kinds") or []))
 
     for pk in picks:
         comp = components_by_id.get(pk.component_type) or {}
@@ -1237,13 +1241,6 @@ async def plan(
                     continue  # unknown reference -- coordination check covers that
                 provides = existing.get("io_output_type") or "__missing__"
                 up_label = existing.get("component_type") or "existing asset"
-                if provides == "__missing__" and want == "pd.DataFrame" and _is_warehouse_backed(existing):
-                    # Bridged via I/O manager -- explicitly compatible,
-                    # not just "no info" (which would fall through to the
-                    # missing-check below and warn nothing either way, but
-                    # being explicit here documents the reasoning instead
-                    # of relying on an accidental silence).
-                    continue
             if provides == "__missing__":
                 continue
             if provides != want:
