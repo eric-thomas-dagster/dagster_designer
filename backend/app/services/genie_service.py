@@ -62,6 +62,15 @@ _CLAUDE_MD_DISK_CACHE_PATH = (
     _Path(__file__).resolve().parent.parent.parent / ".claude_md_cache.txt"
 )
 
+# Per-component config-schema cache, keyed by schema_url. In-memory only
+# (no disk fallback like the manifest/CLAUDE.md caches) -- schemas are
+# fetched a handful at a time (only for components actually picked in a
+# plan, not the whole catalog), so losing the cache on a backend restart
+# just costs a few redundant fetches, not a rate-limit risk the way
+# re-fetching the 1000+ component manifest from scratch would be.
+_schema_cache: dict[str, tuple[float, dict[str, Any] | None]] = {}
+_SCHEMA_TTL = 900.0  # seconds
+
 
 @dataclass
 class GeniePick:
@@ -1212,12 +1221,20 @@ async def plan(
     # server-side and — if any exist — do ONE targeted repair call
     # asking the model to fix the specific mismatches. Adds ~2s only
     # when needed; clean plans skip the second call entirely.
+    # Schema issues (missing required config fields, per each pick's real
+    # schema.json) are meaningful even for a single pick; coordination
+    # issues only make sense with 2+ picks (there's no "other pick" to
+    # cross-reference otherwise -- _detect_coordination_issues naturally
+    # returns nothing in that case, but the len(picks) >= 2 guard keeps
+    # that explicit).
     coord_issues = _detect_coordination_issues(picks)
-    if coord_issues and len(picks) >= 2:
+    schema_issues = await _detect_schema_issues(picks, components_by_id)
+    all_issues = schema_issues + coord_issues
+    if schema_issues or (coord_issues and len(picks) >= 2):
         try:
             repaired_picks = await _repair_picks(
                 original_picks=picks,
-                issues=coord_issues,
+                issues=all_issues,
                 task=task,
                 model=model,
                 api_key=api_key,
@@ -1226,15 +1243,14 @@ async def plan(
             if repaired_picks is not None:
                 picks = repaired_picks
                 notes.append(
-                    f"ℹ Auto-repaired {len(coord_issues)} cross-pick coordination "
-                    f"issue(s): " + "; ".join(coord_issues[:3])
-                    + (f" (+{len(coord_issues) - 3} more)" if len(coord_issues) > 3 else "")
+                    f"ℹ Auto-repaired {len(all_issues)} issue(s): " + "; ".join(all_issues[:3])
+                    + (f" (+{len(all_issues) - 3} more)" if len(all_issues) > 3 else "")
                 )
         except Exception as e:
             # Repair is best-effort. If it fails, surface the ORIGINAL
             # detected issues so the user still sees what's wrong.
-            for iss in coord_issues:
-                notes.append(f"⚠︎ Coordination issue: {iss}")
+            for iss in all_issues:
+                notes.append(f"⚠︎ Issue: {iss}")
             notes.append(f"⚠︎ Auto-repair failed: {type(e).__name__}: {str(e)[:120]}")
 
     usage = data.get("usage") or {}
@@ -1246,6 +1262,87 @@ async def plan(
         tokens_completion=usage.get("completion_tokens", 0),
         notes=notes,
     )
+
+
+# ------------------------------------------------------------------
+# Config-schema validation (post-plan, pre-repair)
+# ------------------------------------------------------------------
+
+
+async def _fetch_schema(url: str) -> dict[str, Any] | None:
+    """Fetch one component's config schema.json, cached (15 min TTL).
+    Returns None on any failure (missing url, 404, network error, bad
+    JSON) -- callers treat that as "nothing to validate" for that
+    component, never as a plan-blocking error. Note: this registry's
+    schema.json is NOT standard JSON Schema -- required-ness is a
+    per-field boolean under `attributes`, not a top-level `required`
+    array (see _required_fields)."""
+    import time
+    now = time.time()
+    cached = _schema_cache.get(url)
+    if cached and (now - cached[0]) < _SCHEMA_TTL:
+        return cached[1]
+    try:
+        async with httpx.AsyncClient() as client:
+            r = await client.get(url, timeout=10.0)
+            if r.status_code != 200:
+                _schema_cache[url] = (now, None)
+                return None
+            schema = r.json()
+    except Exception:
+        _schema_cache[url] = (now, None)
+        return None
+    _schema_cache[url] = (now, schema)
+    return schema
+
+
+def _required_fields(schema: dict[str, Any]) -> list[str]:
+    attrs = schema.get("attributes") or {}
+    return [name for name, spec in attrs.items() if isinstance(spec, dict) and spec.get("required")]
+
+
+async def _detect_schema_issues(picks: list[GeniePick], components_by_id: dict[str, dict[str, Any]]) -> list[str]:
+    """Deterministic check the LLM-based validation never covered: does
+    each "add" pick's config actually include every required attribute
+    per its component's real schema.json? Catches hallucinated/omitted
+    config fields (as opposed to _detect_coordination_issues, which only
+    catches cross-pick reference mismatches) -- e.g. a pick that's
+    missing a required `asset_name` or `upstream_asset_key` the LLM just
+    never filled in.
+
+    Only "add" picks are checked -- "edit" merges into an existing
+    instance's already-valid config, so a partial config there is
+    intentional, not a mistake. Schema fetches run in parallel and are
+    scoped to just the component types actually used in this plan (a
+    handful, never the whole catalog)."""
+    import asyncio
+    add_picks = [p for p in picks if p.action == "add"]
+    if not add_picks:
+        return []
+    types_needed = {p.component_type for p in add_picks}
+    urls = {
+        ct: (components_by_id.get(ct) or {}).get("schema_url")
+        for ct in types_needed
+    }
+    urls = {ct: u for ct, u in urls.items() if u}
+    if not urls:
+        return []
+
+    fetched = await asyncio.gather(*(_fetch_schema(u) for u in urls.values()))
+    schemas_by_type = dict(zip(urls.keys(), fetched))
+
+    issues: list[str] = []
+    for p in add_picks:
+        schema = schemas_by_type.get(p.component_type)
+        if not schema:
+            continue
+        missing = [f for f in _required_fields(schema) if f not in (p.config or {})]
+        if missing:
+            issues.append(
+                f"Pick '{p.asset_name}' ({p.component_type}) is missing required "
+                f"field(s): {', '.join(missing)}."
+            )
+    return issues
 
 
 # ------------------------------------------------------------------
