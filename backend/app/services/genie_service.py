@@ -760,6 +760,29 @@ SYSTEM_PROMPT = (
     "  `warehouse_pipeline`, and any other entry whose `produces` "
     "  includes `multi_asset` or whose `when_to_use` mentions 'one "
     "  YAML' / 'one instance' / 'whole pipeline'.\n"
+    "- PICK A MODEL/PROVIDER ONCE, APPLY EVERYWHERE (critical, this "
+    "  family only): every op in `agentic_pipeline`/`ml_pipeline`/"
+    "  `polars_pipeline`/`warehouse_pipeline` (llm_call, synthesize, "
+    "  route's `router` AND each entry in `specialists`, debate's each "
+    "  `proposers` entry AND `arbitrator`, critique_loop, etc.) declares "
+    "  its OWN `model` + `api_key_env_var` -- there is no pipeline-level "
+    "  default, every nested block repeats both fields separately. If "
+    "  the task doesn't name a specific model or provider, TODO-"
+    "  placeholder `model` AND `api_key_env_var` in EVERY such block (not "
+    "  just the first one you write) and ask ONE `clarifying_question` "
+    "  for the whole pipeline: \"Which LLM provider/model should this "
+    "  pipeline use? (applies to every step)\", options [\"Claude "
+    "  (Anthropic)\", \"GPT-4o (OpenAI)\", \"Gemini (Google)\", "
+    "  \"Something else\"]. Once answered, apply the SAME real model "
+    "  name + the matching provider's `api_key_env_var` "
+    "  (`ANTHROPIC_API_KEY` for Claude, `OPENAI_API_KEY` for GPT, "
+    "  `GEMINI_API_KEY` for Gemini) to EVERY block that needs it, not "
+    "  just one -- a mix of TODO and real values across steps is the "
+    "  same half-applied failure as leaving `clarifying_question` unset "
+    "  after a TODO (see ASK RATHER THAN FABRICATE above). If the task "
+    "  DOES already name a provider or model (\"use Claude\", "
+    "  \"gpt-4o-mini\"), skip the question and fill it in directly "
+    "  everywhere -- don't ask what you already know.\n"
     "- CROSS-PICK COORDINATION (critical): when your plan contains "
     "  multiple picks whose configs reference each other (e.g. one "
     "  pick's `upstream_asset_keys` / `upstream_asset_key` naming an "
@@ -1655,6 +1678,22 @@ async def plan(
                 notes.append(f"⚠︎ Issue: {iss}")
             notes.append(f"⚠︎ Auto-repair failed: {type(e).__name__}: {str(e)[:120]}")
 
+    # Anticipated backstop, same lesson as the generic one below but with
+    # a SPECIFIC, useful question + real options instead of a generic
+    # "look for TODO" -- the model/provider gap is the single most common,
+    # most anticipatable question in this whole component family (every
+    # op needs its own model + api_key_env_var, see
+    # PICK A MODEL/PROVIDER ONCE, APPLY EVERYWHERE), so it's worth its
+    # own targeted question rather than falling through to the generic
+    # one. Checked BEFORE the generic backstop so it wins when both would
+    # otherwise fire on the same TODO value.
+    if _model_provider_gap(picks) and clarifying_question is None:
+        clarifying_question = GenieClarifyingQuestion(
+            question="Which LLM provider/model should this pipeline use? "
+            "(applies to every step)",
+            options=["Claude (Anthropic)", "GPT-4o (OpenAI)", "Gemini (Google)", "Something else"],
+        )
+
     # Deterministic backstop for the SYSTEM_PROMPT's "ASK RATHER THAN
     # FABRICATE" rule: confirmed live that the LLM can follow HALF of a
     # two-part instruction (mark the field as an obvious TODO) while
@@ -1859,6 +1898,61 @@ def _has_todo_placeholder(picks: list[GeniePick]) -> bool:
         return False
 
     return any(scan(p.config) for p in picks)
+
+
+# The whole-pipeline "one YAML" family (see WHOLE-PIPELINE COMPONENTS in
+# SYSTEM_PROMPT) -- every op across all of these (llm_call, synthesize,
+# route's router + each specialist, debate's proposers + arbitrator, ...)
+# repeats its own `model` + `api_key_env_var` fields; there is no
+# pipeline-level default. This is the single most-repeated config gap in
+# this family (the TODO_OPENAI_API_KEY mangling incident lived here), and
+# because it's structurally the SAME question ("which LLM/provider")
+# repeated once per nested block, it's worth anticipating deterministically
+# rather than leaving each block's TODO-or-not up to the model's judgment
+# every time -- see PICK A MODEL/PROVIDER ONCE, APPLY EVERYWHERE.
+_AGENTIC_PIPELINE_FAMILY = {"agentic_pipeline", "ml_pipeline", "polars_pipeline", "warehouse_pipeline"}
+# Ops whose `model`/`api_key_env_var` live directly on the step dict
+# itself (per steps_schemas, both are `required`) -- as opposed to
+# route/debate/critique_loop, where those fields live one level down in a
+# nested router/specialists/proposers/arbitrator block instead.
+_DIRECT_MODEL_OPS = {"llm_call", "synthesize"}
+
+
+def _model_provider_gap(picks: list[GeniePick]) -> bool:
+    """True if any agentic-pipeline-family pick has a step (or nested
+    specialist/proposer/router/arbitrator block) that declares `model`/
+    `api_key_env_var` but leaves either missing or TODO-placeholdered.
+    Scoped to _AGENTIC_PIPELINE_FAMILY component types only -- a plain
+    "model" key on an unrelated component's config (a literal ML model
+    name, a database "model" field, whatever) isn't this."""
+    def _is_todo(v: Any) -> bool:
+        return isinstance(v, str) and v.upper().startswith("TODO")
+
+    def _scan(node: Any) -> bool:
+        if isinstance(node, dict):
+            # `op in _DIRECT_MODEL_OPS` catches a step that omits
+            # model/api_key_env_var ENTIRELY (per steps_schemas, both are
+            # `required` for llm_call/synthesize) -- "model" in node alone
+            # would miss that, since an absent key isn't "in" the dict.
+            # route/debate don't carry `model` at this level at all (it's
+            # one level down, in `router`/`specialists`/`proposers`/
+            # `arbitrator`), so those are caught by the plain key-presence
+            # branch instead once the recursion reaches those sub-dicts.
+            if node.get("op") in _DIRECT_MODEL_OPS or "model" in node or "api_key_env_var" in node:
+                model = node.get("model")
+                key_var = node.get("api_key_env_var")
+                if not model or _is_todo(model) or not key_var or _is_todo(key_var):
+                    return True
+            return any(_scan(v) for v in node.values())
+        if isinstance(node, list):
+            return any(_scan(v) for v in node)
+        return False
+
+    return any(
+        _scan(p.config)
+        for p in picks
+        if p.component_type in _AGENTIC_PIPELINE_FAMILY and p.action != "remove"
+    )
 
 
 async def _detect_schema_issues(picks: list[GeniePick], components_by_id: dict[str, dict[str, Any]]) -> list[str]:
