@@ -5,6 +5,7 @@ import { useProjectStore } from '@/hooks/useProject';
 import { notify, confirmDialog } from './Notifications';
 import { API_BASE, aiApi, type AiProvidersStatus } from '@/services/api';
 import { openSettings, onAiProvidersChanged } from './SettingsDialog';
+import { applyGeniePicks, resolveComponentIdFromCurrentProject } from '@/lib/applyGeniePicks';
 
 interface AIPick {
   component_type: string;
@@ -44,7 +45,7 @@ const MODEL_OPTIONS = [
 ];
 
 export function DagsterAIBar() {
-  const { currentProject, loadProject } = useProjectStore();
+  const { currentProject } = useProjectStore();
   const queryClient = useQueryClient();
   const [task, setTask] = useState('');
   const [thinking, setThinking] = useState(false);
@@ -159,16 +160,6 @@ export function DagsterAIBar() {
     }
   };
 
-  // For "edit"/"remove" picks, resolve the target asset_name back to a
-  // real component instance id — the plan only carries names (what the
-  // model reasons about), same fields used to build `existing` in submit().
-  const resolveComponentId = (assetName: string): string | null => {
-    const node = currentProject?.graph.nodes.find(
-      (n) => (n.data?.asset_key || n.data?.label || n.id) === assetName,
-    );
-    return node ? ((node.data as any)?.component_id || node.id) : null;
-  };
-
   const apply = async () => {
     if (!plan || !currentProject || applying) return;
     const toRemove = plan.picks.filter((p) => p.action === 'remove');
@@ -180,114 +171,12 @@ export function DagsterAIBar() {
       if (!ok) return;
     }
     setApplying(true);
-    let installed = 0;
-    let failed = 0;
-    // Config fields the backend silently dropped (unrecognized name, no
-    // alias match) or a component-list sync that failed -- these used to
-    // only be logged server-side, so a real incident this session (Genie
-    // writing `query` instead of `sql`) left the user with no visible
-    // sign that anything was wrong even though the applied config was
-    // silently different from the plan they approved.
-    const warnings: string[] = [];
     try {
-      for (const pick of plan.picks) {
-        const action = pick.action || 'add';
-
-        if (action === 'remove') {
-          const componentId = resolveComponentId(pick.asset_name);
-          if (!componentId) {
-            failed++;
-            console.warn(`[DagsterAI] Could not resolve existing asset '${pick.asset_name}' to remove`);
-            continue;
-          }
-          try {
-            const { projectsApi } = await import('@/services/api');
-            await projectsApi.deleteComponentInstance(currentProject.id, componentId);
-            installed++;
-          } catch (e) {
-            failed++;
-            console.warn(`[DagsterAI] Failed to remove ${pick.asset_name}:`, e);
-          }
-          continue;
-        }
-
-        if (action === 'edit') {
-          const componentId = resolveComponentId(pick.asset_name);
-          if (!componentId) {
-            failed++;
-            console.warn(`[DagsterAI] Could not resolve existing asset '${pick.asset_name}' to edit`);
-            continue;
-          }
-          try {
-            const res = await fetch(`${API_BASE}/templates/component-instance/${componentId}/attributes`, {
-              method: 'PATCH',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ project_id: currentProject.id, attributes: pick.config }),
-            });
-            const body = await res.json().catch(() => ({} as any));
-            if (!res.ok) {
-              throw new Error(body.detail || `HTTP ${res.status}`);
-            }
-            if (body.dropped_attributes?.length) {
-              warnings.push(`${pick.asset_name}: dropped unrecognized field(s) ${body.dropped_attributes.join(', ')}`);
-            }
-            if (body.components_list_warning) {
-              warnings.push(`${pick.asset_name}: ${body.components_list_warning}`);
-            }
-            installed++;
-          } catch (e) {
-            failed++;
-            console.warn(`[DagsterAI] Failed to edit ${pick.asset_name}:`, e);
-          }
-          continue;
-        }
-
-        // pick.component_type is actually the manifest component_id (e.g.
-        // "unique_dedup"). Pass the AI's proposed attrs as `attributes` so the
-        // CLI-based endpoint merges them into the stub defs.yaml — otherwise
-        // the LLM's carefully-planned config gets discarded and the user has
-        // to re-enter it by hand.
-        const attributes: Record<string, any> = {
-          ...pick.config,
-          asset_name: pick.config.asset_name || pick.asset_name,
-        };
-        if (pick.upstream_asset_names.length > 0) {
-          // upstream_asset_keys is schema'd as an array on every component
-          // we've seen (sql_transform, dataframe_transformer, ...) -- this
-          // used to .join(', ') into a single comma-separated STRING,
-          // which is exactly wrong-shaped for that field (and with just
-          // one upstream, .join produces that string with no comma at
-          // all, which is why this surfaced as "a bare string instead of
-          // a list" rather than an obviously-malformed one).
-          attributes.upstream_asset_keys = pick.upstream_asset_names;
-        }
-        try {
-          const res = await fetch(`${API_BASE}/templates/install-via-cli/${pick.component_type}`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              project_id: currentProject.id,
-              config: {},
-              attributes,
-              instance_name: pick.asset_name,
-            }),
-          });
-          const body = await res.json().catch(() => ({} as any));
-          if (!res.ok) {
-            throw new Error(body.detail || `HTTP ${res.status}`);
-          }
-          if (body.dropped_attributes?.length) {
-            warnings.push(`${pick.asset_name}: dropped unrecognized field(s) ${body.dropped_attributes.join(', ')}`);
-          }
-          if (body.components_list_warning) {
-            warnings.push(`${pick.asset_name}: ${body.components_list_warning}`);
-          }
-          installed++;
-        } catch (e) {
-          failed++;
-          console.warn(`[DagsterAI] Failed to install ${pick.component_type}:`, e);
-        }
-      }
+      const { installed, failed, warnings } = await applyGeniePicks(
+        currentProject.id,
+        plan.picks,
+        resolveComponentIdFromCurrentProject,
+      );
 
       // Refresh the palette + primitives lists so newly-installed community
       // components flip from dashed "available" to purple "installed" and any
@@ -297,70 +186,6 @@ export function DagsterAIBar() {
       await queryClient.invalidateQueries({ queryKey: ['definitions', currentProject.id] });
       await queryClient.invalidateQueries({ queryKey: ['installed-resources', currentProject.id] });
 
-      // install-via-cli only writes defs.yaml files — it doesn't update the
-      // project's graph JSON with the new asset nodes. Without an explicit
-      // regenerate, loadProject would just return the stale graph and the
-      // user would have to refresh the browser to see the new assets. Trigger
-      // asset introspection (preserving existing positions) so the response
-      // includes the freshly discovered assets, then swap the project in.
-      //
-      // Retry loop: `uvx dagster-component add` sometimes returns before its
-      // downstream `uv sync` fully registers the component with Dagster, so
-      // the first `dg list defs` misses the fresh picks and downstream assets
-      // "eventually show up" on manual refresh. Poll until either all
-      // expected asset names are present or we've exhausted retries.
-      // "remove" picks should NOT be waited on — the asset is meant to
-      // disappear, not (re)appear, so including it here would just waste
-      // retries waiting for something that's never coming back.
-      const expectedNames = new Set(
-        plan.picks
-          .filter((p) => (p.action || 'add') !== 'remove')
-          .map((p) => (p.config?.asset_name as string) || p.asset_name)
-          .filter(Boolean),
-      );
-      const { projectsApi } = await import('@/services/api');
-      let updated: any = null;
-      const MAX_RETRIES = 4;
-      const RETRY_DELAY_MS = 1500;
-      for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-        try {
-          updated = await projectsApi.regenerateAssets(currentProject.id, false);
-        } catch (e) {
-          console.warn(`[DagsterAI] regenerate attempt ${attempt + 1} failed:`, e);
-          break;
-        }
-        const foundNames = new Set(
-          (updated?.graph?.nodes ?? [])
-            .filter((n: any) => n.node_kind === 'asset')
-            .map((n: any) => n.id),
-        );
-        const missing = [...expectedNames].filter((n) => !foundNames.has(n));
-        if (missing.length === 0) {
-          if (attempt > 0) {
-            console.log(`[DagsterAI] All picks visible after ${attempt} retry(ies).`);
-          }
-          break;
-        }
-        if (attempt === MAX_RETRIES) {
-          console.warn(
-            `[DagsterAI] Gave up after ${MAX_RETRIES + 1} tries; still missing:`,
-            missing,
-          );
-          break;
-        }
-        console.log(
-          `[DagsterAI] Retry ${attempt + 1}/${MAX_RETRIES}: still missing`,
-          missing,
-          `— waiting ${RETRY_DELAY_MS}ms`,
-        );
-        await new Promise((r) => setTimeout(r, RETRY_DELAY_MS));
-      }
-      if (updated) {
-        useProjectStore.getState().setCurrentProject(updated);
-      } else {
-        console.warn('[DagsterAI] regenerate failed entirely, falling back to loadProject');
-        await loadProject(currentProject.id);
-      }
       if (failed === 0) {
         notify.success(`Dagster AI added ${installed} asset${installed === 1 ? '' : 's'} to the graph.`);
       } else if (installed === 0) {

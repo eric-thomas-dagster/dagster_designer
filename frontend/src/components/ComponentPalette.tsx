@@ -1,7 +1,8 @@
 import { useMemo, useState } from 'react';
 import { useComponentRegistry } from '@/hooks/useComponentRegistry';
-import { Database, ArrowRight, Download, RefreshCw, Box, Search, Plus, Code, FileText, Play, Clock, Radar, CheckCircle, FileCode, Loader2 } from 'lucide-react';
+import { Database, ArrowRight, Download, RefreshCw, Box, Search, Plus, Code, FileText, Play, Clock, Radar, CheckCircle, FileCode, Loader2, Sparkles } from 'lucide-react';
 import { CreatePythonAssetDialog } from './CreatePythonAssetDialog';
+import { AgentPipelineBuilder } from './AgentPipelineBuilder';
 import { useProjectStore } from '@/hooks/useProject';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { notify } from './Notifications';
@@ -39,6 +40,7 @@ export function ComponentPalette({ onComponentClick }: ComponentPaletteProps) {
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedCategory, setSelectedCategory] = useState<string | undefined>();
   const [showCreateAssetDialog, setShowCreateAssetDialog] = useState(false);
+  const [showAgentBuilder, setShowAgentBuilder] = useState(false);
   const [installingId, setInstallingId] = useState<string | null>(null);
   const { data, isLoading } = useComponentRegistry(selectedCategory);
   const { currentProject, loadProject } = useProjectStore();
@@ -384,6 +386,18 @@ export function ComponentPalette({ onComponentClick }: ComponentPaletteProps) {
                       <span>{formatCategoryLabel(cat)}</span>
                       <span className="text-gray-400 font-normal">{entries.length}</span>
                     </div>
+                    {cat === 'ai' && (
+                      <button
+                        onClick={() => setShowAgentBuilder(true)}
+                        className="w-full flex items-center gap-2 px-2.5 py-2 bg-gradient-to-br from-violet-50 to-blue-50 border border-violet-200 rounded-md hover:border-violet-400 transition-all text-left"
+                      >
+                        <Sparkles className="w-4 h-4 text-violet-600 flex-shrink-0" />
+                        <div className="min-w-0">
+                          <div className="text-sm font-medium text-gray-900">Build an agent or pipeline</div>
+                          <div className="text-xs text-gray-500">Describe what it should do — no need to pick a component</div>
+                        </div>
+                      </button>
+                    )}
                     {visible.map((entry, i) => {
                       if (entry.kind === 'installed') {
                         const comp = entry.component;
@@ -490,6 +504,10 @@ export function ComponentPalette({ onComponentClick }: ComponentPaletteProps) {
           onClose={() => setShowCreateAssetDialog(false)}
           onSuccess={handleAssetCreated}
         />
+      )}
+
+      {showAgentBuilder && currentProject && (
+        <AgentPipelineBuilder onClose={() => setShowAgentBuilder(false)} />
       )}
     </div>
   );
