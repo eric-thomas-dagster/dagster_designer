@@ -131,6 +131,11 @@ class GeniePickResponse(BaseModel):
     action: str = "add"
 
 
+class GenieClarifyingQuestionResponse(BaseModel):
+    question: str
+    options: list[str] | None = None
+
+
 class GeniePlanResponse(BaseModel):
     picks: list[GeniePickResponse]
     task: str
@@ -138,6 +143,8 @@ class GeniePlanResponse(BaseModel):
     tokens_prompt: int
     tokens_completion: int
     notes: list[str]
+    # None means the plan is complete and ready to apply.
+    clarifying_question: GenieClarifyingQuestionResponse | None = None
 
 
 @router.post("/plan", response_model=GeniePlanResponse)
@@ -185,6 +192,14 @@ async def genie_plan(req: GeniePlanRequest) -> GeniePlanResponse:
         tokens_prompt=result.tokens_prompt,
         tokens_completion=result.tokens_completion,
         notes=result.notes,
+        clarifying_question=(
+            GenieClarifyingQuestionResponse(
+                question=result.clarifying_question.question,
+                options=result.clarifying_question.options,
+            )
+            if result.clarifying_question
+            else None
+        ),
     )
 
 

@@ -162,6 +162,19 @@ class GeniePick:
 
 
 @dataclass
+class GenieClarifyingQuestion:
+    """A question Genie is asking back before the plan can be considered
+    complete -- set when a pick's config has a TODO-placeholder field
+    (see the ASK RATHER THAN FABRICATE A DATA SOURCE SYSTEM_PROMPT rule).
+    `options`, when present, are 2-4 short suggested answers the UI can
+    render as clickable choices; always still accepts free text too, the
+    same way an ambiguous choice can always fall back to a custom answer
+    rather than being limited to the suggested list."""
+    question: str
+    options: list[str] | None = None
+
+
+@dataclass
 class GeniePlan:
     picks: list[GeniePick]
     task: str
@@ -169,6 +182,9 @@ class GeniePlan:
     tokens_prompt: int
     tokens_completion: int
     notes: list[str]
+    # None means the plan is complete and ready to apply -- see
+    # GenieClarifyingQuestion.
+    clarifying_question: GenieClarifyingQuestion | None = None
 
 
 class GenieError(RuntimeError):
@@ -588,7 +604,13 @@ SYSTEM_PROMPT = (
     '"config": {"<field>": "<value>"}, '
     '"reason": "<why this step>"},\n'
     '     ...\n'
-    '  ]}\n\n'
+    '  ],\n'
+    '   "clarifying_question": {"question": "<specific question>", "options": ["<choice 1>", "<choice 2>", ...]} '
+    "or null}\n\n"
+    "`clarifying_question` is OPTIONAL -- see ASK RATHER THAN FABRICATE A "
+    "DATA SOURCE below for exactly when to set it (and when NOT to: null "
+    "or omitted whenever the plan is complete and doesn't need anything "
+    "from the user).\n\n"
     "EDITING OR REMOVING EXISTING ASSETS (critical): the task isn't always "
     "additive. If the user asks to change, reconfigure, or fix something about "
     "an EXISTING asset (one listed under Existing assets below), emit "
@@ -742,23 +764,35 @@ SYSTEM_PROMPT = (
     "  config is worse than an obviously empty one, because the user has "
     "  to notice it's fake before they can fix it. Both of the following "
     "  are REQUIRED together, every time this applies -- a TODO value "
-    "  with no accompanying note is an incomplete, unacceptable response, "
-    "  not a partial success:\n"
+    "  with no `clarifying_question` set is an incomplete, unacceptable "
+    "  response, not a partial success:\n"
     "    1. Fill the field with something syntactically valid so the "
     "  plan doesn't outright fail, but make it UNMISTAKABLY a "
     "  placeholder (`kind: literal, text: \"TODO: <what you need>\"`, "
     "  not a value that could pass for real).\n"
-    "    2. Add a `❓` entry to `notes` asking the SPECIFIC question that "
-    "  would let you fill it correctly next time -- name the field, "
-    "  offer the real options that field supports per its own schema/ "
-    "  agent_hints (e.g. \"❓ Where are support tickets coming from — an "
-    "  existing asset, a file, or a URL? If it's an asset, which one?\"), "
-    "  not a generic \"please provide more details.\" Every TODO you "
-    "  wrote in step 1 needs its own question here -- check your output "
-    "  before finishing: for each TODO placeholder, is there a matching "
-    "  `❓` note? The user answers via the same refine/regenerate flow "
-    "  used for any other follow-up, which resubmits with their answer "
-    "  as context.\n"
+    "    2. Set the top-level `clarifying_question` field (see the "
+    "  response shape above) to the SPECIFIC question that would let you "
+    "  fill it correctly next time -- name the field, don't ask a "
+    "  generic \"please provide more details.\" Every TODO you wrote in "
+    "  step 1 needs `clarifying_question` set -- check your output "
+    "  before finishing: if any config value starts with \"TODO\", is "
+    "  `clarifying_question` non-null?\n"
+    "  Populate `clarifying_question.options` (2-4 short, concrete, "
+    "  mutually exclusive answers) whenever the question naturally has a "
+    "  small set of good answers -- e.g. real candidate names from "
+    "  `existing_assets` (\"Where are support tickets coming from?\" -> "
+    "  options: the 2-3 existing assets that plausibly could be it, plus "
+    "  \"Something else\"), or a fixed choice like [\"An existing asset\", "
+    "  \"A file\", \"A URL/API\"] when nothing in existing_assets is a "
+    "  plausible match. Leave `options` null for a genuinely open-ended "
+    "  question (e.g. \"What should the destination table be called?\") "
+    "  where a canned choice list wouldn't actually help. The user "
+    "  answers (by picking an option or typing free text) via the same "
+    "  refine/regenerate flow used for any other follow-up, which "
+    "  resubmits with their answer as context -- you may ask ANOTHER "
+    "  `clarifying_question` in that next round if their answer reveals "
+    "  a new gap; keep going until every TODO is resolved with a real "
+    "  value, THEN set `clarifying_question` to null.\n"
     "- PARTITIONING FIELDS (critical): setting `partition_key_parser` "
     "  alone does NOT enable partitioning. To make a partitioned "
     "  agentic_pipeline (or any partitioned component) actually "
@@ -1149,6 +1183,9 @@ async def plan(
             except (KeyError, IndexError, json.JSONDecodeError) as e:
                 raise GenieError(f"Could not parse LLM response: {e}") from e
 
+    # `parsed` is set in whichever branch above ran.
+    clarifying_question = _parse_clarifying_question(parsed)
+
     valid_ids = {c["id"] for c in filtered}
 
     def _resolve_component_id(raw: str) -> str | None:
@@ -1484,18 +1521,18 @@ async def plan(
     # Deterministic backstop for the SYSTEM_PROMPT's "ASK RATHER THAN
     # FABRICATE" rule: confirmed live that the LLM can follow HALF of a
     # two-part instruction (mark the field as an obvious TODO) while
-    # dropping the other half (the accompanying ❓ question) -- a real
+    # dropping the other half (setting clarifying_question) -- a real
     # incident, not a hypothetical. Prompt wording alone isn't reliable
     # enough on its own (same lesson as every other deterministic check
     # in this file); if any pick's config has a TODO-prefixed placeholder
-    # and `notes` has no ❓ question at all, synthesize a generic one
+    # and clarifying_question is still unset, synthesize a generic one
     # ourselves rather than silently shipping an unconfigured field with
     # no visible sign anything needs attention.
-    if _has_todo_placeholder(picks) and not any(n.startswith("❓") for n in notes):
-        notes.append(
-            "❓ This plan includes placeholder values that still need real "
-            "configuration -- look for \"TODO\" in the config below and use "
-            "the box below to tell Genie what they should be."
+    if _has_todo_placeholder(picks) and clarifying_question is None:
+        clarifying_question = GenieClarifyingQuestion(
+            question="This plan includes placeholder values that still need real "
+            "configuration -- look for \"TODO\" in the config below. What should "
+            "they be?"
         )
 
     usage = data.get("usage") or {}
@@ -1506,6 +1543,7 @@ async def plan(
         tokens_prompt=usage.get("prompt_tokens", 0),
         tokens_completion=usage.get("completion_tokens", 0),
         notes=notes,
+        clarifying_question=clarifying_question,
     )
 
 
@@ -1611,6 +1649,26 @@ def _unknown_fields(schema: dict[str, Any], config: dict[str, Any]) -> list[str]
     schema field names so the repair prompt can rename them directly."""
     attrs = schema.get("attributes") or {}
     return [f for f in (config or {}).keys() if f not in attrs]
+
+
+def _parse_clarifying_question(parsed: dict[str, Any]) -> GenieClarifyingQuestion | None:
+    """Extracts the optional clarifying_question the SYSTEM_PROMPT's ASK
+    RATHER THAN FABRICATE rule asks the LLM to set from the raw parsed
+    plan JSON. Defensive: a malformed value (missing `question`,
+    `options` not a list) is treated as "no question" rather than
+    raising, since this field is a nice-to-have the deterministic
+    TODO-placeholder backstop (_has_todo_placeholder, used at plan()'s
+    call site) covers regardless."""
+    raw_cq = parsed.get("clarifying_question")
+    if not isinstance(raw_cq, dict) or not raw_cq.get("question"):
+        return None
+    raw_options = raw_cq.get("options")
+    options = (
+        [str(o) for o in raw_options if isinstance(o, (str, int, float))]
+        if isinstance(raw_options, list) and raw_options
+        else None
+    )
+    return GenieClarifyingQuestion(question=str(raw_cq["question"]), options=options)
 
 
 def _has_todo_placeholder(picks: list[GeniePick]) -> bool:
