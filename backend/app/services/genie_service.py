@@ -612,7 +612,18 @@ SYSTEM_PROMPT = (
     "or omitted whenever the plan is complete and doesn't need anything "
     "from the user).\n\n"
     "EDITING OR REMOVING EXISTING ASSETS (critical): the task isn't always "
-    "additive. If the user asks to change, reconfigure, or fix something about "
+    "additive. USING an existing asset as an upstream/source is NOT "
+    "editing it -- that's just upstream_asset_names (or a `source: "
+    "{kind: upstream_asset, ...}`-style config field) on the NEW pick "
+    "you're adding; the existing asset itself needs no separate pick at "
+    "all. Confirmed live: told to use a real existing asset as a "
+    "pipeline's data source, the model correctly wired the new pipeline "
+    "pick's upstream_asset_names/source to it, but ALSO emitted a "
+    "redundant, wrong action=edit pick targeting that same existing "
+    "asset for no actual reason (no field of ITS OWN needed to change) "
+    "-- don't do this; referencing an asset is not a reason to edit it. "
+    "Only emit action=edit if the user asks to change, reconfigure, or "
+    "fix something about "
     "an EXISTING asset (one listed under Existing assets below), emit "
     '{"action": "edit", "asset_name": "<the EXISTING asset\'s exact name>", '
     '"config": {"<field>": "<new value>", ...}, "reason": "..."} — config here '
@@ -791,12 +802,18 @@ SYSTEM_PROMPT = (
     "  `clarifying_question` non-null?\n"
     "  Populate `clarifying_question.options` (2-4 short, concrete, "
     "  mutually exclusive answers) whenever the question naturally has a "
-    "  small set of good answers -- e.g. real candidate names from "
-    "  `existing_assets` (\"Where are support tickets coming from?\" -> "
-    "  options: the 2-3 existing assets that plausibly could be it, plus "
-    "  \"Something else\"), or a fixed choice like [\"An existing asset\", "
-    "  \"A file\", \"A URL/API\"] when nothing in existing_assets is a "
-    "  plausible match. Leave `options` null for a genuinely open-ended "
+    "  small set of good answers. If `existing_assets` is non-empty, "
+    "  PREFER listing real asset names from it over a generic category "
+    "  list -- even when none look like an obvious match, a real "
+    "  clickable list of what's actually in the project beats making "
+    "  the user recall/retype a name from memory; let THEM judge "
+    "  relevance, don't filter to only the ones you guess are "
+    "  \"plausible\" (\"Where are support tickets coming from?\" -> "
+    "  options: up to ~6 real names from existing_assets, plus "
+    "  \"Something else\"). Only fall back to a fixed generic choice "
+    "  like [\"An existing asset\", \"A file\", \"A URL/API\"] when "
+    "  `existing_assets` is EMPTY, so there's nothing real to list. "
+    "  Leave `options` null for a genuinely open-ended question "
     "  question (e.g. \"What should the destination table be called?\") "
     "  where a canned choice list wouldn't actually help. The user "
     "  answers (by picking an option or typing free text) via the same "
@@ -1578,11 +1595,24 @@ async def plan(
     # dropped above with just a note, which is a dead end with no picks
     # and no question if clarifying_question also never got set.
     if dropped_invalid_edit_target and not picks and clarifying_question is None:
-        clarifying_question = GenieClarifyingQuestion(
-            question="I tried to reference an existing asset, but couldn't find a "
-            "real match in this project. What's it actually called, or should I "
-            "add a new one instead?"
-        )
+        # Show the REAL list of what's actually in the project, if
+        # anything -- even when none of them look like an obvious match,
+        # a real clickable list beats making the user recall/retype a
+        # name from memory. Capped so this doesn't become an unwieldy
+        # wall of buttons on a large project.
+        real_names = sorted(existing_names)[:8]
+        if real_names:
+            clarifying_question = GenieClarifyingQuestion(
+                question="I tried to reference an existing asset, but couldn't find a "
+                "real match in this project. Is it one of these, or something else?",
+                options=[*real_names, "Add a new one instead"],
+            )
+        else:
+            clarifying_question = GenieClarifyingQuestion(
+                question="I tried to reference an existing asset, but this project "
+                "doesn't have one yet. What should the source actually be, or should "
+                "I add a new one instead?"
+            )
 
     usage = data.get("usage") or {}
     return GeniePlan(
@@ -2007,6 +2037,19 @@ async def _repair_picks(
                 upstream_asset_names=p.get("upstream_asset_names") or original.upstream_asset_names,
                 config=p.get("config") or original.config,
                 reason=p.get("reason") or original.reason,
+                # `action` was never passed here at all -- confirmed live
+                # as a real bug: GeniePick.action defaults to "add", so
+                # EVERY repaired pick silently became "add" regardless of
+                # what it actually was, even a correct action="edit" pick
+                # referencing a real existing asset (with its
+                # appropriately empty component_type, which then produced
+                # an invalid action="add" pick with no component_type at
+                # all once mislabeled). The repair prompt only asks the
+                # model to fix specific field-level issues, never to
+                # reconsider add/edit/remove semantics, so always keep
+                # the original's -- there's no scenario where trusting a
+                # repair-round guess here is more correct.
+                action=original.action,
             )
         )
     # Sanity check: the repair must cover every original pick. If any
