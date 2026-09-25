@@ -92,13 +92,32 @@ def agents_pipelines_component_ids(components: list[dict[str, Any]]) -> set[str]
     Vector Search bin's own guided-form curation, not this one).
     """
     trigger_tags = {"agent", "multi-agent"}
-    return {
+    agent_ids = {
         c["id"]
         for c in components
         if c.get("category") == "ai"
         and c.get("id")
         and (trigger_tags & set(c.get("tags") or []) or c["id"].endswith("_agent"))
     }
+    # Real-world usage is dominated by "I have a file/database, now do
+    # something agentic with it" -- confirmed live, most tasks answer the
+    # data-source question with a category (file/database), not a specific
+    # existing asset. Without a source component in the pool, that answer
+    # was a dead end: the SYSTEM_PROMPT could only TODO-placeholder the
+    # consuming pick's input forever, since it had no component available
+    # to actually build the source. These three are the plain, lightweight
+    # "source" category readers that output a DataFrame with no
+    # additional resource wiring beyond a connection string/env var
+    # (unlike e.g. bigquery_query_asset, which needs a typed cloud
+    # resource) -- see the "BUILDING A NEW FILE OR DATABASE SOURCE"
+    # SYSTEM_PROMPT rule for how they're used. Deliberately NOT the
+    # `ingestion` category (file_ingestion, database_replication, ...) --
+    # those are heavier ELT-style components that belong on the dedicated
+    # Ingestions page, not folded into a single agent/pipeline pick.
+    source_ids = {"dataframe_from_csv", "dataframe_from_sql", "database_query"} & {
+        c["id"] for c in components if c.get("id")
+    }
+    return agent_ids | source_ids
 
 
 # Registry of scoped-planning entry points -- each maps a `scope` string
@@ -802,17 +821,25 @@ SYSTEM_PROMPT = (
     "  `clarifying_question` non-null?\n"
     "  Populate `clarifying_question.options` (2-4 short, concrete, "
     "  mutually exclusive answers) whenever the question naturally has a "
-    "  small set of good answers. If `existing_assets` is non-empty, "
-    "  PREFER listing real asset names from it over a generic category "
-    "  list -- even when none look like an obvious match, a real "
-    "  clickable list of what's actually in the project beats making "
-    "  the user recall/retype a name from memory; let THEM judge "
-    "  relevance, don't filter to only the ones you guess are "
-    "  \"plausible\" (\"Where are support tickets coming from?\" -> "
-    "  options: up to ~6 real names from existing_assets, plus "
-    "  \"Something else\"). Only fall back to a fixed generic choice "
-    "  like [\"An existing asset\", \"A file\", \"A URL/API\"] when "
-    "  `existing_assets` is EMPTY, so there's nothing real to list. "
+    "  small set of good answers. If `existing_assets` has any entries "
+    "  marked `[outputs: DataFrame]`, PREFER listing ALL of those real "
+    "  asset names as options over a generic category list -- even when "
+    "  none look like an obvious match, a real clickable list of what's "
+    "  actually in the project beats making the user recall/retype a "
+    "  name from memory; let THEM judge relevance, don't filter to only "
+    "  the ones you guess are \"plausible\", and don't artificially cap "
+    "  the list -- the UI handles long lists, this is not a chat-bubble- "
+    "  sized constraint (\"Where are support tickets coming from?\" -> "
+    "  options: every DataFrame-outputting name from existing_assets, "
+    "  plus \"Something else\"). Do NOT include an asset marked "
+    "  `[outputs: ...not a DataFrame]` or `[no data output ...]` -- a dbt "
+    "  model materializing a warehouse table, or a plain SQL/side-effect "
+    "  asset with no return value, has nothing this pick can actually "
+    "  consume as its input even though the asset key exists. Only fall "
+    "  back to a fixed generic choice like [\"An existing asset\", \"A "
+    "  file\", \"A URL/API\"] when `existing_assets` has no "
+    "  DataFrame-outputting entries at all, so there's nothing real to "
+    "  list. "
     "  Leave `options` null for a genuinely open-ended question "
     "  question (e.g. \"What should the destination table be called?\") "
     "  where a canned choice list wouldn't actually help. The user "
@@ -824,21 +851,53 @@ SYSTEM_PROMPT = (
     "  value, THEN set `clarifying_question` to null.\n"
     "  A CATEGORY IS NOT A VALUE (critical, confirmed live as a real "
     "  incident): if the user's answer only narrows the CATEGORY (they "
-    "  picked/typed \"an existing asset\" or \"a file\" from your own "
-    "  `options`) without naming a SPECIFIC thing, you still do NOT have "
-    "  a real value -- \"an existing asset\" is not itself an asset "
-    "  name. Do not treat picking that option as license to invent one "
-    "  (do NOT emit action=edit/remove at this point either -- see "
-    "  EDITING OR REMOVING EXISTING ASSETS above for exactly why that's "
-    "  wrong here). Ask a narrower follow-up instead: if the user said "
-    "  \"an existing asset\" and `existing_assets` has plausible "
-    "  candidates, set `clarifying_question.options` to their real "
-    "  names now; if `existing_assets` is empty or has no plausible "
-    "  match, say so and ask them to name it (\"There's no existing "
-    "  asset that looks like a ticket source in this project yet -- "
-    "  what's it called, or should I use placeholder text for now?\"), "
-    "  `options` null. Keep the field TODO-placeholder'd until you have "
-    "  an actual name, not a category.\n"
+    "  picked/typed \"an existing asset\", \"a file\", or \"a database\" "
+    "  from your own `options`) without naming a SPECIFIC thing, you "
+    "  still do NOT have a real value -- \"an existing asset\" is not "
+    "  itself an asset name. Do not treat picking that option as license "
+    "  to invent one (do NOT emit action=edit/remove at this point "
+    "  either -- see EDITING OR REMOVING EXISTING ASSETS above for "
+    "  exactly why that's wrong here). What to do next depends on which "
+    "  category they picked:\n"
+    "    * \"an existing asset\": ask a narrower follow-up. If "
+    "  `existing_assets` has any entries marked `[outputs: DataFrame]`, "
+    "  set `clarifying_question.options` to ALL of their real names now "
+    "  (uncapped -- see the options guidance above); if `existing_assets` "
+    "  has no DataFrame-outputting entries, say so and ask them to name "
+    "  it (\"There's no existing asset that looks like a ticket source "
+    "  in this project yet -- what's it called, or should I use "
+    "  placeholder text for now?\"), `options` null. Keep the field "
+    "  TODO-placeholder'd until you have an actual name, not a "
+    "  category.\n"
+    "    * \"a file\" or \"a database\": do NOT just re-ask the category "
+    "  question again -- see BUILDING A NEW FILE OR DATABASE SOURCE "
+    "  below, which is exactly this situation and covers the dominant "
+    "  real-world case.\n"
+    "- BUILDING A NEW FILE OR DATABASE SOURCE (the common case, "
+    "  critical): most tasks answer the data-source question with one "
+    "  of these two categories, not a specific existing asset -- "
+    "  confirmed live as the dominant case, not an edge case. When that "
+    "  happens, ADD a real new pick right now, wired into the "
+    "  `upstream_asset_names` of whatever pick needed the source:\n"
+    "    * \"a file\" -> `dataframe_from_csv` (reads a CSV from a local "
+    "  path or URL, outputs a DataFrame).\n"
+    "    * \"a database\" -> `dataframe_from_sql` (runs a SQL query "
+    "  against a configured connection, outputs a DataFrame); "
+    "  `database_query` is an acceptable alternative for the same job.\n"
+    "  Fill every field of that new pick you can infer from the task; "
+    "  TODO-placeholder (see ASK RATHER THAN FABRICATE above) whatever "
+    "  you genuinely don't know yet -- typically the file path/URL for a "
+    "  file source, or the SQL query text AND the database connection "
+    "  for a database source -- and set `clarifying_question` asking for "
+    "  exactly those specifics (e.g. \"What's the path or URL to the "
+    "  CSV?\" or \"What SQL query should I run, and which database "
+    "  connection should it use?\"). Do NOT invent or add a new resource "
+    "  component (duckdb_resource, snowflake_resource, etc.) to supply "
+    "  that connection -- resources are out of scope for this flow; "
+    "  TODO-placeholder the connection field itself and ask instead. "
+    "  This turns a dead-end category answer into a concrete pick the "
+    "  user only has to fill in a couple of real fields for, instead of "
+    "  restating \"a file\" forever.\n"
     "- PARTITIONING FIELDS (critical): setting `partition_key_parser` "
     "  alone does NOT enable partitioning. To make a partitioned "
     "  agentic_pipeline (or any partitioned component) actually "
@@ -990,6 +1049,24 @@ def _distill_claude_md(text: str, max_chars: int = 18000) -> str:
     return "\n\n".join(kept)
 
 
+def _produces_dataframe(asset: dict[str, Any] | None) -> bool:
+    """True if an existing asset's declared output type reads as a
+    DataFrame -- mirrors isDataFrameType in ComponentConfigModal.tsx (the
+    frontend's own upstream-asset-key filter for the same reason: a
+    lenient substring match, since community components phrase this by
+    hand and not always as an exact "dataframe" string). An asset with no
+    io_output_type at all (missing/None) is treated as producing nothing
+    usable -- most existing assets predate this field or are dbt
+    models/warehouse tables/plain side-effect SQL that return no value --
+    so it's excluded rather than assumed compatible. See existing_by_name's
+    docstring-equivalent comment below for why "unknown" isn't "yes".
+    """
+    if not asset:
+        return False
+    t = asset.get("io_output_type")
+    return isinstance(t, str) and "dataframe" in t.lower()
+
+
 def _build_user_prompt(
     task: str,
     catalog_lines: list[str],
@@ -1006,6 +1083,12 @@ def _build_user_prompt(
         name = a.get("name")
         ct = a.get("component_type") or "asset"
         base = f"- {name} ({ct})"
+        if _produces_dataframe(a):
+            base += "  [outputs: DataFrame]"
+        elif a.get("io_output_type"):
+            base += f"  [outputs: {a['io_output_type']}, not a DataFrame]"
+        else:
+            base += "  [no data output -- e.g. a dbt model or side-effect SQL asset]"
         cols = a.get("columns") or []
         if cols:
             dtypes = a.get("dtypes") or {}
@@ -1598,9 +1681,15 @@ async def plan(
         # Show the REAL list of what's actually in the project, if
         # anything -- even when none of them look like an obvious match,
         # a real clickable list beats making the user recall/retype a
-        # name from memory. Capped so this doesn't become an unwieldy
-        # wall of buttons on a large project.
-        real_names = sorted(existing_names)[:8]
+        # name from memory. Filtered to DataFrame-outputting assets only
+        # (see _produces_dataframe) -- a dbt model or side-effect SQL
+        # asset has nothing this pick can consume even though its key
+        # exists. Not capped -- a project can have far more than 6-8
+        # candidates and the frontend renders a searchable list rather
+        # than a fixed row of chat-bubble buttons for a long options list.
+        real_names = sorted(
+            n for n in existing_names if _produces_dataframe(existing_by_name.get(n))
+        )
         if real_names:
             clarifying_question = GenieClarifyingQuestion(
                 question="I tried to reference an existing asset, but couldn't find a "
@@ -1610,8 +1699,10 @@ async def plan(
         else:
             clarifying_question = GenieClarifyingQuestion(
                 question="I tried to reference an existing asset, but this project "
-                "doesn't have one yet. What should the source actually be, or should "
-                "I add a new one instead?"
+                "doesn't have one that outputs a DataFrame yet (a dbt model or a "
+                "side-effect SQL asset doesn't count -- there's nothing for this "
+                "pick to actually read). What should the source actually be, or "
+                "should I add a new one instead?"
             )
 
     usage = data.get("usage") or {}

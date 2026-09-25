@@ -52,3 +52,26 @@ class TestAgentsPipelinesComponentIds:
 
     def test_empty_catalog_returns_empty_set(self):
         assert agents_pipelines_component_ids([]) == set()
+
+    def test_quick_file_and_database_sources_are_included_when_present(self):
+        # Most tasks answer "where's the data coming from" with a category
+        # (file/database), not a specific existing asset -- confirmed live
+        # as the dominant case. Without these in the pool, the LLM has no
+        # component available to actually build that source, so the
+        # BUILDING A NEW FILE OR DATABASE SOURCE SYSTEM_PROMPT rule would
+        # have nothing to work with.
+        comps = [
+            _component("agentic_pipeline", tags=["ai", "agent", "multi-agent"]),
+            _component("dataframe_from_csv", category="source", tags=["source", "dataframe", "from", "csv"]),
+            _component("dataframe_from_sql", category="source", tags=["source", "dataframe", "from", "sql"]),
+            _component("database_query", category="source", tags=["source", "database", "query"]),
+        ]
+        result = agents_pipelines_component_ids(comps)
+        assert result == {"agentic_pipeline", "dataframe_from_csv", "dataframe_from_sql", "database_query"}
+
+    def test_other_source_category_components_are_not_swept_in(self):
+        # Only the three curated quick-source ids -- not every "source"
+        # category component (that would reopen the whole ~700-component
+        # catalog this scope exists to avoid).
+        comps = [_component("mongodb_reader", category="source", tags=["source", "mongodb", "reader"])]
+        assert agents_pipelines_component_ids(comps) == set()

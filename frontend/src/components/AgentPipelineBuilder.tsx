@@ -71,6 +71,17 @@ export function AgentPipelineBuilder({ onClose }: { onClose: () => void }) {
   const [turns, setTurns] = useState<Turn[]>([]);
   const [planning, setPlanning] = useState(false);
   const [applying, setApplying] = useState(false);
+  // Filter text for a long clarifying_question.options list (real project
+  // asset names -- could be hundreds, not the 2-4 generic categories a
+  // fixed row of chat-bubble buttons was designed for). Reset whenever a
+  // new question comes in so stale filter text from a previous turn's
+  // options doesn't carry over.
+  const [optionFilter, setOptionFilter] = useState('');
+  // Above this many options, render a filterable list instead of a flat
+  // wrap of chip buttons -- a handful of categories ("A file", "A URL/API")
+  // reads fine as chips, but real_names off an existing_assets list (see
+  // genie_service.py's DataFrame-output backstop) does not.
+  const MANY_OPTIONS_THRESHOLD = 8;
 
   const latestPlan = [...turns].reverse().find((t): t is Extract<Turn, { role: 'genie' }> => t.role === 'genie')?.plan ?? null;
   const isReady = !!latestPlan && latestPlan.picks.length > 0 && !latestPlan.clarifying_question;
@@ -115,6 +126,7 @@ export function AgentPipelineBuilder({ onClose }: { onClose: () => void }) {
       }
       const data: AgentPlanResponse = await res.json();
       setTurns((prev) => [...prev, { role: 'genie', plan: data }]);
+      setOptionFilter('');
       if (data.picks.length === 0 && !data.clarifying_question) {
         notify.warning(data.notes.join('\n') || 'Could not build a plan for that description.');
       }
@@ -307,20 +319,54 @@ export function AgentPipelineBuilder({ onClose }: { onClose: () => void }) {
 
                         {/* Suggested answers -- only on the LAST turn's
                             question, so old questions don't stay clickable
-                            after the conversation has moved on. */}
+                            after the conversation has moved on. A short
+                            list of categories reads fine as a row of chat
+                            chips; a long list of real project asset names
+                            (could be hundreds) does not -- past
+                            MANY_OPTIONS_THRESHOLD, render a filterable
+                            scrollable list instead, the same "search a
+                            long list of assets" pattern ComponentConfigModal
+                            uses for upstream_asset_keys. */}
                         {turn.plan.clarifying_question?.options && i === turns.length - 1 && (
-                          <div className="flex flex-wrap gap-1.5">
-                            {turn.plan.clarifying_question.options.map((opt) => (
-                              <button
-                                key={opt}
-                                onClick={() => replyTo(opt)}
+                          turn.plan.clarifying_question.options.length > MANY_OPTIONS_THRESHOLD ? (
+                            <div className="space-y-1.5">
+                              <input
+                                type="text"
+                                value={optionFilter}
+                                onChange={(e) => setOptionFilter(e.target.value)}
+                                placeholder={`Filter ${turn.plan.clarifying_question.options.length} options…`}
                                 disabled={planning}
-                                className="px-2.5 py-1 text-xs border border-violet-300 text-violet-700 bg-white rounded-full hover:bg-violet-50 disabled:opacity-50 disabled:cursor-not-allowed"
-                              >
-                                {opt}
-                              </button>
-                            ))}
-                          </div>
+                                className="w-full px-2.5 py-1 text-xs border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
+                              />
+                              <div className="max-h-40 overflow-y-auto border border-gray-200 rounded-md divide-y divide-gray-100 bg-white">
+                                {turn.plan.clarifying_question.options
+                                  .filter((opt) => opt.toLowerCase().includes(optionFilter.toLowerCase()))
+                                  .map((opt) => (
+                                    <button
+                                      key={opt}
+                                      onClick={() => replyTo(opt)}
+                                      disabled={planning}
+                                      className="block w-full text-left px-2.5 py-1.5 text-xs text-violet-700 hover:bg-violet-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                                    >
+                                      {opt}
+                                    </button>
+                                  ))}
+                              </div>
+                            </div>
+                          ) : (
+                            <div className="flex flex-wrap gap-1.5">
+                              {turn.plan.clarifying_question.options.map((opt) => (
+                                <button
+                                  key={opt}
+                                  onClick={() => replyTo(opt)}
+                                  disabled={planning}
+                                  className="px-2.5 py-1 text-xs border border-violet-300 text-violet-700 bg-white rounded-full hover:bg-violet-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                                >
+                                  {opt}
+                                </button>
+                              ))}
+                            </div>
+                          )
                         )}
                       </div>
                     </div>
