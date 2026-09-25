@@ -44,6 +44,7 @@ export function ProjectManager() {
   const [showDbtCloudImportDialog, setShowDbtCloudImportDialog] = useState(false);
   const [showDagsterPlusDialog, setShowDagsterPlusDialog] = useState(false);
   const [showProjectsDialog, setShowProjectsDialog] = useState(false);
+  const [projectsFilter, setProjectsFilter] = useState<'all' | 'cloud' | 'local'>('all');
   const [showCodePreview, setShowCodePreview] = useState(false);
   const [newProjectName, setNewProjectName] = useState('');
   const [newProjectGitRepo, setNewProjectGitRepo] = useState('');
@@ -500,6 +501,12 @@ export function ProjectManager() {
       '  dg scaffold github-actions'
     );
   };
+
+  const filteredProjects = projects.filter((p) => {
+    if (projectsFilter === 'all') return true;
+    const isCloud = !!(p as any).is_dagster_plus;
+    return projectsFilter === 'cloud' ? isCloud : !isCloud;
+  });
 
   return (
     <>
@@ -983,12 +990,37 @@ export function ProjectManager() {
               </button>
             </div>
 
+            {projects.length > 0 && (
+              <div className="inline-flex items-center bg-gray-100 rounded-md p-0.5 mb-3">
+                {([
+                  { value: 'all', label: 'All' },
+                  { value: 'cloud', label: 'Dagster+' },
+                  { value: 'local', label: 'Local' },
+                ] as const).map(({ value, label }) => (
+                  <button
+                    key={value}
+                    onClick={() => setProjectsFilter(value)}
+                    className={`px-3 py-1 text-xs font-medium rounded ${
+                      projectsFilter === value ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-600 hover:text-gray-900'
+                    }`}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+            )}
+
             <div className="space-y-2 max-h-96 overflow-y-auto">
               {projects.length === 0 && (
                 <p className="text-center text-gray-500 py-8">No projects yet</p>
               )}
+              {projects.length > 0 && filteredProjects.length === 0 && (
+                <p className="text-center text-gray-500 py-8">
+                  No {projectsFilter === 'cloud' ? 'Dagster+' : 'local'} projects.
+                </p>
+              )}
 
-              {projects.map((project) => (
+              {filteredProjects.map((project) => (
                 <div
                   key={project.id}
                   className="flex items-center gap-2 p-4 border border-gray-200 rounded-lg hover:border-blue-300 group"
