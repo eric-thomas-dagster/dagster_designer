@@ -1338,14 +1338,82 @@ def _required_fields(schema: dict[str, Any]) -> list[str]:
     return [name for name, spec in attrs.items() if isinstance(spec, dict) and spec.get("required")]
 
 
+# This registry's schema "type" strings (a custom vocabulary, not JSON
+# Schema's) -> the Python type(s) a config value for that field must be an
+# instance of. `bool` is deliberately excluded from number/integer: it's a
+# subclass of `int` in Python, so `isinstance(True, int)` is True, and a
+# YAML `true`/`false` landing in a numeric field is exactly the kind of
+# mistake this check exists to catch, not something to wave through.
+_SCHEMA_TYPE_TO_PYTHON: dict[str, type | tuple[type, ...]] = {
+    "string": str,
+    "boolean": bool,
+    "number": (int, float),
+    "integer": int,
+    "array": list,
+    "object": dict,
+}
+
+
+def _type_mismatches(schema: dict[str, Any], config: dict[str, Any]) -> list[str]:
+    """For every field actually PRESENT in `config` (required or not --
+    pydantic validates a provided value's type regardless of whether the
+    field is required), check it against the schema's declared `type`.
+    Catches e.g. a plain string handed to a field schema'd as `array`
+    (the exact shape of a real incident: `upstream_asset_keys: "marts/x"`
+    instead of `["marts/x"]", which _required_fields' presence-only check
+    doesn't catch -- the field WAS present, just wrong-shaped).
+
+    Unknown/unmapped schema types and fields not in `attributes` at all
+    are skipped, not flagged -- this only rejects a CONFIRMED mismatch
+    against a type this function actually understands, never a guess."""
+    attrs = schema.get("attributes") or {}
+    mismatches: list[str] = []
+    for field, value in (config or {}).items():
+        spec = attrs.get(field)
+        if not isinstance(spec, dict):
+            continue
+        schema_type = spec.get("type")
+        expected = _SCHEMA_TYPE_TO_PYTHON.get(schema_type)
+        if expected is None:
+            continue
+        if value is None:
+            continue  # explicit null on an optional field -- not a type error
+        if isinstance(value, bool) and expected in (int, (int, float)):
+            mismatches.append(f"'{field}' should be {schema_type}, got boolean")
+            continue
+        if not isinstance(value, expected):
+            mismatches.append(f"'{field}' should be {schema_type}, got {type(value).__name__}")
+    return mismatches
+
+
+def _unknown_fields(schema: dict[str, Any], config: dict[str, Any]) -> list[str]:
+    """Fields the pick's config used that aren't in the schema's real
+    `attributes` at all -- e.g. a pick that wrote `query`/`output_table`
+    for a component whose schema actually calls those fields `sql`/
+    `destination_table`. `/install-via-cli`'s merge only recognizes a
+    narrow, hand-maintained alias_map (path, upstream_asset_keys,
+    output_path, input_asset) -- anything else it doesn't recognize gets
+    silently DROPPED, leaving the CLI-installed stub's own example value
+    in place instead of the pick's real one (a real incident: a
+    `sql_transform` pick's task-correct SQL was written under `query`,
+    got dropped on apply, and the stub's unrelated Snowflake
+    dedup-example SQL under `sql` shipped in its place -- the user saw
+    the right SQL in the plan preview and it just never made it into
+    the installed file). Reports both the bad key names and the real
+    schema field names so the repair prompt can rename them directly."""
+    attrs = schema.get("attributes") or {}
+    return [f for f in (config or {}).keys() if f not in attrs]
+
+
 async def _detect_schema_issues(picks: list[GeniePick], components_by_id: dict[str, dict[str, Any]]) -> list[str]:
-    """Deterministic check the LLM-based validation never covered: does
+    """Deterministic checks the LLM-based validation never covered: does
     each "add" pick's config actually include every required attribute
-    per its component's real schema.json? Catches hallucinated/omitted
+    per its component's real schema.json, and does every field it DID
+    provide have the right type? Catches hallucinated/omitted/wrong-typed
     config fields (as opposed to _detect_coordination_issues, which only
     catches cross-pick reference mismatches) -- e.g. a pick that's
-    missing a required `asset_name` or `upstream_asset_key` the LLM just
-    never filled in.
+    missing a required `asset_name`, or one that provided
+    `upstream_asset_keys` as a bare string when the schema wants an array.
 
     Only "add" picks are checked -- "edit" merges into an existing
     instance's already-valid config, so a partial config there is
@@ -1378,6 +1446,23 @@ async def _detect_schema_issues(picks: list[GeniePick], components_by_id: dict[s
             issues.append(
                 f"Pick '{p.asset_name}' ({p.component_type}) is missing required "
                 f"field(s): {', '.join(missing)}."
+            )
+        mismatches = _type_mismatches(schema, p.config or {})
+        if mismatches:
+            issues.append(
+                f"Pick '{p.asset_name}' ({p.component_type}) has wrong-typed "
+                f"field(s): {'; '.join(mismatches)}."
+            )
+        unknown = _unknown_fields(schema, p.config or {})
+        if unknown:
+            valid = sorted((schema.get("attributes") or {}).keys())
+            issues.append(
+                f"Pick '{p.asset_name}' ({p.component_type}) used unrecognized "
+                f"field name(s): {', '.join(unknown)} -- these will be silently "
+                f"dropped on apply, leaving the component's own default/example "
+                f"value in place instead. Valid field names for this component "
+                f"are: {', '.join(valid)}. Rename each unrecognized field to "
+                f"whichever valid name it actually means (keep its value)."
             )
     return issues
 
@@ -1501,8 +1586,9 @@ async def _repair_picks(
     repair_prompt = (
         f"Original user task:\n{task}\n\n"
         f"You produced this plan:\n{plan_json}\n\n"
-        f"A server-side check found these cross-pick coordination "
-        f"issues:\n" + "\n".join(f"  - {i}" for i in issues) + "\n\n"
+        f"A server-side check found these configuration issues (cross-pick "
+        f"references, missing/wrong-typed/misnamed config fields):\n"
+        + "\n".join(f"  - {i}" for i in issues) + "\n\n"
         "Return the FULL plan (same shape: {\"picks\": [...]}) with the "
         "issues fixed. Only change values needed to resolve the "
         "references. Keep every unchanged field identical. Do not "
