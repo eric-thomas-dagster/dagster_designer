@@ -2113,6 +2113,26 @@ async def validate_project(project_id: str):
         # succeeds moments later on manual retry" pattern is what users were
         # seeing by re-opening validation details themselves; retrying here
         # does that for them instead of surfacing a false failure.
+        # Without this, the subprocess inherits the FastAPI backend's own
+        # environment verbatim -- including VIRTUAL_ENV and PATH pointing at
+        # the app bundle's own backend/.venv (set by `uv run` when the
+        # backend itself was launched, see src-tauri's spawn_backend). A
+        # project-scoped `dg` binary invoked that way still runs fine, but
+        # anything it loads that does its own `shutil.which("dbt")` lookup
+        # (dagster-dbt's DbtCliResource, notably) finds the backend's own
+        # dbt-core on PATH before this project's -- which has no adapter
+        # (duckdb, snowflake, ...) installed, since adapters are a
+        # per-project dependency, not a backend one. Same fix already
+        # applied to materialize_assets below; this was the one call site
+        # that still leaked the ambient env.
+        import os
+        project_dir_abs = project_dir.absolute()
+        venv_path_abs = project_dir_abs / ".venv"
+        env = os.environ.copy()
+        env['VIRTUAL_ENV'] = str(venv_path_abs)
+        env['PATH'] = f"{venv_path_abs / 'bin'}:{env.get('PATH', '')}"
+        env.pop('PYTHONHOME', None)
+
         result = None
         for attempt in range(2):
             result = await asyncio.to_thread(
@@ -2121,7 +2141,8 @@ async def validate_project(project_id: str):
                 cwd=str(project_dir.absolute()),
                 capture_output=True,
                 text=True,
-                timeout=180  # 180 seconds for massive dbt projects
+                timeout=180,  # 180 seconds for massive dbt projects
+                env=env,
             )
             if result.returncode == 0 or attempt == 1:
                 break
