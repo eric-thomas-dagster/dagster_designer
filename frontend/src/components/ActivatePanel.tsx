@@ -1,11 +1,12 @@
 import { useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { Send, Plus, CheckCircle2, XCircle, Clock, AlertTriangle, Play, Loader2 } from 'lucide-react';
+import { Send, Plus, CheckCircle2, XCircle, Clock, AlertTriangle, Play, Loader2, TrendingUp, Activity } from 'lucide-react';
 import { useProjectStore } from '@/hooks/useProject';
 import { assetsApi, projectsApi, API_BASE } from '@/services/api';
 import { notify } from './Notifications';
 import { AddActivationDialog } from './AddActivationDialog';
 import { extractComponentId } from '@/lib/componentId';
+import { KpiCard, TrendChart, formatCompact } from './RunActivityCharts';
 import type { ComponentInstance } from '@/types';
 
 interface ActivatePanelProps {
@@ -21,16 +22,18 @@ interface ActivatePanelProps {
  * regex heuristic, since extractComponentId() + a real category lookup
  * is available and more reliable than guessing from a name.
  *
- * Deliberately lighter than IngestionsPanel for now: a status table +
- * "Add activation" picker, not the full KPI band / trend chart / bulk
- * actions / partition backfill that page has grown. Reuses the same
- * ingestion_events.jsonl log (asset-key-keyed, not ingestion-specific)
- * for last-run status, so this comes for free from existing infra.
+ * Shares the same KPI band + trend chart treatment as IngestionsPanel
+ * (extracted into RunActivityCharts so neither page duplicates the SVG
+ * chart) -- still lighter than that page overall: no bulk actions or
+ * partition backfill UI yet. Reuses the same ingestion_events.jsonl log
+ * (asset-key-keyed, not ingestion-specific) for last-run status and the
+ * KPIs, so this comes for free from existing infra.
  */
 export function ActivatePanel({ onAddActivationTarget, onEditComponent }: ActivatePanelProps) {
   const { currentProject } = useProjectStore();
   const [addOpen, setAddOpen] = useState(false);
   const [runningId, setRunningId] = useState<string | null>(null);
+  const [window, setWindow] = useState<'24h' | '7d' | '30d'>('7d');
 
   const { data: manifest } = useQuery({
     queryKey: ['community-templates-manifest'],
@@ -69,6 +72,57 @@ export function ActivatePanel({ onAddActivationTarget, onEditComponent }: Activa
       });
   }, [currentProject, reverseEtlIds, history]);
 
+  // KPI band + trend, mirroring IngestionsPanel's "state of your fleet"
+  // treatment -- same shared event log (assetsApi.ingestionHistory is
+  // keyed by asset_key, not ingestion-specific), just scoped to
+  // activation targets instead of sources.
+  const activationAssetKeys = useMemo(() => new Set(activations.map((a) => a.assetKey)), [activations]);
+  const activationEvents = useMemo(
+    () => (history?.events ?? []).filter((e) => activationAssetKeys.has(e.asset_key)),
+    [history, activationAssetKeys],
+  );
+  const windowMs = window === '24h' ? 24 * 3600e3 : window === '7d' ? 7 * 24 * 3600e3 : 30 * 24 * 3600e3;
+  const now = Date.now();
+  const windowedEvents = useMemo(
+    () => activationEvents.filter((e) => now - new Date(e.ts).getTime() <= windowMs),
+    [activationEvents, windowMs, now],
+  );
+  const analytics = useMemo(() => {
+    const latestPerAsset = new Map<string, (typeof activationEvents)[number]>();
+    for (const e of activationEvents) {
+      if (e.status !== 'success' || (e.rows ?? null) === null) continue;
+      const prev = latestPerAsset.get(e.asset_key);
+      if (!prev || new Date(e.ts) > new Date(prev.ts)) latestPerAsset.set(e.asset_key, e);
+    }
+    const totalRowsSynced = Array.from(latestPerAsset.values()).reduce((s, e) => s + (e.rows ?? 0), 0);
+
+    const windowMats = windowedEvents.filter((e) => e.type === 'materialize');
+    const successes = windowMats.filter((e) => e.status === 'success').length;
+    const failures = windowMats.filter((e) => e.status === 'failure').length;
+    const running = activationEvents.filter((e) => e.status === 'running').length;
+    const successRate = windowMats.length > 0 ? successes / windowMats.length : null;
+    return { totalRowsSynced, successes, failures, running, successRate };
+  }, [activationEvents, windowedEvents]);
+
+  const trend = useMemo(() => {
+    const bucketMs = window === '24h' ? 3600e3 : 24 * 3600e3;
+    const bucketCount = window === '24h' ? 24 : window === '7d' ? 7 : 30;
+    const startMs = now - bucketCount * bucketMs;
+    const buckets: { t: number; success: number; failure: number; rows: number }[] = [];
+    for (let i = 0; i < bucketCount; i++) buckets.push({ t: startMs + i * bucketMs, success: 0, failure: 0, rows: 0 });
+    for (const e of windowedEvents) {
+      const dt = new Date(e.ts).getTime();
+      if (dt < startMs) continue;
+      const idx = Math.min(bucketCount - 1, Math.floor((dt - startMs) / bucketMs));
+      if (e.type === 'materialize') {
+        if (e.status === 'success') buckets[idx].success++;
+        else if (e.status === 'failure') buckets[idx].failure++;
+      }
+      if (e.type === 'materialize' && e.status === 'success') buckets[idx].rows += e.rows ?? 0;
+    }
+    return { buckets, bucketMs, bucketCount };
+  }, [windowedEvents, window, now]);
+
   const handleRun = async (assetKey: string, componentId: string) => {
     if (!currentProject) return;
     setRunningId(componentId);
@@ -105,7 +159,57 @@ export function ActivatePanel({ onAddActivationTarget, onEditComponent }: Activa
         </button>
       </div>
 
-      <div className="px-8 py-6">
+      <div className="px-8 py-6 space-y-4">
+        <div className="flex items-center justify-between">
+          <h2 className="text-sm font-semibold text-gray-900">Overview</h2>
+          <div className="flex items-center gap-0.5 bg-gray-100 rounded p-0.5">
+            {(['24h', '7d', '30d'] as const).map((w) => (
+              <button
+                key={w}
+                onClick={() => setWindow(w)}
+                className={`px-2.5 py-1 text-xs rounded ${
+                  window === w ? 'bg-white text-gray-900 shadow-sm font-medium' : 'text-gray-600'
+                }`}
+              >
+                Last {w}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+          <KpiCard
+            label="Total rows synced"
+            value={formatCompact(analytics.totalRowsSynced)}
+            hint="across all activation targets"
+            icon={TrendingUp}
+            tone="success"
+          />
+          <KpiCard
+            label="Active now"
+            value={String(analytics.running)}
+            hint={analytics.running > 0 ? 'currently running' : 'no runs in flight'}
+            icon={analytics.running > 0 ? Loader2 : Activity}
+            iconSpin={analytics.running > 0}
+            tone={analytics.running > 0 ? 'success' : 'neutral'}
+          />
+          <KpiCard
+            label={`Successful runs (${window})`}
+            value={String(analytics.successes)}
+            hint={analytics.successRate !== null ? `${Math.round((analytics.successRate ?? 0) * 100)}% success rate` : 'no runs yet'}
+            icon={CheckCircle2}
+            tone="success"
+          />
+          <KpiCard
+            label={`Failed runs (${window})`}
+            value={String(analytics.failures)}
+            icon={XCircle}
+            tone={analytics.failures > 0 ? 'warning' : 'neutral'}
+          />
+        </div>
+
+        <TrendChart trend={trend} window={window} title="Activation activity" rowsLegendLabel="rows synced" emptyHint="Sync an activation target to start populating this chart." />
+
         <div className="bg-white border border-gray-200 rounded-lg overflow-hidden">
           <div className="px-4 py-3 border-b border-gray-100 flex items-center gap-2">
             <Send className="w-4 h-4 text-gray-500" />

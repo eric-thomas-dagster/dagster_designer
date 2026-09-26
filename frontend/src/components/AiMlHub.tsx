@@ -5,6 +5,8 @@ import { AgentPipelineBuilder } from './AgentPipelineBuilder';
 import { DocumentExtractionWizard } from './DocumentExtractionWizard';
 import { DocumentExtractorConfigStep } from './DocumentExtractorConfigStep';
 import { OcrExtractorConfigStep } from './OcrExtractorConfigStep';
+import { ClassificationWizard } from './ClassificationWizard';
+import { ClassifierConfigStep } from './ClassifierConfigStep';
 import { ComponentConfigModal } from './ComponentConfigModal';
 import { extractComponentId } from '@/lib/componentId';
 
@@ -43,10 +45,10 @@ const CARDS: HubCard[] = [
   {
     id: 'classic_ml',
     label: 'Classic ML / Inference',
-    description: 'BigQuery ML, MLflow, classifiers, translation, forecasting.',
+    description: 'Classifiers (text, zero-shot, image) are ready — point at a source, pick labels. BigQuery ML, MLflow, and translation still fall back to the raw form.',
     icon: BrainCircuit,
     count: 11,
-    status: 'soon',
+    status: 'ready',
   },
   {
     id: 'rag',
@@ -162,6 +164,16 @@ export function AiMlHub() {
         />
       )}
 
+      {openBuilder === 'classic_ml' && (
+        <ClassificationWizard
+          onClose={() => setOpenBuilder(null)}
+          onOpenComponentConfig={(componentType, initialAttributes) => {
+            setPendingConfig({ componentType, initialAttributes });
+            setOpenBuilder(null);
+          }}
+        />
+      )}
+
       {pendingConfig && (
         extractComponentId(pendingConfig.componentType) === 'structured_document_extractor' ? (
           <DocumentExtractorConfigStep
@@ -173,6 +185,13 @@ export function AiMlHub() {
           />
         ) : extractComponentId(pendingConfig.componentType) === 'ocr_extractor' ? (
           <OcrExtractorConfigStep
+            componentType={pendingConfig.componentType}
+            initialAttributes={pendingConfig.initialAttributes || {}}
+            onDone={() => setPendingConfig(null)}
+            onClose={() => setPendingConfig(null)}
+          />
+        ) : ['text_classifier', 'zero_shot_classifier', 'image_classifier'].includes(extractComponentId(pendingConfig.componentType)) ? (
+          <ClassifierConfigStep
             componentType={pendingConfig.componentType}
             initialAttributes={pendingConfig.initialAttributes || {}}
             onDone={() => setPendingConfig(null)}

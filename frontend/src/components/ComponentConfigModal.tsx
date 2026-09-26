@@ -2091,19 +2091,29 @@ export function ComponentConfigModal({
           {/* Translation Section — universal to all authoring
               contexts (asset-key rewriting works whether the
               component lands locally, in a sandbox, or as a cloud
-              draft to be promoted). */}
-          <div className="border-t border-gray-200 pt-4 mt-4">
-            <TranslationEditor value={translation} onChange={setTranslation} />
-          </div>
+              draft to be promoted). Collapsed by default: this section
+              alone (its own fields + Advanced Options + Examples) was
+              taking as much vertical space as the component's own
+              actually-required fields, which read as "this dialog isn't
+              helpful" when what someone needed (e.g. a sink's fields_map)
+              was buried below an always-open, rarely-needed section. */}
+          <details className="border-t border-gray-200 pt-4 mt-4">
+            <summary className="cursor-pointer text-sm font-medium text-gray-600 hover:text-gray-900 select-none">
+              Advanced: customize how this asset is generated (optional)
+            </summary>
+            <div className="mt-3">
+              <TranslationEditor value={translation} onChange={setTranslation} />
+            </div>
 
-          {/* Template variables hint */}
-          <div className="text-xs text-gray-500 bg-gray-50 border border-gray-200 rounded-md p-3">
-            <strong>Tip:</strong> Use template variables like{' '}
-            <code className="bg-gray-200 px-1 rounded">{'{{ env.VAR_NAME }}'}</code> for
-            environment variables, or{' '}
-            <code className="bg-gray-200 px-1 rounded">{'{{ project_root }}/repo-name'}</code> to
-            reference cloned git repositories
-          </div>
+            {/* Template variables hint */}
+            <div className="text-xs text-gray-500 bg-gray-50 border border-gray-200 rounded-md p-3 mt-3">
+              <strong>Tip:</strong> Use template variables like{' '}
+              <code className="bg-gray-200 px-1 rounded">{'{{ env.VAR_NAME }}'}</code> for
+              environment variables, or{' '}
+              <code className="bg-gray-200 px-1 rounded">{'{{ project_root }}/repo-name'}</code> to
+              reference cloned git repositories
+            </div>
+          </details>
         </div>
 
         {/* Footer */}

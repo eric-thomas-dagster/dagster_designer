@@ -10,6 +10,7 @@ Uses the community templates manifest to know what components are available.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
@@ -1200,6 +1201,32 @@ def _build_user_prompt(
     return "\n\n".join(parts) + "\n"
 
 
+_RETRY_AFTER_RE = re.compile(r"try again in ([\d.]+)s", re.IGNORECASE)
+
+
+async def _post_with_retry(
+    client: "httpx.AsyncClient", url: str, *, headers: dict, json_body: dict, max_retries: int = 2,
+) -> "httpx.Response":
+    """POST with a short retry-with-backoff on 429 (rate limit) --
+    confirmed live: OpenAI's 429 body is a full raw JSON error blob, which
+    read as a scary, unfiltered dump when it reached the user unchanged.
+    Providers often tell us exactly how long to wait ("try again in
+    13.368s"); honor that when present, otherwise fall back to a fixed
+    short delay. Any other status still raises immediately -- only 429 is
+    worth retrying automatically.
+    """
+    last_response = None
+    for attempt in range(max_retries + 1):
+        r = await client.post(url, headers=headers, json=json_body)
+        if r.status_code != 429 or attempt == max_retries:
+            return r
+        last_response = r
+        m = _RETRY_AFTER_RE.search(r.text)
+        delay = float(m.group(1)) + 0.5 if m else 3.0
+        await asyncio.sleep(min(delay, 20.0))
+    return last_response  # pragma: no cover -- loop always returns above
+
+
 async def plan(
     task: str,
     existing_assets: list[dict[str, Any]] | None = None,
@@ -1313,10 +1340,11 @@ async def plan(
             workspace_id = os.getenv("ANTHROPIC_WORKSPACE_ID")
             if workspace_id:
                 anthropic_headers["anthropic-workspace-id"] = workspace_id
-            r = await client.post(
+            r = await _post_with_retry(
+                client,
                 "https://api.anthropic.com/v1/messages",
                 headers=anthropic_headers,
-                json={
+                json_body={
                     "model": model,
                     "max_tokens": 4096,
                     "system": SYSTEM_PROMPT + "\n\nRespond with ONLY the JSON object, no prose, no code fences.",
@@ -1324,6 +1352,8 @@ async def plan(
                     "temperature": 0.2,
                 },
             )
+            if r.status_code == 429:
+                raise GenieError("Anthropic is rate-limiting this API key right now. Wait a few seconds and try again.")
             if r.status_code != 200:
                 raise GenieError(f"Anthropic error {r.status_code}: {r.text[:400]}")
             data = r.json()
@@ -1349,10 +1379,11 @@ async def plan(
             except (KeyError, IndexError, json.JSONDecodeError) as e:
                 raise GenieError(f"Could not parse Claude response: {e}") from e
         else:
-            r = await client.post(
+            r = await _post_with_retry(
+                client,
                 "https://api.openai.com/v1/chat/completions",
                 headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-                json={
+                json_body={
                     "model": model,
                     "messages": [
                         {"role": "system", "content": SYSTEM_PROMPT},
@@ -1362,6 +1393,8 @@ async def plan(
                     "temperature": 0.2,
                 },
             )
+            if r.status_code == 429:
+                raise GenieError("OpenAI is rate-limiting this API key right now. Wait a few seconds and try again.")
             if r.status_code != 200:
                 raise GenieError(f"OpenAI error {r.status_code}: {r.text[:400]}")
             data = r.json()
