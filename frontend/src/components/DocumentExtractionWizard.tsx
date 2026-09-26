@@ -1,5 +1,4 @@
 import { useMemo, useState } from 'react';
-import { useMutation } from '@tanstack/react-query';
 import {
   X, ArrowLeft, ArrowRight, Loader2, FileText, ScanText, Receipt, FileSearch, Layers, Terminal,
 } from 'lucide-react';
@@ -12,6 +11,25 @@ import { API_BASE } from '@/services/api';
 // strict enum), so an exact "dataframe" match silently under-matches.
 function isDataFrameType(t: unknown): boolean {
   return typeof t === 'string' && t.toLowerCase().includes('dataframe');
+}
+
+// Auto-derive a file_lister asset name from a raw path/glob -- only
+// needed as a fallback for the extractor ids that still require a real
+// upstream_asset_key (everything except structured_document_extractor,
+// which reads a path directly and doesn't need a named asset at all).
+// Takes the last non-glob path segment, strips a file extension if the
+// path pointed at one file rather than a directory, and dedupes against
+// names already in use.
+function deriveSourceName(path: string, existingNames: Set<string>): string {
+  const cleaned = path.replace(/[*?[\]{}].*$/, '').replace(/\/+$/, '');
+  const segments = cleaned.split(/[\\/]/).filter(Boolean);
+  let base = (segments[segments.length - 1] || 'documents').replace(/\.[^./]+$/, '');
+  base = base.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || 'documents';
+  if (!/^[a-z]/.test(base)) base = `source_${base}`;
+  if (!existingNames.has(base)) return base;
+  let n = 2;
+  while (existingNames.has(`${base}_${n}`)) n += 1;
+  return `${base}_${n}`;
 }
 
 // The 24 real "extraction"/"ocr"/"document" tagged components in the
@@ -97,13 +115,19 @@ export function DocumentExtractionWizard({
   onOpenComponentConfig,
 }: {
   onClose: () => void;
-  onOpenComponentConfig: (componentType: string, initialAttributes?: Record<string, any>) => void;
+  onOpenComponentConfig: (componentType: string, initialAttributes?: Record<string, any>, sourcePath?: string) => void;
 }) {
   const { currentProject } = useProjectStore();
   const [step, setStep] = useState<1 | 2>(1);
   const [selectedSource, setSelectedSource] = useState<string | null>(null);
+  // The raw fsspec path/glob behind selectedSource -- carried alongside the
+  // asset key (not looked up again downstream) so the config step can show
+  // a real document preview via GET /assets/{project}/sample-files before
+  // the source asset has ever been materialized. Existing sources resolve
+  // it from the matching component's own `path` attribute; a freshly-added
+  // source already has it in hand from the "connect a new source" form.
+  const [selectedSourcePath, setSelectedSourcePath] = useState<string | null>(null);
   const [showNewSourceForm, setShowNewSourceForm] = useState(false);
-  const [newSourceName, setNewSourceName] = useState('');
   const [newSourcePath, setNewSourcePath] = useState('');
   const [newSourceDownload, setNewSourceDownload] = useState(true);
 
@@ -111,42 +135,34 @@ export function DocumentExtractionWizard({
     if (!currentProject) return [];
     return currentProject.graph.nodes
       .filter((n) => (n.type === 'asset' || (n.data as any)?.asset_key) && isDataFrameType((n.data as any)?.io_output_type))
-      .map((n) => ({
-        assetKey: (n.data as any)?.asset_key || n.id,
-        label: (n.data as any)?.label || (n.data as any)?.asset_key || n.id,
-        componentType: (n.data as any)?.component_type,
-      }));
+      .map((n) => {
+        const assetKey = (n.data as any)?.asset_key || n.id;
+        // Resolve the raw path from the underlying component instance, if
+        // it has one (file_lister and similar source components) -- not
+        // every source shape will (e.g. a dbt model), so this can be null.
+        const comp = currentProject.components.find((c) => (c.attributes?.asset_name || c.id) === assetKey);
+        return {
+          assetKey,
+          label: (n.data as any)?.label || assetKey,
+          componentType: (n.data as any)?.component_type,
+          path: (comp?.attributes?.path as string | undefined) || undefined,
+        };
+      });
   }, [currentProject]);
 
-  const installNewSource = useMutation({
-    mutationFn: async () => {
-      if (!currentProject) throw new Error('No project selected');
-      if (!newSourceName.trim() || !newSourcePath.trim()) throw new Error('Name and path are required');
-      const res = await fetch(`${API_BASE}/templates/install-via-cli/file_lister`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          project_id: currentProject.id,
-          config: {},
-          attributes: {
-            asset_name: newSourceName.trim(),
-            path: newSourcePath.trim(),
-            download: newSourceDownload,
-          },
-        }),
-      });
-      const body = await res.json().catch(() => ({} as any));
-      if (!res.ok) throw new Error(body.detail || 'Failed to add source');
-      return newSourceName.trim();
-    },
-    onSuccess: (assetName) => {
-      notify.success(`Added "${assetName}" as a document source.`);
-      setSelectedSource(assetName);
-      setShowNewSourceForm(false);
-      setStep(2);
-    },
-    onError: (e: Error) => notify.error(`Failed to add source: ${e.message}`),
-  });
+  // No install call here anymore -- just capturing the raw path. Whether a
+  // real file_lister asset needs to exist for it (and what name it gets)
+  // is decided in pickExtractor once we know which extractor is chosen:
+  // structured_document_extractor reads a path directly and needs neither;
+  // everything else still requires a real upstream_asset_key, so THAT path
+  // lazily installs file_lister with an auto-derived name.
+  const confirmNewSourcePath = () => {
+    if (!newSourcePath.trim()) return;
+    setSelectedSource(null);
+    setSelectedSourcePath(newSourcePath.trim());
+    setShowNewSourceForm(false);
+    setStep(2);
+  };
 
   const [installingExtractorId, setInstallingExtractorId] = useState<string | null>(null);
   // Set when install-via-cli reports missing_system_deps (a binary like
@@ -161,15 +177,41 @@ export function DocumentExtractionWizard({
   const [installingBrewDeps, setInstallingBrewDeps] = useState(false);
 
   const finishPick = (componentType: string, initialAttributes?: Record<string, any>) => {
-    onOpenComponentConfig(componentType, initialAttributes);
+    onOpenComponentConfig(componentType, initialAttributes, selectedSourcePath || undefined);
     onClose();
   };
 
   const pickExtractor = async (opt: ExtractorOption) => {
     const optKey = `${opt.id}:${opt.documentType ?? ''}`;
-    if (!currentProject || !selectedSource || installingExtractorId) return;
+    if (!currentProject || (!selectedSource && !selectedSourcePath) || installingExtractorId) return;
     setInstallingExtractorId(optKey);
     try {
+      // structured_document_extractor reads a path directly (no separate
+      // file_lister asset needed); every other extractor id still requires
+      // a real upstream_asset_key, so lazily install file_lister here --
+      // only now that we know it's actually needed -- with a name derived
+      // from the path instead of asking the user to make one up.
+      let upstreamAssetKey = selectedSource;
+      if (opt.id !== 'structured_document_extractor' && !upstreamAssetKey) {
+        const existingNames = new Set(
+          currentProject.components.map((c) => (c.attributes?.asset_name as string) || c.id),
+        );
+        const derivedName = deriveSourceName(selectedSourcePath!, existingNames);
+        const listerRes = await fetch(`${API_BASE}/templates/install-via-cli/file_lister`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            project_id: currentProject.id,
+            config: {},
+            attributes: { asset_name: derivedName, path: selectedSourcePath, download: newSourceDownload },
+          }),
+        });
+        const listerBody = await listerRes.json().catch(() => ({} as any));
+        if (!listerRes.ok) throw new Error(listerBody.detail || 'Failed to add source');
+        upstreamAssetKey = derivedName;
+        setSelectedSource(derivedName);
+      }
+
       const res = await fetch(`${API_BASE}/templates/install-via-cli/${opt.id}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -178,7 +220,7 @@ export function DocumentExtractionWizard({
       const body = await res.json().catch(() => ({} as any));
       if (!res.ok) throw new Error(body.detail || 'Install failed');
       const initialAttributes = {
-        upstream_asset_key: selectedSource,
+        ...(upstreamAssetKey ? { upstream_asset_key: upstreamAssetKey } : { path: selectedSourcePath }),
         ...(opt.documentType ? { document_type: opt.documentType } : {}),
       };
       const missing: string[] = body.missing_system_deps || [];
@@ -297,7 +339,7 @@ export function DocumentExtractionWizard({
                   {existingSources.map((s) => (
                     <button
                       key={s.assetKey}
-                      onClick={() => { setSelectedSource(s.assetKey); setStep(2); }}
+                      onClick={() => { setSelectedSource(s.assetKey); setSelectedSourcePath(s.path || null); setStep(2); }}
                       className="w-full flex items-center justify-between px-3 py-2 text-left border border-gray-200 rounded-md hover:border-blue-300 hover:bg-blue-50/40"
                     >
                       <div>
@@ -325,16 +367,6 @@ export function DocumentExtractionWizard({
                   </button>
                 ) : (
                   <div className="border border-gray-200 rounded-md p-3 space-y-2.5">
-                    <div>
-                      <label className="block text-xs font-medium text-gray-700 mb-1">Name</label>
-                      <input
-                        type="text"
-                        value={newSourceName}
-                        onChange={(e) => setNewSourceName(e.target.value)}
-                        placeholder="incoming_invoices"
-                        className="w-full px-2.5 py-1.5 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-                      />
-                    </div>
                     <div>
                       <label className="block text-xs font-medium text-gray-700 mb-1">Path / glob</label>
                       <input
@@ -364,12 +396,12 @@ export function DocumentExtractionWizard({
                         Cancel
                       </button>
                       <button
-                        onClick={() => installNewSource.mutate()}
-                        disabled={installNewSource.isPending || !newSourceName.trim() || !newSourcePath.trim()}
+                        onClick={confirmNewSourcePath}
+                        disabled={!newSourcePath.trim()}
                         className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-primary text-primary-foreground rounded-md hover:bg-accent disabled:opacity-50"
                       >
-                        {installNewSource.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <ArrowRight className="w-3.5 h-3.5" />}
-                        Add source
+                        <ArrowRight className="w-3.5 h-3.5" />
+                        Use this path
                       </button>
                     </div>
                   </div>
@@ -385,8 +417,8 @@ export function DocumentExtractionWizard({
                 <ArrowLeft className="w-3.5 h-3.5" /> Back to source
               </button>
               <p className="text-sm text-gray-500">
-                Reading from <span className="font-mono text-gray-700">{selectedSource}</span> — pick what to extract.
-                You'll configure the specific fields (which column has the file path, language, etc.) next.
+                Reading from <span className="font-mono text-gray-700">{selectedSource || selectedSourcePath}</span> — pick what to extract.
+                You'll configure the specific fields next.
               </p>
               <div className="space-y-4">
                 {EXTRACTOR_GROUPS.map((group) => {

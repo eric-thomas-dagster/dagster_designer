@@ -3,7 +3,9 @@ import { Sparkles, FileText, BrainCircuit, Search, ShieldCheck, Eye, Mic } from 
 import { useProjectStore } from '@/hooks/useProject';
 import { AgentPipelineBuilder } from './AgentPipelineBuilder';
 import { DocumentExtractionWizard } from './DocumentExtractionWizard';
+import { DocumentExtractorConfigStep } from './DocumentExtractorConfigStep';
 import { ComponentConfigModal } from './ComponentConfigModal';
+import { extractComponentId } from '@/lib/componentId';
 
 interface HubCard {
   id: string;
@@ -91,7 +93,7 @@ const CARDS: HubCard[] = [
 export function AiMlHub() {
   const { currentProject } = useProjectStore();
   const [openBuilder, setOpenBuilder] = useState<string | null>(null);
-  const [pendingConfig, setPendingConfig] = useState<{ componentType: string; initialAttributes?: Record<string, any> } | null>(null);
+  const [pendingConfig, setPendingConfig] = useState<{ componentType: string; initialAttributes?: Record<string, any>; sourcePath?: string } | null>(null);
 
   if (!currentProject) {
     return (
@@ -152,19 +154,29 @@ export function AiMlHub() {
       {openBuilder === 'document_extraction' && (
         <DocumentExtractionWizard
           onClose={() => setOpenBuilder(null)}
-          onOpenComponentConfig={(componentType, initialAttributes) => {
-            setPendingConfig({ componentType, initialAttributes });
+          onOpenComponentConfig={(componentType, initialAttributes, sourcePath) => {
+            setPendingConfig({ componentType, initialAttributes, sourcePath });
             setOpenBuilder(null);
           }}
         />
       )}
 
       {pendingConfig && (
-        <ConfigHandoff
-          componentType={pendingConfig.componentType}
-          initialAttributes={pendingConfig.initialAttributes}
-          onDone={() => setPendingConfig(null)}
-        />
+        extractComponentId(pendingConfig.componentType) === 'structured_document_extractor' ? (
+          <DocumentExtractorConfigStep
+            componentType={pendingConfig.componentType}
+            initialAttributes={pendingConfig.initialAttributes || {}}
+            sourcePath={pendingConfig.sourcePath}
+            onDone={() => setPendingConfig(null)}
+            onClose={() => setPendingConfig(null)}
+          />
+        ) : (
+          <ConfigHandoff
+            componentType={pendingConfig.componentType}
+            initialAttributes={pendingConfig.initialAttributes}
+            onDone={() => setPendingConfig(null)}
+          />
+        )
       )}
     </div>
   );
