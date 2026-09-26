@@ -1023,6 +1023,20 @@ async def install_component_via_cli(
         find_uv_binary("uvx"),
         "--from", "dagster-community-components-cli",
         "dagster-component",
+        # The CLI caches its OWN copy of manifest.json locally for an hour
+        # (~/.cache/dagster-community-components/manifest.json,
+        # registry.py's CACHE_TTL_SECONDS) -- completely separate from
+        # (and slower to refresh than) the manifest Designer itself reads
+        # via get_manifest() below. Confirmed live: a component added to
+        # the manifest less than an hour ago (structured_document_extractor)
+        # failed with "Component not found" here even though it was
+        # already visible in Designer's own picker/wizard, purely because
+        # of this second, independent cache. --refresh is a GROUP-level
+        # flag (must precede the `add` subcommand, per Click's convention)
+        # that bypasses it -- always pass it so a component that's brand
+        # new to the manifest is never invisible to installs for up to an
+        # hour after being added.
+        "--refresh",
         "add", component_id,
         "--auto-install",
         "--manager", "uv",
