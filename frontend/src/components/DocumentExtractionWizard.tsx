@@ -197,22 +197,37 @@ export function DocumentExtractionWizard({
           currentProject.components.map((c) => (c.attributes?.asset_name as string) || c.id),
         );
         const derivedName = deriveSourceName(selectedSourcePath!, existingNames);
-        const listerRes = await fetch(`${API_BASE}/templates/install-via-cli/file_lister`, {
+        // install-via-cli only drops file_lister's template code + a demo
+        // stub defs.yaml on disk -- it never touches project.components
+        // (the separate list the config step's own preview reads from),
+        // so calling it WITH attributes directly left project.components
+        // stale no matter how many times loadProject/regenerateAssets ran
+        // afterward -- confirmed live by inspecting the project's
+        // persisted JSON directly. /templates/configure/{id} is the one
+        // path that both writes the real defs.yaml AND syncs
+        // project.components -- the same mechanism every other save in
+        // this app already uses.
+        const listerInstallRes = await fetch(`${API_BASE}/templates/install-via-cli/file_lister`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ project_id: currentProject.id, config: {}, template_only: true }),
+        });
+        const listerInstallBody = await listerInstallRes.json().catch(() => ({} as any));
+        if (!listerInstallRes.ok) throw new Error(listerInstallBody.detail || 'Failed to add source');
+
+        const listerConfigRes = await fetch(`${API_BASE}/templates/configure/file_lister`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             project_id: currentProject.id,
-            config: {},
-            attributes: { asset_name: derivedName, path: selectedSourcePath, download: newSourceDownload },
+            config: { name: derivedName, asset_name: derivedName, path: selectedSourcePath, download: newSourceDownload },
           }),
         });
-        const listerBody = await listerRes.json().catch(() => ({} as any));
-        if (!listerRes.ok) throw new Error(listerBody.detail || 'Failed to add source');
+        const listerConfigBody = await listerConfigRes.json().catch(() => ({} as any));
+        if (!listerConfigRes.ok) throw new Error(listerConfigBody.detail || 'Failed to configure source');
+
         upstreamAssetKey = derivedName;
         setSelectedSource(derivedName);
-        // Without this, currentProject.components stays stale -- the
-        // config step's preview resolves the new file_lister's path by
-        // looking it up there, and would silently find nothing.
         await loadProject(currentProject.id);
       }
 

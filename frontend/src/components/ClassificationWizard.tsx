@@ -95,20 +95,34 @@ export function ClassificationWizard({
       const attributes = newSourceMode === 'csv'
         ? { asset_name: derivedName, file_path: newSourcePath.trim() }
         : { asset_name: derivedName, path: newSourcePath.trim(), download: true };
-      const res = await fetch(`${API_BASE}/templates/install-via-cli/${componentId}`, {
+
+      // install-via-cli only drops the component's template code + a demo
+      // stub defs.yaml on disk -- it never touches project.components (the
+      // separate list this wizard's own preview lookups read from), so
+      // calling it WITH attributes directly (as this used to) left
+      // project.components stale no matter how many times loadProject/
+      // regenerateAssets ran afterward -- confirmed live by inspecting the
+      // project's persisted JSON directly. /templates/configure/{id} is
+      // the one path that both writes the real defs.yaml AND syncs
+      // project.components -- the same mechanism every other save in this
+      // app (ComponentConfigModal, ClassifierConfigStep, ...) already uses.
+      const installRes = await fetch(`${API_BASE}/templates/install-via-cli/${componentId}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ project_id: currentProject.id, config: {}, attributes }),
+        body: JSON.stringify({ project_id: currentProject.id, config: {}, template_only: true }),
       });
-      const body = await res.json().catch(() => ({} as any));
-      if (!res.ok) throw new Error(body.detail || 'Failed to add source');
+      const installBody = await installRes.json().catch(() => ({} as any));
+      if (!installRes.ok) throw new Error(installBody.detail || 'Failed to add source');
+
+      const configRes = await fetch(`${API_BASE}/templates/configure/${componentId}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ project_id: currentProject.id, config: { name: derivedName, ...attributes } }),
+      });
+      const configBody = await configRes.json().catch(() => ({} as any));
+      if (!configRes.ok) throw new Error(configBody.detail || 'Failed to configure source');
+
       notify.success(`Added "${derivedName}" as a source.`);
-      // Without this, currentProject.components stays stale until
-      // something else happens to reload it -- confirmed live: the next
-      // step's config preview resolves the new source's file path by
-      // looking it up in currentProject.components, and silently found
-      // nothing (falling back to a "materialize first" dead end) because
-      // the newly-installed component wasn't in the store yet.
       await loadProject(currentProject.id);
       setSelectedSource(derivedName);
       setNewSourceMode(null);
