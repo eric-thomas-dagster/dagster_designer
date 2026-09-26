@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Sparkles, FileText, BrainCircuit, Search, ShieldCheck, Eye, Mic } from 'lucide-react';
+import { Sparkles, FileText, BrainCircuit, Search, ShieldCheck, Film, Mic } from 'lucide-react';
 import { useProjectStore } from '@/hooks/useProject';
 import { AgentPipelineBuilder } from './AgentPipelineBuilder';
 import { DocumentExtractionWizard } from './DocumentExtractionWizard';
@@ -7,6 +7,9 @@ import { DocumentExtractorConfigStep } from './DocumentExtractorConfigStep';
 import { OcrExtractorConfigStep } from './OcrExtractorConfigStep';
 import { ClassificationWizard } from './ClassificationWizard';
 import { ClassifierConfigStep } from './ClassifierConfigStep';
+import { SingleComponentWizard } from './SingleComponentWizard';
+import { VideoSceneConfigStep } from './VideoSceneConfigStep';
+import { AudioDiarizedConfigStep } from './AudioDiarizedConfigStep';
 import { ComponentConfigModal } from './ComponentConfigModal';
 import { extractComponentId } from '@/lib/componentId';
 
@@ -59,12 +62,12 @@ const CARDS: HubCard[] = [
     status: 'soon',
   },
   {
-    id: 'vision',
-    label: 'Vision & Image',
-    description: 'Classification, object detection, captioning, image generation.',
-    icon: Eye,
+    id: 'video_scene',
+    label: 'Video Understanding',
+    description: 'Detect scene changes and summarize each one with a vision-LLM call — point at a folder of videos.',
+    icon: Film,
     count: 10,
-    status: 'soon',
+    status: 'ready',
   },
   {
     id: 'hitl',
@@ -77,10 +80,10 @@ const CARDS: HubCard[] = [
   {
     id: 'audio',
     label: 'Audio & Speech',
-    description: 'Transcription, text-to-speech.',
+    description: 'Speaker-diarized transcription (who said what, when) — point at a folder of audio files.',
     icon: Mic,
     count: 3,
-    status: 'soon',
+    status: 'ready',
   },
 ];
 
@@ -174,6 +177,36 @@ export function AiMlHub() {
         />
       )}
 
+      {openBuilder === 'video_scene' && (
+        <SingleComponentWizard
+          title="Video Understanding — point at your videos"
+          icon={Film}
+          sourceHint="Pick an existing DataFrame of video paths already in this project, or connect a new folder."
+          pathPlaceholder="s3://my-bucket/videos/**/*.mp4"
+          targetComponentId="video_scene_summarizer"
+          onClose={() => setOpenBuilder(null)}
+          onOpenComponentConfig={(componentType, initialAttributes) => {
+            setPendingConfig({ componentType, initialAttributes });
+            setOpenBuilder(null);
+          }}
+        />
+      )}
+
+      {openBuilder === 'audio' && (
+        <SingleComponentWizard
+          title="Audio Transcription — point at your audio files"
+          icon={Mic}
+          sourceHint="Pick an existing DataFrame of audio paths already in this project (e.g. video_audio_extract_asset's output), or connect a new folder."
+          pathPlaceholder="s3://my-bucket/calls/**/*.mp3"
+          targetComponentId="audio_diarized_transcriber"
+          onClose={() => setOpenBuilder(null)}
+          onOpenComponentConfig={(componentType, initialAttributes) => {
+            setPendingConfig({ componentType, initialAttributes });
+            setOpenBuilder(null);
+          }}
+        />
+      )}
+
       {pendingConfig && (
         extractComponentId(pendingConfig.componentType) === 'structured_document_extractor' ? (
           <DocumentExtractorConfigStep
@@ -192,6 +225,20 @@ export function AiMlHub() {
           />
         ) : ['text_classifier', 'zero_shot_classifier', 'image_classifier'].includes(extractComponentId(pendingConfig.componentType)) ? (
           <ClassifierConfigStep
+            componentType={pendingConfig.componentType}
+            initialAttributes={pendingConfig.initialAttributes || {}}
+            onDone={() => setPendingConfig(null)}
+            onClose={() => setPendingConfig(null)}
+          />
+        ) : extractComponentId(pendingConfig.componentType) === 'video_scene_summarizer' ? (
+          <VideoSceneConfigStep
+            componentType={pendingConfig.componentType}
+            initialAttributes={pendingConfig.initialAttributes || {}}
+            onDone={() => setPendingConfig(null)}
+            onClose={() => setPendingConfig(null)}
+          />
+        ) : extractComponentId(pendingConfig.componentType) === 'audio_diarized_transcriber' ? (
+          <AudioDiarizedConfigStep
             componentType={pendingConfig.componentType}
             initialAttributes={pendingConfig.initialAttributes || {}}
             onDone={() => setPendingConfig(null)}

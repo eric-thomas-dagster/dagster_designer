@@ -14,6 +14,8 @@ import { DocumentExtractorConfigStep } from './components/DocumentExtractorConfi
 import { OcrExtractorConfigStep } from './components/OcrExtractorConfigStep';
 import { ClassifierConfigStep, CLASSIFIER_TYPE_CONFIG } from './components/ClassifierConfigStep';
 import { ClassificationReview } from './components/ClassificationReview';
+import { VideoSceneConfigStep } from './components/VideoSceneConfigStep';
+import { AudioDiarizedConfigStep } from './components/AudioDiarizedConfigStep';
 import { AiMlHub } from './components/AiMlHub';
 import { ActivatePanel } from './components/ActivatePanel';
 import { extractComponentId } from '@/lib/componentId';
@@ -260,6 +262,8 @@ function App() {
   // DocumentExtractionReview -- reviews THIS instance's own output asset.
   const [reviewExtractionsTarget, setReviewExtractionsTarget] = useState<ComponentInstance | null>(null);
   const [reviewClassificationTarget, setReviewClassificationTarget] = useState<ComponentInstance | null>(null);
+  const [reviewScenesTarget, setReviewScenesTarget] = useState<ComponentInstance | null>(null);
+  const [reviewTranscriptsTarget, setReviewTranscriptsTarget] = useState<ComponentInstance | null>(null);
   const [addingComponentType, setAddingComponentType] = useState<string | null>(null);
   const [componentsPanelHeight, setComponentsPanelHeight] = useState(60); // Percentage
   // GraphEditor's graph/catalog toggle is lifted here so App can hide
@@ -1837,6 +1841,28 @@ function App() {
             setReviewClassificationTarget(c);
           }}
         />
+      ) : editingComponent && currentProject && extractComponentId(editingComponent.component_type) === 'video_scene_summarizer' ? (
+        <VideoSceneConfigStep
+          componentType={editingComponent.component_type}
+          component={editingComponent}
+          onDone={() => setEditingComponent(null)}
+          onClose={() => setEditingComponent(null)}
+          onReviewScenes={(c) => {
+            setEditingComponent(null);
+            setReviewScenesTarget(c);
+          }}
+        />
+      ) : editingComponent && currentProject && extractComponentId(editingComponent.component_type) === 'audio_diarized_transcriber' ? (
+        <AudioDiarizedConfigStep
+          componentType={editingComponent.component_type}
+          component={editingComponent}
+          onDone={() => setEditingComponent(null)}
+          onClose={() => setEditingComponent(null)}
+          onReviewTranscripts={(c) => {
+            setEditingComponent(null);
+            setReviewTranscriptsTarget(c);
+          }}
+        />
       ) : (editingComponent || addingComponentType) && currentProject && (
         <ComponentConfigModal
           component={editingComponent}
@@ -1888,6 +1914,24 @@ function App() {
           />
         );
       })()}
+
+      {reviewScenesTarget && currentProject && (
+        <ClassificationReview
+          projectId={currentProject.id}
+          assetKey={reviewScenesTarget.attributes?.asset_name || reviewScenesTarget.id}
+          inputColumn="frame_path"
+          isImage
+          onClose={() => setReviewScenesTarget(null)}
+        />
+      )}
+
+      {reviewTranscriptsTarget && currentProject && (
+        <ClassificationReview
+          projectId={currentProject.id}
+          assetKey={reviewTranscriptsTarget.attributes?.asset_name || reviewTranscriptsTarget.id}
+          onClose={() => setReviewTranscriptsTarget(null)}
+        />
+      )}
 
       {/* Dagster Startup Modal */}
       {showDagsterStartupModal && currentProject && (

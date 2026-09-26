@@ -181,6 +181,13 @@ export function ClassifierConfigStep({
           )}
 
           <div className="space-y-4 overflow-y-auto px-6 py-4">
+            <div className="bg-blue-50 border border-blue-100 rounded-md p-3 text-xs text-blue-900 space-y-1">
+              <p className="font-medium">How this works</p>
+              <p>1. You list the possible categories below.</p>
+              <p>2. You save this, then materialize (run) the asset.</p>
+              <p>3. The model reads each row and assigns it whichever category fits best — automatically, for every row. You never tag anything by hand.</p>
+            </div>
+
             <div>
               <label className="block text-xs font-medium text-gray-700 mb-1">Asset name</label>
               <input
@@ -218,9 +225,12 @@ export function ClassifierConfigStep({
 
             <div>
               <label className="block text-xs font-medium text-gray-700 mb-1">
-                {cfg.labelField === 'categories' ? 'Categories' : 'Labels'}
+                {cfg.labelField === 'categories' ? 'Categories to sort each row into' : 'Labels to sort each row into'}
                 {!cfg.labelsRequired && <span className="text-gray-400 font-normal"> (optional)</span>}
               </label>
+              <p className="text-[10px] text-gray-400 mb-1.5">
+                The model will assign exactly one of these to every row automatically — this is the list it picks from, not something you assign yourself.
+              </p>
               <div className="flex flex-wrap gap-1.5 mb-1.5">
                 {labels.map((l) => (
                   <span key={l} className="inline-flex items-center gap-1 px-1.5 py-1 text-xs bg-violet-50 text-violet-700 border border-violet-100 rounded-md font-mono">

@@ -64,6 +64,9 @@ export function TextSamplePreviewPanel({
 
   return (
     <div className="flex flex-col min-w-0 border-r border-gray-100 bg-gray-50">
+      <div className="flex-shrink-0 px-4 py-2 border-b border-gray-100 bg-white">
+        <p className="text-[11px] font-medium text-gray-500">Sample rows — read-only preview, nothing here is clickable</p>
+      </div>
       <div className="flex-1 min-h-0 overflow-y-auto p-4 space-y-2">
         {!upstreamAssetKey ? (
           <div className="h-full flex flex-col items-center justify-center gap-1.5 text-gray-300 px-3 text-center">
