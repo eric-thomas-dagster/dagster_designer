@@ -2517,6 +2517,22 @@ export const assetsApi = {
     return response.data;
   },
 
+  /** Read up to `limit` rows straight from a raw CSV/JSON/Parquet file --
+   *  no Dagster involved, so it works before the source asset has ever
+   *  been materialized. Powers the Classification wizard's config step
+   *  preview for tabular (non-image) sources. */
+  sampleRows: async (
+    projectId: string,
+    path: string,
+    limit = 8,
+  ): Promise<{ columns: string[]; rows: Record<string, any>[]; error?: string }> => {
+    const response = await api.get<{ columns: string[]; rows: Record<string, any>[]; error?: string }>(
+      `/assets/${projectId}/sample-rows`,
+      { params: { path, limit: String(limit) } },
+    );
+    return response.data;
+  },
+
   createTransformerAsset: async (projectId: string, request: CreateTransformerRequest): Promise<Project> => {
     const response = await api.post<Project>(
       `/assets/${projectId}/create-transformer`,

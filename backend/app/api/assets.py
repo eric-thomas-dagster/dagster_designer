@@ -1023,6 +1023,32 @@ async def get_sample_files(project_id: str, path: str, limit: int = 6):
         return {"files": [], "error": str(e)}
 
 
+@router.get("/{project_id}/sample-rows")
+async def get_sample_rows(project_id: str, path: str, limit: int = 8):
+    """Read up to `limit` rows straight from a raw CSV/JSON/Parquet file,
+    with no Dagster involved at all -- same "no materialization needed"
+    reasoning as sample-files, but for tabular sources (e.g.
+    dataframe_from_csv) instead of file sources, for the Classification
+    wizard's config step preview. Supports the same ${VAR}/env var
+    substitution dataframe_from_csv's own `file_path` field does, since
+    this reads the exact same attribute value.
+    """
+    import os
+    import pandas as pd
+    resolved = os.path.expandvars(path)
+    try:
+        ext = Path(resolved).suffix.lower()
+        if ext == ".json":
+            df = pd.read_json(resolved).head(limit)
+        elif ext == ".parquet":
+            df = pd.read_parquet(resolved).head(limit)
+        else:
+            df = pd.read_csv(resolved, nrows=limit)
+        return {"columns": list(df.columns), "rows": json.loads(df.to_json(orient="records"))}
+    except Exception as e:
+        return {"columns": [], "rows": [], "error": str(e)}
+
+
 @router.get("/{project_id}/{asset_key:path}/preview")
 async def preview_asset_data(
     project_id: str,
