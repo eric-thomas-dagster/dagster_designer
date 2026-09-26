@@ -31,6 +31,7 @@ interface ClassifierOption {
   label: string;
   description: string;
   icon: any;
+  kind: 'text' | 'image';
 }
 const CLASSIFIER_OPTIONS: ClassifierOption[] = [
   {
@@ -38,24 +39,28 @@ const CLASSIFIER_OPTIONS: ClassifierOption[] = [
     label: 'Text classification (LLM)',
     description: 'Any provider, your own category list -- best when categories are nuanced or need reasoning.',
     icon: MessageSquareText,
+    kind: 'text',
   },
   {
     id: 'zero_shot_classifier',
     label: 'Text classification (zero-shot, no LLM)',
     description: 'HuggingFace model, no API key or per-row cost -- best for straightforward, high-volume classification.',
     icon: Sparkles,
+    kind: 'text',
   },
   {
     id: 'image_classifier',
     label: 'Image classification',
     description: 'CLIP zero-shot or pre-trained torchvision models.',
     icon: ImageIcon,
+    kind: 'image',
   },
   {
     id: 'ticket_classifier',
     label: 'Support ticket triage',
     description: 'Category + urgency + sentiment + department routing, purpose-built for support tickets.',
     icon: Headset,
+    kind: 'text',
   },
 ];
 
@@ -69,6 +74,17 @@ export function ClassificationWizard({
   const { currentProject, loadProject } = useProjectStore();
   const [step, setStep] = useState<1 | 2>(1);
   const [selectedSource, setSelectedSource] = useState<string | null>(null);
+  // Which classifier options make sense for the source just picked --
+  // known for certain right after "connect a new source" (csv -> text
+  // rows, images -> image rows); for an EXISTING source, guessed from its
+  // component type (file_lister-shaped sources are file listings, so
+  // image-like; anything else is assumed to produce text rows). Null
+  // means "unknown, show everything" rather than guessing wrong and
+  // hiding a real option. Fixes a real gap: step 2 used to show ALL FOUR
+  // classifier types regardless of source, including "Text classification"
+  // right after connecting a folder of images, which can't work at all
+  // (there's no text column, only image paths).
+  const [sourceKind, setSourceKind] = useState<'text' | 'image' | null>(null);
   const [installingId, setInstallingId] = useState<string | null>(null);
   const [newSourceMode, setNewSourceMode] = useState<'csv' | 'images' | null>(null);
   const [newSourcePath, setNewSourcePath] = useState('');
@@ -78,11 +94,20 @@ export function ClassificationWizard({
     if (!currentProject) return [];
     return currentProject.graph.nodes
       .filter((n) => (n.type === 'asset' || (n.data as any)?.asset_key) && isDataFrameType((n.data as any)?.io_output_type))
-      .map((n) => ({
-        assetKey: (n.data as any)?.asset_key || n.id,
-        label: (n.data as any)?.label || (n.data as any)?.asset_key || n.id,
-        componentType: (n.data as any)?.component_type,
-      }));
+      .map((n) => {
+        const componentType = (n.data as any)?.component_type as string | undefined;
+        // Best-effort guess, not a certainty -- a file_lister could in
+        // principle list PDFs or CSVs too. Still better than always
+        // showing every classifier type regardless of what's actually in
+        // the source.
+        const kindGuess: 'text' | 'image' = componentType?.toLowerCase().includes('file_lister') ? 'image' : 'text';
+        return {
+          assetKey: (n.data as any)?.asset_key || n.id,
+          label: (n.data as any)?.label || (n.data as any)?.asset_key || n.id,
+          componentType,
+          kindGuess,
+        };
+      });
   }, [currentProject]);
 
   const connectNewSource = async () => {
@@ -125,6 +150,7 @@ export function ClassificationWizard({
       notify.success(`Added "${derivedName}" as a source.`);
       await loadProject(currentProject.id);
       setSelectedSource(derivedName);
+      setSourceKind(newSourceMode === 'csv' ? 'text' : 'image');
       setNewSourceMode(null);
       setNewSourcePath('');
       setStep(2);
@@ -184,7 +210,7 @@ export function ClassificationWizard({
                   {existingSources.map((s) => (
                     <button
                       key={s.assetKey}
-                      onClick={() => { setSelectedSource(s.assetKey); setStep(2); }}
+                      onClick={() => { setSelectedSource(s.assetKey); setSourceKind(s.kindGuess); setStep(2); }}
                       className="w-full flex items-center justify-between px-3 py-2 text-left border border-gray-200 rounded-md hover:border-blue-300 hover:bg-blue-50/40"
                     >
                       <div>
@@ -208,7 +234,7 @@ export function ClassificationWizard({
                       <FileSpreadsheet className="w-4 h-4 text-violet-600 flex-shrink-0" />
                       <div>
                         <div className="text-sm font-medium text-gray-900">A CSV / data file</div>
-                        <div className="text-xs text-gray-500">Tickets, reviews, any row of text</div>
+                        <div className="text-xs text-gray-500">One file — each ROW in it becomes one thing to classify</div>
                       </div>
                     </button>
                     <button
@@ -218,7 +244,7 @@ export function ClassificationWizard({
                       <FolderOpen className="w-4 h-4 text-violet-600 flex-shrink-0" />
                       <div>
                         <div className="text-sm font-medium text-gray-900">A folder of images</div>
-                        <div className="text-xs text-gray-500">S3, GCS, ADLS, or local</div>
+                        <div className="text-xs text-gray-500">One folder (S3, GCS, ADLS, or local) — each FILE in it becomes one thing to classify</div>
                       </div>
                     </button>
                   </div>
@@ -266,9 +292,12 @@ export function ClassificationWizard({
               </button>
               <p className="text-sm text-gray-500">
                 Reading from <span className="font-mono text-gray-700">{selectedSource}</span> — pick a classifier.
+                {sourceKind && (
+                  <span className="text-gray-400"> Only showing types that work on {sourceKind === 'image' ? 'images' : 'text rows'}, since that's what this source produces.</span>
+                )}
               </p>
               <div className="space-y-2">
-                {CLASSIFIER_OPTIONS.map((opt) => {
+                {CLASSIFIER_OPTIONS.filter((opt) => !sourceKind || opt.kind === sourceKind).map((opt) => {
                   const Icon = opt.icon;
                   return (
                     <button
