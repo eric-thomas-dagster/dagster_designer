@@ -1,9 +1,10 @@
 import { useState } from 'react';
-import { X, Loader2, FileText, Plus, Sparkles, Image as ImageIcon } from 'lucide-react';
+import { X, Loader2, FileText, Plus, Sparkles, Image as ImageIcon, Crosshair } from 'lucide-react';
 import { useProjectStore } from '@/hooks/useProject';
 import { projectsApi, API_BASE } from '@/services/api';
 import { notify } from './Notifications';
 import { DocumentPreviewPanel } from './DocumentPreviewPanel';
+import { DocumentAnnotator, type FieldRegion } from './DocumentAnnotator';
 import type { ComponentInstance } from '@/types';
 
 // Mirrors structured_document_extractor's own `_PRESET_FIELDS` (see that
@@ -90,10 +91,14 @@ export function DocumentExtractorConfigStep({
   const [postProcess, setPostProcess] = useState<'none' | 'move' | 'delete'>(seedAttrs.post_process || 'none');
   const [postProcessDir, setPostProcessDir] = useState(seedAttrs.post_process_dir || '');
   const [saving, setSaving] = useState(false);
+  const [fieldRegions, setFieldRegions] = useState<Record<string, FieldRegion>>(seedAttrs.field_regions || {});
+  const [showAnnotator, setShowAnnotator] = useState(false);
+  const [previewImageUrl, setPreviewImageUrl] = useState<string | null>(null);
 
   const handleDocumentTypeChange = (dt: string) => {
     setDocumentType(dt);
     setOutputFields(PRESET_FIELDS[dt] || []);
+    setFieldRegions({}); // old regions were drawn for the previous field set -- start fresh
     setAssetName((prev) => {
       // Only replace the name if it still looks auto-generated (matches
       // the previous doc type's default) -- don't clobber something the
@@ -108,7 +113,29 @@ export function DocumentExtractorConfigStep({
     if (f && !outputFields.includes(f)) setOutputFields((prev) => [...prev, f]);
     setNewField('');
   };
-  const removeField = (f: string) => setOutputFields((prev) => prev.filter((x) => x !== f));
+  const removeField = (f: string) => {
+    setOutputFields((prev) => prev.filter((x) => x !== f));
+    setFieldRegions((prev) => {
+      if (!(f in prev)) return prev;
+      const next = { ...prev };
+      delete next[f];
+      return next;
+    });
+  };
+  const renameField = (oldName: string, rawNewName: string) => {
+    const newName = rawNewName.trim().toLowerCase().replace(/\s+/g, '_');
+    if (!newName || newName === oldName) return;
+    if (outputFields.includes(newName)) {
+      notify.error(`"${newName}" is already in the list.`);
+      return;
+    }
+    setOutputFields((prev) => prev.map((f) => (f === oldName ? newName : f)));
+    setFieldRegions((prev) => {
+      if (!(oldName in prev)) return prev;
+      const { [oldName]: region, ...rest } = prev;
+      return { ...rest, [newName]: region };
+    });
+  };
 
   const canSave = assetName.trim().length > 0
     && (documentType !== 'custom' || outputFields.length > 0)
@@ -137,6 +164,7 @@ export function DocumentExtractorConfigStep({
         config.path = effectiveSourcePath;
       }
       if (outputFields.length > 0) config.output_fields = outputFields;
+      if (Object.keys(fieldRegions).length > 0) config.field_regions = fieldRegions;
       if (postProcess !== 'none') {
         config.post_process = postProcess;
         if (postProcess === 'move') config.post_process_dir = postProcessDir.trim();
@@ -193,7 +221,7 @@ export function DocumentExtractorConfigStep({
               post-extraction it would need the model to return bounding
               boxes, which these prompts don't request today. That's a
               real, separate feature for the post-materialize review UI. */}
-          <DocumentPreviewPanel sourcePath={effectiveSourcePath} upstreamAssetKey={upstreamAssetKey} />
+          <DocumentPreviewPanel sourcePath={effectiveSourcePath} upstreamAssetKey={upstreamAssetKey} onActiveImageChange={setPreviewImageUrl} />
 
           {/* Curated fields */}
           <div className="space-y-4 overflow-y-auto px-6 py-4">
@@ -231,9 +259,28 @@ export function DocumentExtractorConfigStep({
               </label>
               <div className="flex flex-wrap gap-1.5 mb-1.5">
                 {outputFields.map((f) => (
-                  <span key={f} className="inline-flex items-center gap-1 px-2 py-1 text-xs bg-violet-50 text-violet-700 border border-violet-100 rounded-md font-mono">
-                    {f}
-                    <button onClick={() => removeField(f)} className="text-violet-400 hover:text-violet-700">
+                  <span key={f} className="inline-flex items-center gap-1 px-1.5 py-1 text-xs bg-violet-50 text-violet-700 border border-violet-100 rounded-md font-mono">
+                    {fieldRegions[f] && <Crosshair className="w-3 h-3 text-violet-400 flex-shrink-0" />}
+                    <input
+                      defaultValue={f}
+                      size={Math.max(f.length, 3)}
+                      onBlur={(e) => {
+                        const cleaned = e.target.value.trim().toLowerCase().replace(/\s+/g, '_');
+                        if (!cleaned || cleaned === f) {
+                          e.target.value = f; // no real change (or emptied) -- snap back
+                          return;
+                        }
+                        if (outputFields.includes(cleaned)) {
+                          notify.error(`"${cleaned}" is already in the list.`);
+                          e.target.value = f;
+                          return;
+                        }
+                        renameField(f, cleaned);
+                      }}
+                      onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }}
+                      className="bg-transparent focus:outline-none focus:bg-white rounded px-0.5 min-w-0"
+                    />
+                    <button onClick={() => removeField(f)} className="text-violet-400 hover:text-violet-700 flex-shrink-0">
                       <X className="w-3 h-3" />
                     </button>
                   </span>
@@ -259,6 +306,15 @@ export function DocumentExtractorConfigStep({
                   <Plus className="w-3.5 h-3.5" /> Add
                 </button>
               </div>
+              <button
+                onClick={() => setShowAnnotator(true)}
+                disabled={!previewImageUrl || outputFields.length === 0}
+                className="mt-1.5 inline-flex items-center gap-1 text-xs text-violet-600 hover:text-violet-800 disabled:opacity-40 disabled:cursor-not-allowed"
+                title={!previewImageUrl ? 'Needs an image preview' : outputFields.length === 0 ? 'Add a field first' : undefined}
+              >
+                <Crosshair className="w-3.5 h-3.5" />
+                {Object.keys(fieldRegions).length > 0 ? `${Object.keys(fieldRegions).length} field location(s) marked — edit` : 'Mark where these fields appear (optional)'}
+              </button>
             </div>
 
             <div className="grid grid-cols-2 gap-3">
@@ -336,6 +392,16 @@ export function DocumentExtractorConfigStep({
           </button>
         </div>
       </div>
+
+      {showAnnotator && previewImageUrl && (
+        <DocumentAnnotator
+          imageUrl={previewImageUrl}
+          fields={outputFields}
+          initialRegions={fieldRegions}
+          onSave={(regions) => { setFieldRegions(regions); setShowAnnotator(false); }}
+          onClose={() => setShowAnnotator(false)}
+        />
+      )}
     </div>
   );
 }

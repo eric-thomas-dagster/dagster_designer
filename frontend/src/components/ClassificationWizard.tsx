@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { X, ArrowLeft, ArrowRight, Loader2, BrainCircuit, MessageSquareText, Sparkles, Image as ImageIcon, Headset } from 'lucide-react';
+import { X, ArrowLeft, ArrowRight, Loader2, BrainCircuit, MessageSquareText, Sparkles, Image as ImageIcon, Headset, FileSpreadsheet, FolderOpen } from 'lucide-react';
 import { useProjectStore } from '@/hooks/useProject';
 import { notify } from './Notifications';
 import { API_BASE } from '@/services/api';
@@ -9,6 +9,21 @@ import { API_BASE } from '@/services/api';
 // outputs.type by hand, not a strict enum.
 function isDataFrameType(t: unknown): boolean {
   return typeof t === 'string' && t.toLowerCase().includes('dataframe');
+}
+
+// Same auto-naming as DocumentExtractionWizard's deriveSourceName --
+// duplicated rather than shared since the two wizards' surrounding state
+// differs enough that extracting it now isn't worth the indirection.
+function deriveSourceName(path: string, existingNames: Set<string>): string {
+  const cleaned = path.replace(/[*?[\]{}].*$/, '').replace(/\/+$/, '');
+  const segments = cleaned.split(/[\\/]/).filter(Boolean);
+  let base = (segments[segments.length - 1] || 'data').replace(/\.[^./]+$/, '');
+  base = base.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || 'data';
+  if (!/^[a-z]/.test(base)) base = `source_${base}`;
+  if (!existingNames.has(base)) return base;
+  let n = 2;
+  while (existingNames.has(`${base}_${n}`)) n += 1;
+  return `${base}_${n}`;
 }
 
 interface ClassifierOption {
@@ -55,6 +70,9 @@ export function ClassificationWizard({
   const [step, setStep] = useState<1 | 2>(1);
   const [selectedSource, setSelectedSource] = useState<string | null>(null);
   const [installingId, setInstallingId] = useState<string | null>(null);
+  const [newSourceMode, setNewSourceMode] = useState<'csv' | 'images' | null>(null);
+  const [newSourcePath, setNewSourcePath] = useState('');
+  const [installingSource, setInstallingSource] = useState(false);
 
   const existingSources = useMemo(() => {
     if (!currentProject) return [];
@@ -66,6 +84,36 @@ export function ClassificationWizard({
         componentType: (n.data as any)?.component_type,
       }));
   }, [currentProject]);
+
+  const connectNewSource = async () => {
+    if (!currentProject || !newSourcePath.trim() || installingSource) return;
+    setInstallingSource(true);
+    try {
+      const existingNames = new Set(currentProject.components.map((c) => (c.attributes?.asset_name as string) || c.id));
+      const derivedName = deriveSourceName(newSourcePath.trim(), existingNames);
+      const componentId = newSourceMode === 'csv' ? 'dataframe_from_csv' : 'file_lister';
+      const attributes = newSourceMode === 'csv'
+        ? { asset_name: derivedName, file_path: newSourcePath.trim() }
+        : { asset_name: derivedName, path: newSourcePath.trim(), download: true };
+      const res = await fetch(`${API_BASE}/templates/install-via-cli/${componentId}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ project_id: currentProject.id, config: {}, attributes }),
+      });
+      const body = await res.json().catch(() => ({} as any));
+      if (!res.ok) throw new Error(body.detail || 'Failed to add source');
+      notify.success(`Added "${derivedName}" as a source.`);
+      setSelectedSource(derivedName);
+      setNewSourceMode(null);
+      setNewSourcePath('');
+      setStep(2);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      notify.error(`Failed to add source: ${msg}`);
+    } finally {
+      setInstallingSource(false);
+    }
+  };
 
   const pickClassifier = async (opt: ClassifierOption) => {
     if (!currentProject || !selectedSource || installingId) return;
@@ -107,14 +155,11 @@ export function ClassificationWizard({
           {step === 1 ? (
             <>
               <p className="text-sm text-gray-500">
-                Pick an existing asset in this project that produces the rows you want to classify (tickets, reviews, product images, ...).
+                Pick an asset already in this project that produces the rows you want to classify, or connect a new one.
               </p>
-              {existingSources.length === 0 ? (
-                <div className="text-center text-sm text-gray-400 py-8">
-                  No DataFrame-producing assets found yet in this project. Add a source first (e.g. via Ingestions), then come back here.
-                </div>
-              ) : (
+              {existingSources.length > 0 && (
                 <div className="space-y-1.5">
+                  <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Existing sources</h3>
                   {existingSources.map((s) => (
                     <button
                       key={s.assetKey}
@@ -130,6 +175,65 @@ export function ClassificationWizard({
                   ))}
                 </div>
               )}
+
+              <div className="space-y-1.5">
+                <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Connect a new source</h3>
+                {!newSourceMode ? (
+                  <div className="grid grid-cols-2 gap-2">
+                    <button
+                      onClick={() => setNewSourceMode('csv')}
+                      className="flex items-center gap-2 px-3 py-2.5 text-left bg-gradient-to-br from-violet-50 to-blue-50 border border-violet-200 rounded-md hover:border-violet-400"
+                    >
+                      <FileSpreadsheet className="w-4 h-4 text-violet-600 flex-shrink-0" />
+                      <div>
+                        <div className="text-sm font-medium text-gray-900">A CSV / data file</div>
+                        <div className="text-xs text-gray-500">Tickets, reviews, any row of text</div>
+                      </div>
+                    </button>
+                    <button
+                      onClick={() => setNewSourceMode('images')}
+                      className="flex items-center gap-2 px-3 py-2.5 text-left bg-gradient-to-br from-violet-50 to-blue-50 border border-violet-200 rounded-md hover:border-violet-400"
+                    >
+                      <FolderOpen className="w-4 h-4 text-violet-600 flex-shrink-0" />
+                      <div>
+                        <div className="text-sm font-medium text-gray-900">A folder of images</div>
+                        <div className="text-xs text-gray-500">S3, GCS, ADLS, or local</div>
+                      </div>
+                    </button>
+                  </div>
+                ) : (
+                  <div className="border border-gray-200 rounded-md p-3 space-y-2.5">
+                    <div>
+                      <label className="block text-xs font-medium text-gray-700 mb-1">
+                        {newSourceMode === 'csv' ? 'Path or URL to the CSV file' : 'Path / glob'}
+                      </label>
+                      <input
+                        type="text"
+                        value={newSourcePath}
+                        onChange={(e) => setNewSourcePath(e.target.value)}
+                        placeholder={newSourceMode === 'csv' ? 's3://my-bucket/tickets.csv' : 's3://my-bucket/product-images/**/*.jpg'}
+                        className="w-full px-2.5 py-1.5 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono"
+                      />
+                    </div>
+                    <div className="flex justify-end gap-2 pt-1">
+                      <button
+                        onClick={() => { setNewSourceMode(null); setNewSourcePath(''); }}
+                        className="px-3 py-1.5 text-xs text-gray-600 hover:bg-gray-100 rounded-md"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        onClick={connectNewSource}
+                        disabled={installingSource || !newSourcePath.trim()}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-primary text-primary-foreground rounded-md hover:bg-accent disabled:opacity-50"
+                      >
+                        {installingSource ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <ArrowRight className="w-3.5 h-3.5" />}
+                        Use this source
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
             </>
           ) : (
             <>

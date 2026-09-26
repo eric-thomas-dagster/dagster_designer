@@ -92,6 +92,7 @@ export function ClassifierConfigStep({
     setNewLabel('');
   };
   const removeLabel = (l: string) => setLabels((prev) => prev.filter((x) => x !== l));
+  const renameLabel = (oldLabel: string, renamedTo: string) => setLabels((prev) => prev.map((x) => (x === oldLabel ? renamedTo : x)));
 
   const canSave = assetName.trim().length > 0
     && column.trim().length > 0
@@ -195,9 +196,27 @@ export function ClassifierConfigStep({
               </label>
               <div className="flex flex-wrap gap-1.5 mb-1.5">
                 {labels.map((l) => (
-                  <span key={l} className="inline-flex items-center gap-1 px-2 py-1 text-xs bg-violet-50 text-violet-700 border border-violet-100 rounded-md font-mono">
-                    {l}
-                    <button onClick={() => removeLabel(l)} className="text-violet-400 hover:text-violet-700">
+                  <span key={l} className="inline-flex items-center gap-1 px-1.5 py-1 text-xs bg-violet-50 text-violet-700 border border-violet-100 rounded-md font-mono">
+                    <input
+                      defaultValue={l}
+                      size={Math.max(l.length, 3)}
+                      onBlur={(e) => {
+                        const cleaned = e.target.value.trim();
+                        if (!cleaned || cleaned === l) {
+                          e.target.value = l;
+                          return;
+                        }
+                        if (labels.includes(cleaned)) {
+                          notify.error(`"${cleaned}" is already in the list.`);
+                          e.target.value = l;
+                          return;
+                        }
+                        renameLabel(l, cleaned);
+                      }}
+                      onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }}
+                      className="bg-transparent focus:outline-none focus:bg-white rounded px-0.5 min-w-0"
+                    />
+                    <button onClick={() => removeLabel(l)} className="text-violet-400 hover:text-violet-700 flex-shrink-0">
                       <X className="w-3 h-3" />
                     </button>
                   </span>

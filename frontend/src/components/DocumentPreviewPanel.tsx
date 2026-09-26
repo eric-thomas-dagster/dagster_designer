@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { Loader2, FileText, ImageOff, ZoomIn, X } from 'lucide-react';
 import { useProjectStore } from '@/hooks/useProject';
@@ -24,9 +24,15 @@ const IMAGE_EXTENSIONS = /\.(png|jpe?g|gif|webp|bmp|tiff?)$/i;
 export function DocumentPreviewPanel({
   sourcePath,
   upstreamAssetKey,
+  onActiveImageChange,
 }: {
   sourcePath?: string;
   upstreamAssetKey?: string;
+  /** Fires with the currently-shown image's URL (or null when there
+   *  isn't one) -- lets a parent that needs the actual pixels (e.g. the
+   *  field-location annotator) stay in sync with whichever sample this
+   *  panel is showing, without duplicating its own sample-files fetch. */
+  onActiveImageChange?: (url: string | null) => void;
 }) {
   const { currentProject } = useProjectStore();
   const resolvedPath = useMemo(() => {
@@ -50,6 +56,11 @@ export function DocumentPreviewPanel({
   const previewIsImage = previewFile ? IMAGE_EXTENSIONS.test(previewFile.path) : false;
   const previewUrl = (f: { path: string }) =>
     `${API_BASE}/assets/${currentProject?.id}/local-file?path=${encodeURIComponent(f.path)}`;
+
+  useEffect(() => {
+    onActiveImageChange?.(previewFile && previewIsImage ? previewUrl(previewFile) : null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [previewFile?.path, previewIsImage]);
 
   return (
     <>
