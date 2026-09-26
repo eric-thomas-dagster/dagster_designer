@@ -977,6 +977,31 @@ class AssetDataResponse(BaseModel):
     sample_limit: int | None = None
 
 
+_LOCAL_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tiff", ".tif"}
+
+
+@router.get("/{project_id}/local-file")
+async def get_local_file(project_id: str, path: str):
+    """Serve a local file by absolute path, for previewing a source
+    document/image next to its extracted output (see
+    DocumentExtractionReview -- reads file_lister's `local_path` column
+    straight off an extractor's preview rows). Reads an arbitrary
+    filesystem path, so deliberately narrow: existence + regular-file +
+    image-extension checks, not a full sandboxed read -- acceptable for a
+    local single-user desktop app. `project_id` is unused today but keeps
+    this consistent with every other route on this router.
+    """
+    p = Path(path)
+    if not p.is_absolute():
+        raise HTTPException(status_code=400, detail="path must be absolute")
+    if p.suffix.lower() not in _LOCAL_IMAGE_EXTENSIONS:
+        raise HTTPException(status_code=400, detail=f"Not an image file: {p.suffix}")
+    if not p.exists() or not p.is_file():
+        raise HTTPException(status_code=404, detail=f"File not found: {path}")
+    from fastapi.responses import FileResponse
+    return FileResponse(str(p))
+
+
 @router.get("/{project_id}/{asset_key:path}/preview")
 async def preview_asset_data(
     project_id: str,

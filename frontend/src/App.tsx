@@ -9,6 +9,7 @@ import { ComponentPalette } from './components/ComponentPalette';
 import { ProjectComponentsList } from './components/ProjectComponentsList';
 import { ComponentConfigModal } from './components/ComponentConfigModal';
 import { AgentPipelineBuilder } from './components/AgentPipelineBuilder';
+import { DocumentExtractionReview } from './components/DocumentExtractionReview';
 import { AiMlHub } from './components/AiMlHub';
 import { PropertyPanel } from './components/PropertyPanel';
 import { ProjectManager } from './components/ProjectManager';
@@ -248,6 +249,10 @@ function App() {
   // only for AGENTIC_PIPELINE_FAMILY components) to AgentPipelineBuilder
   // in edit mode -- see editingComponent prop there.
   const [genieEditTarget, setGenieEditTarget] = useState<ComponentInstance | null>(null);
+  // Bridge from ComponentConfigModal's "Review extractions" button (shown
+  // only for DOCUMENT_EXTRACTOR_FAMILY components) to
+  // DocumentExtractionReview -- reviews THIS instance's own output asset.
+  const [reviewExtractionsTarget, setReviewExtractionsTarget] = useState<ComponentInstance | null>(null);
   const [addingComponentType, setAddingComponentType] = useState<string | null>(null);
   const [componentsPanelHeight, setComponentsPanelHeight] = useState(60); // Percentage
   // GraphEditor's graph/catalog toggle is lifted here so App can hide
@@ -1791,6 +1796,11 @@ function App() {
             setAddingComponentType(null);
             setGenieEditTarget(c);
           }}
+          onReviewExtractions={(c) => {
+            setEditingComponent(null);
+            setAddingComponentType(null);
+            setReviewExtractionsTarget(c);
+          }}
         />
       )}
 
@@ -1798,6 +1808,14 @@ function App() {
         <AgentPipelineBuilder
           editingComponent={genieEditTarget}
           onClose={() => setGenieEditTarget(null)}
+        />
+      )}
+
+      {reviewExtractionsTarget && currentProject && (
+        <DocumentExtractionReview
+          projectId={currentProject.id}
+          assetKey={reviewExtractionsTarget.attributes?.asset_name || reviewExtractionsTarget.id}
+          onClose={() => setReviewExtractionsTarget(null)}
         />
       )}
 

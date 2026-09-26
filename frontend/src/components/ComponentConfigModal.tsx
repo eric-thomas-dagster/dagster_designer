@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { X, Save, Download, CheckCircle, XCircle, Loader, Plus, Sparkles } from 'lucide-react';
+import { X, Save, Download, CheckCircle, XCircle, Loader, Plus, Sparkles, Image as ImageIcon } from 'lucide-react';
 import { useComponent } from '@/hooks/useComponentRegistry';
 import { TranslationEditor } from './TranslationEditor';
 import { EnhancedDataQualityChecksBuilder } from './EnhancedDataQualityChecksBuilder';
@@ -10,6 +10,8 @@ import type { ComponentInstance } from '@/types';
 import type { ComponentSchema } from '@/services/api';
 import { parseUpstreamAssetKeys } from '@/lib/upstreamAssetKeys';
 import { AGENTIC_PIPELINE_FAMILY } from '@/lib/agenticPipelineFamily';
+import { DOCUMENT_EXTRACTOR_FAMILY } from '@/lib/documentExtractorFamily';
+import { extractComponentId } from '@/lib/componentId';
 
 // `x-dagster-io` type fields (inputs.type, outputs.type, accepts[]) are
 // freeform strings community component authors write by hand, not a
@@ -55,6 +57,12 @@ interface ComponentConfigModalProps {
    *  (an existing instance, not a new one) are present; local mode only,
    *  same reasoning as onSaveDraft's absence gating draft-only UI. */
   onEditWithGenie?: (component: ComponentInstance) => void;
+  /** Offers a "Review extractions" button for the document/image/audio
+   *  extractor family (DOCUMENT_EXTRACTOR_FAMILY) -- opens
+   *  DocumentExtractionReview showing this instance's own output asset
+   *  (source file next to what got extracted from it). Same
+   *  existing-instance-only gating as onEditWithGenie. */
+  onReviewExtractions?: (component: ComponentInstance) => void;
 }
 
 export function ComponentConfigModal({
@@ -72,6 +80,7 @@ export function ComponentConfigModal({
   availableSensors = [],
   onSaveDraft,
   onEditWithGenie,
+  onReviewExtractions,
 }: ComponentConfigModalProps) {
   const isNew = !component;
   const type = component?.component_type || componentType || '';
@@ -1791,13 +1800,22 @@ export function ComponentConfigModal({
             {isNew ? 'Add' : 'Edit'} Component: {componentSchema.name}
           </h2>
           <div className="flex items-center gap-2 flex-shrink-0">
-            {!isNew && !isDraftMode && component && onEditWithGenie && AGENTIC_PIPELINE_FAMILY.has(component.component_type) && (
+            {!isNew && !isDraftMode && component && onEditWithGenie && AGENTIC_PIPELINE_FAMILY.has(extractComponentId(component.component_type)) && (
               <button
                 onClick={() => onEditWithGenie(component)}
                 className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium text-violet-700 bg-violet-50 border border-violet-200 rounded-md hover:bg-violet-100"
                 title="Describe what to change in plain English instead of editing the raw config"
               >
                 <Sparkles className="w-3.5 h-3.5" /> Edit with Genie
+              </button>
+            )}
+            {!isNew && !isDraftMode && component && onReviewExtractions && DOCUMENT_EXTRACTOR_FAMILY.has(extractComponentId(component.component_type)) && (
+              <button
+                onClick={() => onReviewExtractions(component)}
+                className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-md hover:bg-emerald-100"
+                title="See the source image/document next to what got extracted from it"
+              >
+                <ImageIcon className="w-3.5 h-3.5" /> Review extractions
               </button>
             )}
             <button onClick={onClose}>
