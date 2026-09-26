@@ -4,6 +4,7 @@ import { useProjectStore } from '@/hooks/useProject';
 import { AgentPipelineBuilder } from './AgentPipelineBuilder';
 import { DocumentExtractionWizard } from './DocumentExtractionWizard';
 import { DocumentExtractorConfigStep } from './DocumentExtractorConfigStep';
+import { OcrExtractorConfigStep } from './OcrExtractorConfigStep';
 import { ComponentConfigModal } from './ComponentConfigModal';
 import { extractComponentId } from '@/lib/componentId';
 
@@ -167,6 +168,13 @@ export function AiMlHub() {
             componentType={pendingConfig.componentType}
             initialAttributes={pendingConfig.initialAttributes || {}}
             sourcePath={pendingConfig.sourcePath}
+            onDone={() => setPendingConfig(null)}
+            onClose={() => setPendingConfig(null)}
+          />
+        ) : extractComponentId(pendingConfig.componentType) === 'ocr_extractor' ? (
+          <OcrExtractorConfigStep
+            componentType={pendingConfig.componentType}
+            initialAttributes={pendingConfig.initialAttributes || {}}
             onDone={() => setPendingConfig(null)}
             onClose={() => setPendingConfig(null)}
           />

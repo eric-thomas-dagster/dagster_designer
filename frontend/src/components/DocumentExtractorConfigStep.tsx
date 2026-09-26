@@ -1,11 +1,10 @@
 import { useState } from 'react';
-import { useQuery } from '@tanstack/react-query';
-import { X, Loader2, FileText, ImageOff, Plus, Sparkles, ZoomIn } from 'lucide-react';
+import { X, Loader2, FileText, Plus, Sparkles, Image as ImageIcon } from 'lucide-react';
 import { useProjectStore } from '@/hooks/useProject';
-import { assetsApi, projectsApi, API_BASE } from '@/services/api';
+import { projectsApi, API_BASE } from '@/services/api';
 import { notify } from './Notifications';
-
-const IMAGE_EXTENSIONS = /\.(png|jpe?g|gif|webp|bmp|tiff?)$/i;
+import { DocumentPreviewPanel } from './DocumentPreviewPanel';
+import type { ComponentInstance } from '@/types';
 
 // Mirrors structured_document_extractor's own `_PRESET_FIELDS` (see that
 // component's README "Presets" table) -- duplicated here purely as
@@ -43,41 +42,53 @@ function defaultAssetName(documentType: string, upstreamAssetKey?: string): stri
 }
 
 /**
- * Bespoke config step for structured_document_extractor, opened straight
- * off the Document Extraction wizard instead of the raw generic
- * ComponentConfigModal form -- built because that form shows every schema
- * field at once (including the `path`/`upstream_asset_key` pair, only one
- * of which is ever relevant) with no document preview, which read as "no
- * dedicated UI" to the person using it. Persists via the same
- * /templates/configure/{id} path ComponentConfigModal itself uses for
- * community components -- this is a different FRONT END, not a different
- * save mechanism.
+ * Bespoke config step for structured_document_extractor -- opened either
+ * straight off the Document Extraction wizard (`component` null,
+ * `initialAttributes`/`sourcePath` seed the form) or to EDIT an already-
+ * installed instance (`component` set, seeds everything from its own
+ * `attributes` instead). Built because the raw generic ComponentConfigModal
+ * form shows every schema field at once (including the `path`/
+ * `upstream_asset_key` pair, only one of which is ever relevant) with no
+ * document preview, which read as "no dedicated UI" to the person using
+ * it -- true for editing an existing instance just as much as adding a
+ * new one. Persists via the same /templates/configure/{id} path
+ * ComponentConfigModal itself uses for community components -- this is a
+ * different FRONT END, not a different save mechanism.
  */
 export function DocumentExtractorConfigStep({
   componentType,
+  component,
   initialAttributes,
   sourcePath,
   onDone,
   onClose,
+  onReviewExtractions,
 }: {
   componentType: string;
-  initialAttributes: Record<string, any>;
+  component?: ComponentInstance | null;
+  initialAttributes?: Record<string, any>;
   sourcePath?: string;
   onDone: () => void;
   onClose: () => void;
+  onReviewExtractions?: (component: ComponentInstance) => void;
 }) {
   const { currentProject, loadProject } = useProjectStore();
-  const upstreamAssetKey: string | undefined = initialAttributes.upstream_asset_key;
-  const initialDocType = initialAttributes.document_type || 'custom';
+  const isEditing = !!component;
+  const seedAttrs = component?.attributes || initialAttributes || {};
+  const upstreamAssetKey: string | undefined = seedAttrs.upstream_asset_key;
+  const effectiveSourcePath: string | undefined = seedAttrs.path || sourcePath;
+  const initialDocType = seedAttrs.document_type || 'custom';
 
   const [documentType, setDocumentType] = useState(initialDocType);
-  const [assetName, setAssetName] = useState(defaultAssetName(initialDocType, upstreamAssetKey));
-  const [outputFields, setOutputFields] = useState<string[]>(PRESET_FIELDS[initialDocType] || []);
+  const [assetName, setAssetName] = useState<string>(
+    seedAttrs.asset_name || component?.label || defaultAssetName(initialDocType, upstreamAssetKey),
+  );
+  const [outputFields, setOutputFields] = useState<string[]>(seedAttrs.output_fields || PRESET_FIELDS[initialDocType] || []);
   const [newField, setNewField] = useState('');
-  const [model, setModel] = useState('gpt-4o');
-  const [apiKeyEnvVar, setApiKeyEnvVar] = useState('OPENAI_API_KEY');
-  const [postProcess, setPostProcess] = useState<'none' | 'move' | 'delete'>('none');
-  const [postProcessDir, setPostProcessDir] = useState('');
+  const [model, setModel] = useState(seedAttrs.model || 'gpt-4o');
+  const [apiKeyEnvVar, setApiKeyEnvVar] = useState(seedAttrs.api_key_env_var || 'OPENAI_API_KEY');
+  const [postProcess, setPostProcess] = useState<'none' | 'move' | 'delete'>(seedAttrs.post_process || 'none');
+  const [postProcessDir, setPostProcessDir] = useState(seedAttrs.post_process_dir || '');
   const [saving, setSaving] = useState(false);
 
   const handleDocumentTypeChange = (dt: string) => {
@@ -98,19 +109,6 @@ export function DocumentExtractorConfigStep({
     setNewField('');
   };
   const removeField = (f: string) => setOutputFields((prev) => prev.filter((x) => x !== f));
-
-  const { data: sample, isLoading: sampleLoading } = useQuery({
-    queryKey: ['document-extractor-sample', currentProject?.id, sourcePath],
-    queryFn: () => assetsApi.sampleFiles(currentProject!.id, sourcePath!, 12),
-    enabled: !!currentProject && !!sourcePath,
-  });
-  const files = sample?.files || [];
-  const [activeIndex, setActiveIndex] = useState(0);
-  const [zoomed, setZoomed] = useState(false);
-  const previewFile = files[activeIndex];
-  const previewIsImage = previewFile ? IMAGE_EXTENSIONS.test(previewFile.path) : false;
-  const previewUrl = (f: { path: string }) =>
-    `${API_BASE}/assets/${currentProject?.id}/local-file?path=${encodeURIComponent(f.path)}`;
 
   const canSave = assetName.trim().length > 0
     && (documentType !== 'custom' || outputFields.length > 0)
@@ -135,8 +133,8 @@ export function DocumentExtractorConfigStep({
         config.upstream_asset_key = upstreamAssetKey;
         config.input_column = 'local_path';
         config.input_type = 'file';
-      } else if (sourcePath) {
-        config.path = sourcePath;
+      } else if (effectiveSourcePath) {
+        config.path = effectiveSourcePath;
       }
       if (outputFields.length > 0) config.output_fields = outputFields;
       if (postProcess !== 'none') {
@@ -160,13 +158,17 @@ export function DocumentExtractorConfigStep({
       }
 
       if (body.assets_regenerated) {
-        notify.success(`Added "${assetName.trim()}" — extracting ${DOCUMENT_TYPE_LABELS[documentType] || documentType} fields.`);
+        notify.success(
+          isEditing
+            ? `Updated "${assetName.trim()}".`
+            : `Added "${assetName.trim()}" — extracting ${DOCUMENT_TYPE_LABELS[documentType] || documentType} fields.`,
+        );
         onDone();
       } else {
         notify.error(`Saved, but Dagster couldn't load it:\n\n${body.regenerate_error || 'Unknown error'}`);
       }
     } catch (e: any) {
-      notify.error(`Failed to add extractor: ${e?.message ?? e}`);
+      notify.error(`Failed to save: ${e?.message ?? e}`);
     } finally {
       setSaving(false);
     }
@@ -178,7 +180,7 @@ export function DocumentExtractorConfigStep({
         <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200">
           <div className="flex items-center gap-2">
             <FileText className="w-5 h-5 text-primary" />
-            <h2 className="text-lg font-semibold">Configure extraction</h2>
+            <h2 className="text-lg font-semibold">{isEditing ? 'Edit extraction' : 'Configure extraction'}</h2>
           </div>
           <button onClick={onClose} aria-label="Close">
             <X className="w-5 h-5 text-gray-400 hover:text-gray-600" />
@@ -186,72 +188,12 @@ export function DocumentExtractorConfigStep({
         </div>
 
         <div className="flex-1 overflow-hidden grid grid-cols-1 sm:grid-cols-[1fr_380px]">
-          {/* Document preview -- main image + a scrollable thumbnail strip
-              of every sample file found at the source path, not just one.
-              Click a thumbnail to preview that file instead; click the
-              main image to zoom to a full-size lightbox. Extracted-field
-              highlighting on the document isn't possible here -- nothing's
-              been extracted yet at config time, and even post-extraction
-              it would need the model to return bounding boxes, which
-              these prompts don't request today. That's a real, separate
-              feature for the post-materialize review UI, not this step. */}
-          <div className="flex flex-col min-w-0 border-r border-gray-100 bg-gray-50">
-            <div className="flex-1 min-h-0 flex items-center justify-center p-6">
-              {!sourcePath ? (
-                <div className="flex flex-col items-center gap-1.5 text-gray-300 px-3 text-center">
-                  <ImageOff className="w-8 h-8" />
-                  <span className="text-xs">reading from an existing asset — no preview available yet</span>
-                </div>
-              ) : sampleLoading ? (
-                <Loader2 className="w-6 h-6 text-gray-300 animate-spin" />
-              ) : previewFile && previewIsImage ? (
-                <button
-                  onClick={() => setZoomed(true)}
-                  className="relative group max-w-full max-h-full rounded-lg overflow-hidden border border-gray-200 bg-white shadow-sm"
-                  title="Click to zoom"
-                >
-                  <img src={previewUrl(previewFile)} alt={previewFile.name} className="max-w-full max-h-[calc(90vh-220px)] object-contain" />
-                  <div className="absolute inset-0 bg-black/0 group-hover:bg-black/10 transition-colors flex items-center justify-center">
-                    <ZoomIn className="w-6 h-6 text-white opacity-0 group-hover:opacity-90 drop-shadow" />
-                  </div>
-                </button>
-              ) : previewFile ? (
-                <div className="flex flex-col items-center gap-1.5 text-gray-400 px-3 text-center">
-                  <FileText className="w-10 h-10" />
-                  <span className="text-xs break-all">{previewFile.name}</span>
-                  <span className="text-[10px] text-gray-400">no inline preview for this file type</span>
-                </div>
-              ) : (
-                <div className="flex flex-col items-center gap-1 text-gray-300 px-3 text-center">
-                  <ImageOff className="w-8 h-8" />
-                  <span className="text-xs">no matching files found</span>
-                </div>
-              )}
-            </div>
-            {files.length > 0 && (
-              <div className="flex-shrink-0 border-t border-gray-200 bg-white px-3 py-2 flex items-center gap-2 overflow-x-auto">
-                {files.map((f, i) => (
-                  <button
-                    key={f.path}
-                    onClick={() => setActiveIndex(i)}
-                    title={f.name}
-                    className={`flex-shrink-0 w-12 h-14 rounded border overflow-hidden bg-gray-100 flex items-center justify-center ${
-                      i === activeIndex ? 'border-primary ring-2 ring-primary/30' : 'border-gray-200 hover:border-gray-300'
-                    }`}
-                  >
-                    {IMAGE_EXTENSIONS.test(f.path) ? (
-                      <img src={previewUrl(f)} alt={f.name} className="w-full h-full object-cover" />
-                    ) : (
-                      <FileText className="w-4 h-4 text-gray-400" />
-                    )}
-                  </button>
-                ))}
-              </div>
-            )}
-            <p className="flex-shrink-0 text-[11px] text-gray-400 text-center py-1.5 border-t border-gray-100 bg-white">
-              {files.length > 0 ? `${activeIndex + 1} of ${files.length} real file(s) from your source` : 'Preview'}
-            </p>
-          </div>
+          {/* Extracted-field highlighting on the document isn't possible
+              here -- nothing's been extracted yet at config time, and even
+              post-extraction it would need the model to return bounding
+              boxes, which these prompts don't request today. That's a
+              real, separate feature for the post-materialize review UI. */}
+          <DocumentPreviewPanel sourcePath={effectiveSourcePath} upstreamAssetKey={upstreamAssetKey} />
 
           {/* Curated fields */}
           <div className="space-y-4 overflow-y-auto px-6 py-4">
@@ -261,8 +203,10 @@ export function DocumentExtractorConfigStep({
                 type="text"
                 value={assetName}
                 onChange={(e) => setAssetName(e.target.value)}
-                className="w-full px-2.5 py-1.5 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono"
+                disabled={isEditing}
+                className="w-full px-2.5 py-1.5 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono disabled:bg-gray-50 disabled:text-gray-400"
               />
+              {isEditing && <p className="text-[10px] text-gray-400 mt-0.5">Can't be renamed after creation.</p>}
             </div>
 
             <div>
@@ -371,6 +315,14 @@ export function DocumentExtractorConfigStep({
         </div>
 
         <div className="flex justify-end gap-2 px-6 py-4 border-t border-gray-200">
+          {isEditing && onReviewExtractions && (
+            <button
+              onClick={() => onReviewExtractions(component!)}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-emerald-700 border border-emerald-200 bg-emerald-50 rounded-md hover:bg-emerald-100 mr-auto"
+            >
+              <ImageIcon className="w-3.5 h-3.5" /> Review extractions
+            </button>
+          )}
           <button onClick={onClose} className="px-3 py-1.5 text-sm text-gray-600 hover:bg-gray-100 rounded-md">
             Cancel
           </button>
@@ -380,22 +332,10 @@ export function DocumentExtractorConfigStep({
             className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium bg-primary text-primary-foreground rounded-md hover:bg-accent disabled:opacity-50"
           >
             {saving ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Sparkles className="w-3.5 h-3.5" />}
-            {saving ? 'Adding…' : 'Add extractor'}
+            {saving ? 'Saving…' : isEditing ? 'Save changes' : 'Add extractor'}
           </button>
         </div>
       </div>
-
-      {zoomed && previewFile && previewIsImage && (
-        <div
-          className="fixed inset-0 bg-black/80 flex items-center justify-center z-[60] p-8"
-          onClick={() => setZoomed(false)}
-        >
-          <button onClick={() => setZoomed(false)} className="absolute top-4 right-4 text-white/70 hover:text-white" aria-label="Close zoom">
-            <X className="w-6 h-6" />
-          </button>
-          <img src={previewUrl(previewFile)} alt={previewFile.name} className="max-w-full max-h-full object-contain" />
-        </div>
-      )}
     </div>
   );
 }

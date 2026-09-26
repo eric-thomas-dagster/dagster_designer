@@ -10,8 +10,11 @@ import { ProjectComponentsList } from './components/ProjectComponentsList';
 import { ComponentConfigModal } from './components/ComponentConfigModal';
 import { AgentPipelineBuilder } from './components/AgentPipelineBuilder';
 import { DocumentExtractionReview } from './components/DocumentExtractionReview';
+import { DocumentExtractorConfigStep } from './components/DocumentExtractorConfigStep';
+import { OcrExtractorConfigStep } from './components/OcrExtractorConfigStep';
 import { AiMlHub } from './components/AiMlHub';
 import { ActivatePanel } from './components/ActivatePanel';
+import { extractComponentId } from '@/lib/componentId';
 import { PropertyPanel } from './components/PropertyPanel';
 import { ProjectManager } from './components/ProjectManager';
 import { CodeEditor } from './components/CodeEditor';
@@ -1790,8 +1793,37 @@ function App() {
       </div>
       {/* /right-side column */}
 
-      {/* Component Config Modal */}
-      {(editingComponent || addingComponentType) && currentProject && (
+      {/* Component Config Modal -- editing an existing
+          structured_document_extractor instance gets the same bespoke
+          config step as adding one (see AiMlHub's wizard handoff) instead
+          of dropping back to the raw generic form. Only gated on
+          editingComponent (an existing instance, so a real upstream mode
+          is already known); addingComponentType alone (e.g. dragging it
+          straight off the Component Palette) has no source to seed from
+          yet, so that path still goes through the generic form. */}
+      {editingComponent && currentProject && extractComponentId(editingComponent.component_type) === 'structured_document_extractor' ? (
+        <DocumentExtractorConfigStep
+          componentType={editingComponent.component_type}
+          component={editingComponent}
+          onDone={() => setEditingComponent(null)}
+          onClose={() => setEditingComponent(null)}
+          onReviewExtractions={(c) => {
+            setEditingComponent(null);
+            setReviewExtractionsTarget(c);
+          }}
+        />
+      ) : editingComponent && currentProject && extractComponentId(editingComponent.component_type) === 'ocr_extractor' ? (
+        <OcrExtractorConfigStep
+          componentType={editingComponent.component_type}
+          component={editingComponent}
+          onDone={() => setEditingComponent(null)}
+          onClose={() => setEditingComponent(null)}
+          onReviewExtractions={(c) => {
+            setEditingComponent(null);
+            setReviewExtractionsTarget(c);
+          }}
+        />
+      ) : (editingComponent || addingComponentType) && currentProject && (
         <ComponentConfigModal
           component={editingComponent}
           componentType={addingComponentType || undefined}
