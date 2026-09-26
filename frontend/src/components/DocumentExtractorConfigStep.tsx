@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { X, Loader2, FileText, ImageOff, Plus, Sparkles } from 'lucide-react';
+import { X, Loader2, FileText, ImageOff, Plus, Sparkles, ZoomIn } from 'lucide-react';
 import { useProjectStore } from '@/hooks/useProject';
 import { assetsApi, projectsApi, API_BASE } from '@/services/api';
 import { notify } from './Notifications';
@@ -76,6 +76,8 @@ export function DocumentExtractorConfigStep({
   const [newField, setNewField] = useState('');
   const [model, setModel] = useState('gpt-4o');
   const [apiKeyEnvVar, setApiKeyEnvVar] = useState('OPENAI_API_KEY');
+  const [postProcess, setPostProcess] = useState<'none' | 'move' | 'delete'>('none');
+  const [postProcessDir, setPostProcessDir] = useState('');
   const [saving, setSaving] = useState(false);
 
   const handleDocumentTypeChange = (dt: string) => {
@@ -99,13 +101,20 @@ export function DocumentExtractorConfigStep({
 
   const { data: sample, isLoading: sampleLoading } = useQuery({
     queryKey: ['document-extractor-sample', currentProject?.id, sourcePath],
-    queryFn: () => assetsApi.sampleFiles(currentProject!.id, sourcePath!, 1),
+    queryFn: () => assetsApi.sampleFiles(currentProject!.id, sourcePath!, 12),
     enabled: !!currentProject && !!sourcePath,
   });
-  const previewFile = sample?.files?.[0];
+  const files = sample?.files || [];
+  const [activeIndex, setActiveIndex] = useState(0);
+  const [zoomed, setZoomed] = useState(false);
+  const previewFile = files[activeIndex];
   const previewIsImage = previewFile ? IMAGE_EXTENSIONS.test(previewFile.path) : false;
+  const previewUrl = (f: { path: string }) =>
+    `${API_BASE}/assets/${currentProject?.id}/local-file?path=${encodeURIComponent(f.path)}`;
 
-  const canSave = assetName.trim().length > 0 && (documentType !== 'custom' || outputFields.length > 0);
+  const canSave = assetName.trim().length > 0
+    && (documentType !== 'custom' || outputFields.length > 0)
+    && (postProcess !== 'move' || postProcessDir.trim().length > 0);
 
   const handleSave = async () => {
     if (!currentProject || !canSave || saving) return;
@@ -130,6 +139,10 @@ export function DocumentExtractorConfigStep({
         config.path = sourcePath;
       }
       if (outputFields.length > 0) config.output_fields = outputFields;
+      if (postProcess !== 'none') {
+        config.post_process = postProcess;
+        if (postProcess === 'move') config.post_process_dir = postProcessDir.trim();
+      }
 
       const res = await fetch(`${API_BASE}/templates/configure/${componentId}`, {
         method: 'POST',
@@ -161,7 +174,7 @@ export function DocumentExtractorConfigStep({
 
   return (
     <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-      <div className="bg-white rounded-lg shadow-xl w-full max-w-3xl max-h-[85vh] flex flex-col">
+      <div className="bg-white rounded-lg shadow-xl w-full max-w-6xl h-[90vh] flex flex-col">
         <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200">
           <div className="flex items-center gap-2">
             <FileText className="w-5 h-5 text-primary" />
@@ -172,42 +185,76 @@ export function DocumentExtractorConfigStep({
           </button>
         </div>
 
-        <div className="flex-1 overflow-y-auto px-6 py-4 grid grid-cols-1 sm:grid-cols-[220px_1fr] gap-5">
-          {/* Document preview */}
-          <div className="space-y-2">
-            <div className="aspect-[3/4] bg-gray-100 border border-gray-200 rounded-lg flex items-center justify-center overflow-hidden">
+        <div className="flex-1 overflow-hidden grid grid-cols-1 sm:grid-cols-[1fr_380px]">
+          {/* Document preview -- main image + a scrollable thumbnail strip
+              of every sample file found at the source path, not just one.
+              Click a thumbnail to preview that file instead; click the
+              main image to zoom to a full-size lightbox. Extracted-field
+              highlighting on the document isn't possible here -- nothing's
+              been extracted yet at config time, and even post-extraction
+              it would need the model to return bounding boxes, which
+              these prompts don't request today. That's a real, separate
+              feature for the post-materialize review UI, not this step. */}
+          <div className="flex flex-col min-w-0 border-r border-gray-100 bg-gray-50">
+            <div className="flex-1 min-h-0 flex items-center justify-center p-6">
               {!sourcePath ? (
-                <div className="flex flex-col items-center gap-1 text-gray-300 px-3 text-center">
-                  <ImageOff className="w-6 h-6" />
-                  <span className="text-[11px]">reading from an existing asset — no preview available yet</span>
+                <div className="flex flex-col items-center gap-1.5 text-gray-300 px-3 text-center">
+                  <ImageOff className="w-8 h-8" />
+                  <span className="text-xs">reading from an existing asset — no preview available yet</span>
                 </div>
               ) : sampleLoading ? (
-                <Loader2 className="w-5 h-5 text-gray-300 animate-spin" />
+                <Loader2 className="w-6 h-6 text-gray-300 animate-spin" />
               ) : previewFile && previewIsImage ? (
-                <img
-                  src={`${API_BASE}/assets/${currentProject?.id}/local-file?path=${encodeURIComponent(previewFile.path)}`}
-                  alt={previewFile.name}
-                  className="w-full h-full object-contain"
-                />
+                <button
+                  onClick={() => setZoomed(true)}
+                  className="relative group max-w-full max-h-full rounded-lg overflow-hidden border border-gray-200 bg-white shadow-sm"
+                  title="Click to zoom"
+                >
+                  <img src={previewUrl(previewFile)} alt={previewFile.name} className="max-w-full max-h-[calc(90vh-220px)] object-contain" />
+                  <div className="absolute inset-0 bg-black/0 group-hover:bg-black/10 transition-colors flex items-center justify-center">
+                    <ZoomIn className="w-6 h-6 text-white opacity-0 group-hover:opacity-90 drop-shadow" />
+                  </div>
+                </button>
               ) : previewFile ? (
                 <div className="flex flex-col items-center gap-1.5 text-gray-400 px-3 text-center">
-                  <FileText className="w-8 h-8" />
-                  <span className="text-[11px] break-all">{previewFile.name}</span>
+                  <FileText className="w-10 h-10" />
+                  <span className="text-xs break-all">{previewFile.name}</span>
+                  <span className="text-[10px] text-gray-400">no inline preview for this file type</span>
                 </div>
               ) : (
                 <div className="flex flex-col items-center gap-1 text-gray-300 px-3 text-center">
-                  <ImageOff className="w-6 h-6" />
-                  <span className="text-[11px]">no matching files found</span>
+                  <ImageOff className="w-8 h-8" />
+                  <span className="text-xs">no matching files found</span>
                 </div>
               )}
             </div>
-            <p className="text-[11px] text-gray-400 text-center">
-              {previewFile ? 'A real file from your source' : 'Preview'}
+            {files.length > 0 && (
+              <div className="flex-shrink-0 border-t border-gray-200 bg-white px-3 py-2 flex items-center gap-2 overflow-x-auto">
+                {files.map((f, i) => (
+                  <button
+                    key={f.path}
+                    onClick={() => setActiveIndex(i)}
+                    title={f.name}
+                    className={`flex-shrink-0 w-12 h-14 rounded border overflow-hidden bg-gray-100 flex items-center justify-center ${
+                      i === activeIndex ? 'border-primary ring-2 ring-primary/30' : 'border-gray-200 hover:border-gray-300'
+                    }`}
+                  >
+                    {IMAGE_EXTENSIONS.test(f.path) ? (
+                      <img src={previewUrl(f)} alt={f.name} className="w-full h-full object-cover" />
+                    ) : (
+                      <FileText className="w-4 h-4 text-gray-400" />
+                    )}
+                  </button>
+                ))}
+              </div>
+            )}
+            <p className="flex-shrink-0 text-[11px] text-gray-400 text-center py-1.5 border-t border-gray-100 bg-white">
+              {files.length > 0 ? `${activeIndex + 1} of ${files.length} real file(s) from your source` : 'Preview'}
             </p>
           </div>
 
           {/* Curated fields */}
-          <div className="space-y-4">
+          <div className="space-y-4 overflow-y-auto px-6 py-4">
             <div>
               <label className="block text-xs font-medium text-gray-700 mb-1">Asset name</label>
               <input
@@ -291,6 +338,35 @@ export function DocumentExtractorConfigStep({
                 />
               </div>
             </div>
+
+            {!upstreamAssetKey && (
+              <div>
+                <label className="block text-xs font-medium text-gray-700 mb-1">After a file is extracted</label>
+                <select
+                  value={postProcess}
+                  onChange={(e) => setPostProcess(e.target.value as 'none' | 'move' | 'delete')}
+                  className="w-full px-2.5 py-1.5 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
+                >
+                  <option value="none">Leave it in place (reprocessed every run)</option>
+                  <option value="move">Move it to another folder</option>
+                  <option value="delete">Delete it</option>
+                </select>
+                {postProcess === 'move' && (
+                  <input
+                    type="text"
+                    value={postProcessDir}
+                    onChange={(e) => setPostProcessDir(e.target.value)}
+                    placeholder="s3://my-bucket/invoices/_processed/"
+                    className="w-full mt-1.5 px-2.5 py-1.5 text-xs border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono"
+                  />
+                )}
+                <p className="text-[10px] text-gray-400 mt-0.5">
+                  {postProcess === 'none'
+                    ? "Since this component lists files itself, without this the same files get re-extracted on every run."
+                    : 'Only applied to files that extracted successfully — a failed one is left in place so the next run retries it.'}
+                </p>
+              </div>
+            )}
           </div>
         </div>
 
@@ -308,6 +384,18 @@ export function DocumentExtractorConfigStep({
           </button>
         </div>
       </div>
+
+      {zoomed && previewFile && previewIsImage && (
+        <div
+          className="fixed inset-0 bg-black/80 flex items-center justify-center z-[60] p-8"
+          onClick={() => setZoomed(false)}
+        >
+          <button onClick={() => setZoomed(false)} className="absolute top-4 right-4 text-white/70 hover:text-white" aria-label="Close zoom">
+            <X className="w-6 h-6" />
+          </button>
+          <img src={previewUrl(previewFile)} alt={previewFile.name} className="max-w-full max-h-full object-contain" />
+        </div>
+      )}
     </div>
   );
 }
