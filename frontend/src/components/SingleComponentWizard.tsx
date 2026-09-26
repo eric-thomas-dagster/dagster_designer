@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { X, ArrowRight, Loader2, FolderOpen } from 'lucide-react';
+import { X, ArrowLeft, ArrowRight, Loader2, FolderOpen } from 'lucide-react';
 import { useProjectStore } from '@/hooks/useProject';
 import { notify } from './Notifications';
 import { API_BASE } from '@/services/api';
@@ -24,23 +24,35 @@ function deriveSourceName(path: string, existingNames: Set<string>): string {
   return `${base}_${n}`;
 }
 
+export interface WizardTargetOption {
+  id: string;
+  label: string;
+  description: string;
+}
+
 /**
- * Single-source, single-target wizard: pick an existing DataFrame-of-
- * paths asset, or connect a new folder via file_lister, then install
- * `targetComponentId` wired to it. Extracted after DocumentExtractionWizard,
- * ClassificationWizard, and this being the third+fourth near-identical
- * "pick or connect a source" flow (video_scene_summarizer,
- * audio_diarized_transcriber) -- unlike structured_document_extractor,
- * neither of these has a direct `path` mode, so this is simpler than
- * DocumentExtractionWizard: always exactly one component, always
- * upstream_asset_key, no "which type" second step.
+ * Single-source wizard: pick an existing DataFrame-of-paths asset, or
+ * connect a new folder via file_lister, then choose which of
+ * `targetOptions` to install wired to it. Extracted after
+ * DocumentExtractionWizard/ClassificationWizard being the 2nd/3rd
+ * near-identical "pick or connect a source" flow.
+ *
+ * `targetOptions` deliberately lists every real alternative in the
+ * catalog for this source shape (not just the one with a bespoke config
+ * step) -- an earlier version of this wizard only offered a single
+ * hardcoded target, which hid perfectly good components (e.g.
+ * video_frame_extract_asset, audio_transcriber) with no way to reach
+ * them from here at all. Anything without its own bespoke step still
+ * falls through to the generic form via the caller's ConfigHandoff --
+ * same "discovery over depth for the long tail" call already made for
+ * Document Extraction's 24 options.
  */
 export function SingleComponentWizard({
   title,
   icon: Icon,
   sourceHint,
   pathPlaceholder,
-  targetComponentId,
+  targetOptions,
   onOpenComponentConfig,
   onClose,
 }: {
@@ -48,17 +60,18 @@ export function SingleComponentWizard({
   icon: any;
   sourceHint: string;
   pathPlaceholder: string;
-  targetComponentId: string;
+  targetOptions: WizardTargetOption[];
   onOpenComponentConfig: (componentType: string, initialAttributes?: Record<string, any>) => void;
   onClose: () => void;
 }) {
   const { currentProject, loadProject } = useProjectStore();
+  const [step, setStep] = useState<1 | 2>(1);
   const [selectedSource, setSelectedSource] = useState<string | null>(null);
   const [showNewSourceForm, setShowNewSourceForm] = useState(false);
   const [newSourcePath, setNewSourcePath] = useState('');
   const [newSourceDownload, setNewSourceDownload] = useState(true);
   const [installingSource, setInstallingSource] = useState(false);
-  const [installingTarget, setInstallingTarget] = useState(false);
+  const [installingTargetId, setInstallingTargetId] = useState<string | null>(null);
 
   const existingSources = useMemo(() => {
     if (!currentProject) return [];
@@ -107,6 +120,7 @@ export function SingleComponentWizard({
       setSelectedSource(derivedName);
       setShowNewSourceForm(false);
       setNewSourcePath('');
+      setStep(2);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       notify.error(`Failed to add source: ${msg}`);
@@ -115,25 +129,24 @@ export function SingleComponentWizard({
     }
   };
 
-  const pickSourceAndContinue = async (assetKey: string) => {
-    if (!currentProject || installingTarget) return;
-    setSelectedSource(assetKey);
-    setInstallingTarget(true);
+  const pickTarget = async (opt: WizardTargetOption) => {
+    if (!currentProject || !selectedSource || installingTargetId) return;
+    setInstallingTargetId(opt.id);
     try {
-      const res = await fetch(`${API_BASE}/templates/install-via-cli/${targetComponentId}`, {
+      const res = await fetch(`${API_BASE}/templates/install-via-cli/${opt.id}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ project_id: currentProject.id, config: {}, template_only: true }),
       });
       const body = await res.json().catch(() => ({} as any));
       if (!res.ok) throw new Error(body.detail || 'Install failed');
-      onOpenComponentConfig(body.component_type, { upstream_asset_key: assetKey });
+      onOpenComponentConfig(body.component_type, { upstream_asset_key: selectedSource });
       onClose();
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       notify.error(`Failed to add component: ${msg}`);
     } finally {
-      setInstallingTarget(false);
+      setInstallingTargetId(null);
     }
   };
 
@@ -143,7 +156,7 @@ export function SingleComponentWizard({
         <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200">
           <div className="flex items-center gap-2">
             <Icon className="w-5 h-5 text-primary" />
-            <h2 className="text-lg font-semibold">{title}</h2>
+            <h2 className="text-lg font-semibold">{step === 1 ? title : 'What do you want to do with these files?'}</h2>
           </div>
           <button onClick={onClose} aria-label="Close">
             <X className="w-5 h-5 text-gray-400 hover:text-gray-600" />
@@ -151,87 +164,100 @@ export function SingleComponentWizard({
         </div>
 
         <div className="flex-1 overflow-y-auto px-6 py-4 space-y-4">
-          <p className="text-sm text-gray-500">{sourceHint}</p>
+          {step === 1 ? (
+            <>
+              <p className="text-sm text-gray-500">{sourceHint}</p>
 
-          {existingSources.length > 0 && (
-            <div className="space-y-1.5">
-              <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Existing sources</h3>
-              {existingSources.map((s) => (
-                <button
-                  key={s.assetKey}
-                  onClick={() => pickSourceAndContinue(s.assetKey)}
-                  disabled={installingTarget}
-                  className="w-full flex items-center justify-between px-3 py-2 text-left border border-gray-200 rounded-md hover:border-blue-300 hover:bg-blue-50/40 disabled:opacity-50 disabled:cursor-progress"
-                >
-                  <div>
-                    <div className="text-sm font-medium text-gray-900">{s.label}</div>
-                    {s.componentType && <div className="text-xs text-gray-400 font-mono">{s.componentType}</div>}
-                  </div>
-                  {installingTarget && selectedSource === s.assetKey ? (
-                    <Loader2 className="w-4 h-4 text-gray-400 animate-spin" />
-                  ) : (
-                    <ArrowRight className="w-4 h-4 text-gray-300" />
-                  )}
-                </button>
-              ))}
-            </div>
-          )}
+              {existingSources.length > 0 && (
+                <div className="space-y-1.5">
+                  <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Existing sources</h3>
+                  {existingSources.map((s) => (
+                    <button
+                      key={s.assetKey}
+                      onClick={() => { setSelectedSource(s.assetKey); setStep(2); }}
+                      className="w-full flex items-center justify-between px-3 py-2 text-left border border-gray-200 rounded-md hover:border-blue-300 hover:bg-blue-50/40"
+                    >
+                      <div>
+                        <div className="text-sm font-medium text-gray-900">{s.label}</div>
+                        {s.componentType && <div className="text-xs text-gray-400 font-mono">{s.componentType}</div>}
+                      </div>
+                      <ArrowRight className="w-4 h-4 text-gray-300" />
+                    </button>
+                  ))}
+                </div>
+              )}
 
-          <div className="space-y-1.5">
-            <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Connect a new source</h3>
-            {!showNewSourceForm ? (
-              <button
-                onClick={() => setShowNewSourceForm(true)}
-                className="w-full flex items-center gap-2 px-3 py-2.5 text-left bg-gradient-to-br from-violet-50 to-blue-50 border border-violet-200 rounded-md hover:border-violet-400"
-              >
-                <FolderOpen className="w-4 h-4 text-violet-600" />
-                <div>
-                  <div className="text-sm font-medium text-gray-900">Point at a bucket or folder</div>
-                  <div className="text-xs text-gray-500">S3, GCS, ADLS, or a local path — matches a glob pattern</div>
-                </div>
-              </button>
-            ) : (
-              <div className="border border-gray-200 rounded-md p-3 space-y-2.5">
-                <div>
-                  <label className="block text-xs font-medium text-gray-700 mb-1">Path / glob</label>
-                  <input
-                    type="text"
-                    value={newSourcePath}
-                    onChange={(e) => setNewSourcePath(e.target.value)}
-                    placeholder={pathPlaceholder}
-                    className="w-full px-2.5 py-1.5 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono"
-                  />
-                </div>
-                <label className="flex items-center gap-1.5 text-xs text-gray-600">
-                  <input type="checkbox" checked={newSourceDownload} onChange={(e) => setNewSourceDownload(e.target.checked)} />
-                  Download files to a local cache
-                </label>
-                <div className="flex justify-end gap-2 pt-1">
-                  <button onClick={() => setShowNewSourceForm(false)} className="px-3 py-1.5 text-xs text-gray-600 hover:bg-gray-100 rounded-md">
-                    Cancel
-                  </button>
+              <div className="space-y-1.5">
+                <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Connect a new source</h3>
+                {!showNewSourceForm ? (
                   <button
-                    onClick={connectNewSource}
-                    disabled={installingSource || !newSourcePath.trim()}
-                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-primary text-primary-foreground rounded-md hover:bg-accent disabled:opacity-50"
+                    onClick={() => setShowNewSourceForm(true)}
+                    className="w-full flex items-center gap-2 px-3 py-2.5 text-left bg-gradient-to-br from-violet-50 to-blue-50 border border-violet-200 rounded-md hover:border-violet-400"
                   >
-                    {installingSource ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <ArrowRight className="w-3.5 h-3.5" />}
-                    Use this path
+                    <FolderOpen className="w-4 h-4 text-violet-600" />
+                    <div>
+                      <div className="text-sm font-medium text-gray-900">Point at a bucket or folder</div>
+                      <div className="text-xs text-gray-500">S3, GCS, ADLS, or a local path — matches a glob pattern</div>
+                    </div>
                   </button>
-                </div>
+                ) : (
+                  <div className="border border-gray-200 rounded-md p-3 space-y-2.5">
+                    <div>
+                      <label className="block text-xs font-medium text-gray-700 mb-1">Path / glob</label>
+                      <input
+                        type="text"
+                        value={newSourcePath}
+                        onChange={(e) => setNewSourcePath(e.target.value)}
+                        placeholder={pathPlaceholder}
+                        className="w-full px-2.5 py-1.5 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono"
+                      />
+                    </div>
+                    <label className="flex items-center gap-1.5 text-xs text-gray-600">
+                      <input type="checkbox" checked={newSourceDownload} onChange={(e) => setNewSourceDownload(e.target.checked)} />
+                      Download files to a local cache
+                    </label>
+                    <div className="flex justify-end gap-2 pt-1">
+                      <button onClick={() => setShowNewSourceForm(false)} className="px-3 py-1.5 text-xs text-gray-600 hover:bg-gray-100 rounded-md">
+                        Cancel
+                      </button>
+                      <button
+                        onClick={connectNewSource}
+                        disabled={installingSource || !newSourcePath.trim()}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-primary text-primary-foreground rounded-md hover:bg-accent disabled:opacity-50"
+                      >
+                        {installingSource ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <ArrowRight className="w-3.5 h-3.5" />}
+                        Use this path
+                      </button>
+                    </div>
+                  </div>
+                )}
               </div>
-            )}
-          </div>
-
-          {selectedSource && !showNewSourceForm && (
-            <button
-              onClick={() => pickSourceAndContinue(selectedSource)}
-              disabled={installingTarget}
-              className="w-full inline-flex items-center justify-center gap-1.5 px-3 py-2 text-sm font-medium bg-primary text-primary-foreground rounded-md hover:bg-accent disabled:opacity-50"
-            >
-              {installingTarget ? <Loader2 className="w-4 h-4 animate-spin" /> : <ArrowRight className="w-4 h-4" />}
-              Continue with "{selectedSource}"
-            </button>
+            </>
+          ) : (
+            <>
+              <button onClick={() => setStep(1)} className="inline-flex items-center gap-1 text-xs text-gray-500 hover:text-gray-700">
+                <ArrowLeft className="w-3.5 h-3.5" /> Back to source
+              </button>
+              <p className="text-sm text-gray-500">
+                Reading from <span className="font-mono text-gray-700">{selectedSource}</span> — pick what to do with it.
+              </p>
+              <div className="space-y-2">
+                {targetOptions.map((opt) => (
+                  <button
+                    key={opt.id}
+                    onClick={() => pickTarget(opt)}
+                    disabled={!!installingTargetId}
+                    className="w-full flex items-center justify-between px-3 py-2.5 text-left border border-gray-200 rounded-md hover:border-blue-300 hover:bg-blue-50/40 disabled:opacity-50 disabled:cursor-progress"
+                  >
+                    <div>
+                      <div className="text-sm font-medium text-gray-900">{opt.label}</div>
+                      <div className="text-xs text-gray-500">{opt.description}</div>
+                    </div>
+                    {installingTargetId === opt.id && <Loader2 className="w-3.5 h-3.5 animate-spin text-gray-400 flex-shrink-0" />}
+                  </button>
+                ))}
+              </div>
+            </>
           )}
         </div>
       </div>

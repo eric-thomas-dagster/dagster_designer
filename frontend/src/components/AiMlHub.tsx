@@ -63,8 +63,8 @@ const CARDS: HubCard[] = [
   },
   {
     id: 'video_scene',
-    label: 'Video Understanding',
-    description: 'Detect scene changes and summarize each one with a vision-LLM call — point at a folder of videos.',
+    label: 'Video',
+    description: 'Scene understanding, frame extraction, audio extraction, or metadata — point at a folder of videos, pick what you need.',
     icon: Film,
     count: 10,
     status: 'ready',
@@ -80,7 +80,7 @@ const CARDS: HubCard[] = [
   {
     id: 'audio',
     label: 'Audio & Speech',
-    description: 'Speaker-diarized transcription (who said what, when) — point at a folder of audio files.',
+    description: 'Transcription — with or without speaker labels, local or cloud — point at a folder of audio files, pick what you need.',
     icon: Mic,
     count: 3,
     status: 'ready',
@@ -179,11 +179,16 @@ export function AiMlHub() {
 
       {openBuilder === 'video_scene' && (
         <SingleComponentWizard
-          title="Video Understanding — point at your videos"
+          title="Video — point at your videos"
           icon={Film}
           sourceHint="Pick an existing DataFrame of video paths already in this project, or connect a new folder."
           pathPlaceholder="s3://my-bucket/videos/**/*.mp4"
-          targetComponentId="video_scene_summarizer"
+          targetOptions={[
+            { id: 'video_scene_summarizer', label: 'Understand scenes', description: 'Detect scene changes and summarize each one with a vision-LLM call — a table of contents for the video.' },
+            { id: 'video_frame_extract_asset', label: 'Extract frames', description: 'Pull N frames per video as image files (every N seconds/frames, or a fixed count) — no LLM call.' },
+            { id: 'video_audio_extract_asset', label: 'Extract audio track', description: 'Pull just the audio out of each video via ffmpeg, for feeding into a transcriber.' },
+            { id: 'video_metadata_extractor', label: 'Get metadata', description: 'Container + stream metadata (duration, resolution, codec, ...) via ffprobe — no LLM call.' },
+          ]}
           onClose={() => setOpenBuilder(null)}
           onOpenComponentConfig={(componentType, initialAttributes) => {
             setPendingConfig({ componentType, initialAttributes });
@@ -194,11 +199,16 @@ export function AiMlHub() {
 
       {openBuilder === 'audio' && (
         <SingleComponentWizard
-          title="Audio Transcription — point at your audio files"
+          title="Audio — point at your audio files"
           icon={Mic}
           sourceHint="Pick an existing DataFrame of audio paths already in this project (e.g. video_audio_extract_asset's output), or connect a new folder."
           pathPlaceholder="s3://my-bucket/calls/**/*.mp3"
-          targetComponentId="audio_diarized_transcriber"
+          targetOptions={[
+            { id: 'audio_diarized_transcriber', label: 'Transcribe with speaker labels', description: 'Who said what, when — segments per speaker turn. Google Cloud Speech or local pyannote+Whisper.' },
+            { id: 'audio_transcriber', label: 'Transcribe (local Whisper)', description: 'Plain transcript, no speaker labels — runs fully locally via OpenAI\'s Whisper model, no API key.' },
+            { id: 'litellm_audio_transcription', label: 'Transcribe (LiteLLM/cloud Whisper)', description: 'Plain transcript via any LiteLLM-compatible Whisper endpoint (OpenAI, Azure, ...).' },
+            { id: 'speech_to_text_asset', label: 'Transcribe (Google Cloud Speech)', description: 'Plain transcript via Cloud Speech-to-Text v2 — good for long files, non-English, or noisy audio.' },
+          ]}
           onClose={() => setOpenBuilder(null)}
           onOpenComponentConfig={(componentType, initialAttributes) => {
             setPendingConfig({ componentType, initialAttributes });
