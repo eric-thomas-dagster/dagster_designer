@@ -12,6 +12,8 @@ import { AgentPipelineBuilder } from './components/AgentPipelineBuilder';
 import { DocumentExtractionReview } from './components/DocumentExtractionReview';
 import { DocumentExtractorConfigStep } from './components/DocumentExtractorConfigStep';
 import { OcrExtractorConfigStep } from './components/OcrExtractorConfigStep';
+import { ClassifierConfigStep, CLASSIFIER_TYPE_CONFIG } from './components/ClassifierConfigStep';
+import { ClassificationReview } from './components/ClassificationReview';
 import { AiMlHub } from './components/AiMlHub';
 import { ActivatePanel } from './components/ActivatePanel';
 import { extractComponentId } from '@/lib/componentId';
@@ -257,6 +259,7 @@ function App() {
   // only for DOCUMENT_EXTRACTOR_FAMILY components) to
   // DocumentExtractionReview -- reviews THIS instance's own output asset.
   const [reviewExtractionsTarget, setReviewExtractionsTarget] = useState<ComponentInstance | null>(null);
+  const [reviewClassificationTarget, setReviewClassificationTarget] = useState<ComponentInstance | null>(null);
   const [addingComponentType, setAddingComponentType] = useState<string | null>(null);
   const [componentsPanelHeight, setComponentsPanelHeight] = useState(60); // Percentage
   // GraphEditor's graph/catalog toggle is lifted here so App can hide
@@ -1823,6 +1826,17 @@ function App() {
             setReviewExtractionsTarget(c);
           }}
         />
+      ) : editingComponent && currentProject && ['text_classifier', 'zero_shot_classifier', 'image_classifier'].includes(extractComponentId(editingComponent.component_type)) ? (
+        <ClassifierConfigStep
+          componentType={editingComponent.component_type}
+          component={editingComponent}
+          onDone={() => setEditingComponent(null)}
+          onClose={() => setEditingComponent(null)}
+          onReviewClassification={(c) => {
+            setEditingComponent(null);
+            setReviewClassificationTarget(c);
+          }}
+        />
       ) : (editingComponent || addingComponentType) && currentProject && (
         <ComponentConfigModal
           component={editingComponent}
@@ -1860,6 +1874,20 @@ function App() {
           onClose={() => setReviewExtractionsTarget(null)}
         />
       )}
+
+      {reviewClassificationTarget && currentProject && (() => {
+        const cid = extractComponentId(reviewClassificationTarget.component_type);
+        const cfg = CLASSIFIER_TYPE_CONFIG[cid] || CLASSIFIER_TYPE_CONFIG.text_classifier;
+        return (
+          <ClassificationReview
+            projectId={currentProject.id}
+            assetKey={reviewClassificationTarget.attributes?.asset_name || reviewClassificationTarget.id}
+            inputColumn={reviewClassificationTarget.attributes?.[cfg.columnField] || cfg.columnDefault}
+            isImage={cfg.isImage}
+            onClose={() => setReviewClassificationTarget(null)}
+          />
+        );
+      })()}
 
       {/* Dagster Startup Modal */}
       {showDagsterStartupModal && currentProject && (

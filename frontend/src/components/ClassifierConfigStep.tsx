@@ -15,7 +15,7 @@ import type { ComponentInstance } from '@/types';
 // department fields) is different enough to deserve its own pass later;
 // it still falls back to the generic form for now, same call made for
 // document_ai_extractor/vision_api_asset in the extraction wizard.
-const TYPE_CONFIG: Record<string, {
+export const CLASSIFIER_TYPE_CONFIG: Record<string, {
   labelField: 'categories' | 'candidate_labels';
   labelsRequired: boolean;
   labelsHelp: string;
@@ -59,21 +59,21 @@ export function ClassifierConfigStep({
   initialAttributes,
   onDone,
   onClose,
-  onReviewExtractions,
+  onReviewClassification,
 }: {
   componentType: string;
   component?: ComponentInstance | null;
   initialAttributes?: Record<string, any>;
   onDone: () => void;
   onClose: () => void;
-  onReviewExtractions?: (component: ComponentInstance) => void;
+  onReviewClassification?: (component: ComponentInstance) => void;
 }) {
   const { currentProject, loadProject } = useProjectStore();
   const isEditing = !!component;
   const seedAttrs = component?.attributes || initialAttributes || {};
   const upstreamAssetKey: string | undefined = seedAttrs.upstream_asset_key;
   const componentId = extractComponentId(componentType);
-  const cfg = TYPE_CONFIG[componentId] || TYPE_CONFIG.text_classifier;
+  const cfg = CLASSIFIER_TYPE_CONFIG[componentId] || CLASSIFIER_TYPE_CONFIG.text_classifier;
 
   const [assetName, setAssetName] = useState<string>(
     seedAttrs.asset_name || component?.label || (upstreamAssetKey ? `${upstreamAssetKey}_classified` : 'classified'),
@@ -322,9 +322,9 @@ export function ClassifierConfigStep({
         </div>
 
         <div className="flex justify-end gap-2 px-6 py-4 border-t border-gray-200">
-          {isEditing && onReviewExtractions && (
+          {isEditing && onReviewClassification && (
             <button
-              onClick={() => onReviewExtractions(component!)}
+              onClick={() => onReviewClassification(component!)}
               className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-emerald-700 border border-emerald-200 bg-emerald-50 rounded-md hover:bg-emerald-100 mr-auto"
             >
               <ImageIcon className="w-3.5 h-3.5" /> Review results
