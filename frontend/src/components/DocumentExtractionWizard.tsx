@@ -21,9 +21,19 @@ function isDataFrameType(t: unknown): boolean {
 // schemas) -- ComponentConfigModal's own column picker handles the
 // specific column field once opened, so this wizard only needs to seed
 // upstream_asset_key, not guess every extractor's exact field name.
+//
+// "Structured business documents" installs ONE component
+// (structured_document_extractor) for every option in that group, not a
+// different component per option -- confirmed by diffing the source
+// directly: invoice_extractor/receipt_extractor/bank_statement_extractor/
+// etc. were the SAME component with a different default `output_fields`
+// value. structured_document_extractor consolidates them with a
+// `document_type` field that picks the same preset; `documentType` below
+// is seeded as that field's initial value.
 interface ExtractorOption {
   id: string;
   label: string;
+  documentType?: string;
 }
 interface ExtractorGroup {
   label: string;
@@ -45,19 +55,20 @@ const EXTRACTOR_GROUPS: ExtractorGroup[] = [
     label: 'Structured business documents',
     icon: Receipt,
     options: [
-      { id: 'invoice_extractor', label: 'Invoice' },
-      { id: 'receipt_extractor', label: 'Receipt' },
-      { id: 'bank_statement_extractor', label: 'Bank statement' },
-      { id: 'expense_report_extractor', label: 'Expense report' },
-      { id: 'purchase_order_extractor', label: 'Purchase order' },
-      { id: 'shipping_label_extractor', label: 'Shipping label' },
-      { id: 'contract_extractor', label: 'Contract' },
-      { id: 'legal_document_extractor', label: 'Legal document' },
-      { id: 'insurance_claim_extractor', label: 'Insurance claim' },
-      { id: 'medical_record_extractor', label: 'Medical record' },
-      { id: 'resume_extractor', label: 'Resume' },
-      { id: 'job_posting_extractor', label: 'Job posting' },
-      { id: 'scientific_paper_extractor', label: 'Scientific paper' },
+      { id: 'structured_document_extractor', documentType: 'invoice', label: 'Invoice' },
+      { id: 'structured_document_extractor', documentType: 'receipt', label: 'Receipt' },
+      { id: 'structured_document_extractor', documentType: 'bank_statement', label: 'Bank statement' },
+      { id: 'structured_document_extractor', documentType: 'expense_report', label: 'Expense report' },
+      { id: 'structured_document_extractor', documentType: 'purchase_order', label: 'Purchase order' },
+      { id: 'structured_document_extractor', documentType: 'shipping_label', label: 'Shipping label' },
+      { id: 'structured_document_extractor', documentType: 'contract', label: 'Contract' },
+      { id: 'structured_document_extractor', documentType: 'legal_document', label: 'Legal document' },
+      { id: 'structured_document_extractor', documentType: 'insurance_claim', label: 'Insurance claim' },
+      { id: 'structured_document_extractor', documentType: 'medical_record', label: 'Medical record' },
+      { id: 'structured_document_extractor', documentType: 'resume', label: 'Resume' },
+      { id: 'structured_document_extractor', documentType: 'job_posting', label: 'Job posting' },
+      { id: 'structured_document_extractor', documentType: 'scientific_paper', label: 'Scientific paper' },
+      { id: 'structured_document_extractor', documentType: 'custom', label: 'Something else (custom fields)' },
     ],
   },
   {
@@ -70,7 +81,7 @@ const EXTRACTOR_GROUPS: ExtractorGroup[] = [
     ],
   },
   {
-    label: 'Generic / custom structured extraction',
+    label: 'Other structured extraction',
     icon: FileSearch,
     options: [
       { id: 'instructor_extractor', label: 'Pydantic model extractor (Instructor)' },
@@ -138,18 +149,22 @@ export function DocumentExtractionWizard({
   });
 
   const [installingExtractorId, setInstallingExtractorId] = useState<string | null>(null);
-  const pickExtractor = async (extractorId: string) => {
+  const pickExtractor = async (opt: ExtractorOption) => {
+    const optKey = `${opt.id}:${opt.documentType ?? ''}`;
     if (!currentProject || !selectedSource || installingExtractorId) return;
-    setInstallingExtractorId(extractorId);
+    setInstallingExtractorId(optKey);
     try {
-      const res = await fetch(`${API_BASE}/templates/install-via-cli/${extractorId}`, {
+      const res = await fetch(`${API_BASE}/templates/install-via-cli/${opt.id}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ project_id: currentProject.id, config: {}, template_only: true }),
       });
       const body = await res.json().catch(() => ({} as any));
       if (!res.ok) throw new Error(body.detail || 'Install failed');
-      onOpenComponentConfig(body.component_type, { upstream_asset_key: selectedSource });
+      onOpenComponentConfig(body.component_type, {
+        upstream_asset_key: selectedSource,
+        ...(opt.documentType ? { document_type: opt.documentType } : {}),
+      });
       onClose();
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -288,17 +303,20 @@ export function DocumentExtractionWizard({
                         <Icon className="w-3.5 h-3.5" /> {group.label}
                       </h3>
                       <div className="grid grid-cols-2 gap-1.5">
-                        {group.options.map((opt) => (
-                          <button
-                            key={opt.id}
-                            onClick={() => pickExtractor(opt.id)}
-                            disabled={!!installingExtractorId}
-                            className="flex items-center justify-between px-2.5 py-2 text-left text-sm border border-gray-200 rounded-md hover:border-blue-300 hover:bg-blue-50/40 disabled:opacity-50 disabled:cursor-progress"
-                          >
-                            <span className="text-gray-800">{opt.label}</span>
-                            {installingExtractorId === opt.id && <Loader2 className="w-3.5 h-3.5 animate-spin text-gray-400" />}
-                          </button>
-                        ))}
+                        {group.options.map((opt) => {
+                          const optKey = `${opt.id}:${opt.documentType ?? opt.label}`;
+                          return (
+                            <button
+                              key={optKey}
+                              onClick={() => pickExtractor(opt)}
+                              disabled={!!installingExtractorId}
+                              className="flex items-center justify-between px-2.5 py-2 text-left text-sm border border-gray-200 rounded-md hover:border-blue-300 hover:bg-blue-50/40 disabled:opacity-50 disabled:cursor-progress"
+                            >
+                              <span className="text-gray-800">{opt.label}</span>
+                              {installingExtractorId === optKey && <Loader2 className="w-3.5 h-3.5 animate-spin text-gray-400" />}
+                            </button>
+                          );
+                        })}
                       </div>
                     </div>
                   );
