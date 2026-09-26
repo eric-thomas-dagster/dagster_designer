@@ -12,6 +12,7 @@ from typing import Any, List, Optional
 
 from ..services.project_service import project_service
 from ..core.uv_binary import find_uv_binary, env_with_bundled_uv_on_path, project_subprocess_env
+from ..services.genie_service import fetch_manifest
 
 router = APIRouter(prefix="/templates", tags=["templates"])
 
@@ -1103,6 +1104,27 @@ async def install_component_via_cli(
     except Exception as _dep_e:
         print(f"[CLI Install] Warning: could not install template requirements: {_dep_e}")
 
+    # System-level (non-pip) dependencies, e.g. ocr_extractor needs the
+    # `tesseract` BINARY -- pip/uv can install pytesseract (the Python
+    # wrapper) but can never install the binary itself, since it isn't a
+    # Python package at all. Confirmed live: an OCR install succeeded
+    # above (litellm/pytesseract landed fine) but OCR still couldn't run
+    # without a system-level `brew install tesseract`. Surfaced here
+    # (not auto-installed) so the caller can confirm before Designer
+    # shells out to Homebrew -- that's a real system-level change, not
+    # just a project-local venv package.
+    missing_system_deps: list[str] = []
+    try:
+        import shutil as _sh2
+        manifest_entry = next(
+            (c for c in (await fetch_manifest()).get("components", []) if c.get("id") == component_id),
+            None,
+        )
+        brew_formulas = ((manifest_entry or {}).get("dependencies") or {}).get("brew") or []
+        missing_system_deps = [f for f in brew_formulas if _sh2.which(f) is None]
+    except Exception as e:
+        print(f"[CLI Install] Warning: could not check system dependencies: {e}")
+
     # The CLI writes a defs.yaml stub at <project>/src/<module>/defs/<id>/defs.yaml
     # (or the flat-layout equivalent). Find it and pull out the canonical type.
     candidates = [
@@ -1236,6 +1258,7 @@ async def install_component_via_cli(
             "component_id": component_id,
             "component_type": component_type,
             "defs_yaml": None,
+            "missing_system_deps": missing_system_deps,
         }
 
     # If the caller wants a different instance directory name (needed when the
@@ -1301,7 +1324,73 @@ async def install_component_via_cli(
         "defs_yaml": str(final_defs_yaml_path.relative_to(project_dir)),
         "dropped_attributes": dropped_attributes,
         "components_list_warning": components_list_warning,
+        "missing_system_deps": missing_system_deps,
     }
+
+
+class InstallSystemDepsRequest(BaseModel):
+    formulas: List[str]
+
+
+@router.post("/install-system-deps")
+async def install_system_deps(request: InstallSystemDepsRequest):
+    """Install missing system-level (non-pip) binary dependencies via
+    Homebrew, e.g. `tesseract` for ocr_extractor or `ffmpeg` for
+    audio_transcriber -- see missing_system_deps on install-via-cli's
+    response. Deliberately a SEPARATE, explicit call the frontend only
+    makes after the user confirms: unlike the pip-dependency safety net
+    (which lands in an isolated project venv), this modifies the host
+    system itself, so it isn't run silently as part of installing a
+    component.
+    """
+    import shutil as _sh3
+
+    if not request.formulas:
+        raise HTTPException(status_code=400, detail="No formulas given")
+
+    # Allowlist: only formulas some component in the manifest actually
+    # declares under dependencies.brew -- this endpoint takes a plain
+    # list of strings from the frontend, and while subprocess.run's list
+    # form (no shell=True) already rules out shell injection, nothing
+    # else would stop it being used to `brew install` an arbitrary
+    # formula unrelated to any real component dependency.
+    try:
+        manifest = await fetch_manifest()
+        allowed = {
+            f
+            for c in manifest.get("components", [])
+            for f in ((c.get("dependencies") or {}).get("brew") or [])
+        }
+    except Exception:
+        allowed = set()
+    not_allowed = [f for f in request.formulas if f not in allowed]
+    if not_allowed:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Not a known component dependency, refusing to install: {not_allowed}",
+        )
+
+    if _sh3.which("brew") is None:
+        raise HTTPException(
+            status_code=500,
+            detail="Homebrew isn't installed. Install it from https://brew.sh, then try again.",
+        )
+
+    try:
+        result = subprocess.run(
+            ["brew", "install", *request.formulas],
+            capture_output=True,
+            text=True,
+            timeout=600,
+        )
+    except subprocess.TimeoutExpired:
+        raise HTTPException(status_code=504, detail="brew install timed out after 10 minutes")
+
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "unknown error").strip().splitlines()
+        raise HTTPException(status_code=500, detail=f"brew install failed: {' | '.join(detail[-5:])}")
+
+    return {"success": True, "installed": request.formulas}
 
 
 class UpdateComponentAttributesRequest(BaseModel):

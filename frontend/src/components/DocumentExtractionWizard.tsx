@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react';
 import { useMutation } from '@tanstack/react-query';
 import {
-  X, ArrowLeft, ArrowRight, Loader2, FileText, ScanText, Receipt, FileSearch, Layers,
+  X, ArrowLeft, ArrowRight, Loader2, FileText, ScanText, Receipt, FileSearch, Layers, Terminal,
 } from 'lucide-react';
 import { useProjectStore } from '@/hooks/useProject';
 import { notify } from './Notifications';
@@ -149,6 +149,22 @@ export function DocumentExtractionWizard({
   });
 
   const [installingExtractorId, setInstallingExtractorId] = useState<string | null>(null);
+  // Set when install-via-cli reports missing_system_deps (a binary like
+  // tesseract/ffmpeg that pip/uv can never install) -- holds what to do
+  // once the user confirms or skips, since the component itself is
+  // already installed either way at this point.
+  const [pendingSystemDeps, setPendingSystemDeps] = useState<{
+    formulas: string[];
+    componentType: string;
+    initialAttributes?: Record<string, any>;
+  } | null>(null);
+  const [installingBrewDeps, setInstallingBrewDeps] = useState(false);
+
+  const finishPick = (componentType: string, initialAttributes?: Record<string, any>) => {
+    onOpenComponentConfig(componentType, initialAttributes);
+    onClose();
+  };
+
   const pickExtractor = async (opt: ExtractorOption) => {
     const optKey = `${opt.id}:${opt.documentType ?? ''}`;
     if (!currentProject || !selectedSource || installingExtractorId) return;
@@ -161,11 +177,19 @@ export function DocumentExtractionWizard({
       });
       const body = await res.json().catch(() => ({} as any));
       if (!res.ok) throw new Error(body.detail || 'Install failed');
-      onOpenComponentConfig(body.component_type, {
+      const initialAttributes = {
         upstream_asset_key: selectedSource,
         ...(opt.documentType ? { document_type: opt.documentType } : {}),
-      });
-      onClose();
+      };
+      const missing: string[] = body.missing_system_deps || [];
+      if (missing.length > 0) {
+        // Component is already installed at this point (pip deps and
+        // all) -- this is purely "it also needs a system binary to
+        // actually run", confirmed before Designer shells out to brew.
+        setPendingSystemDeps({ formulas: missing, componentType: body.component_type, initialAttributes });
+      } else {
+        finishPick(body.component_type, initialAttributes);
+      }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       notify.error(`Failed to add extractor: ${msg}`);
@@ -173,6 +197,76 @@ export function DocumentExtractionWizard({
       setInstallingExtractorId(null);
     }
   };
+
+  const confirmInstallBrewDeps = async () => {
+    if (!pendingSystemDeps) return;
+    setInstallingBrewDeps(true);
+    try {
+      const res = await fetch(`${API_BASE}/templates/install-system-deps`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ formulas: pendingSystemDeps.formulas }),
+      });
+      const body = await res.json().catch(() => ({} as any));
+      if (!res.ok) throw new Error(body.detail || 'brew install failed');
+      notify.success(`Installed ${pendingSystemDeps.formulas.join(', ')} via Homebrew.`);
+      finishPick(pendingSystemDeps.componentType, pendingSystemDeps.initialAttributes);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      notify.error(`Homebrew install failed: ${msg}`);
+    } finally {
+      setInstallingBrewDeps(false);
+    }
+  };
+
+  const skipBrewDeps = () => {
+    if (!pendingSystemDeps) return;
+    finishPick(pendingSystemDeps.componentType, pendingSystemDeps.initialAttributes);
+  };
+
+  if (pendingSystemDeps) {
+    return (
+      <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+        <div className="bg-white rounded-lg shadow-xl w-full max-w-md flex flex-col">
+          <div className="flex items-center gap-2 px-6 py-4 border-b border-gray-200">
+            <Terminal className="w-5 h-5 text-primary" />
+            <h2 className="text-lg font-semibold">Also needs a system tool</h2>
+          </div>
+          <div className="px-6 py-4 space-y-3">
+            <p className="text-sm text-gray-600">
+              This component is installed, but it also needs{' '}
+              {pendingSystemDeps.formulas.map((f) => (
+                <code key={f} className="px-1 py-0.5 bg-gray-100 rounded text-xs mr-1">{f}</code>
+              ))}
+              on your system to actually run — not something pip/uv can install on its own.
+            </p>
+            <p className="text-xs text-gray-500">
+              Install via Homebrew now, or skip and do it yourself later
+              (<code className="bg-gray-100 px-1 rounded">brew install {pendingSystemDeps.formulas.join(' ')}</code>).
+              Either way the component is already configured and ready.
+            </p>
+          </div>
+          <div className="flex justify-end gap-2 px-6 py-4 border-t border-gray-200">
+            <button
+              onClick={skipBrewDeps}
+              disabled={installingBrewDeps}
+              className="px-3 py-1.5 text-sm text-gray-600 hover:bg-gray-100 rounded-md disabled:opacity-50"
+            >
+              Skip for now
+            </button>
+            <button
+              onClick={confirmInstallBrewDeps}
+              disabled={installingBrewDeps}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium bg-primary text-primary-foreground rounded-md hover:bg-accent disabled:opacity-50"
+            >
+              {installingBrewDeps ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Terminal className="w-3.5 h-3.5" />}
+              {installingBrewDeps ? 'Installing…' : 'Install with Homebrew'}
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
