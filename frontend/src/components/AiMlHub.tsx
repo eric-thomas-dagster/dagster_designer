@@ -11,6 +11,8 @@ import { SingleComponentWizard } from './SingleComponentWizard';
 import { VideoSceneConfigStep } from './VideoSceneConfigStep';
 import { AudioDiarizedConfigStep } from './AudioDiarizedConfigStep';
 import { MlflowInferenceConfigStep } from './MlflowInferenceConfigStep';
+import { AutoMLConfigStep } from './AutoMLConfigStep';
+import { LlmJudgeConfigStep } from './LlmJudgeConfigStep';
 import { ComponentConfigModal } from './ComponentConfigModal';
 import { extractComponentId } from '@/lib/componentId';
 
@@ -49,9 +51,9 @@ const CARDS: HubCard[] = [
   {
     id: 'classic_ml',
     label: 'Classic ML / Inference',
-    description: 'Classifiers (text, zero-shot, image) and scoring an existing MLflow model are ready — point at a source, pick what to do. BigQuery ML and feature engineering still fall back to the raw form.',
+    description: 'Classify, score, or train — the wizard asks if you have labeled data first, then picks between AutoML, judging with an LLM, or scoring an existing model. BigQuery ML still falls back to the raw form.',
     icon: BrainCircuit,
-    count: 11,
+    count: 15,
     status: 'ready',
   },
   {
@@ -257,6 +259,20 @@ export function AiMlHub() {
           />
         ) : extractComponentId(pendingConfig.componentType) === 'mlflow_model_inference' ? (
           <MlflowInferenceConfigStep
+            componentType={pendingConfig.componentType}
+            initialAttributes={pendingConfig.initialAttributes || {}}
+            onDone={() => setPendingConfig(null)}
+            onClose={() => setPendingConfig(null)}
+          />
+        ) : extractComponentId(pendingConfig.componentType) === 'automl_asset' ? (
+          <AutoMLConfigStep
+            componentType={pendingConfig.componentType}
+            initialAttributes={pendingConfig.initialAttributes || {}}
+            onDone={() => setPendingConfig(null)}
+            onClose={() => setPendingConfig(null)}
+          />
+        ) : extractComponentId(pendingConfig.componentType) === 'llm_judge' ? (
+          <LlmJudgeConfigStep
             componentType={pendingConfig.componentType}
             initialAttributes={pendingConfig.initialAttributes || {}}
             onDone={() => setPendingConfig(null)}

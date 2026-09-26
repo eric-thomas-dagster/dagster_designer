@@ -17,6 +17,8 @@ import { ClassificationReview } from './components/ClassificationReview';
 import { VideoSceneConfigStep } from './components/VideoSceneConfigStep';
 import { AudioDiarizedConfigStep } from './components/AudioDiarizedConfigStep';
 import { MlflowInferenceConfigStep } from './components/MlflowInferenceConfigStep';
+import { AutoMLConfigStep } from './components/AutoMLConfigStep';
+import { LlmJudgeConfigStep } from './components/LlmJudgeConfigStep';
 import { AiMlHub } from './components/AiMlHub';
 import { ActivatePanel } from './components/ActivatePanel';
 import { extractComponentId } from '@/lib/componentId';
@@ -266,6 +268,7 @@ function App() {
   const [reviewScenesTarget, setReviewScenesTarget] = useState<ComponentInstance | null>(null);
   const [reviewTranscriptsTarget, setReviewTranscriptsTarget] = useState<ComponentInstance | null>(null);
   const [reviewPredictionsTarget, setReviewPredictionsTarget] = useState<ComponentInstance | null>(null);
+  const [reviewJudgmentsTarget, setReviewJudgmentsTarget] = useState<ComponentInstance | null>(null);
   const [addingComponentType, setAddingComponentType] = useState<string | null>(null);
   const [componentsPanelHeight, setComponentsPanelHeight] = useState(60); // Percentage
   // GraphEditor's graph/catalog toggle is lifted here so App can hide
@@ -1876,6 +1879,28 @@ function App() {
             setReviewPredictionsTarget(c);
           }}
         />
+      ) : editingComponent && currentProject && extractComponentId(editingComponent.component_type) === 'automl_asset' ? (
+        <AutoMLConfigStep
+          componentType={editingComponent.component_type}
+          component={editingComponent}
+          onDone={() => setEditingComponent(null)}
+          onClose={() => setEditingComponent(null)}
+          onReviewPredictions={(c) => {
+            setEditingComponent(null);
+            setReviewPredictionsTarget(c);
+          }}
+        />
+      ) : editingComponent && currentProject && extractComponentId(editingComponent.component_type) === 'llm_judge' ? (
+        <LlmJudgeConfigStep
+          componentType={editingComponent.component_type}
+          component={editingComponent}
+          onDone={() => setEditingComponent(null)}
+          onClose={() => setEditingComponent(null)}
+          onReviewJudgments={(c) => {
+            setEditingComponent(null);
+            setReviewJudgmentsTarget(c);
+          }}
+        />
       ) : (editingComponent || addingComponentType) && currentProject && (
         <ComponentConfigModal
           component={editingComponent}
@@ -1951,6 +1976,15 @@ function App() {
           projectId={currentProject.id}
           assetKey={reviewPredictionsTarget.attributes?.asset_name || reviewPredictionsTarget.id}
           onClose={() => setReviewPredictionsTarget(null)}
+        />
+      )}
+
+      {reviewJudgmentsTarget && currentProject && (
+        <ClassificationReview
+          projectId={currentProject.id}
+          assetKey={reviewJudgmentsTarget.attributes?.asset_name || reviewJudgmentsTarget.id}
+          inputColumn={reviewJudgmentsTarget.attributes?.response_column}
+          onClose={() => setReviewJudgmentsTarget(null)}
         />
       )}
 
