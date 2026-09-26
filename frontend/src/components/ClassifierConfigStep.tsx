@@ -79,6 +79,20 @@ export function ClassifierConfigStep({
     seedAttrs.asset_name || component?.label || (upstreamAssetKey ? `${upstreamAssetKey}_classified` : 'classified'),
   );
   const [column, setColumn] = useState<string>(seedAttrs[cfg.columnField] || cfg.columnDefault);
+  // Real columns from the source, once TextSamplePreviewPanel resolves
+  // them -- lets the field below become a dropdown instead of a blind
+  // guess. `cfg.columnDefault` ('text') is just a placeholder; it won't
+  // match a real source's actual column name (e.g. 'ticket_text'), which
+  // read as "column not found" for anyone whose CSV wasn't named 'text'.
+  const [availableColumns, setAvailableColumns] = useState<string[]>([]);
+  const columnWasExplicitlySet = !!seedAttrs[cfg.columnField];
+  const handleColumnsResolved = (cols: string[]) => {
+    setAvailableColumns(cols);
+    if (!columnWasExplicitlySet && !cols.includes(column)) {
+      const guess = cols.find((c) => c.toLowerCase().includes('text')) || cols[0];
+      if (guess) setColumn(guess);
+    }
+  };
   const [labels, setLabels] = useState<string[]>(seedAttrs[cfg.labelField] || []);
   const [newLabel, setNewLabel] = useState('');
   const [provider, setProvider] = useState<string>(seedAttrs.provider || 'openai');
@@ -163,7 +177,7 @@ export function ClassifierConfigStep({
           {cfg.isImage ? (
             <DocumentPreviewPanel upstreamAssetKey={upstreamAssetKey} />
           ) : (
-            <TextSamplePreviewPanel upstreamAssetKey={upstreamAssetKey} column={column} />
+            <TextSamplePreviewPanel upstreamAssetKey={upstreamAssetKey} column={column} onColumnsChange={handleColumnsResolved} />
           )}
 
           <div className="space-y-4 overflow-y-auto px-6 py-4">
@@ -181,12 +195,25 @@ export function ClassifierConfigStep({
 
             <div>
               <label className="block text-xs font-medium text-gray-700 mb-1">{cfg.columnLabel}</label>
-              <input
-                type="text"
-                value={column}
-                onChange={(e) => setColumn(e.target.value)}
-                className="w-full px-2.5 py-1.5 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono"
-              />
+              {!cfg.isImage && availableColumns.length > 0 ? (
+                <select
+                  value={availableColumns.includes(column) ? column : ''}
+                  onChange={(e) => setColumn(e.target.value)}
+                  className="w-full px-2.5 py-1.5 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white font-mono"
+                >
+                  {!availableColumns.includes(column) && <option value="" disabled>{column} (not found — pick one)</option>}
+                  {availableColumns.map((c) => (
+                    <option key={c} value={c}>{c}</option>
+                  ))}
+                </select>
+              ) : (
+                <input
+                  type="text"
+                  value={column}
+                  onChange={(e) => setColumn(e.target.value)}
+                  className="w-full px-2.5 py-1.5 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono"
+                />
+              )}
             </div>
 
             <div>

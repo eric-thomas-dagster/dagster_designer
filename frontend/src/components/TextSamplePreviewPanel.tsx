@@ -1,4 +1,4 @@
-import { useMemo } from 'react';
+import { useEffect, useMemo } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { Loader2, AlertCircle, FileText } from 'lucide-react';
 import { useProjectStore } from '@/hooks/useProject';
@@ -19,9 +19,14 @@ import { assetsApi } from '@/services/api';
 export function TextSamplePreviewPanel({
   upstreamAssetKey,
   column,
+  onColumnsChange,
 }: {
   upstreamAssetKey?: string;
   column?: string;
+  /** Fires with the source's real column names once resolved -- lets a
+   *  parent offer a dropdown (or auto-correct a wrong guess) instead of
+   *  making the user type/guess an exact column name blind. */
+  onColumnsChange?: (columns: string[]) => void;
 }) {
   const { currentProject } = useProjectStore();
   const resolvedPath = useMemo(() => {
@@ -51,6 +56,11 @@ export function TextSamplePreviewPanel({
     ? rawQuery.data?.error || (rawQuery.error ? String(rawQuery.error) : undefined)
     : materializedQuery.data?.error;
   const colExists = !!column && columns.includes(column);
+
+  useEffect(() => {
+    if (columns.length > 0) onColumnsChange?.(columns);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [columns.join(',')]);
 
   return (
     <div className="flex flex-col min-w-0 border-r border-gray-100 bg-gray-50">
