@@ -538,18 +538,41 @@ export function AgentPipelineBuilder({
                           </div>
                         )}
 
-                        {/* Info/warning notes (auto-repair, etc.) -- shown
-                            plainly, never as the primary bubble. */}
-                        {turn.plan.notes.filter((n) => !n.startsWith('❓')).map((n, k) => (
-                          <div
-                            key={k}
-                            className={`text-xs rounded px-2.5 py-1.5 ${
-                              n.startsWith('ℹ') ? 'bg-gray-50 text-gray-500' : 'bg-amber-50 text-amber-700'
-                            }`}
-                          >
-                            {n}
-                          </div>
-                        ))}
+                        {/* Info/warning notes (auto-repair, dropped/renamed
+                            picks, etc.) -- real signal for someone
+                            debugging a plan, but raw and alarming-looking
+                            to read cold (e.g. "references unknown asset"
+                            reads as "your pipeline is broken" even when
+                            it's just a redundant duplicate pick getting
+                            silently cleaned up). Tucked behind a single
+                            disclosure instead of shown as bare lines, same
+                            pattern as each pick's own Config disclosure. */}
+                        {(() => {
+                          const visible = turn.plan.notes.filter((n) => !n.startsWith('❓'));
+                          if (visible.length === 0) return null;
+                          const warnings = visible.filter((n) => !n.startsWith('ℹ'));
+                          return (
+                            <details className="text-xs">
+                              <summary className="cursor-pointer text-gray-400 hover:text-gray-600 select-none">
+                                {warnings.length > 0
+                                  ? `${warnings.length} thing${warnings.length === 1 ? '' : 's'} to double-check`
+                                  : `${visible.length} automatic fix${visible.length === 1 ? '' : 'es'} applied`}
+                              </summary>
+                              <div className="mt-1.5 space-y-1">
+                                {visible.map((n, k) => (
+                                  <div
+                                    key={k}
+                                    className={`rounded px-2.5 py-1.5 ${
+                                      n.startsWith('ℹ') ? 'bg-gray-50 text-gray-500' : 'bg-amber-50 text-amber-700'
+                                    }`}
+                                  >
+                                    {n}
+                                  </div>
+                                ))}
+                              </div>
+                            </details>
+                          );
+                        })()}
 
                         {/* Suggested answers -- only on the LAST turn's
                             question, so old questions don't stay clickable

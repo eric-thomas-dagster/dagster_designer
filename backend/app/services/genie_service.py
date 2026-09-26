@@ -1454,6 +1454,20 @@ async def plan(
     notes: list[str] = []
 
     existing_names = {str(a["name"]) for a in (existing_assets or []) if a.get("name")}
+    # Confirmed live: the LLM sometimes proposes the SAME asset twice in one
+    # plan -- once as a legit "add" and once as a bogus self-"edit" of that
+    # same not-yet-existing name (probably reaching for an "edit" action out
+    # of habit on the very asset it's also creating). The add pick is what
+    # actually survives; the edit pick is correctly dropped below, but
+    # warning the user about it reads as if their new pipeline itself failed
+    # rather than a redundant duplicate being silently cleaned up. Only
+    # suppress the note for this specific self-duplicate case -- a
+    # genuinely unknown edit target (typo'd or invented name) still warns.
+    raw_add_names = {
+        str(p.get("asset_name") or "").strip()
+        for p in raw_picks
+        if (p.get("action") or "add") == "add" and p.get("component_type") != "noop"
+    }
 
     def _dedupe(name: str, used: set[str]) -> str:
         """Return a unique variant of `name` not in `used`. Appends `_v2`,
@@ -1478,6 +1492,11 @@ async def plan(
                 notes.append(f"⚠︎ Pick #{i + 1} ({action}) is missing an asset name — skipped.")
                 continue
             if target_name not in existing_names:
+                if target_name in raw_add_names:
+                    # Self-duplicate (see raw_add_names comment above) --
+                    # the add pick with this name is what lands, so this is
+                    # silent, expected cleanup, not a user-facing problem.
+                    continue
                 notes.append(
                     f"⚠︎ Pick #{i + 1} ({action}) references unknown existing asset "
                     f"'{target_name}' — skipped."

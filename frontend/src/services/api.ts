@@ -2501,6 +2501,22 @@ export const assetsApi = {
     return response.data;
   },
 
+  /** List up to `limit` files matching a raw fsspec path/glob directly --
+   *  no Dagster involved, so it works before the source asset has ever
+   *  been materialized. Powers the document preview in the Document
+   *  Extraction wizard's config step. */
+  sampleFiles: async (
+    projectId: string,
+    path: string,
+    limit = 6,
+  ): Promise<{ files: { path: string; name: string }[]; error?: string }> => {
+    const response = await api.get<{ files: { path: string; name: string }[]; error?: string }>(
+      `/assets/${projectId}/sample-files`,
+      { params: { path, limit: String(limit) } },
+    );
+    return response.data;
+  },
+
   createTransformerAsset: async (projectId: string, request: CreateTransformerRequest): Promise<Project> => {
     const response = await api.post<Project>(
       `/assets/${projectId}/create-transformer`,

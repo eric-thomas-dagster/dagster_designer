@@ -11,6 +11,7 @@ import { ComponentConfigModal } from './components/ComponentConfigModal';
 import { AgentPipelineBuilder } from './components/AgentPipelineBuilder';
 import { DocumentExtractionReview } from './components/DocumentExtractionReview';
 import { AiMlHub } from './components/AiMlHub';
+import { ActivatePanel } from './components/ActivatePanel';
 import { PropertyPanel } from './components/PropertyPanel';
 import { ProjectManager } from './components/ProjectManager';
 import { CodeEditor } from './components/CodeEditor';
@@ -41,7 +42,7 @@ import { setActiveTabGlobal } from './services/activeTab';
 import { onMenuAction, onQuitRequested, confirmQuit, openExternalUrl, getPlatform, isTauri } from './services/tauri';
 import { WindowsCaptionButtons } from './components/WindowsCaptionButtons';
 import { hasUnsavedChanges } from './hooks/useUnsavedChanges';
-import { Network, FileCode, Zap, Package, ExternalLink, Settings, SlidersHorizontal, Workflow, ChevronDown, Skull, AlertTriangle, X, Loader2, CheckCircle, XCircle, PanelLeftClose, PanelLeft, Clock, Play, Radar, Timer, Download, Database, ShieldCheck, Cloud, Bell, BarChart3, Sparkles } from 'lucide-react';
+import { Network, FileCode, Zap, Package, ExternalLink, Settings, SlidersHorizontal, Workflow, ChevronDown, Skull, AlertTriangle, X, Loader2, CheckCircle, XCircle, PanelLeftClose, PanelLeft, Clock, Play, Radar, Timer, Download, Database, ShieldCheck, Cloud, Bell, BarChart3, Sparkles, Send } from 'lucide-react';
 import { IngestionsPanel } from './components/IngestionsPanel';
 import { InsightsPanel } from './components/InsightsPanel';
 import { DbtPanel } from './components/DbtPanel';
@@ -970,6 +971,7 @@ function App() {
     { value: 'assets', label: 'Assets', icon: Network },
     { value: 'ingestions', label: 'Ingestions', icon: Download },
     { value: 'ai-ml', label: 'AI/ML', icon: Sparkles },
+    { value: 'activate', label: 'Activate', icon: Send },
     { value: 'dbt', label: 'dbt', icon: Database },
     { value: 'monitors', label: 'Monitors', icon: ShieldCheck },
     { value: 'alerts', label: 'Alerts', icon: Bell },
@@ -1601,6 +1603,14 @@ function App() {
               modals and ComponentConfigModal handoff. */}
           <Tabs.Content value="ai-ml" className="flex-1 overflow-hidden">
             <AiMlHub />
+          </Tabs.Content>
+
+          {/* Activate Tab Content — mirror of Ingestions for reverse-ETL/
+              activation targets (schema-spec.json's `reverse_etl`
+              category). Same add/edit handoff into the shared
+              ComponentConfigModal wiring below. */}
+          <Tabs.Content value="activate" className="flex-1 overflow-hidden">
+            <ActivatePanel onAddActivationTarget={setAddingComponentType} onEditComponent={setEditingComponent} />
           </Tabs.Content>
 
           {/* Insights Tab Content — deployment-level Dagster+ usage/cost/

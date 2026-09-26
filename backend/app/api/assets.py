@@ -1002,6 +1002,27 @@ async def get_local_file(project_id: str, path: str):
     return FileResponse(str(p))
 
 
+@router.get("/{project_id}/sample-files")
+async def get_sample_files(project_id: str, path: str, limit: int = 6):
+    """List up to `limit` files matching a raw fsspec path/glob, with no
+    Dagster involved at all -- for showing a real document preview in the
+    Document Extraction wizard's config step, before the source asset has
+    ever been materialized (it usually hasn't, since this runs right after
+    the source is picked/added). Mirrors file_lister's own bare-directory
+    fix: a plain directory path resolves to itself, not its contents, so
+    that case is expanded via `fs.ls()` same as there.
+    """
+    try:
+        import fsspec
+        fs, _, paths = fsspec.get_fs_token_paths(path)
+        if len(paths) == 1 and fs.isdir(paths[0]):
+            paths = [p for p in fs.ls(paths[0], detail=False) if not fs.isdir(p)]
+        paths = paths[: max(1, limit)]
+        return {"files": [{"path": p, "name": Path(p).name} for p in paths]}
+    except Exception as e:
+        return {"files": [], "error": str(e)}
+
+
 @router.get("/{project_id}/{asset_key:path}/preview")
 async def preview_asset_data(
     project_id: str,
