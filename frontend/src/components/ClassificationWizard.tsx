@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { X, ArrowLeft, ArrowRight, Loader2, BrainCircuit, MessageSquareText, Sparkles, Image as ImageIcon, Headset, FileSpreadsheet, FolderOpen } from 'lucide-react';
+import { X, ArrowLeft, ArrowRight, Loader2, BrainCircuit, MessageSquareText, Sparkles, Image as ImageIcon, Headset, FileSpreadsheet, FolderOpen, Gauge } from 'lucide-react';
 import { useProjectStore } from '@/hooks/useProject';
 import { notify } from './Notifications';
 import { API_BASE } from '@/services/api';
@@ -60,6 +60,13 @@ const CLASSIFIER_OPTIONS: ClassifierOption[] = [
     label: 'Support ticket triage',
     description: 'Category + urgency + sentiment + department routing, purpose-built for support tickets.',
     icon: Headset,
+    kind: 'text',
+  },
+  {
+    id: 'mlflow_model_inference',
+    label: 'Score with an existing model (MLflow)',
+    description: "Loads a model already registered in MLflow and scores every row with it -- doesn't train anything, just runs one you already have.",
+    icon: Gauge,
     kind: 'text',
   },
 ];
@@ -190,7 +197,7 @@ export function ClassificationWizard({
           <div className="flex items-center gap-2">
             <BrainCircuit className="w-5 h-5 text-primary" />
             <h2 className="text-lg font-semibold">
-              {step === 1 ? 'Classification — what do you want to classify?' : 'What kind of classifier?'}
+              {step === 1 ? 'Classify or score — what are the rows?' : 'How should each row be labeled or scored?'}
             </h2>
           </div>
           <button onClick={onClose} aria-label="Close">

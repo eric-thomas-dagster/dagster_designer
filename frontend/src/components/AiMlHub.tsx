@@ -10,6 +10,7 @@ import { ClassifierConfigStep } from './ClassifierConfigStep';
 import { SingleComponentWizard } from './SingleComponentWizard';
 import { VideoSceneConfigStep } from './VideoSceneConfigStep';
 import { AudioDiarizedConfigStep } from './AudioDiarizedConfigStep';
+import { MlflowInferenceConfigStep } from './MlflowInferenceConfigStep';
 import { ComponentConfigModal } from './ComponentConfigModal';
 import { extractComponentId } from '@/lib/componentId';
 
@@ -48,7 +49,7 @@ const CARDS: HubCard[] = [
   {
     id: 'classic_ml',
     label: 'Classic ML / Inference',
-    description: 'Classifiers (text, zero-shot, image) are ready — point at a source, pick labels. BigQuery ML, MLflow, and translation still fall back to the raw form.',
+    description: 'Classifiers (text, zero-shot, image) and scoring an existing MLflow model are ready — point at a source, pick what to do. BigQuery ML and feature engineering still fall back to the raw form.',
     icon: BrainCircuit,
     count: 11,
     status: 'ready',
@@ -249,6 +250,13 @@ export function AiMlHub() {
           />
         ) : extractComponentId(pendingConfig.componentType) === 'audio_diarized_transcriber' ? (
           <AudioDiarizedConfigStep
+            componentType={pendingConfig.componentType}
+            initialAttributes={pendingConfig.initialAttributes || {}}
+            onDone={() => setPendingConfig(null)}
+            onClose={() => setPendingConfig(null)}
+          />
+        ) : extractComponentId(pendingConfig.componentType) === 'mlflow_model_inference' ? (
+          <MlflowInferenceConfigStep
             componentType={pendingConfig.componentType}
             initialAttributes={pendingConfig.initialAttributes || {}}
             onDone={() => setPendingConfig(null)}
