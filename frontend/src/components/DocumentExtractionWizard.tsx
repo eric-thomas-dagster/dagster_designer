@@ -117,7 +117,7 @@ export function DocumentExtractionWizard({
   onClose: () => void;
   onOpenComponentConfig: (componentType: string, initialAttributes?: Record<string, any>, sourcePath?: string) => void;
 }) {
-  const { currentProject } = useProjectStore();
+  const { currentProject, loadProject } = useProjectStore();
   const [step, setStep] = useState<1 | 2>(1);
   const [selectedSource, setSelectedSource] = useState<string | null>(null);
   // The raw fsspec path/glob behind selectedSource -- carried alongside the
@@ -210,6 +210,10 @@ export function DocumentExtractionWizard({
         if (!listerRes.ok) throw new Error(listerBody.detail || 'Failed to add source');
         upstreamAssetKey = derivedName;
         setSelectedSource(derivedName);
+        // Without this, currentProject.components stays stale -- the
+        // config step's preview resolves the new file_lister's path by
+        // looking it up there, and would silently find nothing.
+        await loadProject(currentProject.id);
       }
 
       const res = await fetch(`${API_BASE}/templates/install-via-cli/${opt.id}`, {

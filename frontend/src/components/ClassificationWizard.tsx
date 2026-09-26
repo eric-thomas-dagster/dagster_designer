@@ -66,7 +66,7 @@ export function ClassificationWizard({
   onClose: () => void;
   onOpenComponentConfig: (componentType: string, initialAttributes?: Record<string, any>) => void;
 }) {
-  const { currentProject } = useProjectStore();
+  const { currentProject, loadProject } = useProjectStore();
   const [step, setStep] = useState<1 | 2>(1);
   const [selectedSource, setSelectedSource] = useState<string | null>(null);
   const [installingId, setInstallingId] = useState<string | null>(null);
@@ -103,6 +103,13 @@ export function ClassificationWizard({
       const body = await res.json().catch(() => ({} as any));
       if (!res.ok) throw new Error(body.detail || 'Failed to add source');
       notify.success(`Added "${derivedName}" as a source.`);
+      // Without this, currentProject.components stays stale until
+      // something else happens to reload it -- confirmed live: the next
+      // step's config preview resolves the new source's file path by
+      // looking it up in currentProject.components, and silently found
+      // nothing (falling back to a "materialize first" dead end) because
+      // the newly-installed component wasn't in the store yet.
+      await loadProject(currentProject.id);
       setSelectedSource(derivedName);
       setNewSourceMode(null);
       setNewSourcePath('');
