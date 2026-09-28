@@ -640,20 +640,28 @@ def _build_select_sql(cfg: dict[str, Any], dialect_name: str) -> str:
             select_items.append(literal_column(expr).label(into))
 
     # Substring ops → SUBSTRING(col FROM start FOR length) — SQL standard;
-    # DuckDB, Postgres, Snowflake, BigQuery all accept this form.
+    # DuckDB, Postgres, Snowflake, BigQuery all accept this form. A negative
+    # start means "N characters from the end" (Python/pandas slice
+    # convention, e.g. start=-3 = the last 3 characters onward, matching
+    # s[-3:]) -- SQL's own SUBSTRING has no such concept, so a negative
+    # start compiles to a LENGTH()-relative position instead of a literal
+    # one. Added for "extract the last N characters" suggestions, which a
+    # plain positive start can't express since the value's length varies
+    # per row.
     substring_ops = _json_list(cfg.get("substring_ops"))
     if substring_ops:
         for op in substring_ops:
             col = op.get("column")
             into = op.get("into")
-            start = op.get("start", 1)
+            start = int(op.get("start", 1))
             length = op.get("length")
             if not col or not into:
                 continue
+            start_expr = f'(LENGTH("{col}") + {start} + 1)' if start < 0 else str(start)
             if length is None or length == "":
-                expr = f'SUBSTRING("{col}" FROM {int(start)})'
+                expr = f'SUBSTRING("{col}" FROM {start_expr})'
             else:
-                expr = f'SUBSTRING("{col}" FROM {int(start)} FOR {int(length)})'
+                expr = f'SUBSTRING("{col}" FROM {start_expr} FOR {int(length)})'
             select_items.append(literal_column(expr).label(into))
 
     # Numeric ops → ROUND / FLOOR / CEIL / ABS

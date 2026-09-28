@@ -153,3 +153,38 @@ def test_remove_punctuation_wildcard_column_is_skipped_not_crashed():
     }
     sql = _build_select_sql(cfg, "postgresql")
     assert "REGEXP_REPLACE" not in sql
+
+
+def test_substring_ops_negative_start_means_from_the_end():
+    # start=-3 means "the last 3 characters onward" (Python/pandas slice
+    # convention), computed relative to LENGTH() since SQL's own SUBSTRING
+    # has no such concept -- verified against a real DuckDB execution
+    # (not just structural) while building this: "CHI-202425-001" with
+    # start=-3 correctly returns "001".
+    cfg = {
+        "upstream_table": "main.t",
+        "columns_to_keep": "id",
+        "substring_ops": '[{"column": "code", "start": -3, "into": "last3"}]',
+    }
+    sql = _build_select_sql(cfg, "postgresql")
+    assert 'SUBSTRING("code" FROM (LENGTH("code") + -3 + 1)) AS last3' in sql
+
+
+def test_substring_ops_negative_start_with_length():
+    cfg = {
+        "upstream_table": "main.t",
+        "columns_to_keep": "id",
+        "substring_ops": '[{"column": "code", "start": -5, "length": 3, "into": "mid"}]',
+    }
+    sql = _build_select_sql(cfg, "postgresql")
+    assert 'SUBSTRING("code" FROM (LENGTH("code") + -5 + 1) FOR 3) AS mid' in sql
+
+
+def test_substring_ops_positive_start_unaffected_by_negative_handling():
+    cfg = {
+        "upstream_table": "main.t",
+        "columns_to_keep": "id",
+        "substring_ops": '[{"column": "code", "start": 1, "length": 3, "into": "prefix"}]',
+    }
+    sql = _build_select_sql(cfg, "postgresql")
+    assert 'SUBSTRING("code" FROM 1 FOR 3) AS prefix' in sql
