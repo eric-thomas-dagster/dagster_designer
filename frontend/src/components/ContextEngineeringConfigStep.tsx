@@ -179,11 +179,27 @@ export function ContextEngineeringConfigStep({
   const [resources, setResources] = useState<{ name: string }[]>([]);
   const [resourcesLoading, setResourcesLoading] = useState(false);
   const [resourceKey, setResourceKey] = useState<string>(seedSource?.resource_key || '');
+  // A registered Dagster resource (preferred -- reusable across every
+  // component that reads this warehouse, and the only path that supports
+  // SQL-pushdown mode below) vs. a bare SQLAlchemy connection string via
+  // an env var (quicker for a one-off, no resource registration needed --
+  // but python-mode only: _run_sql_mode still hard-requires resource_key
+  // in the real component, unlike the python-mode ingestion path which
+  // now accepts either).
+  const [warehouseAuthMode, setWarehouseAuthMode] = useState<'resource' | 'connection_string'>(
+    seedSource?.database_url_env_var ? 'connection_string' : 'resource',
+  );
+  const [databaseUrlEnvVar, setDatabaseUrlEnvVar] = useState<string>(seedSource?.database_url_env_var || '');
   const [sourceSql, setSourceSql] = useState<string>(seedSource?.sql || '');
-  const dialectGuess = resourceKey ? guessDialect(resourceKey) : null;
+  const dialectGuess = warehouseAuthMode === 'resource' && resourceKey ? guessDialect(resourceKey) : null;
   const [runMode, setRunMode] = useState<'python' | 'sql'>(seedAttrs.execution_mode === 'sql' ? 'sql' : 'python');
   const [sqlDialect, setSqlDialect] = useState<string>(seedAttrs.sql_dialect || dialectGuess || '');
   const [outputTable, setOutputTable] = useState<string>(seedAttrs.output_table || '');
+
+  const switchWarehouseAuthMode = (mode: 'resource' | 'connection_string') => {
+    setWarehouseAuthMode(mode);
+    if (mode === 'connection_string') setRunMode('python');
+  };
 
   useEffect(() => {
     if (sourceMode !== 'warehouse' || !currentProject || resources.length > 0 || resourcesLoading) return;
@@ -321,7 +337,9 @@ export function ContextEngineeringConfigStep({
   const pushdown = sourceMode === 'warehouse' && runMode === 'sql';
 
   const canSave = assetName.trim().length > 0
-    && (sourceMode === 'asset' ? !!upstreamAssetKey : !!resourceKey && sourceSql.trim().length > 0)
+    && (sourceMode === 'asset'
+      ? !!upstreamAssetKey
+      : sourceSql.trim().length > 0 && (warehouseAuthMode === 'resource' ? !!resourceKey : databaseUrlEnvVar.trim().length > 0))
     && idColumn.trim().length > 0 && textColumn.trim().length > 0
     && (!classifyEnabled || candidateLabels.length > 0)
     && (!pushdown || (!!sqlDialect && outputTable.trim().length > 0));
@@ -372,7 +390,11 @@ export function ContextEngineeringConfigStep({
       if (sourceMode === 'asset') {
         config.upstream_asset_key = upstreamAssetKey;
       } else {
-        config.source = { kind: 'warehouse_query', resource_key: resourceKey, sql: sourceSql.trim() };
+        config.source = {
+          kind: 'warehouse_query',
+          sql: sourceSql.trim(),
+          ...(warehouseAuthMode === 'resource' ? { resource_key: resourceKey } : { database_url_env_var: databaseUrlEnvVar.trim() }),
+        };
         if (pushdown) {
           config.execution_mode = 'sql';
           config.sql_dialect = sqlDialect;
@@ -490,29 +512,68 @@ export function ContextEngineeringConfigStep({
           ) : (
             <div className="overflow-y-auto px-6 py-4 space-y-3 bg-gray-50">
               <p className="text-[11px] font-medium text-gray-500">No live preview for a raw SQL source — double-check column names against your query.</p>
+
               <div>
-                <label className="block text-xs font-medium text-gray-700 mb-1">Resource</label>
-                {resourcesLoading ? (
-                  <div className="flex items-center gap-2 text-xs text-gray-400"><Loader2 className="w-3.5 h-3.5 animate-spin" /> Loading registered resources…</div>
-                ) : resources.length === 0 ? (
-                  <p className="text-xs text-amber-600">No resources registered in this project yet — add one (e.g. a Snowflake or DuckDB resource) first.</p>
-                ) : (
-                  <select
-                    value={resourceKey}
-                    onChange={(e) => setResourceKey(e.target.value)}
-                    className="w-full px-2.5 py-1.5 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white font-mono"
+                <label className="block text-xs font-medium text-gray-700 mb-1">Connect via</label>
+                <div className="flex gap-2 mb-1">
+                  <button
+                    onClick={() => switchWarehouseAuthMode('resource')}
+                    className={`flex-1 px-2.5 py-1.5 text-xs rounded-md border ${warehouseAuthMode === 'resource' ? 'bg-primary text-primary-foreground border-primary' : 'border-gray-300 text-gray-600 hover:bg-gray-50'}`}
                   >
-                    <option value="" disabled>pick a resource</option>
-                    {resources.map((r) => (<option key={r.name} value={r.name}>{r.name}</option>))}
-                  </select>
-                )}
+                    A registered resource
+                  </button>
+                  <button
+                    onClick={() => switchWarehouseAuthMode('connection_string')}
+                    className={`flex-1 px-2.5 py-1.5 text-xs rounded-md border ${warehouseAuthMode === 'connection_string' ? 'bg-primary text-primary-foreground border-primary' : 'border-gray-300 text-gray-600 hover:bg-gray-50'}`}
+                  >
+                    A connection string
+                  </button>
+                </div>
+                <p className="text-[10px] text-gray-400 mb-1.5">
+                  {warehouseAuthMode === 'resource'
+                    ? 'Preferred — reusable by every other component that reads this warehouse, and the only path that supports running natively in the warehouse below.'
+                    : "Quicker for a one-off, no resource registration needed — but always pulls into Python here; there's no pushdown mode without a registered resource."}
+                </p>
               </div>
+
+              {warehouseAuthMode === 'resource' ? (
+                <div>
+                  <label className="block text-xs font-medium text-gray-700 mb-1">Resource</label>
+                  {resourcesLoading ? (
+                    <div className="flex items-center gap-2 text-xs text-gray-400"><Loader2 className="w-3.5 h-3.5 animate-spin" /> Loading registered resources…</div>
+                  ) : resources.length === 0 ? (
+                    <p className="text-xs text-amber-600">No resources registered in this project yet — add one (e.g. a Snowflake or DuckDB resource), or use a connection string instead.</p>
+                  ) : (
+                    <select
+                      value={resourceKey}
+                      onChange={(e) => setResourceKey(e.target.value)}
+                      className="w-full px-2.5 py-1.5 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white font-mono"
+                    >
+                      <option value="" disabled>pick a resource</option>
+                      {resources.map((r) => (<option key={r.name} value={r.name}>{r.name}</option>))}
+                    </select>
+                  )}
+                </div>
+              ) : (
+                <div>
+                  <label className="block text-xs font-medium text-gray-700 mb-1">Connection string env var</label>
+                  <input
+                    type="text"
+                    value={databaseUrlEnvVar}
+                    onChange={(e) => setDatabaseUrlEnvVar(e.target.value)}
+                    placeholder="DATABASE_URL"
+                    className="w-full px-2.5 py-1.5 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono"
+                  />
+                  <p className="text-[10px] text-gray-400 mt-0.5">Env var holding a bare SQLAlchemy URL, e.g. <span className="font-mono">postgresql://user:pass@host/db</span> — read at runtime, never stored here.</p>
+                </div>
+              )}
+
               <div>
                 <label className="block text-xs font-medium text-gray-700 mb-1">SQL query</label>
                 <textarea
                   value={sourceSql}
                   onChange={(e) => setSourceSql(e.target.value)}
-                  rows={10}
+                  rows={8}
                   placeholder={`SELECT ticket_id, body, customer_id\nFROM support_tickets\nWHERE created_at > CURRENT_DATE - 7`}
                   className="w-full px-2.5 py-1.5 text-xs border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono"
                 />
