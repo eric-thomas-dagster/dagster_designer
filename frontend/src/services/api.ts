@@ -2541,6 +2541,27 @@ export const assetsApi = {
     return response.data;
   },
 
+  /** Start a SQL transform straight from a resource or a bare connection
+   *  string -- no existing Dagster asset needed, unlike createTransformerAsset
+   *  above. Always writes a SqlTransformerComponent (a raw SQL source is
+   *  definitionally warehouse-backed). Set exactly one of resourceKey /
+   *  connectionUrlEnvVar. transformConfig is loosely typed to match the
+   *  same real backend TransformConfig shape createTransformerAsset's
+   *  caller already casts around (see DataPreviewModal). */
+  createSqlSourceTransformer: async (projectId: string, request: {
+    sourceSql: string;
+    resourceKey?: string;
+    connectionUrlEnvVar?: string;
+    newAssetName: string;
+    transformConfig: Record<string, any>;
+  }): Promise<Project> => {
+    const response = await api.post<Project>(
+      `/assets/${projectId}/create-sql-transformer`,
+      request
+    );
+    return response.data;
+  },
+
   /** Fetch the schema cache — `{asset_key: {columns: [...], dtypes: {...}}}`
    *  for every asset that's been previewed at least once. Powers the
    *  column-picker dropdowns in ComponentConfigModal so `*_column` fields

@@ -987,7 +987,7 @@ function App() {
   const navItems = [
     { value: 'assets', label: 'Assets', icon: Network },
     { value: 'ingestions', label: 'Ingestions', icon: Download },
-    { value: 'ai-ml', label: 'AI/ML', icon: Sparkles },
+    { value: 'ai-ml', label: 'Builders', icon: Sparkles },
     { value: 'activate', label: 'Activate', icon: Send },
     { value: 'dbt', label: 'dbt', icon: Database },
     { value: 'monitors', label: 'Monitors', icon: ShieldCheck },

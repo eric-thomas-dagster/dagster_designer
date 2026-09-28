@@ -1272,6 +1272,186 @@ class CreateTransformerRequest(BaseModel):
     transformConfig: TransformConfig
 
 
+class CreateSqlSourceTransformerRequest(BaseModel):
+    """Start a SQL transform from a resource or a bare connection string --
+    no existing Dagster asset needed, unlike CreateTransformerRequest above.
+    Set exactly one of resourceKey / connectionUrlEnvVar."""
+    sourceSql: str
+    resourceKey: str | None = None
+    connectionUrlEnvVar: str | None = None
+    newAssetName: str
+    transformConfig: TransformConfig
+
+
+def _translate_transform_config_to_sql_attrs(transform_config: "TransformConfig") -> dict:
+    """The pure TransformConfig -> SqlTransformerComponent-attributes
+    translation, shared by both the asset-sourced and raw-SQL-sourced
+    entry points -- everything except the source-specific keys
+    (asset_name, upstream_*/source_sql, output_schema, resource_key),
+    which each caller sets itself.
+
+    group_by/aggregations, drop_na, and string_operations compile to real
+    SQL (GROUP BY + aggregate functions, IS NOT NULL checks, UPPER/LOWER/
+    TRIM/INITCAP) -- see sql_transformer.py. Still-unsupported fields
+    (pivot, unpivot, string_replace, fill_na -- the last two need full
+    schema reflection to stay type-safe, which that component deliberately
+    avoids) are dropped silently; the user can re-do those in a DataFrame
+    branch if they need them.
+    """
+    sql_attrs: dict = {}
+    if transform_config.columnsToKeep:
+        sql_attrs["columns_to_keep"] = ",".join(transform_config.columnsToKeep)
+    if transform_config.columnsToDrop:
+        sql_attrs["columns_to_drop"] = ",".join(transform_config.columnsToDrop)
+    if transform_config.columnRenames:
+        sql_attrs["rename_columns"] = json.dumps(transform_config.columnRenames)
+    if transform_config.dropDuplicates:
+        sql_attrs["drop_duplicates"] = True
+    if transform_config.dropNA:
+        sql_attrs["drop_na"] = True
+    if transform_config.groupBy:
+        sql_attrs["group_by"] = ",".join(transform_config.groupBy)
+    if transform_config.aggregations:
+        sql_attrs["agg_functions"] = json.dumps(transform_config.aggregations)
+    if transform_config.stringOperations:
+        sql_attrs["string_operations"] = json.dumps(transform_config.stringOperations)
+    if transform_config.sortBy:
+        sql_attrs["sort_by"] = ",".join(transform_config.sortBy)
+        sql_attrs["sort_ascending"] = transform_config.sortAscending
+    if transform_config.calculatedColumns:
+        sql_attrs["calculated_columns"] = json.dumps(transform_config.calculatedColumns)
+    if transform_config.limitRows is not None and transform_config.limitRows > 0:
+        sql_attrs["limit_rows"] = transform_config.limitRows
+    if transform_config.replaceOps:
+        sql_attrs["replace_ops"] = json.dumps(transform_config.replaceOps)
+    if transform_config.splitOps:
+        sql_attrs["split_ops"] = json.dumps(transform_config.splitOps)
+    if transform_config.windowOps:
+        sql_attrs["window_ops"] = json.dumps(transform_config.windowOps)
+    if transform_config.countMatchOps:
+        sql_attrs["count_match_ops"] = json.dumps(transform_config.countMatchOps)
+    if transform_config.caseWhenOps:
+        sql_attrs["case_when_ops"] = json.dumps(transform_config.caseWhenOps)
+    if transform_config.concatOps:
+        sql_attrs["concat_ops"] = json.dumps(transform_config.concatOps)
+    if transform_config.dateExtractOps:
+        sql_attrs["date_extract_ops"] = json.dumps(transform_config.dateExtractOps)
+    if transform_config.substringOps:
+        sql_attrs["substring_ops"] = json.dumps(transform_config.substringOps)
+    if transform_config.numericOps:
+        sql_attrs["numeric_ops"] = json.dumps(transform_config.numericOps)
+    if transform_config.sampleConfig:
+        sql_attrs["sample_config"] = json.dumps(transform_config.sampleConfig)
+    if transform_config.binOps:
+        sql_attrs["bin_ops"] = json.dumps(transform_config.binOps)
+    if transform_config.dedupeSubset:
+        sql_attrs["dedupe_subset"] = json.dumps(transform_config.dedupeSubset)
+    if transform_config.cumsumOps:
+        sql_attrs["cumsum_ops"] = json.dumps(transform_config.cumsumOps)
+    if transform_config.fillDirectionOps:
+        sql_attrs["fill_direction_ops"] = json.dumps(transform_config.fillDirectionOps)
+    # Filter translation: pandas query → SQL WHERE. Basic operators only;
+    # anything involving `.str.contains` or method chains falls through
+    # unchanged and may fail at run time.
+    if transform_config.filters:
+        sql_parts = []
+        for f in transform_config.filters:
+            col, op, val = f.column, f.operator, f.value
+            if op == "equals":
+                sql_parts.append(f'"{col}" = ' + (val if val.lower() in ('true', 'false') else f"'{val}'"))
+            elif op == "not_equals":
+                sql_parts.append(f'"{col}" != ' + (val if val.lower() in ('true', 'false') else f"'{val}'"))
+            elif op == "greater_than":
+                sql_parts.append(f'"{col}" > {val}')
+            elif op == "less_than":
+                sql_parts.append(f'"{col}" < {val}')
+            elif op == "contains":
+                sql_parts.append(f'"{col}" LIKE \'%{val}%\'')
+            elif op == "not_contains":
+                sql_parts.append(f'"{col}" NOT LIKE \'%{val}%\'')
+        if sql_parts:
+            sql_attrs["filter_expression"] = " AND ".join(sql_parts)
+    return sql_attrs
+
+
+@router.post("/{project_id}/create-sql-transformer")
+async def create_sql_source_transformer(project_id: str, request: CreateSqlSourceTransformerRequest):
+    """Start a SQL transform straight from a resource or a bare connection
+    string -- the "let me visually transform my data by a resource or
+    SQLAlchemy connection" entry point, no existing Dagster asset required.
+    Always SqlTransformerComponent (a raw SQL source is definitionally
+    warehouse-backed, no DataFrame-vs-SQL routing decision to make).
+    Mirrors create_transformer_asset's real write/regenerate/save sequence
+    below, minus the custom-lineage edge (there's no source asset to link
+    from -- this is a root asset)."""
+    from ..services.project_service import project_service
+    from ..models.project import ProjectUpdate, ComponentInstance
+    from ..services.asset_introspection_service import asset_introspection_service
+
+    if bool(request.resourceKey) == bool(request.connectionUrlEnvVar):
+        raise HTTPException(status_code=400, detail="Set exactly one of resourceKey or connectionUrlEnvVar.")
+
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    project_dir = project_service._get_project_dir(project)
+    if not project_dir.exists():
+        raise HTTPException(status_code=404, detail="Project directory not found")
+
+    component_id = request.newAssetName.replace('-', '_').replace(' ', '_').lower()
+    src_dir = project_dir / "src" / project.directory_name
+    defs_dir = src_dir / "defs" / component_id
+    defs_dir.mkdir(parents=True, exist_ok=True)
+
+    sql_attrs: dict = {
+        "asset_name": component_id,
+        "source_sql": request.sourceSql,
+        "output_schema": "main",
+    }
+    if request.resourceKey:
+        sql_attrs["resource_key"] = request.resourceKey
+    else:
+        sql_attrs["connection_url_env_var"] = request.connectionUrlEnvVar
+    sql_attrs.update(_translate_transform_config_to_sql_attrs(request.transformConfig))
+
+    transformer_component_type = f"{project.directory_name}.dagster_designer_components.SqlTransformerComponent"
+
+    with open(defs_dir / "defs.yaml", "w") as f:
+        yaml.dump({"type": transformer_component_type, "attributes": sql_attrs}, f, default_flow_style=False, sort_keys=False)
+
+    component_exists = any(c.component_type == transformer_component_type and c.id == component_id for c in project.components)
+    if not component_exists:
+        project.components.append(ComponentInstance(
+            id=component_id,
+            component_type=transformer_component_type,
+            label=request.newAssetName,
+            attributes={"asset_name": component_id},
+            translation=None,
+            post_processing=None,
+            is_asset_factory=False,
+        ))
+
+    asset_introspection_service.clear_cache(project.id)
+    try:
+        asset_nodes, asset_edges = await asset_introspection_service.get_assets_for_project_async(project, recalculate_layout=True)
+        transformer_node = next((n for n in asset_nodes if n.id == component_id or n.data.get('asset_key') == component_id), None)
+        if transformer_node:
+            non_asset_nodes = [n for n in project.graph.nodes if n.node_kind != "asset"]
+            project.graph.nodes = non_asset_nodes + asset_nodes
+            edge_map = {edge.id: edge for edge in asset_edges}
+            project.graph.edges = list(edge_map.values())
+        else:
+            print(f"[Create SQL Transformer] Warning: could not find node '{component_id}' in regenerated assets", flush=True)
+    except Exception as e:
+        print(f"[Create SQL Transformer] Warning: failed to regenerate assets, but transformer files were created: {e}", flush=True)
+
+    updated_project = project_service.update_project(
+        project_id,
+        ProjectUpdate(components=project.components, graph=project.graph),
+    )
+    return updated_project if updated_project else project
+
+
 @router.post("/{project_id}/create-transformer")
 async def create_transformer_asset(project_id: str, request: CreateTransformerRequest):
     """Create a new transformer asset that applies transformations to a source asset.
@@ -1469,10 +1649,14 @@ async def create_transformer_asset(project_id: str, request: CreateTransformerRe
     # Pick the right transformer backend based on upstream type.
     if upstream_is_warehouse:
         # Translate the DF-style attributes we built above into SQL-style ones
-        # SqlTransformerComponent expects. Fields the SQL backend doesn't
-        # support (group_by, aggregations, pivot, unpivot, string_operations,
-        # string_replace, drop_na, fill_na) are dropped with a warning — the
-        # user can re-do those in a DataFrame branch if they need them.
+        # SqlTransformerComponent expects. group_by/aggregations, drop_na, and
+        # string_operations now compile to real SQL (GROUP BY + aggregate
+        # functions, IS NOT NULL checks, UPPER/LOWER/TRIM/INITCAP) -- see
+        # sql_transformer.py. Still-unsupported fields (pivot, unpivot,
+        # string_replace, fill_na -- the last two need full schema reflection
+        # to stay type-safe, which this component deliberately avoids) are
+        # dropped with a warning; the user can re-do those in a DataFrame
+        # branch if they need them.
         sql_attrs: dict = {
             "asset_name": attributes["asset_name"],
             "upstream_asset_keys": attributes["upstream_asset_keys"],
@@ -1481,71 +1665,7 @@ async def create_transformer_asset(project_id: str, request: CreateTransformerRe
             "upstream_table": f"main.{request.sourceAssetKey.rsplit('/', 1)[-1]}",
             "output_schema": "main",
         }
-        # Direct passes.
-        if request.transformConfig.columnsToKeep:
-            sql_attrs["columns_to_keep"] = ",".join(request.transformConfig.columnsToKeep)
-        if request.transformConfig.columnsToDrop:
-            sql_attrs["columns_to_drop"] = ",".join(request.transformConfig.columnsToDrop)
-        if request.transformConfig.columnRenames:
-            sql_attrs["rename_columns"] = json.dumps(request.transformConfig.columnRenames)
-        if request.transformConfig.dropDuplicates:
-            sql_attrs["drop_duplicates"] = True
-        if request.transformConfig.sortBy:
-            sql_attrs["sort_by"] = ",".join(request.transformConfig.sortBy)
-            sql_attrs["sort_ascending"] = request.transformConfig.sortAscending
-        if request.transformConfig.calculatedColumns:
-            sql_attrs["calculated_columns"] = json.dumps(request.transformConfig.calculatedColumns)
-        if request.transformConfig.limitRows is not None and request.transformConfig.limitRows > 0:
-            sql_attrs["limit_rows"] = request.transformConfig.limitRows
-        if request.transformConfig.replaceOps:
-            sql_attrs["replace_ops"] = json.dumps(request.transformConfig.replaceOps)
-        if request.transformConfig.splitOps:
-            sql_attrs["split_ops"] = json.dumps(request.transformConfig.splitOps)
-        if request.transformConfig.windowOps:
-            sql_attrs["window_ops"] = json.dumps(request.transformConfig.windowOps)
-        if request.transformConfig.countMatchOps:
-            sql_attrs["count_match_ops"] = json.dumps(request.transformConfig.countMatchOps)
-        if request.transformConfig.caseWhenOps:
-            sql_attrs["case_when_ops"] = json.dumps(request.transformConfig.caseWhenOps)
-        if request.transformConfig.concatOps:
-            sql_attrs["concat_ops"] = json.dumps(request.transformConfig.concatOps)
-        if request.transformConfig.dateExtractOps:
-            sql_attrs["date_extract_ops"] = json.dumps(request.transformConfig.dateExtractOps)
-        if request.transformConfig.substringOps:
-            sql_attrs["substring_ops"] = json.dumps(request.transformConfig.substringOps)
-        if request.transformConfig.numericOps:
-            sql_attrs["numeric_ops"] = json.dumps(request.transformConfig.numericOps)
-        if request.transformConfig.sampleConfig:
-            sql_attrs["sample_config"] = json.dumps(request.transformConfig.sampleConfig)
-        if request.transformConfig.binOps:
-            sql_attrs["bin_ops"] = json.dumps(request.transformConfig.binOps)
-        if request.transformConfig.dedupeSubset:
-            sql_attrs["dedupe_subset"] = json.dumps(request.transformConfig.dedupeSubset)
-        if request.transformConfig.cumsumOps:
-            sql_attrs["cumsum_ops"] = json.dumps(request.transformConfig.cumsumOps)
-        if request.transformConfig.fillDirectionOps:
-            sql_attrs["fill_direction_ops"] = json.dumps(request.transformConfig.fillDirectionOps)
-        # Filter translation: pandas query → SQL WHERE. Basic operators only;
-        # anything involving `.str.contains` or method chains falls through
-        # unchanged and may fail at run time.
-        if request.transformConfig.filters:
-            sql_parts = []
-            for f in request.transformConfig.filters:
-                col, op, val = f.column, f.operator, f.value
-                if op == "equals":
-                    sql_parts.append(f'"{col}" = ' + (val if val.lower() in ('true', 'false') else f"'{val}'"))
-                elif op == "not_equals":
-                    sql_parts.append(f'"{col}" != ' + (val if val.lower() in ('true', 'false') else f"'{val}'"))
-                elif op == "greater_than":
-                    sql_parts.append(f'"{col}" > {val}')
-                elif op == "less_than":
-                    sql_parts.append(f'"{col}" < {val}')
-                elif op == "contains":
-                    sql_parts.append(f'"{col}" LIKE \'%{val}%\'')
-                elif op == "not_contains":
-                    sql_parts.append(f'"{col}" NOT LIKE \'%{val}%\'')
-            if sql_parts:
-                sql_attrs["filter_expression"] = " AND ".join(sql_parts)
+        sql_attrs.update(_translate_transform_config_to_sql_attrs(request.transformConfig))
 
         # Auto-detect a Dagster resource_key from the upstream's defs.yaml so
         # the SqlTransformer inherits warehouse credentials the same way its

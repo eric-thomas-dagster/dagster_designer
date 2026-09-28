@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Sparkles, FileText, BrainCircuit, Search, ShieldCheck, Film, Mic, Loader2 } from 'lucide-react';
+import { Sparkles, FileText, BrainCircuit, Search, ShieldCheck, Film, Mic, Loader2, Wand2 } from 'lucide-react';
 import { useProjectStore } from '@/hooks/useProject';
 import { API_BASE } from '@/services/api';
 import { notify } from './Notifications';
@@ -16,6 +16,7 @@ import { MlflowInferenceConfigStep } from './MlflowInferenceConfigStep';
 import { AutoMLConfigStep } from './AutoMLConfigStep';
 import { LlmJudgeConfigStep } from './LlmJudgeConfigStep';
 import { ContextEngineeringConfigStep } from './ContextEngineeringConfigStep';
+import { SqlTransformConfigStep } from './SqlTransformConfigStep';
 import { ComponentConfigModal } from './ComponentConfigModal';
 import { extractComponentId } from '@/lib/componentId';
 
@@ -91,6 +92,14 @@ const CARDS: HubCard[] = [
     count: 3,
     status: 'ready',
   },
+  {
+    id: 'sql_transform',
+    label: 'Transform / Clean Data',
+    description: "Filter, dedupe, group-by, clean up strings — in-warehouse SQL, no data movement. Start from a resource or a bare connection string here; for an asset already in this project, click it in the graph and use its own Transform button.",
+    icon: Wand2,
+    count: 1,
+    status: 'ready',
+  },
 ];
 
 /**
@@ -145,9 +154,9 @@ export function AiMlHub() {
     <div className="h-full overflow-y-auto bg-gray-50">
       <div className="px-8 py-6 max-w-4xl mx-auto space-y-6">
         <div>
-          <h2 className="text-lg font-semibold text-gray-900">AI/ML</h2>
+          <h2 className="text-lg font-semibold text-gray-900">Builders</h2>
           <p className="text-sm text-gray-500 mt-1">
-            Curated, guided builders for the ~130-component AI/ML catalog — describe or configure what you need instead of hunting through a component list.
+            Curated, guided builders for the AI/ML catalog and for cleaning up data before it gets there — describe or configure what you need instead of hunting through a component list.
           </p>
         </div>
 
@@ -250,6 +259,13 @@ export function AiMlHub() {
             setPendingConfig({ componentType, initialAttributes });
             setOpenBuilder(null);
           }}
+        />
+      )}
+
+      {openBuilder === 'sql_transform' && (
+        <SqlTransformConfigStep
+          onDone={() => setOpenBuilder(null)}
+          onClose={() => setOpenBuilder(null)}
         />
       )}
 

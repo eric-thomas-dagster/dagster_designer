@@ -30,15 +30,24 @@ import dagster as dg
 class SqlTransformerComponent(dg.Component, dg.Model, dg.Resolvable):
     """Apply visual-builder transformations against a warehouse table using SQL.
 
-    Reads from an upstream table (a dbt model output, a sink component output,
-    or any other warehouse table declared as a Dagster asset) and writes the
-    transformed result as a new table. Everything stays in the warehouse — no
-    data movement — which is the whole point vs the DataFrame path.
+    Two source shapes, mutually exclusive -- set exactly one:
+      1. `upstream_table` (+ optionally `upstream_asset_keys` for real Dagster
+         lineage): reads a dbt model output, a sink component output, or any
+         other warehouse table already declared as a Dagster asset.
+      2. `source_sql`: a raw SQL query defining the source relation directly
+         against a resource/connection (no existing Dagster asset needed --
+         same "start from a resource or a bare connection string" pattern as
+         context_engineering_pipeline's `source: {kind: warehouse_query}`).
+         Becomes a root asset with no upstream Dagster dependency.
+
+    Either way, everything stays in the warehouse -- no data movement --
+    which is the whole point vs the DataFrame path.
     """
 
     asset_name: str
-    upstream_asset_keys: str  # comma-separated
-    upstream_table: str  # SQL identifier for the source, e.g. "main.stg_customers"
+    upstream_asset_keys: Optional[str] = None  # comma-separated
+    upstream_table: Optional[str] = None  # SQL identifier for the source, e.g. "main.stg_customers"
+    source_sql: Optional[str] = None  # raw query defining the source relation, instead of upstream_table
     output_schema: str = "main"
 
     # Connection — try in order:
@@ -99,14 +108,45 @@ class SqlTransformerComponent(dg.Component, dg.Model, dg.Resolvable):
     cumsum_ops: Optional[str] = None
     # JSON list: [{"column", "direction": ffill|bfill, "partitionBy", "orderBy"}]
     fill_direction_ops: Optional[str] = None
+    # comma-separated columns to GROUP BY. When set, the SELECT list becomes
+    # ONLY the group_by columns + agg_functions expressions -- every other
+    # column-projection option (columns_to_keep/drop, calculated_columns,
+    # etc.) is ignored for this query, same as pandas' groupby().agg()
+    # collapsing every non-grouped/non-aggregated column.
+    group_by: Optional[str] = None
+    # JSON dict: {"column": "function"}. function in
+    # {sum, count, count_distinct, avg, mean, min, max, std, stddev}.
+    # Output column is named "<function>_<column>" (e.g. "sum_amount"),
+    # matching the same convention the DataFrame backend's pandas
+    # groupby().agg() produces.
+    agg_functions: Optional[str] = None
+    # Drop rows where any of columns_to_keep (or, if unset, every column
+    # referenced elsewhere in this query) is NULL. Full "drop row if ANY
+    # column across the whole table is null" isn't expressible without
+    # reflecting the table's full schema (which this component deliberately
+    # avoids -- see module docstring); this is the honest subset that's
+    # actually knowable at compile time.
+    drop_na: bool = False
+    # JSON list: [{"column", "operation"}]. operation in
+    # {upper, lower, title, trim}. Applied in place (same column name),
+    # matching the DataFrame backend's str.upper()/.lower()/.title()/.strip().
+    string_operations: Optional[str] = None
 
     group_name: Optional[str] = None
     description: Optional[str] = None
 
     def build_defs(self, context: dg.ComponentLoadContext) -> dg.Definitions:
+        if bool(self.upstream_table) == bool(self.source_sql):
+            raise ValueError(
+                "SqlTransformerComponent: set exactly one of `upstream_table` "
+                "(reads an existing Dagster asset's table) or `source_sql` "
+                "(a raw query against a resource/connection, no existing "
+                "asset needed)."
+            )
+
         upstream_keys = [
             dg.AssetKey.from_user_string(k.strip())
-            for k in self.upstream_asset_keys.split(',')
+            for k in (self.upstream_asset_keys or '').split(',')
             if k.strip()
         ]
 
@@ -163,6 +203,7 @@ class SqlTransformerComponent(dg.Component, dg.Model, dg.Resolvable):
             "asset_name": self.asset_name,
             "upstream_asset_keys": self.upstream_asset_keys,
             "upstream_table": self.upstream_table,
+            "source_sql": self.source_sql,
             "output_schema": self.output_schema,
             "resource_key": self.resource_key,
             "connection_url": self.connection_url,
@@ -190,6 +231,10 @@ class SqlTransformerComponent(dg.Component, dg.Model, dg.Resolvable):
             "dedupe_subset": self.dedupe_subset,
             "cumsum_ops": self.cumsum_ops,
             "fill_direction_ops": self.fill_direction_ops,
+            "group_by": self.group_by,
+            "agg_functions": self.agg_functions,
+            "drop_na": self.drop_na,
+            "string_operations": self.string_operations,
         }
 
 
@@ -385,43 +430,57 @@ def _derive_url_from_dbt_profile() -> Optional[str]:
     return None
 
 
-def _build_select_sql(cfg: dict[str, Any], dialect_name: str) -> str:
-    """Compile the visual-builder ops into a dialect-appropriate SELECT.
+def _from_clause(cfg: dict[str, Any]):
+    """Build the FROM target: either the named upstream table (existing
+    Dagster asset) or a raw source_sql query wrapped as a subquery (no
+    existing asset -- reads straight from a resource/connection). Every
+    column reference elsewhere in this module is a bare quoted
+    literal_column, never tbl.c.<name>, so this only has to compile
+    correctly as a FROM target -- it doesn't need real typed columns."""
+    from sqlalchemy import MetaData, Table, text
 
-    Uses SQLAlchemy Core when possible so identifier quoting is dialect-aware.
-    """
-    from sqlalchemy import (
-        MetaData, Table, select, distinct as sa_distinct,
-        Column, literal_column, asc, desc,
-    )
-    from sqlalchemy.sql import quoted_name
+    if cfg.get("source_sql"):
+        return text(f"({cfg['source_sql']}) AS __source")
 
-    # Split schema.table from upstream_table if provided that way.
     upstream = cfg["upstream_table"]
     if "." in upstream:
         schema_name, table_name = upstream.split(".", 1)
     else:
         schema_name, table_name = None, upstream
+    return Table(table_name, MetaData(), schema=schema_name)
+
+
+def _build_select_sql(cfg: dict[str, Any], dialect_name: str) -> str:
+    """Compile the visual-builder ops into a dialect-appropriate SELECT.
+
+    Uses SQLAlchemy Core when possible so identifier quoting is dialect-aware.
+    """
+    from sqlalchemy import select, distinct as sa_distinct, literal_column, asc, desc
+    from sqlalchemy.sql.elements import Label
 
     # We don't reflect the actual schema (would require a live connection at
-    # compile time). Instead we use SQLAlchemy's literal_column and pass an
-    # empty Table with named columns as they're referenced.
+    # compile time). Instead we use SQLAlchemy's literal_column throughout
+    # and only need SOMETHING that compiles correctly as a FROM target --
+    # never actual Column objects off of it (every column reference below is
+    # a bare quoted literal_column, not tbl.c.<name>).
     keep = _csv(cfg.get("columns_to_keep"))
     drop = set(_csv(cfg.get("columns_to_drop")))
     renames = _json_dict(cfg.get("rename_columns"))
     calc = _json_dict(cfg.get("calculated_columns"))
+    group_by_cols = _csv(cfg.get("group_by"))
+    agg_functions = _json_dict(cfg.get("agg_functions"))
 
-    # Build a Table stub with any columns explicitly named. Anything else in
-    # SELECT goes via `text()` / literal_column. Using an ephemeral MetaData
-    # so we don't collide across component instances.
-    metadata = MetaData()
+    # group_by takes over the whole SELECT list -- every non-grouped,
+    # non-aggregated column has to disappear (same as pandas'
+    # groupby().agg()), which makes it fundamentally incompatible with the
+    # per-row projection ops below (calculated columns, string ops, window
+    # functions, ...). Handled as its own simple, separate path rather than
+    # threading a group_by flag through 300 lines of per-row logic.
+    if group_by_cols:
+        return _build_group_by_sql(cfg, group_by_cols, agg_functions, dialect_name)
+
+    tbl = _from_clause(cfg)
     cols_referenced = set(keep) | drop | set(renames.keys()) | set(calc.keys())
-    tbl = Table(
-        table_name,
-        metadata,
-        *[Column(quoted_name(c, quote=True)) for c in cols_referenced],
-        schema=schema_name,
-    )
 
     # Select clause:
     #  - If keep is provided, project just those cols (with rename applied).
@@ -430,14 +489,29 @@ def _build_select_sql(cfg: dict[str, Any], dialect_name: str) -> str:
     #    column enumeration (not possible without column introspection —
     #    document this limitation).
     #  - Calculated columns are appended after the base projection.
+    #
+    # projected_index tracks output-column-name -> its position in
+    # select_items, but ONLY for the base `keep` projection (the one case
+    # where every output column name is known upfront). "In place" ops
+    # below (string_operations, replace_ops) use it to overwrite that
+    # column's entry instead of appending a second column with the same
+    # name -- appending would compile to valid-looking but wrong/ambiguous
+    # SQL (e.g. two columns both named "name"). Without an explicit `keep`
+    # list (a bare SELECT *), there's no known position to overwrite, so
+    # those ops fall back to appending an extra column -- the same
+    # documented "needs column introspection" limitation columns_to_drop
+    # already has on non-EXCLUDE dialects.
     select_items: list = []
+    projected_index: dict[str, int] = {}
     if keep:
         for c in keep:
             base = literal_column(f'"{c}"')
             if c in renames:
                 select_items.append(base.label(renames[c]))
+                projected_index[renames[c]] = len(select_items) - 1
             elif c not in drop:
                 select_items.append(base)
+                projected_index[c] = len(select_items) - 1
     elif drop:
         supports_exclude = dialect_name in {'duckdb', 'bigquery'}
         if supports_exclude:
@@ -472,7 +546,11 @@ def _build_select_sql(cfg: dict[str, Any], dialect_name: str) -> str:
                 find = str(op.get("find", "")).replace("'", "''")
                 repl = str(op.get("replace", "")).replace("'", "''")
                 expr = f"REPLACE({expr}, '{find}', '{repl}')"
-            select_items.append(literal_column(expr).label(f"{col}"))
+            labeled = literal_column(expr).label(col)
+            if col in projected_index:
+                select_items[projected_index[col]] = labeled
+            else:
+                select_items.append(labeled)
 
     # Split ops → SPLIT_PART(col, delimiter, N) for each target column. Works
     # on Postgres, DuckDB, Snowflake, Redshift. BigQuery uses SPLIT() but
@@ -580,6 +658,48 @@ def _build_select_sql(cfg: dict[str, Any], dialect_name: str) -> str:
             else:
                 expr = f'ROUND("{col}", {digits})'
             select_items.append(literal_column(expr).label(into))
+
+    # String ops → UPPER / LOWER / TRIM / a portable title-case emulation.
+    # Applied "in place" (same column name) same as the DataFrame backend's
+    # .str.upper()/.lower()/.title()/.strip() -- chains onto whatever this
+    # column's expression already is (e.g. after a replace_op) via
+    # projected_index, same overwrite-not-append behavior as replace_ops.
+    string_operations = _json_list(cfg.get("string_operations"))
+    if string_operations:
+        for op in string_operations:
+            col = op.get("column")
+            operation = str(op.get("operation", "upper")).lower()
+            if not col:
+                continue
+            # Chain onto the column's current expression (e.g. a prior
+            # replace_op on the same column) rather than always re-reading
+            # the raw column, so ops apply in combination, not in isolation.
+            # Label.element strips the "AS alias" wrapper -- compiling a
+            # Label directly would embed "AS alias" inside the UPPER(...)/
+            # etc. call below, which isn't valid SQL as a function argument.
+            if col in projected_index:
+                current_item = select_items[projected_index[col]]
+                target = current_item.element if isinstance(current_item, Label) else current_item
+                current_sql = str(target.compile(compile_kwargs={"literal_binds": True}))
+            else:
+                current_sql = f'"{col}"'
+            if operation == "lower":
+                expr = f'LOWER({current_sql})'
+            elif operation == "trim":
+                expr = f'TRIM({current_sql})'
+            elif operation == "title":
+                # INITCAP is Postgres/Snowflake/Redshift; not standard SQL.
+                # DuckDB and BigQuery also implement it. MySQL/MSSQL/Oracle
+                # don't -- those will error at runtime, same documented
+                # dialect-gap pattern as columns_to_drop's EXCLUDE(...) above.
+                expr = f'INITCAP({current_sql})'
+            else:
+                expr = f'UPPER({current_sql})'
+            labeled = literal_column(expr).label(col)
+            if col in projected_index:
+                select_items[projected_index[col]] = labeled
+            else:
+                select_items.append(labeled)
 
     # Date Extract ops → EXTRACT(part FROM col)
     date_extract_ops = _json_list(cfg.get("date_extract_ops"))
@@ -706,6 +826,15 @@ def _build_select_sql(cfg: dict[str, Any], dialect_name: str) -> str:
     if cfg.get("filter_expression"):
         stmt = stmt.where(literal_column(cfg["filter_expression"]))
 
+    if cfg.get("drop_na"):
+        # Only the columns we actually know about at compile time (keep
+        # list, or whatever else got referenced) -- true "any column in the
+        # whole table" isn't expressible without schema reflection, which
+        # this component deliberately avoids (see module docstring).
+        na_check_cols = keep or sorted(cols_referenced)
+        for c in na_check_cols:
+            stmt = stmt.where(literal_column(f'"{c}"').isnot(None))
+
     if cfg.get("drop_duplicates"):
         stmt = stmt.distinct()
 
@@ -746,6 +875,72 @@ def _build_select_sql(cfg: dict[str, Any], dialect_name: str) -> str:
     if limit is not None:
         stmt = stmt.limit(int(limit))
 
+    return _compile_stmt(stmt)
+
+
+_AGG_FUNC_SQL = {
+    "sum": "SUM",
+    "count": "COUNT",
+    "avg": "AVG",
+    "mean": "AVG",
+    "min": "MIN",
+    "max": "MAX",
+    "std": "STDDEV",
+    "stddev": "STDDEV",
+}
+
+
+def _build_group_by_sql(
+    cfg: dict[str, Any], group_by_cols: list[str], agg_functions: dict[str, str],
+    dialect_name: str,
+) -> str:
+    """group_by + agg_functions -> a real GROUP BY query. Kept separate from
+    _build_select_sql's per-row projection ops (calculated columns, string
+    ops, window functions, ...) since none of those are meaningful once rows
+    have been collapsed by grouping -- mixing them in would produce invalid
+    SQL (an ungrouped column in the SELECT list) rather than the pandas
+    groupby().agg() shape the DataFrame backend already emits (every
+    non-grouped column disappears, replaced by the aggregations)."""
+    from sqlalchemy import select, literal_column, asc, desc
+
+    agg_source_cols = set(agg_functions.keys())
+    cols_referenced = set(group_by_cols) | agg_source_cols
+    tbl = _from_clause(cfg)
+
+    select_items: list = [literal_column(f'"{c}"') for c in group_by_cols]
+    for col, func in agg_functions.items():
+        func_lower = str(func).lower()
+        if func_lower == "count_distinct":
+            expr = f'COUNT(DISTINCT "{col}")'
+        else:
+            sql_func = _AGG_FUNC_SQL.get(func_lower, func_lower.upper())
+            expr = f'{sql_func}("{col}")'
+        select_items.append(literal_column(expr).label(f"{func_lower}_{col}"))
+
+    stmt = select(*select_items).select_from(tbl)
+
+    if cfg.get("filter_expression"):
+        stmt = stmt.where(literal_column(cfg["filter_expression"]))
+
+    if cfg.get("drop_na"):
+        for c in sorted(cols_referenced):
+            stmt = stmt.where(literal_column(f'"{c}"').isnot(None))
+
+    stmt = stmt.group_by(*[literal_column(f'"{c}"') for c in group_by_cols])
+
+    if cfg.get("sort_by"):
+        sort_cols = _csv(cfg["sort_by"])
+        direction = asc if cfg.get("sort_ascending", True) else desc
+        stmt = stmt.order_by(*[direction(literal_column(f'"{c}"')) for c in sort_cols])
+
+    limit = cfg.get("limit_rows")
+    if limit is not None:
+        stmt = stmt.limit(int(limit))
+
+    return _compile_stmt(stmt)
+
+
+def _compile_stmt(stmt) -> str:
     # Compile with the correct dialect so quoting/keywords come out right.
     from sqlalchemy.dialects import (
         postgresql, sqlite, mysql, mssql, oracle,
