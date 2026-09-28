@@ -1365,7 +1365,7 @@ async def install_system_deps(request: InstallSystemDepsRequest):
     # Allowlist: only formulas some component in the manifest actually
     # declares under dependencies.brew -- this endpoint takes a plain
     # list of strings from the frontend, and while subprocess.run's list
-    # form (no shell=True) already rules out shell injection, nothing
+    # form (no shell involved) already rules out shell injection, nothing
     # else would stop it being used to `brew install` an arbitrary
     # formula unrelated to any real component dependency.
     try:
