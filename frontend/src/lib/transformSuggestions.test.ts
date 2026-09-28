@@ -77,6 +77,110 @@ describe('computeColumnSuggestions', () => {
       .flatMap((s) => (s.action.type === 'splitOp' ? s.action.into.split(',') : []));
     expect(new Set(intoNames).size).toBe(intoNames.length);
   });
+
+  it('shows at most one suggestion per column, even when several issues apply', () => {
+    // Messy whitespace AND inconsistent casing AND punctuation, all on the
+    // same column -- should collapse to a single highest-priority pick,
+    // not three stacked cards for one column.
+    const rows = [
+      { note: '  Hello, World!!  ' },
+      { note: 'hello, world!!' },
+      { note: 'HELLO, WORLD!!' },
+    ];
+    const suggestions = computeColumnSuggestions(rows, ['note']);
+    expect(suggestions.filter((s) => s.column === 'note')).toHaveLength(1);
+  });
+
+  it('does not suggest a split for prose that happens to share a comma count (comma excluded)', () => {
+    const rows = [
+      { bio: 'Loves hiking, camping, and long walks on the beach every weekend' },
+      { bio: 'Enjoys reading, writing, and playing chess with friends on weekends' },
+    ];
+    const suggestions = computeColumnSuggestions(rows, ['bio']);
+    expect(suggestions.some((s) => s.action.type === 'splitOp')).toBe(false);
+  });
+
+  it('does not suggest a split for long free text even with a consistent single-hyphen count', () => {
+    const rows = [
+      { comment: 'This is a well-written and thoughtful piece of long-form text' },
+      { comment: 'Another example of well-formed but decidedly long-form prose' },
+    ];
+    const suggestions = computeColumnSuggestions(rows, ['comment']);
+    expect(suggestions.some((s) => s.action.type === 'splitOp')).toBe(false);
+  });
+
+  it('does not suggest a split when the resulting first part varies too much in length', () => {
+    // Same hyphen count everywhere, but the first segment length is wildly
+    // inconsistent -- not a genuine fixed-shape code.
+    const rows = [{ v: 'a-100-x' }, { v: 'alpha-200-y' }, { v: 'ab-300-z' }];
+    const suggestions = computeColumnSuggestions(rows, ['v']);
+    expect(suggestions.some((s) => s.action.type === 'splitOp')).toBe(false);
+  });
+
+  it('still suggests a split for a genuine fixed-shape code', () => {
+    const rows = [{ sku: 'CHI-202425-001' }, { sku: 'NYC-202426-042' }, { sku: 'LAX-202427-099' }];
+    const suggestions = computeColumnSuggestions(rows, ['sku']);
+    expect(suggestions.some((s) => s.action.type === 'splitOp')).toBe(true);
+  });
+
+  describe('pattern-consistency outlier detection', () => {
+    it('flags a value that breaks the dominant pattern (the CHI vs CHICAGO case)', () => {
+      const rows = [
+        { code: 'CHI-001-xxxx' }, { code: 'CHI-002-xxxx' }, { code: 'CHI-003-xxxx' },
+        { code: 'CHICAGO-001-xxxx' },
+      ];
+      const suggestions = computeColumnSuggestions(rows, ['code']);
+      const outlier = suggestions.find((s) => s.action.type === 'excludeValues');
+      expect(outlier).toBeTruthy();
+      expect(outlier!.action).toMatchObject({ type: 'excludeValues', column: 'code', values: ['CHICAGO-001-xxxx'] });
+      // It wins priority over whatever split suggestion the same column
+      // might also qualify for -- one card, the most actionable one.
+      expect(suggestions.filter((s) => s.column === 'code')).toHaveLength(1);
+    });
+
+    it('does not flag anything when every value shares the same shape', () => {
+      const rows = [{ code: 'CHI-001-xxxx' }, { code: 'NYC-002-yyyy' }, { code: 'LAX-003-zzzz' }];
+      const suggestions = computeColumnSuggestions(rows, ['code']);
+      expect(suggestions.some((s) => s.action.type === 'excludeValues')).toBe(false);
+    });
+
+    it('does not flag anything with too few sampled rows to be confident', () => {
+      const rows = [{ code: 'CHI-001-xxxx' }, { code: 'CHICAGO-001-xxxx' }];
+      const suggestions = computeColumnSuggestions(rows, ['code']);
+      expect(suggestions.some((s) => s.action.type === 'excludeValues')).toBe(false);
+    });
+
+    it('does not flag anything when the column is too chaotic to have a dominant shape', () => {
+      const rows = [{ v: 'a1' }, { v: 'BB-2' }, { v: '333' }, { v: 'dddd/4' }, { v: 'E' }];
+      const suggestions = computeColumnSuggestions(rows, ['v']);
+      expect(suggestions.some((s) => s.action.type === 'excludeValues')).toBe(false);
+    });
+
+    it('does not flag anything when the minority is too large a share to call an outlier', () => {
+      // Half and half -- not "a few outliers", genuinely two formats.
+      const rows = [
+        { code: 'CHI-001' }, { code: 'CHI-002' },
+        { code: 'CHICAGO-001' }, { code: 'CHICAGO-002' },
+      ];
+      const suggestions = computeColumnSuggestions(rows, ['code']);
+      expect(suggestions.some((s) => s.action.type === 'excludeValues')).toBe(false);
+    });
+  });
+
+  it('caps the total number of suggestions shown', () => {
+    const rows: Array<Record<string, any>> = [{}];
+    const columns: string[] = [];
+    for (let i = 0; i < 20; i++) {
+      const col = `messy_${i}`;
+      columns.push(col);
+      rows[0][col] = '  Value  ';
+    }
+    // A second row so whitespace inconsistency is real and every column
+    // independently qualifies.
+    rows.push(Object.fromEntries(columns.map((c) => [c, 'value'])));
+    const suggestions = computeColumnSuggestions(rows, columns);
+    expect(suggestions.length).toBeLessThanOrEqual(8);
+  });
 });
 
 describe('computeSelectionSuggestions', () => {
@@ -124,5 +228,50 @@ describe('computeSelectionSuggestions', () => {
     const suggestions = computeSelectionSuggestions('col', 'abc', 'abc', 0, 3);
     expect(suggestions.some((s) => s.id === 'sel-prefix')).toBe(false);
     expect(suggestions.some((s) => s.id === 'sel-suffix')).toBe(false);
+  });
+
+  describe('timestamp/date context-awareness', () => {
+    const iso = '2024-01-15T10:30:00';
+
+    it('suggests splitting into date and time when the T separator itself is selected -- not a fixed-offset extraction', () => {
+      const suggestions = computeSelectionSuggestions('created_at', iso, 'T', 10, 11);
+      expect(suggestions.some((s) => s.id === 'sel-ts-split')).toBe(true);
+      expect(suggestions.some((s) => s.id === 'sel-fixed')).toBe(false);
+      const split = suggestions.find((s) => s.id === 'sel-ts-split')!;
+      expect(split.action).toMatchObject({ type: 'splitOp', delimiter: 'T' });
+    });
+
+    it('suggests month extraction when the month digits are selected', () => {
+      const suggestions = computeSelectionSuggestions('created_at', iso, '01', 5, 7);
+      expect(suggestions.some((s) => s.id === 'sel-ts-month')).toBe(true);
+    });
+
+    it('suggests day extraction when the day digits are selected', () => {
+      const suggestions = computeSelectionSuggestions('created_at', iso, '15', 8, 10);
+      expect(suggestions.some((s) => s.id === 'sel-ts-day')).toBe(true);
+    });
+
+    it('suggests year extraction when the year digits are selected', () => {
+      const suggestions = computeSelectionSuggestions('created_at', iso, '2024', 0, 4);
+      expect(suggestions.some((s) => s.id === 'sel-ts-year')).toBe(true);
+    });
+
+    it('suggests hour extraction and time-portion extraction when the time part is selected', () => {
+      const suggestions = computeSelectionSuggestions('created_at', iso, '10', 11, 13);
+      expect(suggestions.some((s) => s.id === 'sel-ts-hour')).toBe(true);
+      expect(suggestions.some((s) => s.id === 'sel-ts-time')).toBe(true);
+    });
+
+    it('offers date-segment extraction but no split for a plain date with no time component', () => {
+      const suggestions = computeSelectionSuggestions('order_date', '2024-01-15', '01', 5, 7);
+      expect(suggestions.some((s) => s.id === 'sel-ts-month')).toBe(true);
+      expect(suggestions.some((s) => s.id === 'sel-ts-split')).toBe(false);
+    });
+
+    it('does not apply shape-aware logic to a value that is not a recognized date/timestamp', () => {
+      const suggestions = computeSelectionSuggestions('code', 'CHI-202425-001', 'CHI', 0, 3);
+      expect(suggestions.some((s) => s.id.startsWith('sel-ts-'))).toBe(false);
+      expect(suggestions.some((s) => s.id === 'sel-prefix')).toBe(true);
+    });
   });
 });

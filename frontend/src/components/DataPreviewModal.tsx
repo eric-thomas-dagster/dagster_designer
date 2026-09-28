@@ -1265,6 +1265,13 @@ export function DataPreviewModal({
       case 'fillDirectionOp':
         setFillDirectionOps((prev) => [...prev, { column: a.column, direction: a.direction, partitionBy: '', orderBy: '' }]);
         break;
+      case 'excludeValues':
+        // One not_equals filter per outlier value -- filters AND-combine
+        // (see the transform pipeline's own sequential .filter() chain and
+        // the backend's " and ".join(filter_parts)/" AND ".join(sql_parts)),
+        // so N of these together correctly means "none of these values".
+        setFilters((prev) => [...prev, ...a.values.map((v) => ({ column: a.column, operator: 'not_equals' as const, value: v }))]);
+        break;
     }
     setDismissedSuggestionIds((prev) => new Set(prev).add(s.id));
   };
