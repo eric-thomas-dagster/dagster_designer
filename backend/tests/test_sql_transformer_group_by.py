@@ -126,3 +126,30 @@ def test_string_operations_without_columns_to_keep_falls_back_to_appending():
     sql = _build_select_sql(cfg, "postgresql")
     assert "SELECT *, " in sql
     assert 'UPPER("name") AS name' in sql
+
+
+def test_remove_punctuation_uses_dialect_specific_regexp_replace_args():
+    cfg = {
+        "upstream_table": "main.customers",
+        "columns_to_keep": "id,name",
+        "string_operations": '[{"column": "name", "operation": "remove_punctuation"}]',
+    }
+    pg_sql = _build_select_sql(cfg, "postgresql")
+    assert "REGEXP_REPLACE(\"name\", '" in pg_sql
+    assert pg_sql.rstrip().endswith("'g') AS name") or ", 'g') AS name" in pg_sql
+    duckdb_sql = _build_select_sql(cfg, "duckdb")
+    assert "REGEXP_REPLACE(\"name\", '" in duckdb_sql
+    assert ", 'g')" not in duckdb_sql  # no trailing global-match flag outside Postgres
+
+
+def test_remove_punctuation_wildcard_column_is_skipped_not_crashed():
+    # SQL mode can't auto-detect string columns without a live connection
+    # (this component deliberately never opens one at compile time) --
+    # "*" is silently skipped rather than producing broken SQL.
+    cfg = {
+        "upstream_table": "main.customers",
+        "columns_to_keep": "id",
+        "string_operations": '[{"column": "*", "operation": "remove_punctuation"}]',
+    }
+    sql = _build_select_sql(cfg, "postgresql")
+    assert "REGEXP_REPLACE" not in sql

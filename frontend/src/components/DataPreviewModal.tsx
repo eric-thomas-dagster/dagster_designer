@@ -950,6 +950,12 @@ export function DataPreviewModal({
               );
               break;
             case 'trim': newRow[op.column] = val.trim(); break;
+            case 'remove_punctuation':
+              // Matches Python's str.translate(str.maketrans('', '',
+              // string.punctuation)) -- same ASCII punctuation set both
+              // backends strip via `_string_module.punctuation`.
+              newRow[op.column] = val.replace(/[!"#$%&'()*+,\-./:;<=>?@[\]^_`{|}~\\]/g, '');
+              break;
           }
         }
         return newRow;
@@ -3883,6 +3889,12 @@ export function DataPreviewModal({
                                                 onSelect={() => handleStringOperation(col, 'trim')}
                                               >
                                                 Trim Whitespace
+                                              </DropdownMenu.Item>
+                                              <DropdownMenu.Item
+                                                className="px-3 py-2 text-sm text-gray-700 rounded hover:bg-gray-100 cursor-pointer outline-none"
+                                                onSelect={() => handleStringOperation(col, 'remove_punctuation')}
+                                              >
+                                                Remove Punctuation
                                               </DropdownMenu.Item>
                                             </DropdownMenu.SubContent>
                                           </DropdownMenu.Portal>

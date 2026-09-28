@@ -21,8 +21,25 @@ from __future__ import annotations
 
 import json
 import os
+import string as _string_module
 from pathlib import Path
 from typing import Any, Optional
+
+# Regex character class matching Python's string.punctuation exactly (same
+# set the DataFrame backend's str.translate call strips) -- built
+# programmatically rather than hand-escaped, since a literal containing a
+# backtick, single quote, backslash, and both bracket characters is exactly
+# the kind of string that's easy to get subtly wrong by hand. `]` goes
+# first, `-` goes last, `\` is regex-escaped as `\\` -- the three
+# characters that have positional/escaping rules inside a `[...]` class;
+# everything else in string.punctuation is literal there, including a bare
+# `[` and `^` (only special as the very first character, which it isn't
+# here).
+_SQL_PUNCTUATION_CLASS = (
+    "[]"
+    + "".join(c for c in _string_module.punctuation if c not in ("]", "-", "\\"))
+    + "\\\\-]"
+)
 
 import dagster as dg
 
@@ -664,12 +681,18 @@ def _build_select_sql(cfg: dict[str, Any], dialect_name: str) -> str:
     # .str.upper()/.lower()/.title()/.strip() -- chains onto whatever this
     # column's expression already is (e.g. after a replace_op) via
     # projected_index, same overwrite-not-append behavior as replace_ops.
+    # No "*" (all string columns) wildcard here, unlike the DataFrame
+    # backend's own string_operations -- that mode needs to know every
+    # object-dtype column name, which requires a live connection to
+    # introspect the schema. This component deliberately never opens one at
+    # compile time (see module docstring), so every column has to be named
+    # explicitly.
     string_operations = _json_list(cfg.get("string_operations"))
     if string_operations:
         for op in string_operations:
             col = op.get("column")
             operation = str(op.get("operation", "upper")).lower()
-            if not col:
+            if not col or col == "*":
                 continue
             # Chain onto the column's current expression (e.g. a prior
             # replace_op on the same column) rather than always re-reading
@@ -693,6 +716,17 @@ def _build_select_sql(cfg: dict[str, Any], dialect_name: str) -> str:
                 # don't -- those will error at runtime, same documented
                 # dialect-gap pattern as columns_to_drop's EXCLUDE(...) above.
                 expr = f'INITCAP({current_sql})'
+            elif operation == "remove_punctuation":
+                # REGEXP_REPLACE's own arg count/flags are genuinely
+                # dialect-specific (same documented-gap class as INITCAP):
+                # Postgres needs a 'g' flag as a 4th arg for a global
+                # replace; Snowflake/DuckDB/BigQuery replace every match by
+                # default with just 3 args.
+                _punct_sql = _SQL_PUNCTUATION_CLASS.replace("'", "''")
+                if dialect_name == "postgresql":
+                    expr = f"REGEXP_REPLACE({current_sql}, '{_punct_sql}', '', 'g')"
+                else:
+                    expr = f"REGEXP_REPLACE({current_sql}, '{_punct_sql}', '')"
             else:
                 expr = f'UPPER({current_sql})'
             labeled = literal_column(expr).label(col)
