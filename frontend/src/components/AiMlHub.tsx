@@ -60,7 +60,7 @@ const CARDS: HubCard[] = [
   {
     id: 'rag',
     label: 'RAG & Vector Search',
-    description: 'Build a governed knowledge base — chunk, classify, embed, and index raw text into a searchable vector store. Querying it back falls back to the raw form for now.',
+    description: 'Build a governed knowledge base — chunk, classify, embed, and index raw text. Combine as many sources as you want (support tickets, contracts, call transcripts, ...) into one searchable store. Querying it back falls back to the raw form for now.',
     icon: Search,
     count: 11,
     status: 'ready',

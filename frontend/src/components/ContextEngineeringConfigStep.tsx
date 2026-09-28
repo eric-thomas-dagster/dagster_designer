@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { X, Loader2, Plus, Sparkles, Layers, Database, FileSpreadsheet } from 'lucide-react';
 import { useProjectStore } from '@/hooks/useProject';
 import { projectsApi, API_BASE } from '@/services/api';
@@ -178,6 +178,59 @@ export function ContextEngineeringConfigStep({
   const [connectionString, setConnectionString] = useState<string>(seedWrite.connection_string || '');
   const [collectionName, setCollectionName] = useState<string>(seedWrite.collection_name || '');
   const [storeApiKeyEnvVar, setStoreApiKeyEnvVar] = useState<string>(seedWrite.api_key_env_var || '');
+
+  // Real value here is many independent per-source chains landing in the
+  // SAME knowledge base -- confirmed against dbt Labs' own jaffle-logistics
+  // reference project (five source-specific chunk/classify/embed chains --
+  // legal docs, incident reports, CRM notes, call transcripts, support
+  // tickets -- unioned into one knowledge_base model). This component has
+  // no multi-source concept of its own (exactly one upstream_asset_key OR
+  // source per instance), so "many sources, one KB" here means many
+  // context_engineering_pipeline instances, each with its own source/
+  // columns/chunk/classify config, all write_vector_store-ing into the
+  // same provider+connection_string+collection_name -- upsert semantics
+  // already merge them, no union step needed. Discovered by scanning this
+  // project's OTHER instances of this same component for their
+  // write_vector_store step, not tracked as separate state anywhere.
+  const knownKnowledgeBases = useMemo(() => {
+    if (!currentProject) return [];
+    const seen = new Map<string, { key: string; label: string; provider: string; connectionString: string; collectionName: string; sourceCount: number }>();
+    for (const c of currentProject.components) {
+      if (component && c.id === component.id) continue;
+      if (extractComponentId(c.component_type) !== 'context_engineering_pipeline') continue;
+      const steps: any[] = c.attributes?.steps || [];
+      const write = steps.find((s) => s.op === 'write_vector_store');
+      if (!write) continue;
+      const provider = write.provider || 'chromadb';
+      const connStr = write.connection_string || VECTOR_STORE_PROVIDERS[provider]?.connectionPlaceholder || '';
+      const collName = write.collection_name || '';
+      if (!collName) continue;
+      const key = `${provider}::${connStr}::${collName}`;
+      const existing = seen.get(key);
+      if (existing) {
+        existing.sourceCount += 1;
+      } else {
+        seen.set(key, { key, label: collName, provider, connectionString: connStr, collectionName: collName, sourceCount: 1 });
+      }
+    }
+    return Array.from(seen.values());
+  }, [currentProject, component]);
+
+  const matchedExistingKB = knownKnowledgeBases.find(
+    (kb) => kb.provider === storeProvider && kb.connectionString === (connectionString || VECTOR_STORE_PROVIDERS[storeProvider]?.connectionPlaceholder) && kb.collectionName === collectionName,
+  );
+  const [kbChoice, setKbChoice] = useState<'new' | string>(matchedExistingKB?.key || 'new');
+  const joiningExistingKB = kbChoice !== 'new';
+
+  const joinKnowledgeBase = (kb: (typeof knownKnowledgeBases)[number]) => {
+    setKbChoice(kb.key);
+    setStoreProvider(kb.provider);
+    setConnectionString(kb.connectionString);
+    setCollectionName(kb.collectionName);
+  };
+  const startNewKnowledgeBase = () => {
+    setKbChoice('new');
+  };
 
   const [saving, setSaving] = useState(false);
 
@@ -634,49 +687,84 @@ export function ContextEngineeringConfigStep({
             {!pushdown && (
               <div className="border-t border-gray-100 pt-4">
                 <h3 className="text-xs font-semibold text-gray-700 uppercase tracking-wider mb-2">4. Write to vector store</h3>
-                <div className="space-y-2.5">
-                  <select
-                    value={storeProvider}
-                    onChange={(e) => { setStoreProvider(e.target.value); setConnectionString(''); }}
-                    className="w-full px-2.5 py-1.5 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
-                  >
-                    {Object.entries(VECTOR_STORE_PROVIDERS).map(([id, p]) => (<option key={id} value={id}>{p.label}</option>))}
-                  </select>
-                  <div className="grid grid-cols-2 gap-3">
-                    <div>
-                      <label className="block text-xs font-medium text-gray-700 mb-1">{VECTOR_STORE_PROVIDERS[storeProvider]?.connectionLabel}</label>
-                      <input
-                        type="text"
-                        value={connectionString}
-                        onChange={(e) => setConnectionString(e.target.value)}
-                        placeholder={VECTOR_STORE_PROVIDERS[storeProvider]?.connectionPlaceholder}
-                        className="w-full px-2.5 py-1.5 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-xs font-medium text-gray-700 mb-1">Collection name</label>
-                      <input
-                        type="text"
-                        value={collectionName}
-                        onChange={(e) => setCollectionName(e.target.value)}
-                        placeholder={`${assetName.trim() || 'context'}_kb`}
-                        className="w-full px-2.5 py-1.5 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono"
-                      />
+
+                {knownKnowledgeBases.length > 0 && !isEditing && (
+                  <div className="mb-3 space-y-1.5">
+                    <p className="text-[11px] text-gray-500">
+                      The real value is combining sources — each one gets its own chunk/classify config above, but they can all land in the same searchable knowledge base (upsert, not overwrite — nothing here gets clobbered by adding another source).
+                    </p>
+                    <div className="space-y-1">
+                      {knownKnowledgeBases.map((kb) => (
+                        <button
+                          key={kb.key}
+                          onClick={() => joinKnowledgeBase(kb)}
+                          className={`w-full flex items-center justify-between px-2.5 py-2 text-left border rounded-md text-xs ${kbChoice === kb.key ? 'border-primary bg-blue-50/60' : 'border-gray-200 hover:border-blue-300 hover:bg-blue-50/40'}`}
+                        >
+                          <div>
+                            <div className="font-medium text-gray-900">Add to "{kb.label}"</div>
+                            <div className="text-gray-400 font-mono">{VECTOR_STORE_PROVIDERS[kb.provider]?.label || kb.provider} — {kb.sourceCount} source{kb.sourceCount === 1 ? '' : 's'} already in it</div>
+                          </div>
+                        </button>
+                      ))}
+                      <button
+                        onClick={startNewKnowledgeBase}
+                        className={`w-full flex items-center px-2.5 py-2 text-left border rounded-md text-xs ${kbChoice === 'new' ? 'border-primary bg-blue-50/60' : 'border-gray-200 hover:border-blue-300 hover:bg-blue-50/40'}`}
+                      >
+                        <div className="font-medium text-gray-900">Start a new knowledge base</div>
+                      </button>
                     </div>
                   </div>
-                  {VECTOR_STORE_PROVIDERS[storeProvider]?.needsApiKey && (
-                    <div>
-                      <label className="block text-xs font-medium text-gray-700 mb-1">API key env var</label>
-                      <input
-                        type="text"
-                        value={storeApiKeyEnvVar}
-                        onChange={(e) => setStoreApiKeyEnvVar(e.target.value)}
-                        placeholder={VECTOR_STORE_PROVIDERS[storeProvider]?.apiKeyDefault}
-                        className="w-full px-2.5 py-1.5 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono"
-                      />
+                )}
+
+                {joiningExistingKB && !isEditing ? (
+                  <p className="text-xs text-gray-500">
+                    Joining <span className="font-mono text-gray-700">{collectionName}</span> ({VECTOR_STORE_PROVIDERS[storeProvider]?.label || storeProvider} @ <span className="font-mono">{connectionString}</span>) — provider, storage, and collection are locked to match the sources already in it.
+                  </p>
+                ) : (
+                  <div className="space-y-2.5">
+                    <select
+                      value={storeProvider}
+                      onChange={(e) => { setStoreProvider(e.target.value); setConnectionString(''); }}
+                      className="w-full px-2.5 py-1.5 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
+                    >
+                      {Object.entries(VECTOR_STORE_PROVIDERS).map(([id, p]) => (<option key={id} value={id}>{p.label}</option>))}
+                    </select>
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <label className="block text-xs font-medium text-gray-700 mb-1">{VECTOR_STORE_PROVIDERS[storeProvider]?.connectionLabel}</label>
+                        <input
+                          type="text"
+                          value={connectionString}
+                          onChange={(e) => setConnectionString(e.target.value)}
+                          placeholder={VECTOR_STORE_PROVIDERS[storeProvider]?.connectionPlaceholder}
+                          className="w-full px-2.5 py-1.5 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-xs font-medium text-gray-700 mb-1">Collection name</label>
+                        <input
+                          type="text"
+                          value={collectionName}
+                          onChange={(e) => setCollectionName(e.target.value)}
+                          placeholder={`${assetName.trim() || 'context'}_kb`}
+                          className="w-full px-2.5 py-1.5 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono"
+                        />
+                      </div>
                     </div>
-                  )}
-                </div>
+                    {VECTOR_STORE_PROVIDERS[storeProvider]?.needsApiKey && (
+                      <div>
+                        <label className="block text-xs font-medium text-gray-700 mb-1">API key env var</label>
+                        <input
+                          type="text"
+                          value={storeApiKeyEnvVar}
+                          onChange={(e) => setStoreApiKeyEnvVar(e.target.value)}
+                          placeholder={VECTOR_STORE_PROVIDERS[storeProvider]?.apiKeyDefault}
+                          className="w-full px-2.5 py-1.5 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono"
+                        />
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
             )}
             {pushdown && (
