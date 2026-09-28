@@ -1308,17 +1308,37 @@ async def create_transformer_asset(project_id: str, request: CreateTransformerRe
     defs_dir.mkdir(parents=True, exist_ok=True)
 
     # Detect whether the upstream asset lives in a warehouse (dbt model / sink
-    # component output) vs. produces a Python DataFrame in-process. Warehouse
-    # upstreams get the SqlTransformerComponent (in-warehouse SQL, no data
-    # movement); DataFrame upstreams get DataFrameTransformerComponent.
+    # component output, or a component instance running in a warehouse-
+    # native execution mode) vs. produces a Python DataFrame in-process.
+    # Warehouse upstreams get the SqlTransformerComponent (in-warehouse SQL,
+    # no data movement); DataFrame upstreams get DataFrameTransformerComponent.
     #
-    # MVP heuristic: dbt asset keys always look like "models/<name>" or
-    # "seeds/<name>". Anything else is treated as a DataFrame. We can add
-    # richer detection (introspect the source component's output type) once
-    # this lands.
+    # Two real signals, not one heuristic:
+    #  1. dbt asset keys always look like "models/<name>" / "seeds/<name>" /
+    #     etc. -- these aren't tracked as project.components instances at
+    #     all (they're raw dbt models), so this is the only signal
+    #     available for them.
+    #  2. A tracked component instance producing this asset: check its OWN
+    #     config for a definitive warehouse-native signal instead of
+    #     guessing from the asset name's spelling. Concretely,
+    #     execution_mode='sql' (context_engineering_pipeline's pushdown
+    #     mode, added this session, writes value=None -- no DataFrame
+    #     exists at all, so misrouting this to DataFrameTransformerComponent
+    #     would crash on a missing frame) or the source component itself
+    #     being a SqlTransformerComponent both mean "no DataFrame to hand
+    #     the pandas path, this lives in a table."
     upstream_is_warehouse = '/' in request.sourceAssetKey and request.sourceAssetKey.split('/', 1)[0] in {
         'models', 'seeds', 'snapshots', 'analyses'
     }
+    if not upstream_is_warehouse:
+        for _c in project.components:
+            if (_c.attributes or {}).get('asset_name') != request.sourceAssetKey:
+                continue
+            if (_c.attributes or {}).get('execution_mode') == 'sql':
+                upstream_is_warehouse = True
+            elif 'SqlTransformer' in (_c.component_type or ''):
+                upstream_is_warehouse = True
+            break
 
     # Build transformation configuration for the transformer component
     # The DataFrameTransformerComponent expects specific attributes, not a transforms array

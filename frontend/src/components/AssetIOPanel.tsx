@@ -170,8 +170,8 @@ export function AssetIOPanel({
 
           <button
             onClick={() => onOpenPreview(currentAssetKey, 'transform')}
-            className="flex items-center gap-1 px-2 py-1 text-xs text-gray-700 hover:bg-gray-100 rounded"
-            title="Open the full preview modal in transform mode"
+            className="flex items-center gap-1 px-2 py-1 text-xs font-medium text-violet-700 bg-violet-50 border border-violet-200 hover:bg-violet-100 hover:border-violet-300 rounded"
+            title="Clean, reshape, or filter this data — saves as a real pipeline step (in-warehouse SQL when the source is warehouse-backed, pandas otherwise)"
           >
             <Wand2 className="w-3.5 h-3.5" />
             Transform
