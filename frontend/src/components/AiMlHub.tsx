@@ -17,6 +17,8 @@ import { AutoMLConfigStep } from './AutoMLConfigStep';
 import { LlmJudgeConfigStep } from './LlmJudgeConfigStep';
 import { ContextEngineeringConfigStep } from './ContextEngineeringConfigStep';
 import { SqlTransformConfigStep } from './SqlTransformConfigStep';
+import { TransformSourcePicker } from './TransformSourcePicker';
+import { DataPreviewModal } from './DataPreviewModal';
 import { ComponentConfigModal } from './ComponentConfigModal';
 import { extractComponentId } from '@/lib/componentId';
 
@@ -95,7 +97,7 @@ const CARDS: HubCard[] = [
   {
     id: 'sql_transform',
     label: 'Transform / Clean Data',
-    description: "Filter, dedupe, group-by, clean up strings — in-warehouse SQL, no data movement. Start from a resource or a bare connection string here; for an asset already in this project, click it in the graph and use its own Transform button.",
+    description: 'Filter, dedupe, group-by, clean up strings — in-warehouse SQL, no data movement. Pick an asset already in this project, or connect a resource or connection string first.',
     icon: Wand2,
     count: 1,
     status: 'ready',
@@ -112,10 +114,15 @@ const CARDS: HubCard[] = [
  * added as cards here as they're built, not as new nav tabs.
  */
 export function AiMlHub() {
-  const { currentProject } = useProjectStore();
+  const { currentProject, loadProject } = useProjectStore();
   const [openBuilder, setOpenBuilder] = useState<string | null>(null);
   const [pendingConfig, setPendingConfig] = useState<{ componentType: string; initialAttributes?: Record<string, any>; sourcePath?: string } | null>(null);
   const [installingRag, setInstallingRag] = useState(false);
+  // Transform's real "existing asset" path opens the actual DataPreviewModal
+  // (the same live-preview-driven visual builder the graph's own Transform
+  // button opens) directly against the picked asset, instead of a reduced
+  // form that can't match its capability.
+  const [transformAssetKey, setTransformAssetKey] = useState<string | null>(null);
 
   // context_engineering_pipeline owns its OWN source picking (an asset in
   // this project, or query a warehouse directly) -- routing it through
@@ -263,9 +270,43 @@ export function AiMlHub() {
       )}
 
       {openBuilder === 'sql_transform' && (
-        <SqlTransformConfigStep
-          onDone={() => setOpenBuilder(null)}
+        <TransformSourcePicker
+          onPickExistingAsset={(assetKey) => {
+            setTransformAssetKey(assetKey);
+            setOpenBuilder(null);
+          }}
+          onPickRawSource={() => setOpenBuilder('sql_transform_connect')}
           onClose={() => setOpenBuilder(null)}
+        />
+      )}
+
+      {openBuilder === 'sql_transform_connect' && (
+        <SqlTransformConfigStep
+          onConnected={(assetKey) => {
+            setTransformAssetKey(assetKey);
+            setOpenBuilder(null);
+          }}
+          onClose={() => setOpenBuilder(null)}
+        />
+      )}
+
+      {/* Real Transform UI (ops left, live preview right, recipe of steps)
+          -- reused as-is, same component the graph's own Transform button
+          opens, whether the asset was already here or was just connected
+          above. onTransformerCreated only has loadProject to sync into
+          (no direct graph-node splice like GraphEditor's own mount has),
+          which is a full reload rather than a surgical patch, but correct. */}
+      {transformAssetKey && currentProject && (
+        <DataPreviewModal
+          isOpen
+          onClose={() => setTransformAssetKey(null)}
+          projectId={currentProject.id}
+          assetKey={transformAssetKey}
+          assetName={transformAssetKey}
+          initialMode="transform"
+          onTransformerCreated={() => {
+            loadProject(currentProject.id);
+          }}
         />
       )}
 
