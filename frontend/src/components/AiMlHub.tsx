@@ -1,6 +1,8 @@
 import { useState } from 'react';
-import { Sparkles, FileText, BrainCircuit, Search, ShieldCheck, Film, Mic } from 'lucide-react';
+import { Sparkles, FileText, BrainCircuit, Search, ShieldCheck, Film, Mic, Loader2 } from 'lucide-react';
 import { useProjectStore } from '@/hooks/useProject';
+import { API_BASE } from '@/services/api';
+import { notify } from './Notifications';
 import { AgentPipelineBuilder } from './AgentPipelineBuilder';
 import { DocumentExtractionWizard } from './DocumentExtractionWizard';
 import { DocumentExtractorConfigStep } from './DocumentExtractorConfigStep';
@@ -104,6 +106,32 @@ export function AiMlHub() {
   const { currentProject } = useProjectStore();
   const [openBuilder, setOpenBuilder] = useState<string | null>(null);
   const [pendingConfig, setPendingConfig] = useState<{ componentType: string; initialAttributes?: Record<string, any>; sourcePath?: string } | null>(null);
+  const [installingRag, setInstallingRag] = useState(false);
+
+  // context_engineering_pipeline owns its OWN source picking (an asset in
+  // this project, or query a warehouse directly) -- routing it through
+  // SingleComponentWizard's step 1 would force a CSV/asset pick before
+  // ever reaching that screen, hiding the warehouse path behind a gate
+  // with no way to skip it. Install straight in, no source pre-picked.
+  const handleOpenRag = async () => {
+    if (!currentProject || installingRag) return;
+    setInstallingRag(true);
+    try {
+      const res = await fetch(`${API_BASE}/templates/install-via-cli/context_engineering_pipeline`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ project_id: currentProject.id, config: {}, template_only: true }),
+      });
+      const body = await res.json().catch(() => ({} as any));
+      if (!res.ok) throw new Error(body.detail || 'Install failed');
+      setPendingConfig({ componentType: body.component_type, initialAttributes: {} });
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      notify.error(`Failed to open knowledge base builder: ${msg}`);
+    } finally {
+      setInstallingRag(false);
+    }
+  };
 
   if (!currentProject) {
     return (
@@ -130,8 +158,8 @@ export function AiMlHub() {
             return (
               <button
                 key={card.id}
-                onClick={() => !disabled && setOpenBuilder(card.id)}
-                disabled={disabled}
+                onClick={() => !disabled && (card.id === 'rag' ? handleOpenRag() : setOpenBuilder(card.id))}
+                disabled={disabled || (card.id === 'rag' && installingRag)}
                 className={`text-left p-4 rounded-lg border flex items-start gap-3 transition-all ${
                   disabled
                     ? 'bg-gray-100 border-gray-200 opacity-60 cursor-not-allowed'
@@ -139,7 +167,11 @@ export function AiMlHub() {
                 }`}
               >
                 <div className={`w-9 h-9 rounded-md flex items-center justify-center flex-shrink-0 ${disabled ? 'bg-gray-200' : 'bg-violet-50 border border-violet-100'}`}>
-                  <Icon className={`w-4.5 h-4.5 ${disabled ? 'text-gray-400' : 'text-violet-600'}`} />
+                  {card.id === 'rag' && installingRag ? (
+                    <Loader2 className="w-4.5 h-4.5 text-violet-600 animate-spin" />
+                  ) : (
+                    <Icon className={`w-4.5 h-4.5 ${disabled ? 'text-gray-400' : 'text-violet-600'}`} />
+                  )}
                 </div>
                 <div className="min-w-0">
                   <div className="flex items-center gap-1.5">
@@ -212,24 +244,6 @@ export function AiMlHub() {
             { id: 'audio_transcriber', label: 'Transcribe (local Whisper)', description: 'Plain transcript, no speaker labels — runs fully locally via OpenAI\'s Whisper model, no API key.' },
             { id: 'litellm_audio_transcription', label: 'Transcribe (LiteLLM/cloud Whisper)', description: 'Plain transcript via any LiteLLM-compatible Whisper endpoint (OpenAI, Azure, ...).' },
             { id: 'speech_to_text_asset', label: 'Transcribe (Google Cloud Speech)', description: 'Plain transcript via Cloud Speech-to-Text v2 — good for long files, non-English, or noisy audio.' },
-          ]}
-          onClose={() => setOpenBuilder(null)}
-          onOpenComponentConfig={(componentType, initialAttributes) => {
-            setPendingConfig({ componentType, initialAttributes });
-            setOpenBuilder(null);
-          }}
-        />
-      )}
-
-      {openBuilder === 'rag' && (
-        <SingleComponentWizard
-          title="Knowledge base — point at your text"
-          icon={Search}
-          sourceHint="Pick an existing DataFrame of raw text rows already in this project, or connect a new CSV/data file."
-          pathPlaceholder="s3://my-bucket/support-tickets.csv"
-          sourceComponentId="dataframe_from_csv"
-          targetOptions={[
-            { id: 'context_engineering_pipeline', label: 'Build a knowledge base', description: 'Chunk, optionally classify, embed, and write each row into a searchable vector store — pairs with rag_pipeline for querying it back.' },
           ]}
           onClose={() => setOpenBuilder(null)}
           onOpenComponentConfig={(componentType, initialAttributes) => {

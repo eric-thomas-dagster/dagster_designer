@@ -82,7 +82,6 @@ export function ContextEngineeringConfigStep({
   const { currentProject, loadProject } = useProjectStore();
   const isEditing = !!component;
   const seedAttrs = component?.attributes || initialAttributes || {};
-  const upstreamAssetKey: string | undefined = seedAttrs.upstream_asset_key;
   const seedSource: any = seedAttrs.source;
   const seedSteps: any[] = seedAttrs.steps || [];
   const seedChunk = seedSteps.find((s) => s.op === 'chunk') || {};
@@ -90,15 +89,93 @@ export function ContextEngineeringConfigStep({
   const seedEmbed = seedSteps.find((s) => s.op === 'embed') || {};
   const seedWrite = seedSteps.find((s) => s.op === 'write_vector_store') || {};
 
+  // Which existing asset to read from, when sourceMode='asset' -- state,
+  // not a const derived from props, since this screen now owns picking it
+  // (previously forced through SingleComponentWizard's source step before
+  // ever reaching here, which hid the warehouse path entirely behind a
+  // "pick a CSV first" gate with no way to skip it).
+  const [upstreamAssetKey, setUpstreamAssetKey] = useState<string | undefined>(seedAttrs.upstream_asset_key);
+  const [showNewAssetForm, setShowNewAssetForm] = useState(false);
+  const [newAssetPath, setNewAssetPath] = useState('');
+  const [installingAsset, setInstallingAsset] = useState(false);
+
   const [assetName, setAssetName] = useState<string>(
     seedAttrs.asset_name || component?.label || (upstreamAssetKey ? `${upstreamAssetKey}_kb` : 'knowledge_base'),
   );
+  const [assetNameTouched, setAssetNameTouched] = useState<boolean>(!!(seedAttrs.asset_name || component?.label));
+  const handleAssetNameChange = (v: string) => { setAssetNameTouched(true); setAssetName(v); };
 
   // Source: an existing asset (default, simple) vs. querying a warehouse
   // directly. Only known for certain when editing an existing instance;
-  // a fresh install from the wizard always arrives with upstream_asset_key
-  // already set (the wizard's own source-picker), so 'asset' is right there.
+  // a fresh install has neither yet -- the user picks one on this screen.
   const [sourceMode, setSourceMode] = useState<'asset' | 'warehouse'>(seedSource ? 'warehouse' : 'asset');
+
+  useEffect(() => {
+    // assetName's default above only fires once, at mount -- before a
+    // source has even been picked on a fresh add (upstreamAssetKey starts
+    // undefined now that this screen owns picking it). Re-derive the
+    // default once a source lands, same as every other bespoke step's
+    // "<source>_<suffix>" convention, but never clobber a name the user
+    // already typed themselves.
+    if (!assetNameTouched && sourceMode === 'asset' && upstreamAssetKey) {
+      setAssetName(`${upstreamAssetKey}_kb`);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [upstreamAssetKey, sourceMode]);
+
+  const existingAssetSources = useMemo(() => {
+    if (!currentProject) return [];
+    return currentProject.graph.nodes
+      .filter((n) => (n.type === 'asset' || (n.data as any)?.asset_key) && typeof (n.data as any)?.io_output_type === 'string' && (n.data as any).io_output_type.toLowerCase().includes('dataframe'))
+      .map((n) => ({
+        assetKey: (n.data as any)?.asset_key || n.id,
+        label: (n.data as any)?.label || (n.data as any)?.asset_key || n.id,
+        componentType: (n.data as any)?.component_type as string | undefined,
+      }));
+  }, [currentProject]);
+
+  const connectNewAsset = async () => {
+    if (!currentProject || !newAssetPath.trim() || installingAsset) return;
+    setInstallingAsset(true);
+    try {
+      const cleaned = newAssetPath.trim().replace(/\/+$/, '');
+      const segments = cleaned.split(/[\\/]/).filter(Boolean);
+      let base = (segments[segments.length - 1] || 'data').replace(/\.[^./]+$/, '');
+      base = base.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || 'data';
+      if (!/^[a-z]/.test(base)) base = `source_${base}`;
+      const existingNames = new Set(currentProject.components.map((c) => (c.attributes?.asset_name as string) || c.id));
+      let derivedName = base;
+      let n = 2;
+      while (existingNames.has(derivedName)) { derivedName = `${base}_${n}`; n += 1; }
+
+      const installRes = await fetch(`${API_BASE}/templates/install-via-cli/dataframe_from_csv`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ project_id: currentProject.id, config: {}, template_only: true }),
+      });
+      const installBody = await installRes.json().catch(() => ({} as any));
+      if (!installRes.ok) throw new Error(installBody.detail || 'Failed to add source');
+
+      const configRes = await fetch(`${API_BASE}/templates/configure/dataframe_from_csv`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ project_id: currentProject.id, config: { name: derivedName, asset_name: derivedName, file_path: newAssetPath.trim() } }),
+      });
+      const configBody = await configRes.json().catch(() => ({} as any));
+      if (!configRes.ok) throw new Error(configBody.detail || 'Failed to configure source');
+
+      notify.success(`Added "${derivedName}" as a source.`);
+      await loadProject(currentProject.id);
+      setUpstreamAssetKey(derivedName);
+      setShowNewAssetForm(false);
+      setNewAssetPath('');
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      notify.error(`Failed to add source: ${msg}`);
+    } finally {
+      setInstallingAsset(false);
+    }
+  };
   const [resources, setResources] = useState<{ name: string }[]>([]);
   const [resourcesLoading, setResourcesLoading] = useState(false);
   const [resourceKey, setResourceKey] = useState<string>(seedSource?.resource_key || '');
@@ -347,7 +424,68 @@ export function ContextEngineeringConfigStep({
         </div>
 
         <div className="flex-1 overflow-hidden grid grid-cols-1 sm:grid-cols-[1fr_420px]">
-          {sourceMode === 'asset' ? (
+          {sourceMode === 'asset' && !upstreamAssetKey ? (
+            <div className="overflow-y-auto px-6 py-4 space-y-3 bg-gray-50">
+              {existingAssetSources.length > 0 && (
+                <div className="space-y-1.5">
+                  <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Existing sources</h3>
+                  {existingAssetSources.map((s) => (
+                    <button
+                      key={s.assetKey}
+                      onClick={() => setUpstreamAssetKey(s.assetKey)}
+                      className="w-full flex items-center justify-between px-3 py-2 text-left border border-gray-200 rounded-md hover:border-blue-300 hover:bg-blue-50/40 bg-white"
+                    >
+                      <div>
+                        <div className="text-sm font-medium text-gray-900">{s.label}</div>
+                        {s.componentType && <div className="text-xs text-gray-400 font-mono">{s.componentType}</div>}
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              )}
+              <div className="space-y-1.5">
+                <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Connect a new source</h3>
+                {!showNewAssetForm ? (
+                  <button
+                    onClick={() => setShowNewAssetForm(true)}
+                    className="w-full flex items-center gap-2 px-3 py-2.5 text-left bg-gradient-to-br from-violet-50 to-blue-50 border border-violet-200 rounded-md hover:border-violet-400"
+                  >
+                    <FileSpreadsheet className="w-4 h-4 text-violet-600 flex-shrink-0" />
+                    <div>
+                      <div className="text-sm font-medium text-gray-900">A CSV / data file</div>
+                      <div className="text-xs text-gray-500">Each ROW becomes one thing to chunk and index</div>
+                    </div>
+                  </button>
+                ) : (
+                  <div className="border border-gray-200 rounded-md p-3 space-y-2.5 bg-white">
+                    <div>
+                      <label className="block text-xs font-medium text-gray-700 mb-1">Path or URL to the CSV file</label>
+                      <input
+                        type="text"
+                        value={newAssetPath}
+                        onChange={(e) => setNewAssetPath(e.target.value)}
+                        placeholder="s3://my-bucket/support-tickets.csv"
+                        className="w-full px-2.5 py-1.5 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono"
+                      />
+                    </div>
+                    <div className="flex justify-end gap-2 pt-1">
+                      <button onClick={() => { setShowNewAssetForm(false); setNewAssetPath(''); }} className="px-3 py-1.5 text-xs text-gray-600 hover:bg-gray-100 rounded-md">
+                        Cancel
+                      </button>
+                      <button
+                        onClick={connectNewAsset}
+                        disabled={installingAsset || !newAssetPath.trim()}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-primary text-primary-foreground rounded-md hover:bg-accent disabled:opacity-50"
+                      >
+                        {installingAsset ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Plus className="w-3.5 h-3.5" />}
+                        Use this source
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          ) : sourceMode === 'asset' ? (
             <TextSamplePreviewPanel upstreamAssetKey={upstreamAssetKey} onColumnsChange={handleColumnsResolved} />
           ) : (
             <div className="overflow-y-auto px-6 py-4 space-y-3 bg-gray-50">
@@ -408,6 +546,12 @@ export function ContextEngineeringConfigStep({
                 </button>
               </div>
               {isEditing && <p className="text-[10px] text-gray-400 mt-0.5">Source can't be changed after creation.</p>}
+              {!isEditing && sourceMode === 'asset' && upstreamAssetKey && (
+                <p className="text-[10px] text-gray-500 mt-0.5">
+                  Reading from <span className="font-mono text-gray-700">{upstreamAssetKey}</span> —{' '}
+                  <button onClick={() => setUpstreamAssetKey(undefined)} className="text-blue-600 hover:underline">change</button>
+                </p>
+              )}
             </div>
 
             {sourceMode === 'warehouse' && resourceKey && (
@@ -465,7 +609,7 @@ export function ContextEngineeringConfigStep({
               <input
                 type="text"
                 value={assetName}
-                onChange={(e) => setAssetName(e.target.value)}
+                onChange={(e) => handleAssetNameChange(e.target.value)}
                 disabled={isEditing}
                 className="w-full px-2.5 py-1.5 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono disabled:bg-gray-50 disabled:text-gray-400"
               />
