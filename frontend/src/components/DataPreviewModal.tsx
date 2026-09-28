@@ -9,6 +9,9 @@ import { CommunityTransformPicker } from './CommunityTransformPicker';
 import { ColumnProfileStrip } from './ColumnProfileStrip';
 import { MultiColumnSelect } from './MultiColumnSelect';
 import { RecipePanel, type RecipeStep } from './RecipePanel';
+import { SuggestionsStrip } from './SuggestionsStrip';
+import { SelectionSuggestionPopover } from './SelectionSuggestionPopover';
+import { computeColumnSuggestions, computeSelectionSuggestions, type TransformSuggestion } from '@/lib/transformSuggestions';
 
 interface DataPreviewModalProps {
   isOpen: boolean;
@@ -210,6 +213,19 @@ export function DataPreviewModal({
     partitionBy: string;
     orderBy: string;
   }>>([]);
+
+  // Suggestions -- Trifacta/Dataprep-style. Column suggestions are dismissed
+  // by id (either applied or explicitly closed) so an already-handled one
+  // doesn't keep reappearing; they're also naturally recomputed live off
+  // the current transformed data, so fixing the underlying issue (e.g.
+  // trimming whitespace) makes its own suggestion disappear on its own.
+  const [dismissedSuggestionIds, setDismissedSuggestionIds] = useState<Set<string>>(new Set());
+  // Selection-based suggestions ("Transformation by Example") -- set on
+  // mouseup inside a transform-mode table cell when there's a real
+  // selection; null closes the popover.
+  const [selectionPopover, setSelectionPopover] = useState<{
+    x: number; y: number; column: string; cellValue: string; selectedText: string; startOffset: number; endOffset: number;
+  } | null>(null);
 
   // Step-view: when set, applies only the first N ops (0-indexed) and shows
   // that partial snapshot in the preview table. RecipePanel highlights the
@@ -1221,6 +1237,79 @@ export function DataPreviewModal({
     setOpenColumnMenu(null);
   };
 
+  // Single dispatch point for every suggestion action (both the column-
+  // profile strip and the selection popover funnel through here) -- each
+  // one is just the same op a manual control in this sidebar would add,
+  // never a new capability.
+  const applySuggestion = (s: TransformSuggestion) => {
+    const a = s.action;
+    switch (a.type) {
+      case 'stringOp':
+        setStringOperations((prev) => (prev.some((op) => op.column === a.column && op.operation === a.operation) ? prev : [...prev, { column: a.column, operation: a.operation }]));
+        break;
+      case 'dropDuplicates':
+        setDropDuplicates(true);
+        break;
+      case 'splitOp':
+        setSplitOps((prev) => [...prev, { column: a.column, delimiter: a.delimiter, into: a.into }]);
+        break;
+      case 'substringOp':
+        setSubstringOps((prev) => [...prev, { column: a.column, start: a.start, length: a.length, into: a.into }]);
+        break;
+      case 'dateExtractOp':
+        setDateExtractOps((prev) => [...prev, { column: a.column, part: a.part as 'year' | 'month' | 'day' | 'dayofweek' | 'hour', into: a.into }]);
+        break;
+      case 'numericOp':
+        setNumericOps((prev) => [...prev, { column: a.column, op: a.op as 'round' | 'floor' | 'ceil' | 'abs', digits: a.digits, into: a.into }]);
+        break;
+      case 'fillDirectionOp':
+        setFillDirectionOps((prev) => [...prev, { column: a.column, direction: a.direction, partitionBy: '', orderBy: '' }]);
+        break;
+    }
+    setDismissedSuggestionIds((prev) => new Set(prev).add(s.id));
+  };
+
+  // Trifacta's "Transformation by Example" -- fires on mouseup inside a
+  // transform-mode table cell. Reads window.getSelection() for the raw
+  // text, then maps the selection's start/end back to character offsets
+  // within THIS cell's own text node (not the page) via a Range comparison,
+  // since getSelection() only gives you the DOM anchor/focus nodes/offsets,
+  // not "where within this specific string".
+  const handleCellMouseUp = (e: React.MouseEvent<HTMLTableCellElement>, column: string, cellValue: string) => {
+    const sel = window.getSelection();
+    if (!sel || sel.isCollapsed || sel.rangeCount === 0) return;
+    const selectedText = sel.toString();
+    if (!selectedText.trim()) return;
+
+    const cellEl = e.currentTarget;
+    if (!cellEl.contains(sel.anchorNode) || !cellEl.contains(sel.focusNode)) return;
+
+    // Compute the selection's offset within the cell's full text by
+    // measuring a Range from the start of the cell to each selection
+    // boundary -- works regardless of which text node the selection
+    // actually starts/ends in (here there's only ever one, but this stays
+    // correct if the cell's rendering ever gets more structure).
+    const preRange = document.createRange();
+    preRange.selectNodeContents(cellEl);
+    preRange.setEnd(sel.anchorNode!, sel.anchorOffset);
+    const anchorOffset = preRange.toString().length;
+    preRange.setEnd(sel.focusNode!, sel.focusOffset);
+    const focusOffset = preRange.toString().length;
+    const startOffset = Math.min(anchorOffset, focusOffset);
+    const endOffset = Math.max(anchorOffset, focusOffset);
+
+    const rect = sel.getRangeAt(0).getBoundingClientRect();
+    setSelectionPopover({
+      x: Math.min(rect.left, window.innerWidth - 300),
+      y: rect.bottom + 6,
+      column,
+      cellValue,
+      selectedText,
+      startOffset,
+      endOffset,
+    });
+  };
+
   const handleAddCalculatedColumn = () => {
     if (newCalcColName && newCalcColExpr) {
       setCalculatedColumns({ ...calculatedColumns, [newCalcColName]: newCalcColExpr });
@@ -1381,6 +1470,25 @@ export function DataPreviewModal({
   };
 
   const displayData = mode === 'transform' ? transformedData : data;
+
+  // Column-profile-driven suggestions, recomputed live off whatever's
+  // CURRENTLY on screen (not the original raw data) -- fixing the
+  // underlying issue (e.g. applying the trim suggestion) makes that
+  // suggestion vanish on its own next render, same as it disappearing for
+  // any other reason data changed shape.
+  const columnSuggestions: TransformSuggestion[] = useMemo(() => {
+    if (mode !== 'transform' || !displayData?.success || !displayData.data || !displayData.columns) return [];
+    return computeColumnSuggestions(displayData.data, displayData.columns, displayData.dtypes ?? undefined)
+      .filter((s) => !dismissedSuggestionIds.has(s.id));
+  }, [mode, displayData, dismissedSuggestionIds]);
+
+  const selectionSuggestions: TransformSuggestion[] = useMemo(() => {
+    if (!selectionPopover) return [];
+    return computeSelectionSuggestions(
+      selectionPopover.column, selectionPopover.cellValue, selectionPopover.selectedText,
+      selectionPopover.startOffset, selectionPopover.endOffset,
+    );
+  }, [selectionPopover]);
 
   // Recipe steps — flat, ordered list of every op currently configured, in
   // the order they're actually applied by the preview useMemo. Order MUST
@@ -3666,6 +3774,15 @@ export function DataPreviewModal({
                 </div>
               )}
 
+              {mode === 'transform' && (
+                <SuggestionsStrip
+                  suggestions={columnSuggestions}
+                  onApply={applySuggestion}
+                  onApplyAll={() => columnSuggestions.forEach(applySuggestion)}
+                  onDismiss={(id) => setDismissedSuggestionIds((prev) => new Set(prev).add(id))}
+                />
+              )}
+
               {mode !== 'profile' && displayData && displayData.success && displayData.data && displayData.columns && (
                 <div className="border border-gray-200 rounded-lg overflow-hidden">
                   <div className="overflow-x-auto">
@@ -3915,6 +4032,7 @@ export function DataPreviewModal({
                               <td
                                 key={colIdx}
                                 className="px-4 py-3 text-sm text-gray-900 whitespace-nowrap"
+                                onMouseUp={mode === 'transform' && row[col] !== null && row[col] !== undefined ? (e) => handleCellMouseUp(e, col, String(row[col])) : undefined}
                               >
                                 {row[col] === null || row[col] === undefined
                                   ? <span className="text-gray-400 italic">null</span>
@@ -3983,6 +4101,20 @@ export function DataPreviewModal({
           )}
         </Dialog.Content>
       </Dialog.Portal>
+
+      {/* Selection-based suggestions ("Transformation by Example") --
+          floats over everything via fixed positioning, closed on Apply or
+          by clicking its own X. */}
+      {selectionPopover && (
+        <SelectionSuggestionPopover
+          x={selectionPopover.x}
+          y={selectionPopover.y}
+          selectedText={selectionPopover.selectedText}
+          suggestions={selectionSuggestions}
+          onApply={(s) => { applySuggestion(s); setSelectionPopover(null); }}
+          onClose={() => setSelectionPopover(null)}
+        />
+      )}
 
       {/* Community transform picker — nested modal on top of this one. */}
       <CommunityTransformPicker

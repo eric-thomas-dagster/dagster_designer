@@ -8,7 +8,7 @@ interface ColumnProfileStripProps {
   compact?: boolean;
 }
 
-interface Profile {
+export interface Profile {
   total: number;
   nonNull: number;
   distinct: number;
@@ -187,7 +187,7 @@ function formatNum(n: number): string {
   return n.toFixed(2);
 }
 
-function computeProfile(rows: Array<Record<string, any>>, column: string, dtypeHint?: string): Profile {
+export function computeProfile(rows: Array<Record<string, any>>, column: string, dtypeHint?: string): Profile {
   const total = rows.length;
   let nonNull = 0;
   const values: any[] = [];
