@@ -27,12 +27,17 @@ export function ClassificationReview({
   assetKey,
   inputColumn,
   isImage = false,
+  excludeColumns,
   onClose,
 }: {
   projectId: string;
   assetKey: string;
   inputColumn?: string;
   isImage?: boolean;
+  // Columns to drop from the badge list entirely -- e.g. a raw embedding
+  // vector (hundreds of floats), which JSON.stringify's into an unreadable
+  // wall of text if rendered as a badge like every other output column.
+  excludeColumns?: string[];
   onClose: () => void;
 }) {
   const { data, isLoading, error, refetch, isFetching } = useQuery({
@@ -41,8 +46,8 @@ export function ClassificationReview({
   });
 
   const outputColumns = useMemo(
-    () => (data?.columns || []).filter((c) => c !== inputColumn),
-    [data, inputColumn],
+    () => (data?.columns || []).filter((c) => c !== inputColumn && !(excludeColumns || []).includes(c)),
+    [data, inputColumn, excludeColumns],
   );
 
   return (

@@ -19,6 +19,7 @@ import { AudioDiarizedConfigStep } from './components/AudioDiarizedConfigStep';
 import { MlflowInferenceConfigStep } from './components/MlflowInferenceConfigStep';
 import { AutoMLConfigStep } from './components/AutoMLConfigStep';
 import { LlmJudgeConfigStep } from './components/LlmJudgeConfigStep';
+import { ContextEngineeringConfigStep } from './components/ContextEngineeringConfigStep';
 import { AiMlHub } from './components/AiMlHub';
 import { ActivatePanel } from './components/ActivatePanel';
 import { extractComponentId } from '@/lib/componentId';
@@ -269,6 +270,7 @@ function App() {
   const [reviewTranscriptsTarget, setReviewTranscriptsTarget] = useState<ComponentInstance | null>(null);
   const [reviewPredictionsTarget, setReviewPredictionsTarget] = useState<ComponentInstance | null>(null);
   const [reviewJudgmentsTarget, setReviewJudgmentsTarget] = useState<ComponentInstance | null>(null);
+  const [reviewKnowledgeBaseTarget, setReviewKnowledgeBaseTarget] = useState<ComponentInstance | null>(null);
   const [addingComponentType, setAddingComponentType] = useState<string | null>(null);
   const [componentsPanelHeight, setComponentsPanelHeight] = useState(60); // Percentage
   // GraphEditor's graph/catalog toggle is lifted here so App can hide
@@ -1901,6 +1903,17 @@ function App() {
             setReviewJudgmentsTarget(c);
           }}
         />
+      ) : editingComponent && currentProject && extractComponentId(editingComponent.component_type) === 'context_engineering_pipeline' ? (
+        <ContextEngineeringConfigStep
+          componentType={editingComponent.component_type}
+          component={editingComponent}
+          onDone={() => setEditingComponent(null)}
+          onClose={() => setEditingComponent(null)}
+          onReviewKnowledgeBase={(c) => {
+            setEditingComponent(null);
+            setReviewKnowledgeBaseTarget(c);
+          }}
+        />
       ) : (editingComponent || addingComponentType) && currentProject && (
         <ComponentConfigModal
           component={editingComponent}
@@ -1985,6 +1998,16 @@ function App() {
           assetKey={reviewJudgmentsTarget.attributes?.asset_name || reviewJudgmentsTarget.id}
           inputColumn={reviewJudgmentsTarget.attributes?.response_column}
           onClose={() => setReviewJudgmentsTarget(null)}
+        />
+      )}
+
+      {reviewKnowledgeBaseTarget && currentProject && (
+        <ClassificationReview
+          projectId={currentProject.id}
+          assetKey={reviewKnowledgeBaseTarget.attributes?.asset_name || reviewKnowledgeBaseTarget.id}
+          inputColumn="chunk_text"
+          excludeColumns={['embedding']}
+          onClose={() => setReviewKnowledgeBaseTarget(null)}
         />
       )}
 

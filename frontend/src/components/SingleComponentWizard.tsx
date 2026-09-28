@@ -53,6 +53,13 @@ export function SingleComponentWizard({
   sourceHint,
   pathPlaceholder,
   targetOptions,
+  // 'file_lister' (default): a folder/glob, each FILE becomes a row --
+  // right for video/audio/image sources. 'dataframe_from_csv': one file,
+  // each ROW is already a record with real columns -- right for anything
+  // reading tabular/text rows (e.g. context_engineering_pipeline's raw
+  // text corpus), where file_lister's output (a bare list of file paths)
+  // wouldn't have the id/text columns the target component needs.
+  sourceComponentId = 'file_lister',
   onOpenComponentConfig,
   onClose,
 }: {
@@ -61,6 +68,7 @@ export function SingleComponentWizard({
   sourceHint: string;
   pathPlaceholder: string;
   targetOptions: WizardTargetOption[];
+  sourceComponentId?: 'file_lister' | 'dataframe_from_csv';
   onOpenComponentConfig: (componentType: string, initialAttributes?: Record<string, any>) => void;
   onClose: () => void;
 }) {
@@ -96,7 +104,7 @@ export function SingleComponentWizard({
       // the raw defs.yaml; configure is the one path that does both,
       // confirmed the hard way debugging the classifier wizard's own
       // "materialize first" dead end.
-      const installRes = await fetch(`${API_BASE}/templates/install-via-cli/file_lister`, {
+      const installRes = await fetch(`${API_BASE}/templates/install-via-cli/${sourceComponentId}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ project_id: currentProject.id, config: {}, template_only: true }),
@@ -104,12 +112,15 @@ export function SingleComponentWizard({
       const installBody = await installRes.json().catch(() => ({} as any));
       if (!installRes.ok) throw new Error(installBody.detail || 'Failed to add source');
 
-      const configRes = await fetch(`${API_BASE}/templates/configure/file_lister`, {
+      const sourceAttributes = sourceComponentId === 'dataframe_from_csv'
+        ? { asset_name: derivedName, file_path: newSourcePath.trim() }
+        : { asset_name: derivedName, path: newSourcePath.trim(), download: newSourceDownload };
+      const configRes = await fetch(`${API_BASE}/templates/configure/${sourceComponentId}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           project_id: currentProject.id,
-          config: { name: derivedName, asset_name: derivedName, path: newSourcePath.trim(), download: newSourceDownload },
+          config: { name: derivedName, ...sourceAttributes },
         }),
       });
       const configBody = await configRes.json().catch(() => ({} as any));
@@ -203,7 +214,9 @@ export function SingleComponentWizard({
                 ) : (
                   <div className="border border-gray-200 rounded-md p-3 space-y-2.5">
                     <div>
-                      <label className="block text-xs font-medium text-gray-700 mb-1">Path / glob</label>
+                      <label className="block text-xs font-medium text-gray-700 mb-1">
+                        {sourceComponentId === 'dataframe_from_csv' ? 'Path or URL to the CSV file' : 'Path / glob'}
+                      </label>
                       <input
                         type="text"
                         value={newSourcePath}
@@ -212,10 +225,12 @@ export function SingleComponentWizard({
                         className="w-full px-2.5 py-1.5 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono"
                       />
                     </div>
-                    <label className="flex items-center gap-1.5 text-xs text-gray-600">
-                      <input type="checkbox" checked={newSourceDownload} onChange={(e) => setNewSourceDownload(e.target.checked)} />
-                      Download files to a local cache
-                    </label>
+                    {sourceComponentId === 'file_lister' && (
+                      <label className="flex items-center gap-1.5 text-xs text-gray-600">
+                        <input type="checkbox" checked={newSourceDownload} onChange={(e) => setNewSourceDownload(e.target.checked)} />
+                        Download files to a local cache
+                      </label>
+                    )}
                     <div className="flex justify-end gap-2 pt-1">
                       <button onClick={() => setShowNewSourceForm(false)} className="px-3 py-1.5 text-xs text-gray-600 hover:bg-gray-100 rounded-md">
                         Cancel

@@ -13,6 +13,7 @@ import { AudioDiarizedConfigStep } from './AudioDiarizedConfigStep';
 import { MlflowInferenceConfigStep } from './MlflowInferenceConfigStep';
 import { AutoMLConfigStep } from './AutoMLConfigStep';
 import { LlmJudgeConfigStep } from './LlmJudgeConfigStep';
+import { ContextEngineeringConfigStep } from './ContextEngineeringConfigStep';
 import { ComponentConfigModal } from './ComponentConfigModal';
 import { extractComponentId } from '@/lib/componentId';
 
@@ -59,10 +60,10 @@ const CARDS: HubCard[] = [
   {
     id: 'rag',
     label: 'RAG & Vector Search',
-    description: 'Embeddings, vector stores, semantic search.',
+    description: 'Build a governed knowledge base — chunk, classify, embed, and index raw text into a searchable vector store. Querying it back falls back to the raw form for now.',
     icon: Search,
     count: 11,
-    status: 'soon',
+    status: 'ready',
   },
   {
     id: 'video_scene',
@@ -220,6 +221,24 @@ export function AiMlHub() {
         />
       )}
 
+      {openBuilder === 'rag' && (
+        <SingleComponentWizard
+          title="Knowledge base — point at your text"
+          icon={Search}
+          sourceHint="Pick an existing DataFrame of raw text rows already in this project, or connect a new CSV/data file."
+          pathPlaceholder="s3://my-bucket/support-tickets.csv"
+          sourceComponentId="dataframe_from_csv"
+          targetOptions={[
+            { id: 'context_engineering_pipeline', label: 'Build a knowledge base', description: 'Chunk, optionally classify, embed, and write each row into a searchable vector store — pairs with rag_pipeline for querying it back.' },
+          ]}
+          onClose={() => setOpenBuilder(null)}
+          onOpenComponentConfig={(componentType, initialAttributes) => {
+            setPendingConfig({ componentType, initialAttributes });
+            setOpenBuilder(null);
+          }}
+        />
+      )}
+
       {pendingConfig && (
         extractComponentId(pendingConfig.componentType) === 'structured_document_extractor' ? (
           <DocumentExtractorConfigStep
@@ -273,6 +292,13 @@ export function AiMlHub() {
           />
         ) : extractComponentId(pendingConfig.componentType) === 'llm_judge' ? (
           <LlmJudgeConfigStep
+            componentType={pendingConfig.componentType}
+            initialAttributes={pendingConfig.initialAttributes || {}}
+            onDone={() => setPendingConfig(null)}
+            onClose={() => setPendingConfig(null)}
+          />
+        ) : extractComponentId(pendingConfig.componentType) === 'context_engineering_pipeline' ? (
+          <ContextEngineeringConfigStep
             componentType={pendingConfig.componentType}
             initialAttributes={pendingConfig.initialAttributes || {}}
             onDone={() => setPendingConfig(null)}
