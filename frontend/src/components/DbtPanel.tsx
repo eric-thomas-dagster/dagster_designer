@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { FileCode, Play, Loader2, CheckCircle2, XCircle, AlertTriangle, TestTube2, Book, FileText, Search, Layers, GitCommit, GitCompare, Clock, Eye, DollarSign, X, Network, Filter, Share2, ExternalLink, Sparkles, Plus, Trash2, Sigma, Copy } from 'lucide-react';
+import { FileCode, Play, Loader2, CheckCircle2, XCircle, AlertTriangle, TestTube2, Book, FileText, Search, Layers, GitCommit, GitCompare, Clock, Eye, DollarSign, X, Network, Filter, Share2, ExternalLink, Sparkles, Plus, Trash2, Sigma, Copy, Tags } from 'lucide-react';
 import { projectsApi } from '@/services/api';
 import { classifyStatus } from '@/lib/status';
 import { useProjectStore } from '@/hooks/useProject';
@@ -13,6 +13,7 @@ import { DbtLineageView } from './DbtLineageView';
 import { DbtColumnLineageOverlay } from './DbtColumnLineageOverlay';
 import { AddDbtProjectDialog } from './AddDbtProjectDialog';
 import { AddDbtSelectorDialog } from './AddDbtSelectorDialog';
+import { PostProcessingRulesDialog } from './PostProcessingRulesDialog';
 import { AddDbtExposureDialog } from './AddDbtExposureDialog';
 import { AddDbtSourceDialog } from './AddDbtSourceDialog';
 import { AddDbtTestDialog } from './AddDbtTestDialog';
@@ -70,6 +71,7 @@ export function DbtPanel({ onOpenFile }: DbtPanelProps) {
   const [generatingDocs, setGeneratingDocs] = useState(false);
   const [showAddDbtProject, setShowAddDbtProject] = useState(false);
   const [showAddSelector, setShowAddSelector] = useState(false);
+  const [showPostProcessingRules, setShowPostProcessingRules] = useState(false);
   const [showAddExposure, setShowAddExposure] = useState(false);
   const [showAddSource, setShowAddSource] = useState(false);
   // Column-lineage modal — opened from the drawer's action row. Holds
@@ -503,6 +505,14 @@ export function DbtPanel({ onOpenFile }: DbtPanelProps) {
           >
             {runningModified ? <Loader2 className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4" />}
             Run modified
+          </button>
+          <button
+            onClick={() => setShowPostProcessingRules(true)}
+            disabled={isCloudProject}
+            title={isCloudProject ? "Not available on Dagster+ (read-only)" : "Apply group_name/owners/tags to many assets at once via a selector (tag:/key:/*), e.g. tagging every staging model"}
+            className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-gray-700 border border-gray-300 rounded-md hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            <Tags className="w-4 h-4" /> Post-processing rules
           </button>
           <button
             onClick={() => setShowGitCommit(true)}
@@ -1456,6 +1466,13 @@ export function DbtPanel({ onOpenFile }: DbtPanelProps) {
             setSelectedDbtPath(relativePath);
           } catch {}
         }}
+      />
+
+      {/* Project-wide, not dbt-specific -- no dbt_project_relative_path
+          gating, unlike the dialogs below. */}
+      <PostProcessingRulesDialog
+        open={showPostProcessingRules}
+        onOpenChange={setShowPostProcessingRules}
       />
 
       {/* Add selector / exposure / source — writes to selectors.yml,

@@ -11,6 +11,64 @@ class CustomLineageEdge(BaseModel):
     target: str = Field(..., description="Target asset key")
 
 
+class AssetFieldOverrides(BaseModel):
+    """description/group_name/owners/tags overrides for one asset, applied
+    via the same defs.yaml post_processing mechanism as custom_lineage
+    deps (see project_service._write_post_processing_defs_yaml). Covers
+    fields that previously had no reliable write path at all for some
+    assets:
+      - non-dbt components: confirmed _generate_component_yaml_files
+        strips `description` from a component's own attributes with the
+        comment "this goes in translation, not params" -- then never adds
+        it to translation either, since translation is dbt-only.
+        group_name/owners/tags had the same gap whenever a component's
+        own schema didn't happen to declare them.
+      - PropertyPanel's asset-metadata editor, for any NON-dbt asset:
+        confirmed its "save" path for that case did nothing but mutate
+        the in-memory graph node's `data` -- never persisted anywhere
+        that affects the real Dagster asset, and got silently overwritten
+        on the next introspection regenerate anyway.
+      - AssetDetailPage's "Definition" editor: its dbt path re-implemented
+        the SAME fragile find-or-create-a-per-model-component dance as
+        PropertyPanel (independently, in a second file); its non-dbt path
+        wrote `translation.by_key[assetKey]`, a convention confirmed to
+        be 100% dead -- grepped the whole backend, nothing reads
+        "by_key" anywhere. Both migrated onto this mechanism too."""
+
+    description: str | None = None
+    group_name: str | None = None
+    owners: list[str] | None = None
+    tags: dict[str, str] | None = None
+    kinds: list[str] | None = None
+
+
+class AssetPostProcessingRule(BaseModel):
+    """A project-wide post_processing rule: `target` is a real Dagster
+    asset-selection expression (not just a single literal key), e.g.
+    `"*"`, `"tag:critical=true"`, `"key:core/stg_*"`, or a boolean
+    combination -- confirmed directly against a real Dagster load that
+    this syntax works exactly as documented. This is what
+    AssetFieldOverrides can't do: apply the same attributes to MANY assets
+    in one rule (e.g. "tag every staging model with owner X"), the actual
+    value-add of post_processing beyond single-asset editing.
+
+    Unlike AssetFieldOverrides' keys, `target` is used verbatim when it
+    already looks like real selector syntax (contains ":" or is "*") --
+    the user is responsible for that syntax being correct, the same way
+    they would be hand-writing it in defs.yaml. When it doesn't look like
+    selector syntax (no ":", not "*"), it's treated as a literal asset key
+    and given the same `key:` safety prefix as AssetFieldOverrides, so
+    someone who just types a bare asset name here doesn't accidentally
+    create a bare-string target -- confirmed directly that a bare string
+    that doesn't resolve crashes loading of the ENTIRE project, while an
+    explicit `key:` prefix degrades gracefully instead."""
+
+    target: str
+    group_name: str | None = None
+    owners: list[str] | None = None
+    tags: dict[str, str] | None = None
+
+
 class Project(BaseModel):
     """A pipeline project."""
 
@@ -21,6 +79,13 @@ class Project(BaseModel):
     graph: PipelineGraph = Field(default_factory=PipelineGraph, description="Pipeline graph (assets and 1:1 components)")
     components: list[ComponentInstance] = Field(default_factory=list, description="Component instances (particularly asset factories)")
     custom_lineage: list[CustomLineageEdge] = Field(default_factory=list, description="Custom lineage edges drawn by user")
+    # group_name/owners/tags overrides, keyed by asset key, applied via the
+    # same post_processing mechanism as custom_lineage -- see
+    # AssetFieldOverrides.
+    asset_field_overrides: dict[str, AssetFieldOverrides] = Field(default_factory=dict, description="Per-asset group_name/owners/tags overrides")
+    # Project-wide post_processing rules (selector-based target, not a
+    # single literal asset key) -- see AssetPostProcessingRule.
+    asset_post_processing_rules: list[AssetPostProcessingRule] = Field(default_factory=list, description="Project-wide post_processing rules keyed by a Dagster selection expression")
     # Asset keys the user explicitly marked as ingestion sources. The
     # Ingestions tab's automatic detection is a heuristic (component_type
     # substrings locally, computeKind/description/no-upstream sniffing for
@@ -85,6 +150,8 @@ class ProjectUpdate(BaseModel):
     graph: PipelineGraph | None = None
     components: list[ComponentInstance] | None = None
     custom_lineage: list[CustomLineageEdge] | None = None
+    asset_field_overrides: dict[str, AssetFieldOverrides] | None = None
+    asset_post_processing_rules: list[AssetPostProcessingRule] | None = None
     git_repo: str | None = None
     git_branch: str | None = None
     is_imported: bool | None = None

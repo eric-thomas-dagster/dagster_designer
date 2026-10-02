@@ -166,6 +166,56 @@ class AssetIntrospectionService:
             del _assets_cache[project_id]
             print(f"[Asset Introspection] Cleared cache for project {project_id}", flush=True)
 
+    async def validate_project_defs_async(self, project: Project) -> "tuple[bool, str | None]":
+        """Confirm the project's definitions still load cleanly, by
+        running the exact same `dg list defs` that normal introspection
+        uses -- it has to fully LOAD the defs tree to list it, so a
+        failure here means the SAME thing a failure would mean to a real
+        `dg check defs`/the Dagster webserver: Dagster's definitions
+        loading is all-or-nothing, so even one small, unrelated mistake
+        (a bad selector, a typo'd asset key, invalid YAML) breaks loading
+        of the ENTIRE project, not just the thing being edited -- this
+        was confirmed directly, more than once, this session (one project
+        crashed entirely from a single stale post_processing target left
+        over from much-earlier data).
+
+        Call this as a pre-flight check right before a mutating save is
+        considered final (e.g. before a config dialog closes), so a
+        mistake is caught and can be reported back immediately instead of
+        silently corrupting the project until the next time someone tries
+        to open it.
+
+        Clears the cache first -- `_run_dg_list_defs_async` otherwise may
+        return a result cached from BEFORE whatever change is being
+        validated, defeating the whole point of calling this right after
+        a write. Returns (True, None) on success, (False, <error tail>)
+        on failure. If the project has no .venv yet (e.g. still
+        installing dependencies), there's nothing to validate against --
+        returns (True, None) rather than blocking on an unrelated state.
+        """
+        project_dir = self._get_project_dir(project)
+        if not (project_dir / ".venv").exists():
+            return True, None
+
+        self.clear_cache(project.id)
+        try:
+            await self._run_dg_list_defs_async(project, project_dir)
+            return True, None
+        except RuntimeError as e:
+            # The last ~30 lines tend to have the actual exception message
+            # -- dg's own tree-build trace before it can run long (see
+            # e.g. the ComponentTreeException examples surfaced this
+            # session), so keep the TAIL, not the head.
+            error_tail = "\n".join(str(e).strip().splitlines()[-30:])
+            return False, error_tail
+        finally:
+            # Don't leave a validation run's result cached as if it were
+            # a normal introspection -- the next real
+            # get_assets_for_project_async call should re-run fresh too,
+            # since this method's purpose is pre-flight checking, not
+            # populating the UI's own asset list.
+            self.clear_cache(project.id)
+
     def _is_running(self, project_id: str) -> bool:
         """Check if asset introspection is currently running for a project."""
         if project_id not in _introspection_locks:

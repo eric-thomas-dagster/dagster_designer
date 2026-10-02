@@ -14,6 +14,8 @@ import { PartitionBackfill } from './PartitionBackfill';
 import { StartDgDevButton } from './RunsPanel';
 import { InsightMetricCard } from './InsightMetricCard';
 import { MetadataEntryList } from './MetadataEntryList';
+import { ModelMetricsView } from './ModelMetricsView';
+import { hasModelMetrics } from '@/lib/modelMetrics';
 import type { GraphNode, ComponentInstance } from '@/types';
 
 const isDbtComponentType = (t: string | undefined | null): boolean => !!t && /\bdbt[_.]|^dbt/i.test(t);
@@ -59,10 +61,11 @@ interface AssetDetailPageProps {
   initialTab?: Tab;
 }
 
-export type Tab = 'overview' | 'partitions' | 'events' | 'checks' | 'lineage' | 'insights' | 'change_history';
+export type Tab = 'overview' | 'partitions' | 'events' | 'checks' | 'lineage' | 'insights' | 'change_history' | 'model';
 
 const TABS: { id: Tab; label: string }[] = [
   { id: 'overview',       label: 'Overview' },
+  { id: 'model',          label: 'Model' },
   { id: 'partitions',     label: 'Partitions' },
   { id: 'events',         label: 'Events' },
   { id: 'checks',         label: 'Checks' },
@@ -80,6 +83,21 @@ export function AssetDetailPage({ nodeId, onClose, onNewPrimitiveForAsset, onNav
     [currentProject, nodeId],
   );
   const isPartitioned = !!(node?.data as any)?.is_partitioned;
+  const assetKeyForModelQuery = (node?.data as any)?.asset_key || nodeId;
+
+  // Whether the Model tab shows at all -- name-based on the latest
+  // materialization's metadata keys (accuracy/r2_score/inertia/holdout_*/
+  // confusion_matrix/...) rather than a hardcoded component-id whitelist,
+  // since the analytics catalog has ~90 components that emit metrics
+  // this same way and Designer shouldn't need to know each one by name.
+  const { data: modelEventsData } = useQuery({
+    queryKey: ['model-tab-check', currentProject?.id, assetKeyForModelQuery],
+    queryFn: () => assetsApi.getAssetEvents(currentProject!.id, assetKeyForModelQuery, 1),
+    enabled: !!currentProject && !!node,
+    staleTime: 15_000,
+  });
+  const latestModelEntries = modelEventsData?.events?.[0]?.metadata || [];
+  const isModelAsset = hasModelMetrics(latestModelEntries);
 
   // Navigating to a different asset (via Lineage tab clicks, etc.) reuses
   // this same component instance rather than remounting it, so a tab
@@ -88,7 +106,8 @@ export function AssetDetailPage({ nodeId, onClose, onNewPrimitiveForAsset, onNav
   // Bounce back to Overview when that happens.
   useEffect(() => {
     if (activeTab === 'partitions' && !isPartitioned) setActiveTab('overview');
-  }, [nodeId, isPartitioned, activeTab]);
+    if (activeTab === 'model' && !isModelAsset) setActiveTab('overview');
+  }, [nodeId, isPartitioned, isModelAsset, activeTab]);
 
   if (!currentProject || !node) return null;
 
@@ -174,7 +193,7 @@ export function AssetDetailPage({ nodeId, onClose, onNewPrimitiveForAsset, onNav
 
       {/* Tabs */}
       <div className="flex-shrink-0 border-b border-gray-200 px-6 flex items-center gap-1">
-        {TABS.filter((t) => t.id !== 'partitions' || isPartitioned).map((t) => (
+        {TABS.filter((t) => (t.id !== 'partitions' || isPartitioned) && (t.id !== 'model' || isModelAsset)).map((t) => (
           <button
             key={t.id}
             onClick={() => setActiveTab(t.id)}
@@ -192,6 +211,11 @@ export function AssetDetailPage({ nodeId, onClose, onNewPrimitiveForAsset, onNav
       {/* Content */}
       <div className="flex-1 overflow-y-auto bg-gray-50">
         {activeTab === 'overview' && <OverviewTab node={node} isCloud={isCloud} onNewPrimitiveForAsset={onNewPrimitiveForAsset} onNavigate={onNavigate} />}
+        {activeTab === 'model' && (
+          <div className="p-6 max-w-[900px] mx-auto">
+            <ModelMetricsView entries={latestModelEntries} />
+          </div>
+        )}
         {activeTab === 'checks' && <ChecksTab node={node} projectId={currentProject.id} onOpenRun={onOpenRun} />}
         {activeTab === 'lineage' && <LineageTab node={node} currentProject={currentProject} onNavigate={onNavigate} />}
         {activeTab === 'events' && <EventsTab node={node} projectId={currentProject.id} onOpenRun={onOpenRun} />}
@@ -1569,29 +1593,30 @@ function ChangeHistoryKeysRow({ label, added, changed, removed }: { label: strin
 // ---------- Definition section (editable) ----------
 
 /**
- * Definition card with an Edit mode. Reads from the graph node and,
- * when the user hits Save, writes back through the source component's
- * `translation` field (which every component supports via its YAML
- * codegen). Two save paths:
- *
- *   • dbt-backed asset -- mirrors the existing PropertyPanel
- *     customization flow: find-or-create a `DbtProjectComponent`
- *     with `select=<model>` + the new translation, and exclude the
- *     model from the original component. Per-asset translation.
- *
- *   • other community components -- patch the source component's
- *     `translation` field. Applies to every asset the component
- *     produces unless the component supports a `by_key` sub-key
- *     (which most do; we shim it in when the source is not dbt).
+ * Definition card with an Edit mode. Reads from the graph node (seeded
+ * from `project.asset_field_overrides` when present) and, on Save,
+ * writes a single `asset_field_overrides` entry for this asset key via
+ * the shared `post_processing` mechanism -- the same path used by
+ * PropertyPanel and by every non-dbt asset. This works identically for
+ * dbt and non-dbt assets and needs only a real asset key, not a
+ * specific producing component, so no per-model component sprawl and
+ * no dead `translation.by_key` writes.
  *
  * Local + non-cloud only. Cloud shows read-only.
  */
 function DefinitionSection({ node, isCloud }: { node: GraphNode; isCloud: boolean }) {
   const { currentProject, loadProject } = useProjectStore();
   const data = node.data as any;
-  const kinds: string[] = Array.isArray(data.kinds) ? data.kinds : [];
-  const owners: string[] = Array.isArray(data.owners) ? data.owners : [];
-  const tags: string[] = Array.isArray(data.tags) ? data.tags : [];
+  const assetKey = (data.asset_key as string) || node.id;
+  const overrides = currentProject?.asset_field_overrides?.[assetKey];
+
+  const kinds: string[] = overrides?.kinds ?? (Array.isArray(data.kinds) ? data.kinds : []);
+  const owners: string[] = overrides?.owners ?? (Array.isArray(data.owners) ? data.owners : []);
+  const tags: string[] = overrides?.tags
+    ? Object.entries(overrides.tags).map(([k, v]) => `${k}=${v}`)
+    : (Array.isArray(data.tags) ? data.tags : []);
+  const description = overrides?.description ?? ((data.description as string) || '');
+  const groupName = overrides?.group_name ?? ((data.group_name as string) || '');
 
   const sourceComponentId: string | undefined = (node as any).source_component || data.source_component;
   const sourceComponent: ComponentInstance | undefined = useMemo(() => {
@@ -1602,14 +1627,13 @@ function DefinitionSection({ node, isCloud }: { node: GraphNode; isCloud: boolea
     return (currentProject.components || []).find((c) => c.id === bare || c.id === sourceComponentId);
   }, [currentProject, sourceComponentId]);
 
-  const editable = !isCloud && !!sourceComponent;
-  const isDbt = isDbtComponentType(sourceComponent?.component_type);
+  const editable = !isCloud;
 
   const [editing, setEditing] = useState(false);
   const [saving, setSaving] = useState(false);
   const [draft, setDraft] = useState({
-    description: (data.description as string) || '',
-    group_name: (data.group_name as string) || '',
+    description,
+    group_name: groupName,
     owners: [...owners],
     tags: [...tags],
     kinds: [...kinds],
@@ -1617,8 +1641,8 @@ function DefinitionSection({ node, isCloud }: { node: GraphNode; isCloud: boolea
 
   const openEdit = () => {
     setDraft({
-      description: (data.description as string) || '',
-      group_name: (data.group_name as string) || '',
+      description,
+      group_name: groupName,
       owners: [...owners],
       tags: [...tags],
       kinds: [...kinds],
@@ -1627,89 +1651,22 @@ function DefinitionSection({ node, isCloud }: { node: GraphNode; isCloud: boolea
   };
 
   const save = async () => {
-    if (!currentProject || !sourceComponent) return;
+    if (!currentProject) return;
     setSaving(true);
     try {
-      const assetKey = (data.asset_key as string) || node.id;
-      const modelName = assetKey.split('/').pop() || assetKey;
-
-      // Build the translation payload. Dagster's translator concept
-      // treats `dagster/kind/*` tags as kinds, but our codegen writes
-      // both fields separately so downstream `AssetSpec` construction
-      // can attach kinds directly on the asset. Redundant is safer than
-      // hoping one of the two paths works.
       const tagsDict: Record<string, string> = {};
       for (const t of draft.tags) {
         const [k, ...rest] = t.split('=');
         tagsDict[k] = rest.join('=') || '';
       }
-      const translation: Record<string, any> = {
-        ...(sourceComponent.translation || {}),
-        group_name: draft.group_name || undefined,
-        description: draft.description || undefined,
-        owners: draft.owners.length ? draft.owners : undefined,
-        tags: Object.keys(tagsDict).length ? tagsDict : undefined,
-        kinds: draft.kinds.length ? draft.kinds : undefined,
-      };
-      // Drop empty keys so we don't emit `null` into the YAML.
-      Object.keys(translation).forEach((k) => { if (translation[k] === undefined) delete translation[k]; });
 
-      let updatedComponents: ComponentInstance[];
-
-      if (isDbt) {
-        // dbt customization: find-or-create a per-model component so
-        // the translation only affects this one asset.
-        const existing = currentProject.components.find(
-          (c) => isDbtComponentType(c.component_type) && c.attributes?.select === modelName,
-        );
-        if (existing) {
-          updatedComponents = currentProject.components.map((c) =>
-            c.id === existing.id ? { ...c, translation } : c
-          );
-        } else {
-          const custom: ComponentInstance = {
-            id: `dbt-custom-${Date.now()}`,
-            component_type: sourceComponent.component_type,
-            label: `dbt: ${modelName} (customized)`,
-            attributes: {
-              project_path: sourceComponent.attributes?.project_path || sourceComponent.attributes?.project,
-              select: modelName,
-            },
-            translation,
-            is_asset_factory: true,
-          };
-          const originalExclude = sourceComponent.attributes?.exclude || '';
-          const excludeList: string[] = originalExclude ? originalExclude.split(',').map((s: string) => s.trim()) : [];
-          if (!excludeList.includes(modelName)) excludeList.push(modelName);
-          updatedComponents = currentProject.components.map((c) =>
-            c.id === sourceComponent.id
-              ? { ...c, attributes: { ...c.attributes, exclude: excludeList.join(', ') } }
-              : c
-          );
-          updatedComponents.push(custom);
-        }
-      } else {
-        // Community component: patch translation via `by_key` so the
-        // change only affects this specific asset key. Components that
-        // don't understand by_key still see the other translation
-        // fields at the top level as a fallback.
-        const prevByKey = (sourceComponent.translation as any)?.by_key || {};
-        const byKey = { ...prevByKey, [assetKey]: {
-          group_name: draft.group_name || undefined,
-          description: draft.description || undefined,
-          owners: draft.owners.length ? draft.owners : undefined,
-          tags: Object.keys(tagsDict).length ? tagsDict : undefined,
-          kinds: draft.kinds.length ? draft.kinds : undefined,
-        } };
-        Object.keys(byKey[assetKey]).forEach((k) => { if (byKey[assetKey][k] === undefined) delete byKey[assetKey][k]; });
-        const newTranslation = { ...(sourceComponent.translation || {}), by_key: byKey };
-        updatedComponents = currentProject.components.map((c) =>
-          c.id === sourceComponent.id ? { ...c, translation: newTranslation } : c
-        );
-      }
-
-      await projectsApi.updateProject(currentProject.id, { components: updatedComponents } as any);
-      await projectsApi.regenerateAssets(currentProject.id);
+      await projectsApi.setAssetFieldOverrides(currentProject.id, assetKey, {
+        description: draft.description || null,
+        group_name: draft.group_name || null,
+        owners: draft.owners.length ? draft.owners : null,
+        tags: Object.keys(tagsDict).length ? tagsDict : null,
+        kinds: draft.kinds.length ? draft.kinds : null,
+      });
       await loadProject(currentProject.id);
       notify.success('Asset metadata saved.');
       setEditing(false);
@@ -1734,7 +1691,6 @@ function DefinitionSection({ node, isCloud }: { node: GraphNode; isCloud: boolea
             className="inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-medium text-blue-700 hover:bg-blue-50 rounded disabled:opacity-40 disabled:cursor-not-allowed"
             title={
               isCloud ? 'Not available on Dagster+ (read-only)'
-                : !sourceComponent ? 'No source component -- nothing to edit here'
                 : 'Edit description, group, tags, kinds, owners'
             }
           >
@@ -1796,7 +1752,7 @@ function DefinitionSection({ node, isCloud }: { node: GraphNode; isCloud: boolea
           <>
             <EditField
               label="Description"
-              hint={isDbt
+              hint={isDbtComponentType(sourceComponent?.component_type)
                 ? 'For dbt models, Dagster auto-embeds the model SQL as the description. Setting a value here overrides that.'
                 : undefined}
             >
@@ -1845,8 +1801,8 @@ function DefinitionSection({ node, isCloud }: { node: GraphNode; isCloud: boolea
               />
             </EditField>
             <div className="text-[10px] text-gray-500 pt-1 border-t border-gray-100">
-              Saves as {isDbt ? 'a per-model dbt customization' : "a per-asset `translation.by_key` entry"} on
-              <span className="font-mono ml-1">{sourceComponent?.component_type}</span>.
+              Saves as a post-processing override for
+              <span className="font-mono ml-1">{assetKey}</span>, independent of the producing component.
             </div>
           </>
         )}

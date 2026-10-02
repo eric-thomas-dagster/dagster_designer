@@ -2,6 +2,7 @@
 
 import sys
 import json
+import shutil
 import subprocess
 import importlib.util
 import time
@@ -1026,6 +1027,82 @@ async def get_sample_files(project_id: str, path: str, limit: int = 6):
         return {"files": [], "error": str(e)}
 
 
+class MediaProbeResponse(BaseModel):
+    available: bool
+    duration_seconds: float | None = None
+    width: int | None = None
+    height: int | None = None
+    fps: float | None = None
+    video_codec: str | None = None
+    has_audio: bool | None = None
+    audio_codec: str | None = None
+    sample_rate: int | None = None
+    channels: int | None = None
+    error: str | None = None
+
+
+def _parse_frame_rate(rate: str | None) -> float | None:
+    """ffprobe reports frame rate as a fraction string like "30000/1001"
+    (NTSC-ish rates) or "25/1" -- never a plain float."""
+    if not rate:
+        return None
+    try:
+        if "/" in rate:
+            num, den = rate.split("/", 1)
+            den_f = float(den)
+            return round(float(num) / den_f, 3) if den_f else None
+        return round(float(rate), 3)
+    except (ValueError, ZeroDivisionError):
+        return None
+
+
+@router.get("/{project_id}/media-probe", response_model=MediaProbeResponse)
+async def media_probe(project_id: str, path: str):
+    """Real ffprobe metadata for one video/audio file -- duration,
+    resolution, fps, codecs -- powering the "analyze and suggest" layer in
+    the video/audio config steps (e.g. suggesting a frame-extraction
+    interval from the actual video length, or flagging a video with no
+    audio track before someone wires it into a transcriber). No Dagster
+    involved, same "instant feedback before materializing" reasoning as
+    sample-files/sample-rows. Read-only, list-form subprocess call (no
+    shell involved), local files only -- remote fsspec paths (s3://, ...)
+    will just report unavailable rather than attempt a protocol ffprobe
+    may or may not support.
+    """
+    ffprobe = shutil.which("ffprobe")
+    if not ffprobe:
+        return MediaProbeResponse(available=False, error="ffprobe not found on PATH")
+    try:
+        result = subprocess.run(
+            [ffprobe, "-v", "quiet", "-print_format", "json", "-show_format", "-show_streams", path],
+            capture_output=True, text=True, timeout=15,
+        )
+        if result.returncode != 0:
+            return MediaProbeResponse(available=False, error=(result.stderr or "ffprobe failed").strip()[:300])
+        data = json.loads(result.stdout)
+        fmt = data.get("format") or {}
+        streams = data.get("streams") or []
+        video_stream = next((s for s in streams if s.get("codec_type") == "video"), None)
+        audio_stream = next((s for s in streams if s.get("codec_type") == "audio"), None)
+        duration = fmt.get("duration") or (video_stream or {}).get("duration") or (audio_stream or {}).get("duration")
+        return MediaProbeResponse(
+            available=True,
+            duration_seconds=round(float(duration), 2) if duration else None,
+            width=video_stream.get("width") if video_stream else None,
+            height=video_stream.get("height") if video_stream else None,
+            fps=_parse_frame_rate(video_stream.get("r_frame_rate")) if video_stream else None,
+            video_codec=video_stream.get("codec_name") if video_stream else None,
+            has_audio=audio_stream is not None,
+            audio_codec=audio_stream.get("codec_name") if audio_stream else None,
+            sample_rate=int(audio_stream["sample_rate"]) if audio_stream and audio_stream.get("sample_rate") else None,
+            channels=audio_stream.get("channels") if audio_stream else None,
+        )
+    except subprocess.TimeoutExpired:
+        return MediaProbeResponse(available=False, error="ffprobe timed out")
+    except Exception as e:
+        return MediaProbeResponse(available=False, error=str(e)[:300])
+
+
 @router.get("/{project_id}/sample-rows")
 async def get_sample_rows(project_id: str, path: str, limit: int = 8):
     """Read up to `limit` rows straight from a raw CSV/JSON/Parquet file,
@@ -1281,6 +1358,71 @@ class CreateSqlSourceTransformerRequest(BaseModel):
     connectionUrlEnvVar: str | None = None
     newAssetName: str
     transformConfig: TransformConfig
+
+
+class CreateJoinRequest(BaseModel):
+    """Join two existing assets together. Set exactly one of `on` (same
+    column name(s) on both sides) or `leftOn`/`rightOn` (names differ).
+    Routes to the warehouse-native SqlJoinComponent when both sides are
+    already warehouse-backed and share a connection (see
+    _resolve_warehouse_source), otherwise to the community dataframe_join
+    component."""
+    leftAssetKey: str
+    rightAssetKey: str
+    newAssetName: str
+    how: str = "inner"
+    on: list[str] | None = None
+    leftOn: list[str] | None = None
+    rightOn: list[str] | None = None
+    suffixes: list[str] | None = None
+    keepColumns: list[str] | None = None
+    rename: dict[str, str] | None = None
+    # Real, unrenamed upstream column lists for each side -- lets a
+    # warehouse-native join build an unambiguous SQL projection without a
+    # live schema-reflection connection of its own. Unused by dataframe_join.
+    leftColumns: list[str] | None = None
+    rightColumns: list[str] | None = None
+
+
+def _resolve_warehouse_source(src_dir: Path, source_asset_key: str) -> "tuple[str, str | None] | None":
+    """If source_asset_key is warehouse-native, return
+    (sql_table_identifier, resource_key). Otherwise None.
+
+    Same two real signals create_transformer_asset's upstream_is_warehouse
+    uses, but this also resolves the actual table identifier so a SQL-
+    native join can FROM/JOIN it directly:
+      1. dbt asset keys (models/seeds/snapshots/analyses) -- table is
+         always `main.<last segment>` under the default dbt-duckdb profile.
+      2. An asset produced by SqlTransformerComponent or SqlJoinComponent
+         itself -- its defs.yaml declares output_schema (+ optionally
+         resource_key), and the table is `<output_schema>.<asset_name>`.
+    A DataFrame-producing component (dataframe_join, dataframe_transformer,
+    file readers, ...) returns None -- there's no warehouse table to join
+    against without materializing it into one first.
+    """
+    if "/" in source_asset_key and source_asset_key.split("/", 1)[0] in {
+        "models", "seeds", "snapshots", "analyses"
+    }:
+        return f"main.{source_asset_key.rsplit('/', 1)[-1]}", None
+
+    import yaml as _yaml
+
+    defs_yaml_path = src_dir / "defs" / source_asset_key / "defs.yaml"
+    if not defs_yaml_path.exists():
+        return None
+    try:
+        parsed = _yaml.safe_load(defs_yaml_path.read_text()) or {}
+    except Exception:
+        return None
+    component_type = parsed.get("type") or ""
+    attrs = parsed.get("attributes") or {}
+    if not isinstance(attrs, dict):
+        return None
+    if "SqlTransformerComponent" in component_type or "SqlJoinComponent" in component_type:
+        output_schema = attrs.get("output_schema", "main")
+        resource_key = attrs.get("resource_key") or _infer_upstream_resource_key(src_dir, source_asset_key)
+        return f"{output_schema}.{source_asset_key}", resource_key
+    return None
 
 
 def _translate_transform_config_to_sql_attrs(transform_config: "TransformConfig") -> dict:
@@ -1770,19 +1912,6 @@ async def create_transformer_asset(project_id: str, request: CreateTransformerRe
         project.custom_lineage.append(new_edge)
         print(f"[Create Transformer] Added custom lineage: {request.sourceAssetKey} -> {component_id}", flush=True)
 
-    # Also write to custom_lineage.json for Dagster to load
-    custom_lineage_file = src_dir / "defs" / "custom_lineage.json"
-    custom_lineage_data = {
-        "edges": [
-            {"source": e.source, "target": e.target}
-            for e in project.custom_lineage
-        ]
-    }
-
-    with open(custom_lineage_file, "w") as f:
-        json.dump(custom_lineage_data, f, indent=2)
-    print(f"[Create Transformer] Updated custom_lineage.json with {len(project.custom_lineage)} edges", flush=True)
-
     # Add component to project's components list if not already there.
     # transformer_component_type was set correctly above based on the branch;
     # don't re-hardcode DataFrameTransformerComponent here.
@@ -1876,6 +2005,227 @@ async def create_transformer_asset(project_id: str, request: CreateTransformerRe
     print(f"[Create Transformer] Edge IDs: {[e.id for e in updated_project.graph.edges]}", flush=True)
     print(f"[Create Transformer] Custom lineage count: {len(updated_project.custom_lineage)}", flush=True)
 
+    # Write custom lineage as a native defs.yaml post_processing block --
+    # AFTER the graph regeneration above, not before: the writer validates
+    # every target/source against project.graph.nodes (a dangling target
+    # crashes loading of the ENTIRE project, confirmed directly), and the
+    # component_id this edge targets has just been created in THIS same
+    # request -- it isn't reflected in project.graph.nodes until the
+    # regeneration above runs.
+    project_service._write_post_processing_defs_yaml(updated_project or project)
+
+    return updated_project if updated_project else project
+
+
+@router.post("/{project_id}/create-join")
+async def create_join_asset(project_id: str, request: CreateJoinRequest):
+    """Create a new asset joining two existing assets together.
+
+    Mirrors create_transformer_asset's write/regenerate/save sequence, but
+    with two upstream dependencies (left + right) instead of one. Routes to
+    the warehouse-native SqlJoinComponent (in-warehouse CTAS, no data
+    movement) when both sides are already warehouse-backed and share a
+    connection; otherwise falls back to the community dataframe_join
+    component, same as any other DataFrame consumer of a warehouse-native
+    upstream would.
+    """
+    from ..services.project_service import project_service
+    from ..models.project import ProjectUpdate, CustomLineageEdge, ComponentInstance
+    from ..models.graph import GraphEdge
+    import yaml
+
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    project_dir = project_service._get_project_dir(project)
+    if not project_dir.exists():
+        raise HTTPException(status_code=404, detail="Project directory not found")
+
+    on_style_valid = bool(request.on) or (bool(request.leftOn) and bool(request.rightOn))
+    if not on_style_valid or (request.on and (request.leftOn or request.rightOn)):
+        raise HTTPException(status_code=400, detail="Set either `on`, or both `leftOn` and `rightOn` (not both styles).")
+
+    component_id = request.newAssetName.replace('-', '_').replace(' ', '_').lower()
+    src_dir = project_dir / "src" / project.directory_name
+    defs_dir = src_dir / "defs" / component_id
+    defs_dir.mkdir(parents=True, exist_ok=True)
+
+    left_wh = _resolve_warehouse_source(src_dir, request.leftAssetKey)
+    right_wh = _resolve_warehouse_source(src_dir, request.rightAssetKey)
+    # Both sides warehouse-native AND either sharing a resource_key or both
+    # relying on the same dbt-profile-derived connection (both None) --
+    # otherwise there's no single connection a CTAS could run against.
+    use_sql_join = bool(left_wh and right_wh and left_wh[1] == right_wh[1])
+
+    if use_sql_join:
+        if not request.leftColumns or not request.rightColumns:
+            raise HTTPException(
+                status_code=400,
+                detail="leftColumns and rightColumns are required to build a warehouse-native join.",
+            )
+        left_table, resource_key = left_wh
+        right_table, _ = right_wh
+        attributes: dict = {
+            "asset_name": component_id,
+            "left_table": left_table,
+            "right_table": right_table,
+            "left_asset_keys": request.leftAssetKey,
+            "right_asset_keys": request.rightAssetKey,
+            "left_columns": ",".join(request.leftColumns),
+            "right_columns": ",".join(request.rightColumns),
+            "how": request.how,
+        }
+        if resource_key:
+            attributes["resource_key"] = resource_key
+        if request.on:
+            attributes["on_columns"] = ",".join(request.on)
+        if request.leftOn:
+            attributes["left_on"] = ",".join(request.leftOn)
+        if request.rightOn:
+            attributes["right_on"] = ",".join(request.rightOn)
+        if request.suffixes:
+            attributes["suffixes"] = ",".join(request.suffixes)
+        if request.rename:
+            attributes["rename_columns"] = json.dumps(request.rename)
+        if request.keepColumns:
+            attributes["keep_only_columns"] = ",".join(request.keepColumns)
+
+        join_component_type = f"{project.directory_name}.dagster_designer_components.SqlJoinComponent"
+        # SqlJoinComponent is first-party, not a community template -- make
+        # sure the project's copy is current (same defensive re-sync
+        # _generate_definitions_with_asset_customizations already does)
+        # rather than assuming whatever was copied at project-creation time
+        # already has it.
+        project_service._copy_component_classes_to_project(project)
+        print(f"[Create Join] Using SqlJoinComponent: {left_table} {request.how} {right_table}", flush=True)
+    else:
+        attributes = {
+            "asset_name": component_id,
+            "left_asset_key": request.leftAssetKey,
+            "right_asset_key": request.rightAssetKey,
+            "how": request.how,
+        }
+        if request.on:
+            attributes["on"] = request.on
+        if request.leftOn:
+            attributes["left_on"] = request.leftOn
+        if request.rightOn:
+            attributes["right_on"] = request.rightOn
+        if request.suffixes:
+            attributes["suffixes"] = request.suffixes
+        if request.rename:
+            attributes["rename"] = request.rename
+        if request.keepColumns:
+            attributes["keep_only_columns"] = request.keepColumns
+
+        join_component_type = f"{project.directory_name}.components.dataframe_join.DataframeJoin"
+
+        # dataframe_join is a community template -- install on demand the same
+        # way create_transformer_asset does for dataframe_transformer.
+        join_dir = src_dir / "components" / "dataframe_join"
+        if not join_dir.exists():
+            print(f"[Create Join] dataframe_join template not installed; auto-installing via CLI…", flush=True)
+            import subprocess
+            try:
+                cli_result = subprocess.run(
+                    [
+                        find_uv_binary("uvx"), "--from", "dagster-community-components-cli",
+                        "dagster-component", "add", "dataframe_join",
+                        "--auto-install", "--manager", "uv", "--force",
+                    ],
+                    cwd=str(project_dir),
+                    env=env_with_bundled_uv_on_path(project_subprocess_env(project_dir)),
+                    capture_output=True, text=True, timeout=300,
+                )
+                if cli_result.returncode != 0:
+                    tail = (cli_result.stderr or cli_result.stdout or "").strip().splitlines()[-5:]
+                    raise HTTPException(
+                        status_code=500,
+                        detail=f"Couldn't install dataframe_join (community template). CLI output: {' | '.join(tail)}",
+                    )
+                print(f"[Create Join] Installed dataframe_join template", flush=True)
+                stub_defs = src_dir / "defs" / "dataframe_join" / "defs.yaml"
+                if stub_defs.exists():
+                    try:
+                        import shutil as _sh
+                        _sh.rmtree(stub_defs.parent)
+                    except Exception as e:
+                        print(f"[Create Join] Warning: couldn't remove stub defs: {e}", flush=True)
+            except subprocess.TimeoutExpired:
+                raise HTTPException(status_code=504, detail="Auto-install of dataframe_join timed out.")
+            except FileNotFoundError:
+                raise HTTPException(status_code=500, detail="uvx not found — install `uv` to enable auto-install of community components.")
+
+    defs_yaml = {"type": join_component_type, "attributes": attributes}
+    with open(defs_dir / "defs.yaml", "w") as f:
+        yaml.dump(defs_yaml, f, default_flow_style=False, sort_keys=False)
+
+    # Two upstream deps this time, not one.
+    for source_key in (request.leftAssetKey, request.rightAssetKey):
+        new_edge = CustomLineageEdge(source=source_key, target=component_id)
+        edge_exists = any(
+            e.source == new_edge.source and e.target == new_edge.target
+            for e in project.custom_lineage
+        )
+        if not edge_exists:
+            project.custom_lineage.append(new_edge)
+
+    component_exists = any(
+        c.component_type == join_component_type and c.id == component_id
+        for c in project.components
+    )
+    if not component_exists:
+        project.components.append(ComponentInstance(
+            id=component_id,
+            component_type=join_component_type,
+            label=request.newAssetName,
+            attributes={"asset_name": component_id},
+            translation=None,
+            post_processing=None,
+            is_asset_factory=False,
+        ))
+
+    from ..services.asset_introspection_service import asset_introspection_service
+    asset_introspection_service.clear_cache(project.id)
+
+    try:
+        asset_nodes, asset_edges = await asset_introspection_service.get_assets_for_project_async(project, recalculate_layout=True)
+
+        join_node = None
+        for node in asset_nodes:
+            if node.id == component_id or node.data.get('asset_key') == component_id:
+                join_node = node
+                break
+
+        if join_node:
+            non_asset_nodes = [n for n in project.graph.nodes if n.node_kind != "asset"]
+            project.graph.nodes = non_asset_nodes + asset_nodes
+
+            edge_map = {edge.id: edge for edge in asset_edges}
+            for custom_lineage in project.custom_lineage:
+                edge_id = f"{custom_lineage.source}_to_{custom_lineage.target}"
+                if edge_id in edge_map:
+                    edge_map[edge_id].is_custom = True
+                else:
+                    edge_map[edge_id] = GraphEdge(id=edge_id, source=custom_lineage.source, target=custom_lineage.target, is_custom=True)
+            project.graph.edges = list(edge_map.values())
+        else:
+            print(f"[Create Join] Warning: could not find join node '{component_id}' in regenerated assets", flush=True)
+    except Exception as e:
+        print(f"[Create Join] Warning: failed to regenerate assets, but join files were created: {e}", flush=True)
+
+    updated_project = project_service.update_project(
+        project_id,
+        ProjectUpdate(components=project.components, graph=project.graph, custom_lineage=project.custom_lineage),
+    )
+
+    # AFTER the graph regeneration above, not before -- same reasoning as
+    # create_transformer_asset: the writer validates every target/source
+    # against project.graph.nodes, and this join's own asset key isn't
+    # reflected there until the regeneration above runs.
+    project_service._write_post_processing_defs_yaml(updated_project or project)
+
     return updated_project if updated_project else project
 
 
@@ -1968,6 +2318,7 @@ class AssetEvent(BaseModel):
     run_id: str | None = None
     partition: str | None = None
     step_key: str | None = None
+    metadata: list[dict] = []
 
 
 class AssetEventsResponse(BaseModel):
@@ -2019,6 +2370,7 @@ async def get_asset_events(project_id: str, asset_key: str, limit: int = 200):
             run_id=m.get("runId"),
             partition=m.get("partition"),
             step_key=m.get("stepKey"),
+            metadata=_metadata_entries_to_dict(m.get("metadataEntries") or []),
         ))
     for o in (node.get("assetObservations") or []):
         events.append(AssetEvent(

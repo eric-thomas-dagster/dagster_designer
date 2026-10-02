@@ -1,10 +1,13 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { X, Loader2, Film, Sparkles } from 'lucide-react';
 import { useProjectStore } from '@/hooks/useProject';
 import { projectsApi, API_BASE } from '@/services/api';
 import { notify } from './Notifications';
 import { extractComponentId } from '@/lib/componentId';
 import { MediaPreviewPanel } from './MediaPreviewPanel';
+import { MediaProbeInfo } from './MediaProbeInfo';
+import { useMediaProbe } from '@/hooks/useMediaProbe';
+import { useUpstreamColumns, pickBestPathColumn } from '@/hooks/useUpstreamColumns';
 import type { ComponentInstance } from '@/types';
 
 /**
@@ -46,6 +49,18 @@ export function VideoSceneConfigStep({
     seedAttrs.summary_prompt || "Describe what's happening in this video frame in one or two sentences. Be specific about action, setting, and any visible text.",
   );
   const [saving, setSaving] = useState(false);
+  const [activeFilePath, setActiveFilePath] = useState<string | null>(null);
+  const { probe, isLoading: probeLoading } = useMediaProbe(currentProject?.id, activeFilePath);
+
+  const videoPathColumnExplicitlySet = !!seedAttrs.video_path_column;
+  const [videoPathColumn, setVideoPathColumn] = useState<string>(seedAttrs.video_path_column || 'file_path');
+  const { columns: upstreamColumns } = useUpstreamColumns(currentProject?.id, upstreamAssetKey);
+  useEffect(() => {
+    if (!videoPathColumnExplicitlySet && upstreamColumns.length > 0) {
+      setVideoPathColumn(pickBestPathColumn(upstreamColumns, 'file_path'));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [upstreamColumns.join(',')]);
 
   const canSave = assetName.trim().length > 0 && !!upstreamAssetKey;
 
@@ -58,6 +73,7 @@ export function VideoSceneConfigStep({
         name: assetName.trim(),
         asset_name: assetName.trim(),
         upstream_asset_key: upstreamAssetKey,
+        video_path_column: videoPathColumn.trim() || 'file_path',
         scene_threshold: sceneThreshold,
         max_scenes_per_video: maxScenes,
         model,
@@ -107,9 +123,11 @@ export function VideoSceneConfigStep({
         </div>
 
         <div className="flex-1 overflow-hidden grid grid-cols-1 sm:grid-cols-[1fr_380px]">
-          <MediaPreviewPanel upstreamAssetKey={upstreamAssetKey} kind="video" />
+          <MediaPreviewPanel upstreamAssetKey={upstreamAssetKey} kind="video" onActiveFileChange={setActiveFilePath} />
 
           <div className="space-y-4 overflow-y-auto px-6 py-4">
+            <MediaProbeInfo probe={probe} isLoading={probeLoading} kind="video" />
+
             <div>
               <label className="block text-xs font-medium text-gray-700 mb-1">Asset name</label>
               <input
@@ -120,6 +138,28 @@ export function VideoSceneConfigStep({
                 className="w-full px-2.5 py-1.5 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono disabled:bg-gray-50 disabled:text-gray-400"
               />
               {isEditing && <p className="text-[10px] text-gray-400 mt-0.5">Can't be renamed after creation.</p>}
+            </div>
+
+            <div>
+              <label className="block text-xs font-medium text-gray-700 mb-1">Video path column</label>
+              {upstreamColumns.length > 0 ? (
+                <select
+                  value={upstreamColumns.includes(videoPathColumn) ? videoPathColumn : ''}
+                  onChange={(e) => setVideoPathColumn(e.target.value)}
+                  className="w-full px-2.5 py-1.5 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white font-mono"
+                >
+                  {!upstreamColumns.includes(videoPathColumn) && <option value="" disabled>{videoPathColumn} (not found — pick one)</option>}
+                  {upstreamColumns.map((c) => <option key={c} value={c}>{c}</option>)}
+                </select>
+              ) : (
+                <input
+                  type="text"
+                  value={videoPathColumn}
+                  onChange={(e) => setVideoPathColumn(e.target.value)}
+                  className="w-full px-2.5 py-1.5 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono"
+                />
+              )}
+              <p className="text-[10px] text-gray-400 mt-0.5">Column in the upstream DataFrame holding each video's local file path.</p>
             </div>
 
             <div className="grid grid-cols-2 gap-3">

@@ -419,6 +419,11 @@ async def configure_component(
         instance_dir.mkdir(parents=True, exist_ok=True)
         yaml_file = instance_dir / "defs.yaml"
 
+        # Captured for rollback below -- None means this is a brand-new
+        # instance (delete rather than restore old content on failure).
+        original_text = yaml_file.read_text() if yaml_file.exists() else None
+        was_new_instance = original_text is None
+
         # Use correct YAML format: type + attributes
         yaml_config = {
             "type": component_type,
@@ -462,11 +467,35 @@ async def configure_component(
         except Exception as e:
             regenerate_error = str(e)
             print(f"[Configure] Warning: Failed to auto-regenerate assets: {e}")
-            # Don't fail the request if regeneration fails - the defs.yaml
-            # is saved either way, and the user can fix the config and
-            # re-save once they see regenerate_error.
             import traceback
             traceback.print_exc()
+
+            # Roll back rather than leave a broken defs.yaml on disk --
+            # Dagster's definitions loading is all-or-nothing, so this
+            # doesn't just affect this one instance, it breaks the ENTIRE
+            # project until the user notices and fixes it (confirmed
+            # directly, more than once, this session). Previously this
+            # was left in place on the theory the user would "fix the
+            # config and re-save", but that left the project unloadable
+            # in the meantime.
+            if was_new_instance:
+                try:
+                    yaml_file.unlink()
+                    if not any(instance_dir.iterdir()):
+                        instance_dir.rmdir()
+                except Exception as cleanup_err:
+                    print(f"[Configure] Warning: failed to remove broken new instance {yaml_file}: {cleanup_err}")
+            else:
+                yaml_file.write_text(original_text)
+
+            return {
+                "success": False,
+                "message": f"Component {instance_name} was NOT saved -- it would have broken the project's definitions (reverted automatically)",
+                "yaml_file": str(yaml_file.relative_to(project_dir)),
+                "assets_regenerated": False,
+                "regenerate_error": regenerate_error,
+                "components_list_warning": None,
+            }
 
         # Add/update this instance in project.components -- a *separate*
         # list from graph.nodes that e.g. IngestionsPanel filters on, not
@@ -1484,6 +1513,14 @@ async def update_component_instance_attributes(instance_id: str, request: Update
     if dropped:
         print(f"[Update Attributes] Dropped unknown attributes for {instance_id}: {dropped} (schema keys: {sorted(allowed_keys or [])})")
 
+    # Captured for rollback -- Dagster's definitions loading is
+    # all-or-nothing, so a bad value here (wrong type, a value that fails
+    # the component's own Pydantic validation, anything schema.json's key
+    # filtering above doesn't catch) can break loading of the ENTIRE
+    # project, not just this one component. Confirmed directly, more than
+    # once, this session.
+    original_text = defs_yaml_path.read_text()
+
     parsed["attributes"] = merged
     try:
         defs_yaml_path.write_text(yaml.safe_dump(parsed, sort_keys=False))
@@ -1502,7 +1539,51 @@ async def update_component_instance_attributes(instance_id: str, request: Update
                 c.model_copy(update={"attributes": merged}) if c.id == instance_id else c
                 for c in project.components
             ]
-            project_service.update_project(request.project_id, ProjectUpdate(components=updated_components))
+
+            # A changed asset_name is a rename -- any custom lineage edge
+            # still pointing at the OLD key would go dangling. A dangling
+            # TARGET in defs.yaml's post_processing block doesn't just skip
+            # that edge, it crashes loading of the ENTIRE project
+            # (DagsterInvalidSubsetError, confirmed directly). Rewrite
+            # rather than drop, since the edge is still semantically valid
+            # -- it just needs the new name.
+            old_asset_name = existing_attrs.get("asset_name")
+            new_asset_name = merged.get("asset_name")
+            renamed_lineage = None
+            if old_asset_name and new_asset_name and old_asset_name != new_asset_name:
+                renamed_lineage = [
+                    e.model_copy(update={
+                        "source": new_asset_name if e.source == old_asset_name else e.source,
+                        "target": new_asset_name if e.target == old_asset_name else e.target,
+                    })
+                    for e in project.custom_lineage
+                ]
+                renamed_count = sum(
+                    1 for e in project.custom_lineage
+                    if e.source == old_asset_name or e.target == old_asset_name
+                )
+                if renamed_count:
+                    print(f"[Update Attributes] Rewrote {renamed_count} custom lineage edge(s): '{old_asset_name}' -> '{new_asset_name}'")
+
+            # Same rename handling for group_name/owners/tags overrides --
+            # keyed by asset key, so they'd go dangling the same way.
+            renamed_overrides = None
+            if old_asset_name and new_asset_name and old_asset_name != new_asset_name:
+                override = project.asset_field_overrides.get(old_asset_name)
+                if override is not None:
+                    renamed_overrides = dict(project.asset_field_overrides)
+                    del renamed_overrides[old_asset_name]
+                    renamed_overrides[new_asset_name] = override
+                    print(f"[Update Attributes] Rewrote field overrides: '{old_asset_name}' -> '{new_asset_name}'")
+
+            update_kwargs = {"components": updated_components}
+            if renamed_lineage is not None:
+                update_kwargs["custom_lineage"] = renamed_lineage
+            if renamed_overrides is not None:
+                update_kwargs["asset_field_overrides"] = renamed_overrides
+            updated_project = project_service.update_project(request.project_id, ProjectUpdate(**update_kwargs))
+            if (renamed_lineage is not None or renamed_overrides is not None) and updated_project:
+                project_service._write_post_processing_defs_yaml(updated_project)
     except Exception as e:
         # Surfaced below (used to be log-only) -- disk already has the new
         # attributes at this point, so this leaves the sidebar showing
@@ -1511,6 +1592,20 @@ async def update_component_instance_attributes(instance_id: str, request: Update
         components_list_warning = (
             f"Saved to disk, but couldn't update '{instance_id}' in the project's component "
             f"list -- the sidebar may show stale values until the project reloads. ({e})"
+        )
+
+    # Pre-flight check -- catches what schema.json's key filtering above
+    # can't (wrong value types, a value that fails the component's own
+    # Pydantic validation, missing required fields). Roll back the
+    # defs.yaml write rather than leave the project unable to load at all
+    # until the user notices on some LATER, unrelated action.
+    from ..services.asset_introspection_service import asset_introspection_service
+    ok, error = await asset_introspection_service.validate_project_defs_async(project)
+    if not ok:
+        defs_yaml_path.write_text(original_text)
+        raise HTTPException(
+            status_code=400,
+            detail=f"These changes broke the project's definitions (reverted automatically):\n\n{error}",
         )
 
     return {

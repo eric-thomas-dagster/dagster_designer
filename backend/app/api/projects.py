@@ -1724,6 +1724,29 @@ async def delete_component_instance(project_id: str, component_id: str):
         # stale entries accumulate here otherwise.
         project.components = [c for c in (project.components or []) if c.id != component_id]
 
+        # Also scrub any custom lineage edge referencing the deleted asset
+        # (as either source or target) -- left behind, a dangling TARGET
+        # in defs.yaml's post_processing block crashes loading of the
+        # ENTIRE project on the next regenerate (DagsterInvalidSubsetError:
+        # "AssetKey(s) [...] were selected, but no AssetsDefinition objects
+        # supply these keys"), confirmed directly. A dangling source
+        # instead silently adds a phantom placeholder asset to the graph.
+        pruned_lineage = [
+            e for e in project.custom_lineage
+            if e.source != component_id and e.target != component_id
+        ]
+        removed_edge_count = len(project.custom_lineage) - len(pruned_lineage)
+        if removed_edge_count:
+            print(f"[Delete Component Instance] Removed {removed_edge_count} custom lineage edge(s) referencing '{component_id}'", flush=True)
+        project.custom_lineage = pruned_lineage
+
+        # Same reasoning for field overrides (group_name/owners/tags) --
+        # a leftover entry keyed by a deleted asset is a dangling
+        # post_processing target, same crash risk as a dangling deps edge.
+        removed_override = project.asset_field_overrides.pop(component_id, None) is not None
+        if removed_override:
+            print(f"[Delete Component Instance] Removed field overrides referencing '{component_id}'", flush=True)
+
         # Clear the asset introspection cache to force fresh introspection
         asset_introspection_service.clear_cache(project.id)
         print(f"[Delete Component Instance] Cleared asset cache for project {project.id}")
@@ -1762,12 +1785,16 @@ async def delete_component_instance(project_id: str, component_id: str):
         # Convert edge map back to list
         project.graph.edges = list(edge_map.values())
 
-        # Save updated project — persist BOTH the refreshed graph AND the
-        # pruned components list (previously only `graph` was saved, so
-        # stale `components` entries accumulated forever).
+        # Save updated project — persist the refreshed graph, pruned
+        # components list, and pruned custom lineage (previously only
+        # `graph` was saved, so stale `components`/`custom_lineage` entries
+        # accumulated forever).
         updated_project = project_service.update_project(
             project_id,
-            ProjectUpdate(graph=project.graph, components=project.components),
+            ProjectUpdate(
+                graph=project.graph, components=project.components,
+                custom_lineage=project.custom_lineage, asset_field_overrides=project.asset_field_overrides,
+            ),
         )
 
         if not updated_project:
@@ -1775,6 +1802,9 @@ async def delete_component_instance(project_id: str, component_id: str):
                 status_code=500,
                 detail="Failed to save project after deletion"
             )
+
+        if removed_edge_count or removed_override:
+            project_service._write_post_processing_defs_yaml(updated_project)
 
         return updated_project
 
@@ -2547,6 +2577,28 @@ async def add_custom_lineage(project_id: str, request: CustomLineageRequest):
         if not project:
             raise HTTPException(status_code=404, detail="Project not found")
 
+        # Both ends must be real, currently-known assets -- a dangling
+        # target in the post_processing block _write_post_processing_defs_yaml
+        # writes doesn't just skip that one edge, it raises
+        # DagsterInvalidSubsetError and crashes loading of the ENTIRE
+        # project (confirmed directly: "AssetKey(s) [...] were selected,
+        # but no AssetsDefinition objects supply these keys"). A dangling
+        # source doesn't crash, but silently adds a phantom placeholder
+        # asset with no materialization function to the graph. Reject both
+        # here instead of writing an edge that breaks (or corrupts) the
+        # project on the next regenerate.
+        known_asset_keys = {
+            node.data.get("asset_key", node.id)
+            for node in project.graph.nodes
+            if node.node_kind == "asset"
+        }
+        missing = [k for k in (request.source, request.target) if k not in known_asset_keys]
+        if missing:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Cannot add custom lineage: asset key(s) not found in this project: {', '.join(missing)}",
+            )
+
         # Add the custom lineage edge if it doesn't already exist
         new_edge = CustomLineageEdge(source=request.source, target=request.target)
 
@@ -2595,11 +2647,11 @@ async def add_custom_lineage(project_id: str, request: CustomLineageRequest):
 
             updated_project = project_service.update_project(project_id, update_data)
 
-            # Write custom_lineage.json to project directory
+            # Write custom lineage as a native defs.yaml post_processing block
             try:
-                project_service._write_custom_lineage_file(updated_project)
+                project_service._write_post_processing_defs_yaml(updated_project)
             except Exception as write_err:
-                print(f"⚠️  Warning: Failed to write custom_lineage.json: {write_err}", flush=True)
+                print(f"⚠️  Warning: Failed to write custom-lineage defs.yaml: {write_err}", flush=True)
                 # Continue anyway - the lineage is saved in the DB
 
             # If component wasn't found in project.components, try to update YAML file directly
@@ -2706,11 +2758,11 @@ async def remove_custom_lineage(project_id: str, request: CustomLineageRequest):
 
         updated_project = project_service.update_project(project_id, update_data)
 
-        # Update custom_lineage.json file
+        # Update custom lineage defs.yaml post_processing block
         try:
-            project_service._write_custom_lineage_file(updated_project)
+            project_service._write_post_processing_defs_yaml(updated_project)
         except Exception as write_err:
-            print(f"⚠️  Warning: Failed to write custom_lineage.json: {write_err}", flush=True)
+            print(f"⚠️  Warning: Failed to write custom-lineage defs.yaml: {write_err}", flush=True)
             # Continue anyway - the lineage is saved in the DB
 
         return updated_project
@@ -2720,6 +2772,137 @@ async def remove_custom_lineage(project_id: str, request: CustomLineageRequest):
         print(f"❌ Error removing custom lineage: {e}", flush=True)
         print(traceback.format_exc(), flush=True)
         raise HTTPException(status_code=500, detail=f"Failed to remove custom lineage: {str(e)}")
+
+
+class AssetFieldOverridesRequest(BaseModel):
+    """description/group_name/owners/tags/kinds overrides for one asset.
+    All fields None/empty clears the override entirely rather than
+    writing an empty entry. `kinds` REPLACES the asset's own kind tags
+    (confirmed directly -- Dagster's post_processing does not merge
+    kinds), so callers should seed their edit form from the asset's
+    CURRENT kinds rather than starting blank, so a save reflects a
+    conscious edit rather than silently wiping technology-icon kinds."""
+    description: str | None = None
+    group_name: str | None = None
+    owners: list[str] | None = None
+    tags: dict[str, str] | None = None
+    kinds: list[str] | None = None
+
+
+@router.put("/{project_id}/asset-field-overrides/{asset_key:path}", response_model=Project)
+async def set_asset_field_overrides(project_id: str, asset_key: str, request: AssetFieldOverridesRequest):
+    """Set (or clear, if every field is empty) group_name/owners/tags
+    overrides for one asset, applied via the same defs.yaml
+    post_processing mechanism as custom lineage. Unlike deps, these ARE
+    valid for dbt-model targets too -- see
+    project_service._write_post_processing_defs_yaml.
+    """
+    from ..models.project import AssetFieldOverrides, ProjectUpdate
+
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    # Same crash-risk reasoning as add_custom_lineage's validation: a
+    # dangling post_processing target raises DagsterInvalidSubsetError and
+    # crashes loading of the ENTIRE project, confirmed directly.
+    known_asset_keys = {
+        node.data.get("asset_key", node.id)
+        for node in project.graph.nodes
+        if node.node_kind == "asset"
+    }
+    if asset_key not in known_asset_keys:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot set field overrides: asset key not found in this project: {asset_key}",
+        )
+
+    updated_overrides = dict(project.asset_field_overrides)
+    if request.description or request.group_name or request.owners or request.tags or request.kinds:
+        updated_overrides[asset_key] = AssetFieldOverrides(
+            description=request.description, group_name=request.group_name,
+            owners=request.owners, tags=request.tags, kinds=request.kinds,
+        )
+    else:
+        updated_overrides.pop(asset_key, None)
+
+    updated_project = project_service.update_project(
+        project_id, ProjectUpdate(asset_field_overrides=updated_overrides),
+    )
+    if not updated_project:
+        raise HTTPException(status_code=500, detail="Failed to save project")
+
+    project_service._write_post_processing_defs_yaml(updated_project)
+    return updated_project
+
+
+class AssetPostProcessingRuleRequest(BaseModel):
+    target: str
+    group_name: str | None = None
+    owners: list[str] | None = None
+    tags: dict[str, str] | None = None
+
+
+class SetPostProcessingRulesRequest(BaseModel):
+    """Replaces the project's ENTIRE list of rules -- matches the
+    list-editor UI (add/edit/remove rows, one Save), simpler than
+    per-rule CRUD for a feature with no natural per-rule identity (two
+    rules could legitimately share the same target selector)."""
+    rules: list[AssetPostProcessingRuleRequest]
+
+
+@router.put("/{project_id}/post-processing-rules", response_model=Project)
+async def set_post_processing_rules(project_id: str, request: SetPostProcessingRulesRequest):
+    """Replace the project's project-wide post_processing rules (selector-
+    based target, e.g. `tag:critical=true` / `key:core/stg_*` / `*` --
+    not a single literal asset key, see AssetPostProcessingRule). This is
+    the one mechanism that can apply group_name/owners/tags to MANY
+    assets in a single rule; AssetFieldOverrides only ever targets one.
+    """
+    from ..models.project import AssetPostProcessingRule, ProjectUpdate
+
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    # Rules carry free-text selector syntax with no syntax validation at
+    # all (unlike AssetFieldOverrides' literal-key check) -- a typo'd
+    # selector here is caught by the pre-flight check below, not before.
+    previous_rules = list(project.asset_post_processing_rules)
+
+    rules = [
+        AssetPostProcessingRule(target=r.target, group_name=r.group_name, owners=r.owners, tags=r.tags)
+        for r in request.rules
+        if r.target.strip()
+    ]
+
+    updated_project = project_service.update_project(
+        project_id, ProjectUpdate(asset_post_processing_rules=rules),
+    )
+    if not updated_project:
+        raise HTTPException(status_code=500, detail="Failed to save project")
+
+    project_service._write_post_processing_defs_yaml(updated_project)
+
+    # Pre-flight check -- Dagster's definitions loading is all-or-nothing,
+    # so a single bad selector here (or a bad defs.yaml write from any
+    # OTHER recent edit this didn't cause) would otherwise go unnoticed
+    # until the next time someone tries to open or preview the project.
+    # Roll back rather than leave a broken project.yaml + defs.yaml the
+    # user has no clue just happened.
+    ok, error = await asset_introspection_service.validate_project_defs_async(updated_project)
+    if not ok:
+        reverted_project = project_service.update_project(
+            project_id, ProjectUpdate(asset_post_processing_rules=previous_rules),
+        )
+        if reverted_project:
+            project_service._write_post_processing_defs_yaml(reverted_project)
+        raise HTTPException(
+            status_code=400,
+            detail=f"These rules broke the project's definitions (reverted automatically):\n\n{error}",
+        )
+
+    return updated_project
 
 
 class YAMLExportResponse(BaseModel):

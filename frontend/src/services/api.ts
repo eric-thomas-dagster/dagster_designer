@@ -179,6 +179,44 @@ export const projectsApi = {
     return response.data;
   },
 
+  /** Set (or clear, by passing every field empty) group_name/owners/tags
+   *  overrides for one asset -- applied via the same defs.yaml
+   *  post_processing mechanism as custom lineage. */
+  setAssetFieldOverrides: async (
+    projectId: string,
+    assetKey: string,
+    overrides: { description?: string | null; group_name?: string | null; owners?: string[] | null; tags?: Record<string, string> | null; kinds?: string[] | null },
+  ) => {
+    // assetKey can contain literal "/" (dbt asset keys, e.g.
+    // "models/stg_customers") -- the backend route uses a `:path`
+    // converter specifically so those pass through as real path segments,
+    // not a single encoded component, so this is NOT encodeURIComponent'd.
+    const response = await api.put<Project>(
+      `/projects/${projectId}/asset-field-overrides/${assetKey}`,
+      overrides,
+    );
+    return response.data;
+  },
+
+  /** Represents one project-wide post_processing rule. `target` is a real
+   *  Dagster selection expression (e.g. "tag:critical=true",
+   *  "key:core/stg_*", "*"), not a single literal asset key -- the one
+   *  mechanism that can apply group_name/owners/tags to MANY assets in a
+   *  single rule. */
+
+  /** Replaces the project's ENTIRE list of post_processing rules in one
+   *  call -- matches a list-editor UI (add/edit/remove rows, one Save). */
+  setPostProcessingRules: async (
+    projectId: string,
+    rules: Array<{ target: string; group_name?: string | null; owners?: string[] | null; tags?: Record<string, string> | null }>,
+  ) => {
+    const response = await api.put<Project>(
+      `/projects/${projectId}/post-processing-rules`,
+      { rules },
+    );
+    return response.data;
+  },
+
   // dbt authoring: discover the dbt project(s) inside this Dagster
   // project (local + git-cloned repos), scaffold new models, commit
   // changes back to the origin remote.
@@ -2472,6 +2510,20 @@ export interface AssetDataPreview {
   sample_limit: number | null;
 }
 
+export interface MediaProbeResult {
+  available: boolean;
+  duration_seconds: number | null;
+  width: number | null;
+  height: number | null;
+  fps: number | null;
+  video_codec: string | null;
+  has_audio: boolean | null;
+  audio_codec: string | null;
+  sample_rate: number | null;
+  channels: number | null;
+  error: string | null;
+}
+
 export interface CreateTransformerRequest {
   sourceAssetKey: string;
   newAssetName: string;
@@ -2517,6 +2569,18 @@ export const assetsApi = {
     return response.data;
   },
 
+  /** Real ffprobe metadata (duration/resolution/fps/codecs) for one local
+   *  video/audio file -- powers the "analyze and suggest" banner in the
+   *  video/audio config steps. `available: false` (with `error`) when
+   *  ffprobe isn't installed or the path isn't a local file it can read. */
+  mediaProbe: async (projectId: string, path: string): Promise<MediaProbeResult> => {
+    const response = await api.get<MediaProbeResult>(
+      `/assets/${projectId}/media-probe`,
+      { params: { path } },
+    );
+    return response.data;
+  },
+
   /** Read up to `limit` rows straight from a raw CSV/JSON/Parquet file --
    *  no Dagster involved, so it works before the source asset has ever
    *  been materialized. Powers the Classification wizard's config step
@@ -2557,6 +2621,33 @@ export const assetsApi = {
   }): Promise<Project> => {
     const response = await api.post<Project>(
       `/assets/${projectId}/create-sql-transformer`,
+      request
+    );
+    return response.data;
+  },
+
+  /** Join two existing DataFrame assets via the community dataframe_join
+   *  component. Set exactly one of `on` or `leftOn`+`rightOn`. */
+  createJoinAsset: async (projectId: string, request: {
+    leftAssetKey: string;
+    rightAssetKey: string;
+    newAssetName: string;
+    how: 'inner' | 'left' | 'right' | 'outer' | 'cross';
+    on?: string[];
+    leftOn?: string[];
+    rightOn?: string[];
+    suffixes?: string[];
+    keepColumns?: string[];
+    rename?: Record<string, string>;
+    // Real, unrenamed upstream column lists for each side -- lets the
+    // backend build an unambiguous SQL projection (aliasing conflicts,
+    // applying rename/keepColumns) when it routes to a warehouse-native
+    // join, without needing a live schema-reflection connection of its own.
+    leftColumns?: string[];
+    rightColumns?: string[];
+  }): Promise<Project> => {
+    const response = await api.post<Project>(
+      `/assets/${projectId}/create-join`,
       request
     );
     return response.data;
@@ -2759,7 +2850,7 @@ export const assetsApi = {
     projectId: string,
     assetKey: string,
     limit: number = 200,
-  ): Promise<{ events: Array<{ ts: string; kind: string; message?: string | null; run_id?: string | null; partition?: string | null }> }> => {
+  ): Promise<{ events: Array<{ ts: string; kind: string; message?: string | null; run_id?: string | null; partition?: string | null; step_key?: string | null; metadata?: Array<{ label: string; type: string; value: any; description?: string | null }> }> }> => {
     const r = await api.get(`/assets/${projectId}/${encodeURIComponent(assetKey)}/events`, { params: { limit } });
     return r.data as any;
   },

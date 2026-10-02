@@ -83,6 +83,72 @@ def _normalize_json_schema_for_ui(schema, defs: dict, _depth: int = 0):
     return out
 
 
+def _find_installed_schema_json(project, component_type: str) -> dict | None:
+    """Locate and parse the schema.json for a community-installed component
+    instance, reusing the same sandbox/project-dir resolution `get_component`'s
+    schema.json fallback (below) already uses.
+
+    Exists to backfill a gap in `dg utils inspect-component`'s own output:
+    confirmed live (real project, real `dg` subprocess call, not a guess) that
+    `--defs-yaml-json-schema` drops `description` for EVERY field that has a
+    `default` -- i.e. nearly every optional field on a real component, since a
+    `Field(default=..., description=...)` loses only the description half.
+    Required fields (no default) keep theirs. A user looking at e.g.
+    ChargebeeIngestionComponent's config modal saw descriptions on asset_name/
+    site/api_key (required) but nothing on resources/destination/... (all
+    defaulted) -- the Python source and the catalog's hand-maintained
+    schema.json both have full descriptions for every field; this is `dg`
+    silently dropping them, not a real metadata gap. schema.json isn't
+    affected (it's read straight off disk, no model_json_schema() involved),
+    so it's a reliable source to patch the live schema's holes from.
+    """
+    from ..services.project_service import project_service
+    from ..services.designer_loc_service import get_state as _get_sandbox_state
+
+    project_dir = project_service._get_project_dir(project)
+    directory_name = project.directory_name
+    # An imported project's real importable module name (pyproject.toml's
+    # root_module) can differ entirely from Designer's own directory_name
+    # slug -- confirmed live (chicago_bulls_analytics vs. directory_name
+    # project_91204b8f_bulls) -- so try the real root module first and
+    # directory_name only as the scaffolded-project fallback.
+    root_module = project_service.get_project_root_module(project)
+    sandbox_dir = _get_sandbox_state(project.id).dir()
+    sandbox_components_dir = sandbox_dir / "src" / sandbox_dir.name / "components"
+
+    components_dir = None
+    if sandbox_components_dir.exists():
+        components_dir = sandbox_components_dir
+    elif (root := project_dir / "src" / root_module / "components").exists():
+        components_dir = root
+    elif (flat := project_dir / directory_name / "components").exists():
+        components_dir = flat
+    elif (src := project_dir / "src" / directory_name / "components").exists():
+        components_dir = src
+    if not components_dir:
+        return None
+
+    parts = component_type.split(".")
+    component_id: str | None = None
+    if "components" in parts:
+        idx = parts.index("components")
+        if idx + 1 < len(parts):
+            component_id = parts[idx + 1]
+
+    schema_files = [components_dir / component_id / "schema.json"] if component_id else list(components_dir.glob("*/schema.json"))
+    for schema_file in schema_files:
+        if not schema_file.exists():
+            continue
+        try:
+            with open(schema_file) as f:
+                data = json.load(f)
+        except Exception:
+            continue
+        if component_id or data.get("component_type") == component_type:
+            return data
+    return None
+
+
 def _get_component_schema_via_dg(project, component_type: str) -> "ComponentSchema | None":
     """Resolve a component's schema by asking the project's OWN `dg` CLI,
     instead of guessing from a checked-in schema.json (may not exist) or
@@ -162,6 +228,39 @@ def _get_component_schema_via_dg(project, component_type: str) -> "ComponentSche
             }
         if merged_defs:
             schema_out["$defs"] = merged_defs
+
+        # Backfill from the component's own installed schema.json, when one
+        # exists: descriptions `dg` dropped (see _find_installed_schema_json
+        # for the field-with-a-default bug), AND `enum`/`ui:widget` -- UI
+        # hints that only ever live in schema.json and never will exist in
+        # `dg`'s output, since they aren't real pydantic constraints (a
+        # plain `destination: Optional[str]` has no Literal/Enum type, so
+        # `dg` has no way to know "snowflake/bigquery/postgres/..." are the
+        # only valid values -- that enum is Designer-catalog-authored UI
+        # metadata, confirmed live: notion_ingestion's schema.json declares
+        # it, chargebee_ingestion's (and 100 other components') didn't,
+        # rendering as a plain text box instead of a picker for exactly
+        # that reason).
+        if isinstance(schema_out.get("properties"), dict):
+            installed_schema = _find_installed_schema_json(project, component_type)
+            if installed_schema:
+                json_attrs = installed_schema.get("attributes") or installed_schema.get("properties") or {}
+                for field_name, field_schema in schema_out["properties"].items():
+                    if not isinstance(field_schema, dict):
+                        continue
+                    json_field = json_attrs.get(field_name) or {}
+                    if not field_schema.get("description") and json_field.get("description"):
+                        field_schema["description"] = json_field["description"]
+                    if not field_schema.get("enum") and json_field.get("enum"):
+                        field_schema["enum"] = json_field["enum"]
+                    if not field_schema.get("ui:widget") and json_field.get("ui:widget"):
+                        field_schema["ui:widget"] = json_field["ui:widget"]
+                    # Same reasoning, for the structured per-destination
+                    # credential-field UI (trigger_field/options/template) --
+                    # also schema.json-only, never derivable from a plain
+                    # `destination_credentials_url: Optional[str]`.
+                    if not field_schema.get("x-dagster-destination-fields") and json_field.get("x-dagster-destination-fields"):
+                        field_schema["x-dagster-destination-fields"] = json_field["x-dagster-destination-fields"]
 
         component = ComponentSchema(
             name=component_type.split(".")[-1],

@@ -256,6 +256,19 @@ class ProjectService:
                         # Save project metadata
                         self._save_project(project)
                     elif project_type == "dbt":
+                        # This branch always scaffolds a BRAND NEW
+                        # Designer-managed wrapper project around the cloned
+                        # dbt repo (it's not Dagster code at all) -- is_imported
+                        # was set True above purely because a git_repo was
+                        # given, but that flag means "existing Dagster project,
+                        # hands off its YAML," which is wrong here and
+                        # confirmed live to break asset generation entirely:
+                        # _generate_component_yaml_files below checks
+                        # `project.is_imported` and silently skips writing the
+                        # defs.yaml for the dbt component just created, so `dg`
+                        # finds zero assets no matter how long you wait or how
+                        # many times you click "Regenerate assets."
+                        project.is_imported = False
                         # Scaffold Dagster wrapper project FIRST
                         print(f"🏗️  Scaffolding Dagster wrapper project for dbt...")
                         self._scaffold_project_with_create_dagster(project)
@@ -300,6 +313,10 @@ class ProjectService:
 
                         self._save_project(project)
                     elif project_type == "multi-dbt":
+                        # Same reasoning as the single-dbt branch above: this
+                        # scaffolds a brand new wrapper project too, so
+                        # is_imported must not stay True.
+                        project.is_imported = False
                         # Multiple dbt projects detected - scaffold Dagster project and create components for each
                         print(f"ℹ️  Multiple dbt projects detected - creating components for each...")
                         dbt_projects = self._find_dbt_projects_recursive(analyze_dir)
@@ -364,6 +381,11 @@ class ProjectService:
 
                             self._save_project(project)
                     else:
+                        # Same reasoning as the dbt/multi-dbt branches above --
+                        # both sub-cases below scaffold a brand new wrapper
+                        # project (dbt-projects-found and generic-no-dbt
+                        # alike), never a real existing-Dagster-project import.
+                        project.is_imported = False
                         # Unknown project type - check for multiple dbt projects in subdirectories
                         print(f"ℹ️  Unknown project type - checking for dbt projects in subdirectories...")
                         dbt_projects = self._find_dbt_projects_recursive(analyze_dir)
@@ -576,9 +598,9 @@ class ProjectService:
         print(f"📥 Installing project dependencies with uv...")
         self._install_dependencies_with_uv(project)
 
-        # Inject custom lineage loading logic into definitions.py
-        print(f"🔧 Injecting custom lineage support into definitions.py...")
-        self._inject_custom_lineage_logic(project)
+        # Write any custom lineage edges as a native post_processing block
+        print(f"🔧 Writing custom lineage support (defs.yaml post_processing)...")
+        self._write_post_processing_defs_yaml(project)
 
         # Discover existing components in the project
         print(f"🔍 Discovering components in imported project...")
@@ -724,6 +746,24 @@ class ProjectService:
                         reconstructed_lineage.append(edge)
                 setattr(project, field, reconstructed_lineage)
                 print(f"[update_project] Reconstructed {len(reconstructed_lineage)} custom lineage edges", flush=True)
+            elif field == "asset_field_overrides" and isinstance(value, dict):
+                # Reconstruct AssetFieldOverrides objects
+                from ..models.project import AssetFieldOverrides
+                reconstructed_overrides = {
+                    k: (AssetFieldOverrides(**v) if isinstance(v, dict) else v)
+                    for k, v in value.items()
+                }
+                setattr(project, field, reconstructed_overrides)
+                print(f"[update_project] Reconstructed {len(reconstructed_overrides)} asset field override(s)", flush=True)
+            elif field == "asset_post_processing_rules" and isinstance(value, list):
+                # Reconstruct AssetPostProcessingRule objects
+                from ..models.project import AssetPostProcessingRule
+                reconstructed_rules = [
+                    AssetPostProcessingRule(**r) if isinstance(r, dict) else r
+                    for r in value
+                ]
+                setattr(project, field, reconstructed_rules)
+                print(f"[update_project] Reconstructed {len(reconstructed_rules)} post-processing rule(s)", flush=True)
             else:
                 setattr(project, field, value)
 
@@ -968,8 +1008,8 @@ class ProjectService:
         # Writing both causes conflicts with Dagster's load_from_defs_folder.
         # self._write_defs_yaml(project)
 
-        # Write custom lineage to JSON file for Dagster to load
-        self._write_custom_lineage_file(project)
+        # Write custom lineage as a native post_processing block
+        self._write_post_processing_defs_yaml(project)
 
     def _write_defs_yaml(self, project: Project):
         """Write all components to a defs.yaml file in the project directory.
@@ -1036,12 +1076,39 @@ class ProjectService:
 
         print(f"[_write_defs_yaml] Wrote {len(project.components)} components to {defs_yaml_file}")
 
-    def _write_custom_lineage_file(self, project: Project):
-        """Write custom lineage to a JSON file in the project directory.
+    def _write_post_processing_defs_yaml(self, project: Project):
+        """Write custom lineage edges AND per-asset group_name/owners/tags
+        overrides as a native Dagster post_processing block in the
+        project's root defs.yaml, instead of a side-channel
+        custom_lineage.json file plus hand-rolled Python injected into
+        definitions.py.
 
-        This file is read by definitions.py to inject custom dependencies.
-        Merges edges from both project.custom_lineage and DependencyGraphComponent.
+        Verified empirically: a root-level defs/defs.yaml declaring
+        `type: dagster.DefsFolderComponent` with a `post_processing.assets[]`
+        list adds a REAL asset dependency, reaching any descendant asset
+        (a bare Python file, a dbt model, a component instance) regardless
+        of which component produced it -- no per-component defs.yaml
+        changes needed, and no custom "lineage component" required at all.
+        `deps`/`group_name`/`owners`/`tags` are all attributes Dagster's
+        own post-processing schema (SharedAssetKwargs) supports
+        generically for every asset, not just `deps`.
+
+        Merges edges from both project.custom_lineage (UI-drawn edges) and
+        any DependencyGraphComponent instance's own `edges` attribute --
+        same two sources the old custom_lineage.json writer merged -- plus
+        project.asset_field_overrides for group_name/owners/tags. Both
+        kinds of override are merged into ONE post_processing entry per
+        target asset where they overlap, rather than two separate entries.
+
+        dbt model TARGETS are skipped for `deps` only (same restriction the
+        old definitions.py injection enforced): a dbt model's deps come
+        from the dbt manifest/schema.yml, not this generic mechanism.
+        group_name/owners/tags have no such restriction -- overriding them
+        on a dbt-sourced asset via post_processing is Dagster's own
+        documented pattern for per-model partitions/tags/owners.
         """
+        import yaml as _yaml
+
         project_dir = self._get_project_dir(project)
 
         # Find the defs directory (handles both src/ and imported project structures)
@@ -1067,195 +1134,197 @@ class ProjectService:
                             break
 
         if not defs_dir:
-            print(f"⚠️  Could not find defs directory for custom_lineage.json", flush=True)
+            print(f"⚠️  Could not find defs directory for custom-lineage defs.yaml", flush=True)
             return
 
-        custom_lineage_file = defs_dir / "custom_lineage.json"
+        root_defs_yaml = defs_dir / "defs.yaml"
 
-        # Create parent directories if they don't exist
-        custom_lineage_file.parent.mkdir(parents=True, exist_ok=True)
+        # Migration cleanup -- nothing reads this anymore (definitions.py no
+        # longer injects a loader for it).
+        stale_json = defs_dir / "custom_lineage.json"
+        if stale_json.exists():
+            try:
+                stale_json.unlink()
+                print(f"🧹 Removed stale {stale_json} (replaced by {root_defs_yaml})", flush=True)
+            except Exception as e:
+                print(f"⚠️  Could not remove stale custom_lineage.json: {e}", flush=True)
 
-        # Collect all edges from multiple sources
-        all_edges = []
+        # 1. Edges from project.custom_lineage (UI-drawn edges)
+        all_edges = [(edge.source, edge.target) for edge in project.custom_lineage]
 
-        # 1. Add edges from project.custom_lineage (legacy/UI-drawn edges)
-        for edge in project.custom_lineage:
-            all_edges.append({"source": edge.source, "target": edge.target})
-
-        # 2. Add edges from DependencyGraphComponent (YAML-based dependencies)
+        # 2. Edges from DependencyGraphComponent (YAML-based dependencies)
         dep_graph_component = next(
             (comp for comp in project.components
              if comp.component_type == 'dagster_component_templates.DependencyGraphComponent'),
             None
         )
-
         component_edges = []
         if dep_graph_component:
             component_edges = dep_graph_component.attributes.get('edges', [])
             for edge in component_edges:
                 if isinstance(edge, dict) and 'source' in edge and 'target' in edge:
-                    all_edges.append({"source": edge['source'], "target": edge['target']})
+                    all_edges.append((edge['source'], edge['target']))
 
-        # Deduplicate edges and filter out self-loops
-        unique_edges = []
+        # Dedup + drop self-loops, preserving first-seen order
         seen = set()
-        for edge in all_edges:
-            # Skip self-loops (asset depending on itself)
-            if edge['source'] == edge['target']:
-                print(f"⚠️  Skipping self-loop: {edge['source']} -> {edge['target']}", flush=True)
+        unique_edges: list[tuple[str, str]] = []
+        for source, target in all_edges:
+            if source == target:
+                print(f"⚠️  Skipping self-loop: {source} -> {target}", flush=True)
                 continue
+            if (source, target) in seen:
+                continue
+            seen.add((source, target))
+            unique_edges.append((source, target))
 
-            edge_tuple = (edge['source'], edge['target'])
-            if edge_tuple not in seen:
-                seen.add(edge_tuple)
-                unique_edges.append(edge)
+        dbt_prefixes = ('models/', 'seeds/', 'snapshots/', 'analyses/')
+        dbt_targets = {t for _, t in unique_edges if t.startswith(dbt_prefixes)}
+        applicable_edges = [(s, t) for s, t in unique_edges if t not in dbt_targets]
 
-        # Write to file
-        lineage_data = {"edges": unique_edges}
+        # Defense in depth: validate every target/source against the
+        # project's CURRENT known asset keys before writing anything.
+        # add_custom_lineage/set_asset_field_overrides already reject a
+        # dangling key at creation time, but this also protects against
+        # stale entries left over from BEFORE that validation existed (or
+        # from an asset that was later renamed/deleted outside those two
+        # code paths) -- confirmed live: a single stale target left over
+        # from earlier pipeline-template-generated lineage data
+        # (referencing an asset key that was never real, a naming-
+        # convention mismatch with the actual ingestion component) crashed
+        # loading of an entire real project the moment this mechanism went
+        # from a no-op to actually being applied. A dangling TARGET raises
+        # DagsterInvalidSubsetError and takes down the whole project; a
+        # dangling source silently adds a phantom placeholder asset --
+        # both are worth dropping rather than trusting blindly.
+        #
+        # dbt asset keys (models/seeds/snapshots/analyses) aren't reflected
+        # as "asset" graph nodes the same way component-produced assets
+        # are in every code path that calls this, so they're treated as
+        # always-known here rather than risking false-positive drops.
+        known_asset_keys = {
+            node.data.get("asset_key", node.id)
+            for node in project.graph.nodes
+            if node.node_kind == "asset"
+        }
 
-        with open(custom_lineage_file, "w") as f:
-            json.dump(lineage_data, f, indent=2)
+        def _is_known(key: str) -> bool:
+            return key in known_asset_keys or key.startswith(dbt_prefixes)
 
-        print(f"✅ Written custom_lineage.json with {len(unique_edges)} edges "
-              f"({len(project.custom_lineage)} from UI, "
-              f"{len(component_edges)} from DependencyGraphComponent)",
+        dropped_dangling: set[str] = set()
+        validated_edges = []
+        for source, target in applicable_edges:
+            if not _is_known(target):
+                dropped_dangling.add(target)
+                continue
+            if not _is_known(source):
+                dropped_dangling.add(source)
+                continue
+            validated_edges.append((source, target))
+        applicable_edges = validated_edges
+
+        # Group by target -- one post_processing entry per target asset.
+        # deps and field overrides merge into the SAME entry where their
+        # targets coincide, rather than writing two separate entries.
+        target_to_attributes: dict[str, dict] = {}
+        for source, target in applicable_edges:
+            target_to_attributes.setdefault(target, {}).setdefault("deps", []).append(source)
+
+        override_count = 0
+        for asset_key, overrides in (project.asset_field_overrides or {}).items():
+            if not _is_known(asset_key):
+                dropped_dangling.add(asset_key)
+                continue
+            attrs: dict = {}
+            if overrides.description:
+                attrs["description"] = overrides.description
+            if overrides.group_name:
+                attrs["group_name"] = overrides.group_name
+            if overrides.owners:
+                attrs["owners"] = overrides.owners
+            if overrides.tags:
+                attrs["tags"] = overrides.tags
+            if overrides.kinds:
+                attrs["kinds"] = overrides.kinds
+            if not attrs:
+                continue
+            target_to_attributes.setdefault(asset_key, {}).update(attrs)
+            override_count += 1
+
+        if dropped_dangling:
+            print(f"⚠️  Dropped post-processing entries referencing asset key(s) not found in "
+                  f"this project (stale/renamed/typo'd): {', '.join(sorted(dropped_dangling))}", flush=True)
+
+        # Project-wide rules (AssetPostProcessingRule): a real Dagster
+        # selection expression, not a single literal key -- lets one rule
+        # apply to many assets (e.g. "tag every staging model with owner
+        # X"), which target_to_attributes's per-literal-key dict can't
+        # express. Kept as separate entries rather than merged into
+        # target_to_attributes, since a selector isn't a safe dedup key
+        # the way a literal asset key is.
+        rule_entries = []
+        for rule in (project.asset_post_processing_rules or []):
+            attrs: dict = {}
+            if rule.group_name:
+                attrs["group_name"] = rule.group_name
+            if rule.owners:
+                attrs["owners"] = rule.owners
+            if rule.tags:
+                attrs["tags"] = rule.tags
+            if not attrs:
+                continue
+            # Only prefix if it DOESN'T already look like real selector
+            # syntax -- a user typing real syntax (tag:/key:/group:/"*"/
+            # boolean combinations) is responsible for it being correct,
+            # the same way they would be hand-writing it in defs.yaml; a
+            # user who just typed a bare asset name still gets the same
+            # bare-string-crashes-the-whole-project protection as
+            # AssetFieldOverrides.
+            target = rule.target if (":" in rule.target or rule.target.strip() == "*") else f"key:{rule.target}"
+            rule_entries.append({"target": target, "attributes": attrs})
+
+        if not target_to_attributes and not rule_entries:
+            if dbt_targets:
+                print(f"⚠️  Cannot add dependencies to dbt models (define in dbt schema.yml): "
+                      f"{', '.join(sorted(dbt_targets))}", flush=True)
+            if root_defs_yaml.exists():
+                try:
+                    root_defs_yaml.unlink()
+                    print(f"✅ Removed {root_defs_yaml} (no post-processing overrides remain)", flush=True)
+                except Exception as e:
+                    print(f"⚠️  Could not remove empty post-processing defs.yaml: {e}", flush=True)
+            return
+
+        # `key:` prefix, not a bare string -- confirmed directly: Dagster
+        # resolves a bare-string target as a strict exact-key lookup that
+        # raises DagsterInvalidSubsetError (crashing the whole project) if
+        # it doesn't resolve, but an explicit `key:<same string>` degrades
+        # gracefully to "matches nothing" for the same nonexistent key,
+        # with IDENTICAL behavior to a bare string when the key DOES
+        # exist (same deps/attributes applied, verified against a real
+        # multi-part dbt-style key too). This makes the known_asset_keys
+        # check above belt-and-suspenders (still useful: avoids littering
+        # defs.yaml with no-op entries and gives a clear warning) rather
+        # than the only thing preventing a crash.
+        defs_yaml_content = {
+            "type": "dagster.DefsFolderComponent",
+            "post_processing": {
+                "assets": [
+                    {"target": f"key:{target}", "attributes": attrs}
+                    for target, attrs in target_to_attributes.items()
+                ] + rule_entries
+            },
+        }
+
+        with open(root_defs_yaml, "w") as f:
+            _yaml.dump(defs_yaml_content, f, default_flow_style=False, sort_keys=False)
+
+        if dbt_targets:
+            print(f"⚠️  Cannot add dependencies to dbt models (define in dbt schema.yml): "
+                  f"{', '.join(sorted(dbt_targets))}", flush=True)
+        print(f"✅ Written {root_defs_yaml} with {len(applicable_edges)} custom lineage edge(s) "
+              f"({len(project.custom_lineage)} from UI, {len(component_edges)} from DependencyGraphComponent), "
+              f"{override_count} field override(s), {len(rule_entries)} project-wide rule(s)",
               flush=True)
-
-    def _inject_custom_lineage_logic(self, project: Project):
-        """Inject custom lineage loading logic into an imported project's definitions.py.
-
-        This ensures that DependencyGraphComponent edges are applied to asset specs
-        at runtime via map_asset_specs().
-        """
-        project_dir = self._get_project_dir(project)
-
-        # Find the definitions.py file (handles both src/ and imported project structures)
-        definitions_file = None
-
-        # Try standard structure first (src/module/__init__.py)
-        src_dir = project_dir / "src"
-        if src_dir.exists():
-            for item in src_dir.iterdir():
-                if item.is_dir() and not item.name.startswith('.'):
-                    candidate = item / "definitions.py"
-                    if candidate.exists():
-                        definitions_file = candidate
-                        break
-
-        # Try imported project structure (module/__init__.py at root)
-        if not definitions_file:
-            for item in project_dir.iterdir():
-                if item.is_dir() and not item.name.startswith('.') and item.name not in ['src', 'tests', 'dbt_project', '.venv', '__pycache__']:
-                    candidate = item / "definitions.py"
-                    if candidate.exists():
-                        definitions_file = candidate
-                        break
-
-        if not definitions_file:
-            print(f"⚠️  Could not find definitions.py to inject custom lineage logic", flush=True)
-            return
-
-        # Read the existing definitions.py content
-        with open(definitions_file, "r") as f:
-            content = f.read()
-
-        # Check if custom lineage logic already exists
-        if "custom_lineage" in content and "inject_custom_dependencies" in content:
-            print(f"✅ Custom lineage logic already exists in definitions.py", flush=True)
-            return
-
-        # Prepare the custom lineage code to inject
-        custom_lineage_code = '''
-# Load custom lineage from JSON file (if it exists)
-custom_lineage_file = Path(__file__).parent / "defs" / "custom_lineage.json"
-custom_lineage_edges = []
-if custom_lineage_file.exists():
-    try:
-        with open(custom_lineage_file, "r") as f:
-            custom_lineage_data = json.load(f)
-            custom_lineage_edges = custom_lineage_data.get("edges", [])
-            if custom_lineage_edges:
-                print(f"✅ Loaded {len(custom_lineage_edges)} custom lineage edge(s)")
-    except Exception as e:
-        print(f"⚠️  Failed to load custom_lineage.json: {e}")
-'''
-
-        inject_code = '''
-# Apply custom lineage by injecting dependencies into asset specs
-if custom_lineage_edges:
-    print(f"⚠️  Custom lineage injection temporarily disabled due to API compatibility issues")
-    print(f"    Custom lineage is tracked in the UI but does not affect Dagster runtime dependencies")
-    # TODO: Fix custom lineage injection for Dagster 1.11+
-    # The challenge is properly merging AssetDep objects with existing deps
-'''
-
-        # Check if we need to add imports
-        needs_json = "import json" not in content
-        needs_pathlib = "from pathlib import Path" not in content and "import pathlib" not in content
-
-        # Build the injection
-        lines = content.split('\n')
-
-        # Find where to inject imports (after existing imports)
-        import_section_end = 0
-        for i, line in enumerate(lines):
-            if line.startswith('import ') or line.startswith('from '):
-                import_section_end = i + 1
-
-        # Add missing imports
-        if needs_json or needs_pathlib:
-            new_imports = []
-            if needs_json:
-                new_imports.append("import json")
-            if needs_pathlib:
-                new_imports.append("from pathlib import Path")
-
-            # Insert after last import
-            for imp in reversed(new_imports):
-                lines.insert(import_section_end, imp)
-            import_section_end += len(new_imports)
-
-        # Find where to inject custom lineage loading (before defs creation)
-        # Look for common patterns like "defs = " or "Definitions("
-        defs_line_idx = None
-        for i, line in enumerate(lines):
-            if 'defs = ' in line and 'Definitions' in line:
-                defs_line_idx = i
-                break
-
-        if defs_line_idx is None:
-            print(f"⚠️  Could not find 'defs = Definitions' pattern in definitions.py", flush=True)
-            return
-
-        # Insert custom lineage loading code before defs creation
-        custom_lineage_lines = custom_lineage_code.strip().split('\n')
-        for j, cl_line in enumerate(custom_lineage_lines):
-            lines.insert(defs_line_idx + j, cl_line)
-
-        # Find the end of defs creation (after the defs variable is assigned)
-        # We'll insert the injection code after all defs operations
-        inject_idx = None
-        for i in range(defs_line_idx + len(custom_lineage_lines), len(lines)):
-            line = lines[i].strip()
-            # Look for the last line that modifies defs
-            if line.startswith('defs = ') or (line and not line.startswith('#') and i > defs_line_idx + len(custom_lineage_lines) + 10):
-                inject_idx = i + 1
-
-        if inject_idx is None:
-            # Default to end of file
-            inject_idx = len(lines)
-
-        # Insert injection code
-        inject_lines = inject_code.strip().split('\n')
-        for j, inj_line in enumerate(inject_lines):
-            lines.insert(inject_idx + j, inj_line)
-
-        # Write back
-        new_content = '\n'.join(lines)
-        with open(definitions_file, "w") as f:
-            f.write(new_content)
-
-        print(f"✅ Injected custom lineage logic into {definitions_file.relative_to(project_dir)}", flush=True)
 
     def _extract_repo_name(self, git_repo: str) -> str:
         """Extract repository name from git URL.
@@ -2730,10 +2799,19 @@ if custom_lineage_edges:
         sys.stdout.flush()
 
     def _generate_definitions_with_asset_customizations(self, project: Project):
-        """Generate definitions.py with asset customization support for dbt components."""
-        import json
+        """Generate definitions.py.
+
+        Historically this also collected per-asset `group_name`/`description`
+        overrides from dbt components using the `select: <model>` +
+        `translation` split-component convention into an
+        `asset_customizations.json` sidecar, applied via `map_asset_specs` at
+        load time. That convention is no longer produced by the frontend --
+        both AssetDetailPage and PropertyPanel now write per-asset overrides
+        through `asset_field_overrides` / `_write_post_processing_defs_yaml`
+        instead, which covers dbt and non-dbt assets identically. Confirmed
+        no other caller still writes `select` + `translation` this way.
+        """
         from pathlib import Path
-        from collections import defaultdict
 
         # Skip code generation for imported Dagster projects - they have their own structure.
         # Same gap as _generate_component_yaml_files had: dagster_package_subdir alone
@@ -2751,43 +2829,9 @@ if custom_lineage_edges:
         module_name = project.directory_name.replace("-", "_")
         module_dir = project_dir / "src" / module_name
         definitions_file = module_dir / "definitions.py"
-        customizations_file = module_dir / "asset_customizations.json"
-
-        # Group dbt components by project path to find customizations
-        dbt_components_by_project = defaultdict(list)
-        for component in project.components:
-            if component.component_type.startswith("dagster_dbt"):
-                # Use 'project' field (the new standard) or fall back to legacy 'project_path'
-                project_path = component.attributes.get("project") or component.attributes.get("project_path", "")
-                if project_path:
-                    dbt_components_by_project[project_path].append(component)
-
-        # Collect asset customizations from dbt components
-        asset_customizations = {}
-        for project_path, components in dbt_components_by_project.items():
-            for component in components:
-                # If component has select attribute, it's targeting specific assets
-                select = component.attributes.get("select")
-                if select and component.translation:
-                    # The select value is the asset key
-                    asset_key = select
-                    customizations = {}
-                    if component.translation.get("group_name"):
-                        customizations["group_name"] = component.translation["group_name"]
-                    if component.translation.get("description"):
-                        customizations["description"] = component.translation["description"]
-                    if customizations:
-                        asset_customizations[asset_key] = customizations
-
-        # Write asset_customizations.json
-        if asset_customizations:
-            with open(customizations_file, 'w') as f:
-                json.dump(asset_customizations, f, indent=2)
-            print(f"✅ Generated asset_customizations.json with {len(asset_customizations)} customizations")
 
         # Generate definitions.py
         definitions_content = '''from pathlib import Path
-import json
 import dagster as dg
 
 # Import custom components to register them with Dagster (if they exist)
@@ -2804,97 +2848,24 @@ except ImportError:
     # This is normal for new projects without any primitives (jobs, schedules, sensors, checks)
     pass
 
-# Load base definitions from components
+# Load base definitions from components. Per-asset metadata overrides
+# (group_name/owners/tags/description/kinds) and custom lineage (cross-asset
+# deps drawn in the Designer UI, or declared via a DependencyGraphComponent)
+# are applied natively here too -- see defs/defs.yaml's post_processing
+# block, written by project_service._write_post_processing_defs_yaml. No
+# separate loading/injection step is needed: load_from_defs_folder applies a
+# defs.yaml's post_processing automatically, the same generic mechanism
+# Dagster uses for any component's defs.yaml.
 defs = dg.load_from_defs_folder(path_within_project=Path(__file__).parent)
-
-# Load custom lineage from JSON file (if it exists)
-custom_lineage_file = Path(__file__).parent / "defs" / "custom_lineage.json"
-custom_lineage_edges = []
-if custom_lineage_file.exists():
-    try:
-        with open(custom_lineage_file, "r") as f:
-            custom_lineage_data = json.load(f)
-            custom_lineage_edges = custom_lineage_data.get("edges", [])
-            if custom_lineage_edges:
-                print(f"✅ Loaded {len(custom_lineage_edges)} custom lineage edge(s)")
-    except Exception as e:
-        print(f"⚠️  Failed to load custom_lineage.json: {e}")
-
-# Apply custom lineage by injecting dependencies using map_resolved_asset_specs with selection
-# This approach works for both Python assets and dbt assets (dbt models are skipped)
-if custom_lineage_edges:
-    # First, get all asset specs to check which ones are from dbt
-    all_specs = list(defs.resolve_all_asset_specs())
-    dbt_asset_keys = set()
-
-    # Identify dbt assets by checking if they have dbt metadata
-    for spec in all_specs:
-        # dbt assets have metadata with 'dagster-dbt/asset_type' or come from dbt component
-        metadata = spec.metadata or {}
-        if any('dbt' in str(key).lower() for key in metadata.keys()):
-            dbt_asset_keys.add(spec.key.to_user_string())
-
-    # Build a map of which assets need custom deps
-    target_to_sources = {}
-    dbt_targets = []
-
-    for edge in custom_lineage_edges:
-        target = edge.get("target")
-        source = edge.get("source")
-        if target and source:
-            # Check if target is a dbt asset dynamically
-            if target in dbt_asset_keys:
-                dbt_targets.append(target)
-                continue
-
-            if target not in target_to_sources:
-                target_to_sources[target] = []
-            target_to_sources[target].append(dg.AssetKey([source]))
-
-    # Apply custom deps to each target asset using selection
-    for target_asset, source_keys in target_to_sources.items():
-        try:
-            defs = defs.map_resolved_asset_specs(
-                func=lambda spec: spec.merge_attributes(deps=source_keys),
-                selection=target_asset  # Only modify this specific asset
-            )
-            print(f"✅ Applied custom lineage to {target_asset}: depends on {[str(key) for key in source_keys]}")
-        except Exception as e:
-            print(f"⚠️  Could not inject custom lineage for {target_asset}: {e}")
-
-    if dbt_targets:
-        print(f"⚠️  Cannot add dependencies to dbt models (define in dbt schema.yml): {', '.join(set(dbt_targets))}")
-
-# Load asset customizations (for group_name, description overrides)
-customizations_path = Path(__file__).parent / "asset_customizations.json"
-if customizations_path.exists():
-    try:
-        with open(customizations_path) as f:
-            customizations = json.load(f)
-
-        # Apply customizations using map_asset_specs
-        def apply_customizations(spec):
-            asset_key_str = spec.key.to_user_string()
-            if asset_key_str in customizations:
-                custom = customizations[asset_key_str]
-                kwargs = {}
-                if "group_name" in custom:
-                    kwargs["group_name"] = custom["group_name"]
-                if "description" in custom:
-                    kwargs["description"] = custom["description"]
-                if kwargs:
-                    return spec.replace_attributes(**kwargs)
-            return spec
-
-        defs = defs.map_asset_specs(func=apply_customizations)
-        print(f"✅ Applied {len(customizations)} asset customizations")
-    except Exception as e:
-        print(f"⚠️  Failed to load asset_customizations.json: {e}")
 '''
 
         with open(definitions_file, 'w') as f:
             f.write(definitions_content)
-        print(f"✅ Generated definitions.py with asset customization support")
+        print(f"✅ Generated definitions.py")
+
+        # Keep the root defs.yaml's post_processing block (custom lineage +
+        # asset field overrides) in sync whenever definitions.py is regenerated.
+        self._write_post_processing_defs_yaml(project)
 
     def _patch_pyproject_for_dg(self, project_path: Path, root_module: str):
         """Patch pyproject.toml to add [tool.dg] configuration if missing.

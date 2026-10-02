@@ -33,9 +33,9 @@ export function TranslationEditor({ value, onChange }: TranslationEditorProps) {
   return (
     <div className="space-y-3">
       <div className="flex items-center justify-between">
-        <label className="block text-sm font-medium text-gray-700">
+        <h3 className="text-sm font-semibold text-gray-900">
           Translation (Asset Customization)
-        </label>
+        </h3>
         <button
           type="button"
           className="text-xs text-blue-600 hover:text-blue-800"
@@ -59,7 +59,7 @@ export function TranslationEditor({ value, onChange }: TranslationEditorProps) {
           return (
             <div key={field.key} className="space-y-1">
               <div className="flex items-center justify-between">
-                <label className="text-xs font-medium text-gray-600">
+                <label className="text-xs text-gray-500">
                   {field.label}
                 </label>
                 {isActive && (
@@ -77,7 +77,7 @@ export function TranslationEditor({ value, onChange }: TranslationEditorProps) {
                 value={fieldValue}
                 onChange={(e) => handleChange(field.key, e.target.value)}
                 placeholder={field.placeholder}
-                className="w-full px-2 py-1.5 text-xs border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                className="w-full px-3 py-1.5 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
               />
             </div>
           );

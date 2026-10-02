@@ -38,6 +38,22 @@ const isDbtComponentType = (componentType: string | undefined): boolean => {
   return false;
 };
 
+// Parses "key=value, key2=value2" into a tags dict -- same convention as
+// ComponentConfigModal's Common fields tags input. Blank/malformed entries
+// (no "=") are skipped rather than erroring, since this is a plain text
+// field, not a validated form.
+function parseTagsInput(s: string): Record<string, string> {
+  const tags: Record<string, string> = {};
+  for (const part of s.split(',')) {
+    const trimmed = part.trim();
+    if (!trimmed || !trimmed.includes('=')) continue;
+    const [k, ...rest] = trimmed.split('=');
+    const key = k.trim();
+    if (key) tags[key] = rest.join('=').trim();
+  }
+  return tags;
+}
+
 interface ComponentTemplate {
   id: string;
   name: string;
@@ -374,8 +390,16 @@ export function PropertyPanel({ nodeId, onConfigureComponent, onOpenFile, onNewP
     description: '',
     group_name: '',
     owners: [] as string[],
+    tags: '', // comma-separated key=value pairs, same convention as ComponentConfigModal's Common fields
   });
   const [hasEdited, setHasEdited] = useState(false);
+  // Custom-lineage-backed "Dependencies", same mechanism as
+  // ComponentConfigModal's -- PropertyPanel operates per-ASSET-node (not
+  // per-component-instance), so unlike that modal this needs no
+  // is_asset_factory gating: every node here already names exactly one
+  // real asset.
+  const [lineageDeps, setLineageDeps] = useState<string[]>([]);
+  const [initialLineageDeps, setInitialLineageDeps] = useState<string[]>([]);
 
   useEffect(() => {
     // Only reset form when switching to a different node (nodeId changes)
@@ -385,16 +409,29 @@ export function PropertyPanel({ nodeId, onConfigureComponent, onOpenFile, onNewP
       setLabel(node.data.label || '');
       setTranslation(node.data.translation || {});
 
-      // Initialize editable metadata for assets
+      // Initialize editable metadata for assets. Prefer a saved
+      // asset_field_overrides entry (the real, persisted source for a
+      // non-dbt asset now) over node.data, which previously was the ONLY
+      // thing the non-dbt save path touched -- confirmed that was purely
+      // cosmetic, never affecting the real Dagster asset.
       if (isAssetNode) {
+        const existingAssetKey = node.data.asset_key || node.id;
+        const overrides = (currentProject?.asset_field_overrides || {})[existingAssetKey];
         setEditableMetadata({
-          description: node.data.description || '',
-          group_name: node.data.group_name || '',
-          owners: node.data.owners || [],
+          description: overrides?.description || node.data.description || '',
+          group_name: overrides?.group_name || node.data.group_name || '',
+          owners: overrides?.owners || node.data.owners || [],
+          tags: Object.entries(overrides?.tags || {}).map(([k, v]) => `${k}=${v}`).join(', '),
         });
+
+        const existingDeps = (currentProject?.custom_lineage || [])
+          .filter((e: any) => e.target === existingAssetKey)
+          .map((e: any) => e.source);
+        setLineageDeps(existingDeps);
+        setInitialLineageDeps(existingDeps);
       }
     }
-  }, [nodeId, node, isAssetNode, hasEdited, isSaving]);
+  }, [nodeId, node, isAssetNode, hasEdited, isSaving, currentProject]);
 
   // Check if asset is partitioned
   useEffect(() => {
@@ -433,148 +470,37 @@ export function PropertyPanel({ nodeId, onConfigureComponent, onOpenFile, onNewP
       setSaveResult(null);
 
       try {
-        // Check if this asset is from a dbt component and has customizations
-        const isDbtAsset = isDbtComponentType(sourceComponent?.component_type);
+        // Persist via asset_field_overrides (the defs.yaml post_processing
+        // mechanism), identically for dbt and non-dbt assets -- this only
+        // needs a real asset key, not a specific producing component, so
+        // there's no per-model component sprawl and no dead
+        // `translation.by_key`/split-DbtProjectComponent dance.
         const assetKey = node.data.asset_key || node.id;
-
-        // Check if metadata has changed from original
-        const hasCustomizations =
-          editableMetadata.description !== (node.data.description || '') ||
-          editableMetadata.group_name !== (node.data.group_name || '') ||
-          JSON.stringify(editableMetadata.owners || []) !== JSON.stringify(node.data.owners || []);
-
-        console.log('[PropertyPanel] Save debug:', {
-          sourceComponent: sourceComponent?.component_type,
-          isDbtAsset,
-          assetKey,
-          hasSourceComponent: !!sourceComponent,
-          hasCustomizations,
-          editableMetadata,
-          nodeData: {
-            description: node.data.description,
-            group_name: node.data.group_name,
-            owners: node.data.owners,
-          },
+        const tags = editableMetadata.tags.trim() ? parseTagsInput(editableMetadata.tags) : null;
+        await projectsApi.setAssetFieldOverrides(currentProject.id, assetKey, {
+          description: editableMetadata.description.trim() || null,
+          group_name: editableMetadata.group_name.trim() || null,
+          owners: editableMetadata.owners.length > 0 ? editableMetadata.owners : null,
+          tags,
         });
 
-        if (isDbtAsset && hasCustomizations && sourceComponent) {
-          // For dbt assets with customizations, we need to:
-          // 1. Create a new dbt component for this specific asset with translation
-          // 2. Exclude this asset from the original dbt component
-          // 3. Regenerate assets to apply changes
+        setSaveResult({
+          success: true,
+          message: 'Asset metadata updated successfully.',
+        });
 
-          // Find the dbt model name from the asset key (last part)
-          const dbtModelName = assetKey.split('/').pop() || assetKey;
-
-          // Check if there's already a customization component for this asset
-          const existingCustomComponent = currentProject.components.find(
-            (c) =>
-              c.component_type === 'dagster_dbt.DbtProjectComponent' &&
-              c.attributes?.select === dbtModelName
-          );
-
-          // Build translation object from customizations
-          const translation: Record<string, any> = {};
-          if (editableMetadata.group_name) {
-            translation.group_name = editableMetadata.group_name;
-          }
-          if (editableMetadata.description) {
-            translation.description = editableMetadata.description;
-          }
-          if (editableMetadata.owners && editableMetadata.owners.length > 0) {
-            translation.owners = editableMetadata.owners;
-          }
-
-          let updatedComponents: ComponentInstance[];
-
-          if (existingCustomComponent) {
-            // Update existing customization component
-            updatedComponents = currentProject.components.map((c) =>
-              c.id === existingCustomComponent.id
-                ? {
-                    ...c,
-                    translation,
-                  }
-                : c
-            );
-          } else {
-            // Create new customization component
-            const customComponent: ComponentInstance = {
-              id: `dbt-custom-${Date.now()}`,
-              component_type: 'dagster_dbt.DbtProjectComponent',
-              label: `dbt: ${dbtModelName} (customized)`,
-              attributes: {
-                // Support both project_path (created by tool) and project (imported)
-                project_path: sourceComponent.attributes.project_path || sourceComponent.attributes.project,
-                select: dbtModelName,
-              },
-              translation,
-              is_asset_factory: true,
-            };
-
-            // Update the original component to exclude this asset
-            const originalExclude = sourceComponent.attributes.exclude || '';
-            const excludeList: string[] = originalExclude ? originalExclude.split(',').map((s: string) => s.trim()) : [];
-
-            if (!excludeList.includes(dbtModelName)) {
-              excludeList.push(dbtModelName);
-            }
-
-            updatedComponents = currentProject.components.map((c) =>
-              c.id === sourceComponent.id
-                ? {
-                    ...c,
-                    attributes: {
-                      ...c.attributes,
-                      exclude: excludeList.join(', '),
-                    },
-                  }
-                : c
-            );
-
-            // Add the new customization component
-            updatedComponents.push(customComponent);
-          }
-
-          // Update the project with new components list
-          await projectsApi.updateProject(currentProject.id, {
-            components: updatedComponents,
-          });
-
-          // Regenerate assets to apply the changes
-          console.log('Regenerating assets after dbt customization...');
-          await projectsApi.regenerateAssets(currentProject.id);
-
-          // Refresh the project state to show updated assets
-          await loadProject(currentProject.id);
-
-          setSaveResult({
-            success: true,
-            message: `Customization applied to "${dbtModelName}". The asset has been moved to the "${editableMetadata.group_name}" group.`,
-          });
-        } else {
-          // For non-dbt assets or assets without source component, just update the node
-          const updatedNodes = currentProject.graph.nodes.map((n) =>
-            n.id === nodeId
-              ? {
-                  ...n,
-                  data: {
-                    ...n.data,
-                    description: editableMetadata.description,
-                    group_name: editableMetadata.group_name,
-                    owners: editableMetadata.owners,
-                  },
-                }
-              : n
-          );
-
-          updateGraph(updatedNodes, currentProject.graph.edges);
-
-          setSaveResult({
-            success: true,
-            message: 'Asset metadata updated successfully.',
-          });
+        // Dependencies: apply the add/remove delta against custom lineage,
+        // same mechanism ComponentConfigModal's Dependencies field uses.
+        const addedDeps = lineageDeps.filter((d) => !initialLineageDeps.includes(d));
+        const removedDeps = initialLineageDeps.filter((d) => !lineageDeps.includes(d));
+        for (const source of addedDeps) {
+          await projectsApi.addCustomLineage(currentProject.id, source, assetKey);
         }
+        for (const source of removedDeps) {
+          await projectsApi.removeCustomLineage(currentProject.id, source, assetKey);
+        }
+
+        await loadProject(currentProject.id);
 
         // Always save the graph to persist any partition config changes
         await projectsApi.update(currentProject.id, {
@@ -1122,6 +1048,89 @@ export function PropertyPanel({ nodeId, onConfigureComponent, onOpenFile, onNewP
                 + Add Owner
               </button>
             </div>
+          </div>
+
+          {/* Tags (Editable) -- same post_processing mechanism as
+              description/group_name/owners above. */}
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              Tags
+            </label>
+            <input
+              type="text"
+              value={editableMetadata.tags}
+              onChange={(e) => {
+                setEditableMetadata({ ...editableMetadata, tags: e.target.value });
+                setHasEdited(true);
+              }}
+              placeholder="tier=prod, team=analytics"
+              className="w-full px-3 py-2 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+            />
+            <p className="text-xs text-gray-500 mt-1">
+              Comma-separated key=value pairs
+            </p>
+          </div>
+
+          {/* Dependencies (Editable) -- backed by custom lineage, same
+              mechanism as ComponentConfigModal's Dependencies field. This
+              is the one place a multi-asset component's (dbt, fivetran,
+              ...) individual assets can get this at all, since
+              ComponentConfigModal operates per component INSTANCE, not
+              per asset. */}
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              Dependencies
+            </label>
+            <p className="text-xs text-gray-500 mb-2">
+              Other assets this one depends on, beyond what its own component declares.
+            </p>
+            <select
+              multiple
+              value={lineageDeps}
+              onChange={(e) => {
+                const selected = Array.from(e.target.selectedOptions, (option) => option.value);
+                setLineageDeps(selected);
+                setHasEdited(true);
+              }}
+              className="w-full px-3 py-2 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+              size={Math.min(6, Math.max(3, (currentProject?.graph.nodes || []).filter((n) => n.node_kind === 'asset' && (n.data.asset_key || n.id) !== assetKey).length))}
+            >
+              {(currentProject?.graph.nodes || [])
+                .filter((n) => n.node_kind === 'asset' && (n.data.asset_key || n.id) !== assetKey)
+                .map((n) => {
+                  const key = n.data.asset_key || n.id;
+                  return (
+                    <option key={key} value={key}>
+                      {key}
+                    </option>
+                  );
+                })}
+            </select>
+            <p className="text-xs text-gray-500 mt-1">
+              Hold Cmd/Ctrl to select multiple assets
+            </p>
+            {lineageDeps.length > 0 && (
+              <div className="flex flex-wrap gap-1 mt-2">
+                {lineageDeps.map((dep) => (
+                  <span
+                    key={dep}
+                    className="inline-flex items-center gap-1 px-2 py-0.5 text-xs bg-blue-50 border border-blue-200 rounded text-blue-700"
+                  >
+                    {dep}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setLineageDeps(lineageDeps.filter((d) => d !== dep));
+                        setHasEdited(true);
+                      }}
+                      className="hover:text-blue-900"
+                    >
+                      <X className="w-3 h-3" />
+                    </button>
+                  </span>
+                ))}
+              </div>
+            )}
           </div>
 
           {/* Additional Metadata */}

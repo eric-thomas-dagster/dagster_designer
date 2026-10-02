@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
 import Editor from '@monaco-editor/react';
 import {
-  X, ShieldCheck, Loader2, Plus, Clock, Sparkles, MessageSquare, Mail,
+  X, ShieldCheck, Loader2, Plus, Clock, Sparkles,
   Wand2, Code2, Layers,
 } from 'lucide-react';
 import { projectsApi } from '@/services/api';
@@ -37,7 +37,6 @@ interface CheckKindDef {
   icon: any;
   implementations: Implementation[];
   requires_column: boolean;
-  crushes: string;                    // parity punch
   group: 'core' | 'volume' | 'schema' | 'value' | 'anomaly' | 'custom';
   /** Default JSON params for the "advanced" branch. Empty for
    *  kinds that have first-class forms. */
@@ -46,29 +45,29 @@ interface CheckKindDef {
 
 const CHECK_KINDS: CheckKindDef[] = [
   // Core presets — dedicated forms
-  { id: 'freshness',            label: 'Freshness',            hint: 'Fail when the asset hasn\'t been updated for N seconds.',                     icon: Clock,       implementations: ['enhanced_check'],             requires_column: false, crushes: 'Monte Carlo Freshness',      group: 'core' },
-  { id: 'row_count',            label: 'Row count',            hint: 'Volume drop / spike (min, max, Z-score anomaly).',                            icon: Layers,      implementations: ['enhanced_check'],             requires_column: false, crushes: 'Monte Carlo Volume',         group: 'volume' },
-  { id: 'null_ratio',           label: 'Null ratio',           hint: 'Fail when a column has more than X% nulls.',                                  icon: Sparkles,    implementations: ['enhanced_check'],             requires_column: true,  crushes: 'Monte Carlo Null Rate',      group: 'value' },
-  { id: 'uniqueness',           label: 'Uniqueness',           hint: 'Every value in the column must be unique.',                                   icon: ShieldCheck, implementations: ['enhanced_check', 'dbt_test'], requires_column: true,  crushes: 'dbt unique / MC Uniqueness', group: 'value' },
-  { id: 'not_null',             label: 'Not null',             hint: 'No null values in this column.',                                              icon: ShieldCheck, implementations: ['dbt_test', 'enhanced_check'], requires_column: true,  crushes: 'dbt not_null',               group: 'value' },
-  { id: 'accepted_values',      label: 'Accepted values',      hint: 'Column value must be in a fixed set.',                                        icon: ShieldCheck, implementations: ['dbt_test', 'enhanced_check'], requires_column: true,  crushes: 'dbt accepted_values',        group: 'value' },
-  { id: 'accepted_range',       label: 'Accepted range',       hint: 'Numeric column must fall in [min, max].',                                     icon: ShieldCheck, implementations: ['enhanced_check', 'dbt_test'], requires_column: true,  crushes: 'dbt_utils.accepted_range',   group: 'value' },
+  { id: 'freshness',            label: 'Freshness',            hint: 'Fail when the asset hasn\'t been updated for N seconds.',                     icon: Clock,       implementations: ['enhanced_check'],             requires_column: false,      group: 'core' },
+  { id: 'row_count',            label: 'Row count',            hint: 'Volume drop / spike (min, max, Z-score anomaly).',                            icon: Layers,      implementations: ['enhanced_check'],             requires_column: false,         group: 'volume' },
+  { id: 'null_ratio',           label: 'Null ratio',           hint: 'Fail when a column has more than X% nulls.',                                  icon: Sparkles,    implementations: ['enhanced_check'],             requires_column: true,      group: 'value' },
+  { id: 'uniqueness',           label: 'Uniqueness',           hint: 'Every value in the column must be unique.',                                   icon: ShieldCheck, implementations: ['enhanced_check', 'dbt_test'], requires_column: true, group: 'value' },
+  { id: 'not_null',             label: 'Not null',             hint: 'No null values in this column.',                                              icon: ShieldCheck, implementations: ['dbt_test', 'enhanced_check'], requires_column: true,               group: 'value' },
+  { id: 'accepted_values',      label: 'Accepted values',      hint: 'Column value must be in a fixed set.',                                        icon: ShieldCheck, implementations: ['dbt_test', 'enhanced_check'], requires_column: true,        group: 'value' },
+  { id: 'accepted_range',       label: 'Accepted range',       hint: 'Numeric column must fall in [min, max].',                                     icon: ShieldCheck, implementations: ['enhanced_check', 'dbt_test'], requires_column: true,   group: 'value' },
   // Advanced presets — JSON params
-  { id: 'distribution_drift',   label: 'Distribution drift',   hint: 'KS test / PSI against a historical baseline.',                                icon: Sparkles,    implementations: ['enhanced_check'],             requires_column: true,  crushes: 'MC Field Health drift',      group: 'anomaly',  default_params: { column: '<col>', method: 'ks', p_threshold: 0.05, baseline_window: 30 } },
-  { id: 'anomaly_detection',    label: 'Anomaly detection',    hint: 'Z-score / IQR against rolling history for any numeric metric.',                icon: Sparkles,    implementations: ['enhanced_check'],             requires_column: false, crushes: 'MC anomaly monitors',        group: 'anomaly',  default_params: { metric: 'row_count', method: 'zscore', threshold: 3.0, window: 30 } },
-  { id: 'mean_shift',           label: 'Mean shift',           hint: 'Column mean drift vs historical baseline.',                                    icon: Sparkles,    implementations: ['enhanced_check'],             requires_column: true,  crushes: 'MC Field Health',            group: 'anomaly',  default_params: { column: '<col>', max_delta_pct: 20, baseline_window: 14 } },
-  { id: 'stddev_check',         label: 'Stddev check',         hint: 'Column stddev inside an allowed band.',                                        icon: Sparkles,    implementations: ['enhanced_check'],             requires_column: true,  crushes: 'MC Field Health',            group: 'anomaly',  default_params: { column: '<col>', max_stddev: 10 } },
-  { id: 'quantile_check',       label: 'Quantile check',       hint: 'P95 / P99 / any quantile against a threshold.',                                icon: Sparkles,    implementations: ['enhanced_check'],             requires_column: true,  crushes: 'MC latency-style monitors',  group: 'anomaly',  default_params: { column: '<col>', quantile: 0.95, max_value: 1000 } },
-  { id: 'regex_match',          label: 'Regex match',          hint: 'All values in a column match a regex pattern.',                                icon: Code2,       implementations: ['enhanced_check'],             requires_column: true,  crushes: 'MC pattern checks',          group: 'value',    default_params: { column: '<col>', pattern: '^.+$' } },
-  { id: 'schema_change',        label: 'Schema change',        hint: 'Fail if columns / types change vs a snapshot.',                                icon: ShieldCheck, implementations: ['enhanced_check'],             requires_column: false, crushes: 'MC Schema monitors',         group: 'schema',   default_params: { fail_on: ['column_added', 'column_removed', 'type_changed'] } },
-  { id: 'referential_integrity',label: 'Referential integrity',hint: 'Every value in col X must exist in ref(other).col Y.',                         icon: ShieldCheck, implementations: ['enhanced_check', 'dbt_test'], requires_column: true,  crushes: 'dbt relationships / MC RI',  group: 'schema',   default_params: { column: '<col>', to_asset: '<other_asset>', to_column: '<col>' } },
-  { id: 'duplicate_count',      label: 'Duplicate count',      hint: 'Count of duplicated key(s) below threshold.',                                  icon: ShieldCheck, implementations: ['enhanced_check'],             requires_column: true,  crushes: 'MC dupe monitors',           group: 'value',    default_params: { columns: ['<col>'], max_duplicates: 0 } },
-  { id: 'zero_count',           label: 'Zero count',           hint: 'Fail if number of rows with 0 / null / missing key exceeds a threshold.',      icon: ShieldCheck, implementations: ['enhanced_check'],             requires_column: true,  crushes: 'MC zero monitors',           group: 'volume',   default_params: { column: '<col>', max_zeros: 0 } },
-  { id: 'sum_check',            label: 'Sum check',            hint: 'Column sum inside an allowed range.',                                          icon: ShieldCheck, implementations: ['enhanced_check'],             requires_column: true,  crushes: 'MC volume + revenue',        group: 'volume',   default_params: { column: '<col>', min_sum: 0 } },
-  { id: 'min_max_check',        label: 'Min / max',            hint: 'Column min or max above / below a threshold.',                                 icon: ShieldCheck, implementations: ['enhanced_check'],             requires_column: true,  crushes: 'MC bounds monitors',         group: 'value',    default_params: { column: '<col>', min_of_min: null, max_of_max: null } },
+  { id: 'distribution_drift',   label: 'Distribution drift',   hint: 'KS test / PSI against a historical baseline.',                                icon: Sparkles,    implementations: ['enhanced_check'],             requires_column: true,      group: 'anomaly',  default_params: { column: '<col>', method: 'ks', p_threshold: 0.05, baseline_window: 30 } },
+  { id: 'anomaly_detection',    label: 'Anomaly detection',    hint: 'Z-score / IQR against rolling history for any numeric metric.',                icon: Sparkles,    implementations: ['enhanced_check'],             requires_column: false,        group: 'anomaly',  default_params: { metric: 'row_count', method: 'zscore', threshold: 3.0, window: 30 } },
+  { id: 'mean_shift',           label: 'Mean shift',           hint: 'Column mean drift vs historical baseline.',                                    icon: Sparkles,    implementations: ['enhanced_check'],             requires_column: true,            group: 'anomaly',  default_params: { column: '<col>', max_delta_pct: 20, baseline_window: 14 } },
+  { id: 'stddev_check',         label: 'Stddev check',         hint: 'Column stddev inside an allowed band.',                                        icon: Sparkles,    implementations: ['enhanced_check'],             requires_column: true,            group: 'anomaly',  default_params: { column: '<col>', max_stddev: 10 } },
+  { id: 'quantile_check',       label: 'Quantile check',       hint: 'P95 / P99 / any quantile against a threshold.',                                icon: Sparkles,    implementations: ['enhanced_check'],             requires_column: true,  group: 'anomaly',  default_params: { column: '<col>', quantile: 0.95, max_value: 1000 } },
+  { id: 'regex_match',          label: 'Regex match',          hint: 'All values in a column match a regex pattern.',                                icon: Code2,       implementations: ['enhanced_check'],             requires_column: true,          group: 'value',    default_params: { column: '<col>', pattern: '^.+$' } },
+  { id: 'schema_change',        label: 'Schema change',        hint: 'Fail if columns / types change vs a snapshot.',                                icon: ShieldCheck, implementations: ['enhanced_check'],             requires_column: false,         group: 'schema',   default_params: { fail_on: ['column_added', 'column_removed', 'type_changed'] } },
+  { id: 'referential_integrity',label: 'Referential integrity',hint: 'Every value in col X must exist in ref(other).col Y.',                         icon: ShieldCheck, implementations: ['enhanced_check', 'dbt_test'], requires_column: true,  group: 'schema',   default_params: { column: '<col>', to_asset: '<other_asset>', to_column: '<col>' } },
+  { id: 'duplicate_count',      label: 'Duplicate count',      hint: 'Count of duplicated key(s) below threshold.',                                  icon: ShieldCheck, implementations: ['enhanced_check'],             requires_column: true,           group: 'value',    default_params: { columns: ['<col>'], max_duplicates: 0 } },
+  { id: 'zero_count',           label: 'Zero count',           hint: 'Fail if number of rows with 0 / null / missing key exceeds a threshold.',      icon: ShieldCheck, implementations: ['enhanced_check'],             requires_column: true,           group: 'volume',   default_params: { column: '<col>', max_zeros: 0 } },
+  { id: 'sum_check',            label: 'Sum check',            hint: 'Column sum inside an allowed range.',                                          icon: ShieldCheck, implementations: ['enhanced_check'],             requires_column: true,        group: 'volume',   default_params: { column: '<col>', min_sum: 0 } },
+  { id: 'min_max_check',        label: 'Min / max',            hint: 'Column min or max above / below a threshold.',                                 icon: ShieldCheck, implementations: ['enhanced_check'],             requires_column: true,         group: 'value',    default_params: { column: '<col>', min_of_min: null, max_of_max: null } },
   // Full escape hatches
-  { id: 'custom',               label: 'Custom SQL / Python',  hint: 'Write your own logic — SQL for dbt tests, Python for enhanced checks.',        icon: Code2,       implementations: ['enhanced_check', 'dbt_test'], requires_column: false, crushes: 'MC custom monitors',         group: 'custom' },
-  { id: 'any',                  label: 'Any kind (advanced)',  hint: 'Type any kind supported by your enhanced-check component. Params as JSON.',    icon: Wand2,       implementations: ['enhanced_check'],             requires_column: false, crushes: 'Anything MC / Sifflet do',   group: 'custom',   default_params: {} },
+  { id: 'custom',               label: 'Custom SQL / Python',  hint: 'Write your own logic — SQL for dbt tests, Python for enhanced checks.',        icon: Code2,       implementations: ['enhanced_check', 'dbt_test'], requires_column: false,         group: 'custom' },
+  { id: 'any',                  label: 'Any kind (advanced)',  hint: 'Type any kind supported by your enhanced-check component. Params as JSON.',    icon: Wand2,       implementations: ['enhanced_check'],             requires_column: false,   group: 'custom',   default_params: {} },
 ];
 
 const GROUP_ORDER: Array<{ id: CheckKindDef['group']; label: string }> = [
@@ -139,8 +138,6 @@ export function AddMonitorDialog({ open, onOpenChange, projectId, onSaved, initi
   const [scheduleCron, setScheduleCron] = useState<string>('0 * * * *');
   const [scheduleInterval, setScheduleInterval] = useState<string>('60');
   const [runOnMaterialize, setRunOnMaterialize] = useState<boolean>(true);
-  const [slackChannel, setSlackChannel] = useState<string>('');
-  const [email, setEmail] = useState<string>('');
 
   const [saving, setSaving] = useState(false);
 
@@ -209,7 +206,7 @@ export function AddMonitorDialog({ open, onOpenChange, projectId, onSaved, initi
     setMinValue(''); setMaxValue('');
     setCustomSql(STARTER_CUSTOM_SQL); setCustomPython(STARTER_CUSTOM_PYTHON); setCustomLang('sql');
     setScheduleMode('none'); setScheduleCron('0 * * * *'); setScheduleInterval('60');
-    setRunOnMaterialize(true); setSlackChannel(''); setEmail('');
+    setRunOnMaterialize(true);
   };
 
   const submit = async () => {
@@ -265,8 +262,6 @@ export function AddMonitorDialog({ open, onOpenChange, projectId, onSaved, initi
         schedule_cron: scheduleMode === 'cron' ? scheduleCron : undefined,
         schedule_interval_minutes: scheduleMode === 'interval' ? Number(scheduleInterval) : undefined,
         run_on_materialization: runOnMaterialize,
-        slack_channel: slackChannel.trim() || undefined,
-        email: email.trim() || undefined,
         dbt_relative_path: implementation === 'dbt_test' ? dbtProjectPath : undefined,
         dbt_model_unique_id: implementation === 'dbt_test' ? dbtModelUid : undefined,
       });
@@ -360,7 +355,6 @@ export function AddMonitorDialog({ open, onOpenChange, projectId, onSaved, initi
                               {k.label}
                             </div>
                             <div className="text-[10px] text-gray-500 mt-0.5 leading-snug">{k.hint}</div>
-                            <div className="text-[9px] text-emerald-700 mt-1 font-medium">→ {k.crushes}</div>
                           </button>
                         ))}
                       </div>
@@ -409,7 +403,7 @@ export function AddMonitorDialog({ open, onOpenChange, projectId, onSaved, initi
                       value={targetAsset}
                       onChange={(e) => setTargetAsset(e.target.value)}
                       placeholder="e.g. jaffle_shop/customers"
-                      className="w-full px-3 py-2 text-sm font-mono border border-gray-300 rounded"
+                      className="w-full px-3 py-2 text-sm font-mono border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
                     />
                     <datalist id="mon-assets">
                       {assets.map((a) => <option key={a} value={a} />)}
@@ -425,7 +419,7 @@ export function AddMonitorDialog({ open, onOpenChange, projectId, onSaved, initi
                       <select
                         value={dbtProjectPath}
                         onChange={(e) => setDbtProjectPath(e.target.value)}
-                        className="w-full px-3 py-2 text-sm border border-gray-300 rounded bg-white"
+                        className="w-full px-3 py-2 text-sm border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
                       >
                         <option value="">— pick a dbt project —</option>
                         {dbtProjects.map((p) => <option key={p.relative_path} value={p.relative_path}>{p.name} ({p.relative_path})</option>)}
@@ -437,7 +431,7 @@ export function AddMonitorDialog({ open, onOpenChange, projectId, onSaved, initi
                         <select
                           value={dbtModelUid}
                           onChange={(e) => setDbtModelUid(e.target.value)}
-                          className="w-full px-3 py-2 text-sm font-mono border border-gray-300 rounded bg-white"
+                          className="w-full px-3 py-2 text-sm font-mono border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
                         >
                           <option value="">— pick a model —</option>
                           {dbtModels.map((m) => <option key={m.unique_id} value={m.unique_id}>{m.name}</option>)}
@@ -500,7 +494,7 @@ export function AddMonitorDialog({ open, onOpenChange, projectId, onSaved, initi
                         <label className="text-[10px] uppercase tracking-wider text-gray-500 mb-1 block">Kind name</label>
                         <input value={advancedKindName} onChange={(e) => setAdvancedKindName(e.target.value)}
                           placeholder="e.g. distribution_drift"
-                          className="w-full px-3 py-2 text-sm font-mono border border-gray-300 rounded" />
+                          className="w-full px-3 py-2 text-sm font-mono border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500" />
                         <p className="text-[10px] text-gray-500 mt-0.5">Exact kind name your enhanced-check component expects.</p>
                       </div>
                     )}
@@ -531,13 +525,13 @@ export function AddMonitorDialog({ open, onOpenChange, projectId, onSaved, initi
                     <label className="text-[10px] uppercase tracking-wider text-gray-500 mb-1 block">Column</label>
                     {implementation === 'dbt_test' && columnCandidates.length > 0 ? (
                       <select value={column} onChange={(e) => setColumn(e.target.value)}
-                        className="w-full px-3 py-2 text-sm font-mono border border-gray-300 rounded bg-white">
+                        className="w-full px-3 py-2 text-sm font-mono border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white">
                         <option value="">— pick a column —</option>
                         {columnCandidates.map((c) => <option key={c} value={c}>{c}</option>)}
                       </select>
                     ) : (
                       <input value={column} onChange={(e) => setColumn(e.target.value)} placeholder="column_name"
-                        className="w-full px-3 py-2 text-sm font-mono border border-gray-300 rounded" />
+                        className="w-full px-3 py-2 text-sm font-mono border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500" />
                     )}
                   </div>
                 )}
@@ -546,7 +540,7 @@ export function AddMonitorDialog({ open, onOpenChange, projectId, onSaved, initi
                   <div>
                     <label className="text-[10px] uppercase tracking-wider text-gray-500 mb-1 block">Max age (seconds)</label>
                     <input value={maxAgeSeconds} onChange={(e) => setMaxAgeSeconds(e.target.value)} placeholder="3600"
-                      className="w-full px-3 py-2 text-sm font-mono border border-gray-300 rounded" />
+                      className="w-full px-3 py-2 text-sm font-mono border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500" />
                     <p className="text-[10px] text-gray-500 mt-0.5">Fail if the last materialization was more than this many seconds ago. Common: 3600 (1h), 86400 (24h).</p>
                   </div>
                 )}
@@ -556,19 +550,19 @@ export function AddMonitorDialog({ open, onOpenChange, projectId, onSaved, initi
                     <div>
                       <label className="text-[10px] uppercase tracking-wider text-gray-500 mb-1 block">Min rows</label>
                       <input value={minRowCount} onChange={(e) => setMinRowCount(e.target.value)} placeholder="—"
-                        className="w-full px-3 py-2 text-sm font-mono border border-gray-300 rounded" />
+                        className="w-full px-3 py-2 text-sm font-mono border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500" />
                     </div>
                     <div>
                       <label className="text-[10px] uppercase tracking-wider text-gray-500 mb-1 block">Max rows</label>
                       <input value={maxRowCount} onChange={(e) => setMaxRowCount(e.target.value)} placeholder="—"
-                        className="w-full px-3 py-2 text-sm font-mono border border-gray-300 rounded" />
+                        className="w-full px-3 py-2 text-sm font-mono border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500" />
                     </div>
                     <div>
                       <label className="text-[10px] uppercase tracking-wider text-gray-500 mb-1 block" title="Anomaly detection: fail when the row count is N standard deviations from a rolling mean.">Z-score alert</label>
                       <input value={rowZScore} onChange={(e) => setRowZScore(e.target.value)} placeholder="3.0"
-                        className="w-full px-3 py-2 text-sm font-mono border border-gray-300 rounded" />
+                        className="w-full px-3 py-2 text-sm font-mono border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500" />
                     </div>
-                    <p className="col-span-3 text-[10px] text-gray-500">Any subset works. Z-score is anomaly detection against recent runs (crushes Monte Carlo volume monitors).</p>
+                    <p className="col-span-3 text-[10px] text-gray-500">Any subset works. Z-score is anomaly detection against recent runs.</p>
                   </div>
                 )}
 
@@ -576,7 +570,7 @@ export function AddMonitorDialog({ open, onOpenChange, projectId, onSaved, initi
                   <div>
                     <label className="text-[10px] uppercase tracking-wider text-gray-500 mb-1 block">Max null ratio (0..1)</label>
                     <input value={maxNullRatio} onChange={(e) => setMaxNullRatio(e.target.value)} placeholder="0.05"
-                      className="w-full px-3 py-2 text-sm font-mono border border-gray-300 rounded" />
+                      className="w-full px-3 py-2 text-sm font-mono border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500" />
                     <p className="text-[10px] text-gray-500 mt-0.5">0.05 = fail when more than 5% of rows have null in this column.</p>
                   </div>
                 )}
@@ -588,7 +582,7 @@ export function AddMonitorDialog({ open, onOpenChange, projectId, onSaved, initi
                       <input value={pendingValue} onChange={(e) => setPendingValue(e.target.value)}
                         onKeyDown={(e) => { if (e.key === 'Enter' && pendingValue.trim()) { e.preventDefault(); setAcceptedValues([...acceptedValues, pendingValue.trim()]); setPendingValue(''); } }}
                         placeholder="value (Enter to add)"
-                        className="flex-1 px-2 py-1 text-sm font-mono border border-gray-300 rounded" />
+                        className="flex-1 px-2 py-1 text-sm font-mono border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500" />
                       <button type="button" onClick={() => { if (pendingValue.trim()) { setAcceptedValues([...acceptedValues, pendingValue.trim()]); setPendingValue(''); } }}
                         className="px-3 py-1 text-xs bg-primary text-primary-foreground rounded">Add</button>
                     </div>
@@ -608,12 +602,12 @@ export function AddMonitorDialog({ open, onOpenChange, projectId, onSaved, initi
                     <div>
                       <label className="text-[10px] uppercase tracking-wider text-gray-500 mb-1 block">Min value</label>
                       <input value={minValue} onChange={(e) => setMinValue(e.target.value)} placeholder="0"
-                        className="w-full px-3 py-2 text-sm font-mono border border-gray-300 rounded" />
+                        className="w-full px-3 py-2 text-sm font-mono border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500" />
                     </div>
                     <div>
                       <label className="text-[10px] uppercase tracking-wider text-gray-500 mb-1 block">Max value</label>
                       <input value={maxValue} onChange={(e) => setMaxValue(e.target.value)} placeholder="—"
-                        className="w-full px-3 py-2 text-sm font-mono border border-gray-300 rounded" />
+                        className="w-full px-3 py-2 text-sm font-mono border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500" />
                     </div>
                   </div>
                 )}
@@ -678,30 +672,14 @@ export function AddMonitorDialog({ open, onOpenChange, projectId, onSaved, initi
                   </div>
                   {scheduleMode === 'cron' && (
                     <input value={scheduleCron} onChange={(e) => setScheduleCron(e.target.value)} placeholder="0 * * * *"
-                      className="w-full px-3 py-2 text-sm font-mono border border-gray-300 rounded" />
+                      className="w-full px-3 py-2 text-sm font-mono border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500" />
                   )}
                   {scheduleMode === 'interval' && (
                     <input value={scheduleInterval} onChange={(e) => setScheduleInterval(e.target.value)} placeholder="60"
-                      className="w-full px-3 py-2 text-sm font-mono border border-gray-300 rounded" />
+                      className="w-full px-3 py-2 text-sm font-mono border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500" />
                   )}
                 </div>
 
-                <div className="border-t border-gray-100 pt-4">
-                  <h4 className="text-xs font-semibold text-gray-800 mb-2">Alert routing</h4>
-                  <div className="grid grid-cols-2 gap-3">
-                    <div>
-                      <label className="text-[10px] uppercase tracking-wider text-gray-500 mb-1 flex items-center gap-1"><MessageSquare className="w-3 h-3" /> Slack channel</label>
-                      <input value={slackChannel} onChange={(e) => setSlackChannel(e.target.value)} placeholder="#data-alerts"
-                        className="w-full px-3 py-2 text-sm font-mono border border-gray-300 rounded" />
-                    </div>
-                    <div>
-                      <label className="text-[10px] uppercase tracking-wider text-gray-500 mb-1 flex items-center gap-1"><Mail className="w-3 h-3" /> Email</label>
-                      <input value={email} onChange={(e) => setEmail(e.target.value)} placeholder="team@company.com"
-                        className="w-full px-3 py-2 text-sm border border-gray-300 rounded" />
-                    </div>
-                  </div>
-                  <p className="text-[10px] text-gray-500 mt-1">Wire your Slack workspace / SMTP once, referenced by channel/address here.</p>
-                </div>
               </div>
             )}
 
@@ -712,12 +690,12 @@ export function AddMonitorDialog({ open, onOpenChange, projectId, onSaved, initi
                   <div>
                     <label className="text-[10px] uppercase tracking-wider text-gray-500 mb-1 block">Name</label>
                     <input value={name} onChange={(e) => setName(e.target.value)} placeholder="check_customers_freshness"
-                      className="w-full px-3 py-2 text-sm font-mono border border-gray-300 rounded" />
+                      className="w-full px-3 py-2 text-sm font-mono border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500" />
                   </div>
                   <div>
                     <label className="text-[10px] uppercase tracking-wider text-gray-500 mb-1 block">Severity</label>
                     <select value={severity} onChange={(e) => setSeverity(e.target.value as any)}
-                      className="w-full px-3 py-2 text-sm border border-gray-300 rounded bg-white">
+                      className="w-full px-3 py-2 text-sm border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white">
                       <option value="error">Error</option>
                       <option value="warn">Warn</option>
                       <option value="info">Info</option>
@@ -726,7 +704,7 @@ export function AddMonitorDialog({ open, onOpenChange, projectId, onSaved, initi
                   <div className="col-span-2">
                     <label className="text-[10px] uppercase tracking-wider text-gray-500 mb-1 block">Description (optional)</label>
                     <input value={description} onChange={(e) => setDescription(e.target.value)} placeholder="What this monitor protects against"
-                      className="w-full px-3 py-2 text-sm border border-gray-300 rounded" />
+                      className="w-full px-3 py-2 text-sm border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500" />
                   </div>
                 </div>
                 <div className="p-3 bg-gray-50 border border-gray-200 rounded text-xs space-y-1">
@@ -740,7 +718,6 @@ export function AddMonitorDialog({ open, onOpenChange, projectId, onSaved, initi
                     {scheduleMode === 'interval' && `every ${scheduleInterval}m`}
                     {!runOnMaterialize && scheduleMode === 'none' && 'manual only'}
                   </span></div>
-                  {(slackChannel || email) && <div className="flex items-baseline gap-2"><span className="text-gray-500 w-32">Alert</span> <span className="font-mono">{[slackChannel, email].filter(Boolean).join(', ')}</span></div>}
                 </div>
                 <p className="text-[10px] text-gray-500 italic">
                   {implementation === 'dbt_test'

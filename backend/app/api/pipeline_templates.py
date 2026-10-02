@@ -494,28 +494,29 @@ async def install_pipeline_template(
                 })
                 print(f"[InstallPipeline]   {dep_instance} -> {instance_name}" + (f" (target: {target_column})" if target_column else ""))
 
-        # Write custom_lineage.json
+        # Record custom lineage edges on the project model -- flushed to the
+        # root defs.yaml's post_processing block by project_service._save_project
+        # (called below) via _write_post_processing_defs_yaml, same path every
+        # other custom-lineage writer in the app goes through now.
         if lineage_edges:
-            lineage_file = defs_dir / "custom_lineage.json"
+            from ..models.project import CustomLineageEdge
 
-            # Load existing lineage if present
-            existing_lineage = {"edges": []}
-            if lineage_file.exists():
-                with open(lineage_file, 'r') as f:
-                    existing_lineage = json.load(f)
-
-            # Merge new edges with existing edges (avoid duplicates)
-            existing_edge_keys = {(e.get("source"), e.get("target")) for e in existing_lineage.get("edges", [])}
+            existing_edge_keys = {(e.source, e.target) for e in project.custom_lineage}
+            added = 0
             for new_edge in lineage_edges:
                 edge_key = (new_edge["source"], new_edge["target"])
                 if edge_key not in existing_edge_keys:
-                    existing_lineage["edges"].append(new_edge)
+                    project.custom_lineage.append(CustomLineageEdge(source=new_edge["source"], target=new_edge["target"]))
+                    existing_edge_keys.add(edge_key)
+                    added += 1
 
-            # Write back
-            with open(lineage_file, 'w') as f:
-                json.dump(existing_lineage, f, indent=2)
-
-            print(f"[InstallPipeline] Created {len(lineage_edges)} lineage connections in custom_lineage.json")
+            # Flush immediately rather than relying solely on the
+            # _save_project call below -- that one is inside a try/except
+            # for asset-graph regeneration, and the old custom_lineage.json
+            # writer guaranteed the edges hit disk regardless of whether
+            # that step succeeded.
+            project_service._write_post_processing_defs_yaml(project)
+            print(f"[InstallPipeline] Recorded {added} new lineage connection(s) ({len(lineage_edges)} from this pipeline)")
         else:
             print(f"[InstallPipeline] No lineage connections to create")
 

@@ -112,6 +112,8 @@ export interface Project {
   git_repo?: string;
   git_branch: string;
   custom_lineage?: any;
+  asset_field_overrides?: Record<string, { description?: string | null; group_name?: string | null; owners?: string[] | null; tags?: Record<string, string> | null; kinds?: string[] | null }>;
+  asset_post_processing_rules?: Array<{ target: string; group_name?: string | null; owners?: string[] | null; tags?: Record<string, string> | null }>;
   directory_name?: string;
   manual_ingestion_asset_keys?: string[];
   dagster_plus_region?: 'us' | 'eu';
