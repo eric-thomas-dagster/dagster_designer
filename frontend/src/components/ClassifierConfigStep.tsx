@@ -25,32 +25,52 @@ export const CLASSIFIER_TYPE_CONFIG: Record<string, {
   isImage: boolean;
   hasProvider: boolean;
   hasModelName: boolean;
+  // The real Pydantic field name each component writes to disk under --
+  // text_classifier's is `model_id` aliased to `model` (a REQUIRED field,
+  // no server-side default), while zero_shot_classifier/image_classifier
+  // both use `model_name` with a real default. Confirmed against the
+  // actual component source, not the (wrong) assumption this used to
+  // encode: text_classifier previously had hasModelName=false, so its
+  // required `model` field was never sent at all -- every save failed
+  // Pydantic validation the moment Dagster tried to load defs.yaml.
+  modelFieldKey: 'model' | 'model_name';
   modelNameDefault: string;
+  modelHelp: string;
 }> = {
   text_classifier: {
     labelField: 'categories', labelsRequired: true,
     labelsHelp: 'The categories to classify each row into.',
     columnField: 'input_column', columnDefault: 'text', columnLabel: 'Text column',
-    isImage: false, hasProvider: true, hasModelName: false, modelNameDefault: '',
+    isImage: false, hasProvider: true, hasModelName: true,
+    modelFieldKey: 'model', modelNameDefault: '',
+    modelHelp: 'LLM model id for the selected provider (e.g. gpt-4, claude-3-5-sonnet-latest).',
   },
   zero_shot_classifier: {
     labelField: 'candidate_labels', labelsRequired: true,
     labelsHelp: 'The categories to classify each row into — no training, no API key.',
     columnField: 'text_column', columnDefault: 'text', columnLabel: 'Text column',
-    isImage: false, hasProvider: false, hasModelName: true, modelNameDefault: 'facebook/bart-large-mnli',
+    isImage: false, hasProvider: false, hasModelName: true,
+    modelFieldKey: 'model_name', modelNameDefault: 'facebook/bart-large-mnli',
+    modelHelp: 'HuggingFace model id.',
   },
   image_classifier: {
     labelField: 'candidate_labels', labelsRequired: false,
     labelsHelp: "Optional — restricts CLIP's zero-shot output to just these labels. Leave empty to use the model's full label set.",
     columnField: 'image_column', columnDefault: 'local_path', columnLabel: 'Image column',
-    isImage: true, hasProvider: false, hasModelName: true, modelNameDefault: 'openai/clip-vit-base-patch32',
+    isImage: true, hasProvider: false, hasModelName: true,
+    modelFieldKey: 'model_name', modelNameDefault: 'openai/clip-vit-base-patch32',
+    modelHelp: 'HuggingFace model id.',
   },
 };
 
+// text_classifier's own component only branches on provider in {"openai",
+// "anthropic"} -- anything else raises "Unsupported provider" at
+// materialize time (confirmed against the real component source). Gemini
+// isn't implemented there, so it isn't offered as a choice; each entry's
+// defaultModel seeds the Model field when that provider is picked.
 const PROVIDERS = [
-  { id: 'openai', label: 'OpenAI', apiKeyPlaceholder: '${OPENAI_API_KEY}' },
-  { id: 'anthropic', label: 'Anthropic', apiKeyPlaceholder: '${ANTHROPIC_API_KEY}' },
-  { id: 'gemini', label: 'Google (Gemini)', apiKeyPlaceholder: '${GEMINI_API_KEY}' },
+  { id: 'openai', label: 'OpenAI', apiKeyPlaceholder: '${OPENAI_API_KEY}', defaultModel: 'gpt-4' },
+  { id: 'anthropic', label: 'Anthropic', apiKeyPlaceholder: '${ANTHROPIC_API_KEY}', defaultModel: 'claude-3-5-sonnet-latest' },
 ];
 
 export function ClassifierConfigStep({
@@ -97,7 +117,11 @@ export function ClassifierConfigStep({
   const [newLabel, setNewLabel] = useState('');
   const [provider, setProvider] = useState<string>(seedAttrs.provider || 'openai');
   const [apiKey, setApiKey] = useState<string>(seedAttrs.api_key || '');
-  const [modelName, setModelName] = useState<string>(seedAttrs.model_name || cfg.modelNameDefault);
+  const modelWasExplicitlySet = !!seedAttrs[cfg.modelFieldKey];
+  const [modelName, setModelName] = useState<string>(
+    seedAttrs[cfg.modelFieldKey]
+    || (cfg.modelFieldKey === 'model' ? (PROVIDERS.find((p) => p.id === (seedAttrs.provider || 'openai'))?.defaultModel || '') : cfg.modelNameDefault),
+  );
   const [saving, setSaving] = useState(false);
 
   const addLabel = () => {
@@ -111,6 +135,7 @@ export function ClassifierConfigStep({
   const canSave = assetName.trim().length > 0
     && column.trim().length > 0
     && (!cfg.labelsRequired || labels.length > 0)
+    && (!cfg.hasModelName || modelName.trim().length > 0)
     && !!upstreamAssetKey;
 
   const handleSave = async () => {
@@ -128,8 +153,13 @@ export function ClassifierConfigStep({
         config.provider = provider;
         if (apiKey.trim()) config.api_key = apiKey.trim();
       }
-      if (cfg.hasModelName && modelName.trim() && modelName.trim() !== cfg.modelNameDefault) {
-        config.model_name = modelName.trim();
+      // Always send when this classifier has a model field -- some (like
+      // text_classifier's `model`) are REQUIRED with no server-side
+      // default, so "only send if different from the default" (the old
+      // logic) silently omitted a required field whenever the user never
+      // touched it, which failed Pydantic validation on every save.
+      if (cfg.hasModelName && modelName.trim()) {
+        config[cfg.modelFieldKey] = modelName.trim();
       }
 
       const res = await fetch(`${API_BASE}/templates/configure/${componentId}`, {
@@ -291,9 +321,16 @@ export function ClassifierConfigStep({
                   <select
                     value={provider}
                     onChange={(e) => {
+                      const prevDefault = PROVIDERS.find((p) => p.id === provider)?.defaultModel;
                       setProvider(e.target.value);
                       const p = PROVIDERS.find((p) => p.id === e.target.value);
                       if (p && (!apiKey || PROVIDERS.some((pp) => pp.apiKeyPlaceholder === apiKey))) setApiKey('');
+                      // Only follow the provider switch if the model field
+                      // still holds the OLD provider's default -- once the
+                      // user types their own model id, leave it alone.
+                      if (!modelWasExplicitlySet && cfg.modelFieldKey === 'model' && p && modelName === prevDefault) {
+                        setModelName(p.defaultModel);
+                      }
                     }}
                     className="w-full px-2.5 py-1.5 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
                   >
@@ -325,7 +362,7 @@ export function ClassifierConfigStep({
                   onChange={(e) => setModelName(e.target.value)}
                   className="w-full px-2.5 py-1.5 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono"
                 />
-                <p className="text-[10px] text-gray-400 mt-0.5">HuggingFace model id.</p>
+                <p className="text-[10px] text-gray-400 mt-0.5">{cfg.modelHelp}</p>
               </div>
             )}
           </div>

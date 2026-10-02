@@ -5,6 +5,7 @@ import {
 import { useProjectStore } from '@/hooks/useProject';
 import { notify } from './Notifications';
 import { API_BASE } from '@/services/api';
+import { PathPickerButton } from './PathPickerButton';
 
 // Same lenient substring check as ComponentConfigModal's isDataFrameType --
 // community components phrase x-dagster-io.outputs.type by hand (not a
@@ -134,7 +135,14 @@ export function DocumentExtractionWizard({
   const existingSources = useMemo(() => {
     if (!currentProject) return [];
     return currentProject.graph.nodes
-      .filter((n) => (n.type === 'asset' || (n.data as any)?.asset_key) && isDataFrameType((n.data as any)?.io_output_type))
+      .filter((n) => {
+        if (!(n.type === 'asset' || (n.data as any)?.asset_key)) return false;
+        const ioOutputType = (n.data as any)?.io_output_type;
+        // Missing metadata means "unknown", not "definitely not a
+        // dataframe" -- same fix already shipped for ClassificationWizard/
+        // SingleComponentWizard's identical filter.
+        return !ioOutputType || isDataFrameType(ioOutputType);
+      })
       .map((n) => {
         const assetKey = (n.data as any)?.asset_key || n.id;
         // Resolve the raw path from the underlying component instance, if
@@ -388,13 +396,16 @@ export function DocumentExtractionWizard({
                   <div className="border border-gray-200 rounded-md p-3 space-y-2.5">
                     <div>
                       <label className="block text-xs font-medium text-gray-700 mb-1">Path / glob</label>
-                      <input
-                        type="text"
-                        value={newSourcePath}
-                        onChange={(e) => setNewSourcePath(e.target.value)}
-                        placeholder="s3://my-bucket/invoices/**/*.pdf"
-                        className="w-full px-2.5 py-1.5 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono"
-                      />
+                      <div className="flex gap-1.5">
+                        <input
+                          type="text"
+                          value={newSourcePath}
+                          onChange={(e) => setNewSourcePath(e.target.value)}
+                          placeholder="s3://my-bucket/invoices/**/*.pdf"
+                          className="w-full px-2.5 py-1.5 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono"
+                        />
+                        <PathPickerButton mode="directory" title="Choose a folder — add a glob suffix afterward if needed" onPicked={setNewSourcePath} />
+                      </div>
                       <p className="text-[11px] text-gray-400 mt-0.5">
                         Also works with gs://, abfss:// / abfs:// / az://, or a plain local path.
                       </p>

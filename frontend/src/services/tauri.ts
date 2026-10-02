@@ -99,6 +99,24 @@ export async function pickDirectory(title?: string): Promise<string | null> {
 }
 
 /**
+ * Opens the native OS file picker and returns the chosen absolute path,
+ * or null if the user canceled or this isn't running under Tauri. Same
+ * "only Tauri can do this" reasoning as pickDirectory -- used for a
+ * single-file field (a credentials JSON, a specific CSV/video file)
+ * rather than a folder/glob.
+ */
+export async function pickFile(opts?: { title?: string; filters?: { name: string; extensions: string[] }[] }): Promise<string | null> {
+  if (!isTauri) return null;
+  try {
+    const { open } = await import('@tauri-apps/plugin-dialog');
+    const result = await open({ directory: false, multiple: false, title: opts?.title, filters: opts?.filters });
+    return typeof result === 'string' ? result : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Opens a URL in the system's default browser. Outside Tauri, this is
  * just `window.open(url, '_blank')` -- but inside Tauri's WKWebView,
  * `window.open` doesn't reliably open the OS browser (it's swallowed or

@@ -1,11 +1,18 @@
-import { useState } from 'react';
-import { X, Loader2, Mic2, Sparkles } from 'lucide-react';
+import { useEffect, useState } from 'react';
+import { X, Loader2, Mic2, Sparkles, Lightbulb } from 'lucide-react';
 import { useProjectStore } from '@/hooks/useProject';
 import { projectsApi, API_BASE } from '@/services/api';
 import { notify } from './Notifications';
 import { extractComponentId } from '@/lib/componentId';
 import { MediaPreviewPanel } from './MediaPreviewPanel';
+import { MediaProbeInfo } from './MediaProbeInfo';
+import { PathPickerButton } from './PathPickerButton';
+import { useMediaProbe } from '@/hooks/useMediaProbe';
+import { useUpstreamColumns, pickBestPathColumn } from '@/hooks/useUpstreamColumns';
+import { suggestWhisperModelSize } from '@/lib/mediaSuggestions';
 import type { ComponentInstance } from '@/types';
+
+const MODEL_SIZE_ORDER = ['tiny', 'base', 'small', 'medium', 'large'];
 
 /**
  * Bespoke config step for audio_diarized_transcriber -- same real-preview
@@ -48,7 +55,22 @@ export function AudioDiarizedConfigStep({
   // pyannote fields
   const [hfTokenEnvVar, setHfTokenEnvVar] = useState<string>(seedAttrs.hf_token_env_var || 'HF_TOKEN');
   const [whisperModelSize, setWhisperModelSize] = useState<string>(seedAttrs.whisper_model_size || 'base');
+  const audioPathColumnExplicitlySet = !!seedAttrs.audio_path_column;
+  const [audioPathColumn, setAudioPathColumn] = useState<string>(seedAttrs.audio_path_column || 'audio_path');
+  const { columns: upstreamColumns } = useUpstreamColumns(currentProject?.id, upstreamAssetKey);
+  useEffect(() => {
+    if (!audioPathColumnExplicitlySet && upstreamColumns.length > 0) {
+      setAudioPathColumn(pickBestPathColumn(upstreamColumns, 'audio_path'));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [upstreamColumns.join(',')]);
   const [saving, setSaving] = useState(false);
+  const [activeFilePath, setActiveFilePath] = useState<string | null>(null);
+
+  const { probe, isLoading: probeLoading } = useMediaProbe(currentProject?.id, activeFilePath);
+  const suggestedModelSize = suggestWhisperModelSize(probe?.duration_seconds);
+  const showModelSizeSuggestion = backend === 'pyannote' && suggestedModelSize != null && suggestedModelSize !== whisperModelSize
+    && MODEL_SIZE_ORDER.indexOf(suggestedModelSize) < MODEL_SIZE_ORDER.indexOf(whisperModelSize);
 
   const canSave = assetName.trim().length > 0 && !!upstreamAssetKey
     && (backend !== 'google_cloud_speech' || !!credentialsPath.trim());
@@ -62,6 +84,7 @@ export function AudioDiarizedConfigStep({
         name: assetName.trim(),
         asset_name: assetName.trim(),
         upstream_asset_key: upstreamAssetKey,
+        audio_path_column: audioPathColumn.trim() || 'audio_path',
         diarization_backend: backend,
       };
       if (backend === 'google_cloud_speech') {
@@ -116,9 +139,11 @@ export function AudioDiarizedConfigStep({
         </div>
 
         <div className="flex-1 overflow-hidden grid grid-cols-1 sm:grid-cols-[1fr_380px]">
-          <MediaPreviewPanel upstreamAssetKey={upstreamAssetKey} kind="audio" />
+          <MediaPreviewPanel upstreamAssetKey={upstreamAssetKey} kind="audio" onActiveFileChange={setActiveFilePath} />
 
           <div className="space-y-4 overflow-y-auto px-6 py-4">
+            <MediaProbeInfo probe={probe} isLoading={probeLoading} kind="audio" />
+
             <div>
               <label className="block text-xs font-medium text-gray-700 mb-1">Asset name</label>
               <input
@@ -129,6 +154,28 @@ export function AudioDiarizedConfigStep({
                 className="w-full px-2.5 py-1.5 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono disabled:bg-gray-50 disabled:text-gray-400"
               />
               {isEditing && <p className="text-[10px] text-gray-400 mt-0.5">Can't be renamed after creation.</p>}
+            </div>
+
+            <div>
+              <label className="block text-xs font-medium text-gray-700 mb-1">Audio path column</label>
+              {upstreamColumns.length > 0 ? (
+                <select
+                  value={upstreamColumns.includes(audioPathColumn) ? audioPathColumn : ''}
+                  onChange={(e) => setAudioPathColumn(e.target.value)}
+                  className="w-full px-2.5 py-1.5 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white font-mono"
+                >
+                  {!upstreamColumns.includes(audioPathColumn) && <option value="" disabled>{audioPathColumn} (not found — pick one)</option>}
+                  {upstreamColumns.map((c) => <option key={c} value={c}>{c}</option>)}
+                </select>
+              ) : (
+                <input
+                  type="text"
+                  value={audioPathColumn}
+                  onChange={(e) => setAudioPathColumn(e.target.value)}
+                  className="w-full px-2.5 py-1.5 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono"
+                />
+              )}
+              <p className="text-[10px] text-gray-400 mt-0.5">Column in the upstream DataFrame holding each clip's local file path.</p>
             </div>
 
             <div>
@@ -147,13 +194,21 @@ export function AudioDiarizedConfigStep({
               <>
                 <div>
                   <label className="block text-xs font-medium text-gray-700 mb-1">Service account credentials path</label>
-                  <input
-                    type="text"
-                    value={credentialsPath}
-                    onChange={(e) => setCredentialsPath(e.target.value)}
-                    placeholder="/path/to/service-account.json"
-                    className="w-full px-2.5 py-1.5 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono"
-                  />
+                  <div className="flex gap-1.5">
+                    <input
+                      type="text"
+                      value={credentialsPath}
+                      onChange={(e) => setCredentialsPath(e.target.value)}
+                      placeholder="/path/to/service-account.json"
+                      className="w-full px-2.5 py-1.5 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono"
+                    />
+                    <PathPickerButton
+                      mode="file"
+                      title="Choose a service account credentials file"
+                      filters={[{ name: 'JSON', extensions: ['json'] }]}
+                      onPicked={setCredentialsPath}
+                    />
+                  </div>
                 </div>
                 <div>
                   <label className="block text-xs font-medium text-gray-700 mb-1">Language codes</label>
@@ -210,6 +265,20 @@ export function AudioDiarizedConfigStep({
                       <option key={s} value={s}>{s}</option>
                     ))}
                   </select>
+                  {showModelSizeSuggestion && (
+                    <div className="flex items-start gap-2 mt-2 px-3 py-2 border border-blue-200 bg-blue-50 rounded-md">
+                      <Lightbulb className="w-4 h-4 text-blue-500 flex-shrink-0 mt-0.5" />
+                      <div className="flex-1 min-w-0 text-xs text-blue-900">
+                        <p>This clip runs long — "{suggestedModelSize}" transcribes noticeably faster than "{whisperModelSize}" with a reasonable accuracy trade-off.</p>
+                        <button
+                          onClick={() => setWhisperModelSize(suggestedModelSize!)}
+                          className="mt-1.5 px-2 py-1 text-[11px] font-medium bg-white border border-blue-300 text-blue-700 rounded hover:bg-blue-100"
+                        >
+                          Use "{suggestedModelSize}"
+                        </button>
+                      </div>
+                    </div>
+                  )}
                 </div>
               </>
             )}

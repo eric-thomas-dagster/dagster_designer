@@ -3,6 +3,7 @@ import { X, ArrowLeft, ArrowRight, Loader2, FolderOpen } from 'lucide-react';
 import { useProjectStore } from '@/hooks/useProject';
 import { notify } from './Notifications';
 import { API_BASE } from '@/services/api';
+import { PathPickerButton } from './PathPickerButton';
 
 // Same lenient substring check used by every other wizard here --
 // community components phrase x-dagster-io's outputs.type by hand, not a
@@ -84,7 +85,20 @@ export function SingleComponentWizard({
   const existingSources = useMemo(() => {
     if (!currentProject) return [];
     return currentProject.graph.nodes
-      .filter((n) => (n.type === 'asset' || (n.data as any)?.asset_key) && isDataFrameType((n.data as any)?.io_output_type))
+      .filter((n) => {
+        if (!(n.type === 'asset' || (n.data as any)?.asset_key)) return false;
+        const ioOutputType = (n.data as any)?.io_output_type;
+        // Missing io_output_type means "unknown", not "definitely not a
+        // dataframe" -- it's only populated when the component's scaffolded
+        // schema.json in THIS project happens to declare an x-dagster-io
+        // block, which stale/older-vintage scaffolds may not have even
+        // when the current community-templates version does. Confirmed
+        // real: a freshly-built video_audio_extract_asset/file_lister
+        // output was invisible here, forcing "connect a new source" over
+        // reusing the asset already in the graph. Same fix already
+        // shipped for ClassificationWizard's identical filter.
+        return !ioOutputType || isDataFrameType(ioOutputType);
+      })
       .map((n) => ({
         assetKey: (n.data as any)?.asset_key || n.id,
         label: (n.data as any)?.label || (n.data as any)?.asset_key || n.id,
@@ -217,13 +231,21 @@ export function SingleComponentWizard({
                       <label className="block text-xs font-medium text-gray-700 mb-1">
                         {sourceComponentId === 'dataframe_from_csv' ? 'Path or URL to the CSV file' : 'Path / glob'}
                       </label>
-                      <input
-                        type="text"
-                        value={newSourcePath}
-                        onChange={(e) => setNewSourcePath(e.target.value)}
-                        placeholder={pathPlaceholder}
-                        className="w-full px-2.5 py-1.5 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono"
-                      />
+                      <div className="flex gap-1.5">
+                        <input
+                          type="text"
+                          value={newSourcePath}
+                          onChange={(e) => setNewSourcePath(e.target.value)}
+                          placeholder={pathPlaceholder}
+                          className="w-full px-2.5 py-1.5 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono"
+                        />
+                        <PathPickerButton
+                          mode={sourceComponentId === 'dataframe_from_csv' ? 'file' : 'directory'}
+                          title={sourceComponentId === 'dataframe_from_csv' ? 'Choose a CSV file' : 'Choose a folder — add a glob suffix afterward if needed'}
+                          filters={sourceComponentId === 'dataframe_from_csv' ? [{ name: 'CSV', extensions: ['csv'] }] : undefined}
+                          onPicked={setNewSourcePath}
+                        />
+                      </div>
                     </div>
                     {sourceComponentId === 'file_lister' && (
                       <label className="flex items-center gap-1.5 text-xs text-gray-600">

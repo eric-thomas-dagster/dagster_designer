@@ -11,13 +11,18 @@ import { ClassificationWizard } from './ClassificationWizard';
 import { ClassifierConfigStep } from './ClassifierConfigStep';
 import { SingleComponentWizard } from './SingleComponentWizard';
 import { VideoSceneConfigStep } from './VideoSceneConfigStep';
+import { VideoFrameExtractConfigStep } from './VideoFrameExtractConfigStep';
+import { VideoAudioExtractConfigStep } from './VideoAudioExtractConfigStep';
+import { VideoMetadataConfigStep } from './VideoMetadataConfigStep';
 import { AudioDiarizedConfigStep } from './AudioDiarizedConfigStep';
+import { AudioTranscriberConfigStep } from './AudioTranscriberConfigStep';
 import { MlflowInferenceConfigStep } from './MlflowInferenceConfigStep';
 import { AutoMLConfigStep } from './AutoMLConfigStep';
 import { LlmJudgeConfigStep } from './LlmJudgeConfigStep';
 import { ContextEngineeringConfigStep } from './ContextEngineeringConfigStep';
 import { SqlTransformConfigStep } from './SqlTransformConfigStep';
 import { TransformSourcePicker } from './TransformSourcePicker';
+import { JoinConfigStep } from './JoinConfigStep';
 import { DataPreviewModal } from './DataPreviewModal';
 import { ComponentConfigModal } from './ComponentConfigModal';
 import { extractComponentId } from '@/lib/componentId';
@@ -97,7 +102,7 @@ const CARDS: HubCard[] = [
   {
     id: 'sql_transform',
     label: 'Transform / Clean Data',
-    description: 'Filter, dedupe, group-by, clean up strings — in-warehouse SQL, no data movement. Pick an asset already in this project, or connect a resource or connection string first.',
+    description: "Filter, dedupe, group-by, clean up strings — in-warehouse SQL, no data movement. Pick an asset already in this project, or connect a resource or connection string first. Joining in a second asset lives here too, once you're in the builder.",
     icon: Wand2,
     count: 1,
     status: 'ready',
@@ -123,6 +128,11 @@ export function AiMlHub() {
   // button opens) directly against the picked asset, instead of a reduced
   // form that can't match its capability.
   const [transformAssetKey, setTransformAssetKey] = useState<string | null>(null);
+  // Pre-fills the Join builder's left asset when handed off from the
+  // Transform UI's "Join in another asset" prompt; left empty (undefined)
+  // when opened fresh from the Join Data card, where both sides start
+  // unpicked.
+  const [joinPrefillLeftAssetKey, setJoinPrefillLeftAssetKey] = useState<string | undefined>(undefined);
 
   // context_engineering_pipeline owns its OWN source picking (an asset in
   // this project, or query a warehouse directly) -- routing it through
@@ -307,6 +317,29 @@ export function AiMlHub() {
           onTransformerCreated={() => {
             loadProject(currentProject.id);
           }}
+          onHandoffToAutoML={(newAssetKey) => {
+            setTransformAssetKey(null);
+            setPendingConfig({ componentType: 'automl_asset', initialAttributes: { upstream_asset_key: newAssetKey } });
+          }}
+          onHandoffToJoin={(newAssetKey) => {
+            setTransformAssetKey(null);
+            setJoinPrefillLeftAssetKey(newAssetKey);
+            setOpenBuilder('join');
+          }}
+        />
+      )}
+
+      {openBuilder === 'join' && (
+        <JoinConfigStep
+          initialLeftAssetKey={joinPrefillLeftAssetKey}
+          onDone={() => {
+            setOpenBuilder(null);
+            setJoinPrefillLeftAssetKey(undefined);
+          }}
+          onClose={() => {
+            setOpenBuilder(null);
+            setJoinPrefillLeftAssetKey(undefined);
+          }}
         />
       )}
 
@@ -340,8 +373,36 @@ export function AiMlHub() {
             onDone={() => setPendingConfig(null)}
             onClose={() => setPendingConfig(null)}
           />
+        ) : extractComponentId(pendingConfig.componentType) === 'video_frame_extract_asset' ? (
+          <VideoFrameExtractConfigStep
+            componentType={pendingConfig.componentType}
+            initialAttributes={pendingConfig.initialAttributes || {}}
+            onDone={() => setPendingConfig(null)}
+            onClose={() => setPendingConfig(null)}
+          />
+        ) : extractComponentId(pendingConfig.componentType) === 'video_audio_extract_asset' ? (
+          <VideoAudioExtractConfigStep
+            componentType={pendingConfig.componentType}
+            initialAttributes={pendingConfig.initialAttributes || {}}
+            onDone={() => setPendingConfig(null)}
+            onClose={() => setPendingConfig(null)}
+          />
+        ) : extractComponentId(pendingConfig.componentType) === 'video_metadata_extractor' ? (
+          <VideoMetadataConfigStep
+            componentType={pendingConfig.componentType}
+            initialAttributes={pendingConfig.initialAttributes || {}}
+            onDone={() => setPendingConfig(null)}
+            onClose={() => setPendingConfig(null)}
+          />
         ) : extractComponentId(pendingConfig.componentType) === 'audio_diarized_transcriber' ? (
           <AudioDiarizedConfigStep
+            componentType={pendingConfig.componentType}
+            initialAttributes={pendingConfig.initialAttributes || {}}
+            onDone={() => setPendingConfig(null)}
+            onClose={() => setPendingConfig(null)}
+          />
+        ) : extractComponentId(pendingConfig.componentType) === 'audio_transcriber' ? (
+          <AudioTranscriberConfigStep
             componentType={pendingConfig.componentType}
             initialAttributes={pendingConfig.initialAttributes || {}}
             onDone={() => setPendingConfig(null)}

@@ -3,6 +3,7 @@ import { X, ArrowLeft, ArrowRight, Loader2, BrainCircuit, MessageSquareText, Spa
 import { useProjectStore } from '@/hooks/useProject';
 import { notify } from './Notifications';
 import { API_BASE } from '@/services/api';
+import { PathPickerButton } from './PathPickerButton';
 
 // Same lenient substring check used by DocumentExtractionWizard/
 // ComponentConfigModal -- community components phrase x-dagster-io's
@@ -169,7 +170,20 @@ export function ClassificationWizard({
   const existingSources = useMemo(() => {
     if (!currentProject) return [];
     return currentProject.graph.nodes
-      .filter((n) => (n.type === 'asset' || (n.data as any)?.asset_key) && isDataFrameType((n.data as any)?.io_output_type))
+      .filter((n) => {
+        if (!(n.type === 'asset' || (n.data as any)?.asset_key)) return false;
+        const ioOutputType = (n.data as any)?.io_output_type;
+        // Missing io_output_type means "unknown", not "definitely not a
+        // dataframe" -- it's only populated for components that declare an
+        // x-dagster-io schema block (the community-template convention).
+        // Our own SqlTransformerComponent (warehouse-native transforms)
+        // has no schema.json at all, so it never gets this metadata despite
+        // producing perfectly ordinary tabular rows -- confirmed the exact
+        // gap that hid SQL-backed transformer outputs from this picker
+        // while TransformSourcePicker's broader filter still found them.
+        // Only exclude on a POSITIVE non-dataframe signal (e.g. "image").
+        return !ioOutputType || isDataFrameType(ioOutputType);
+      })
       .map((n) => {
         const componentType = (n.data as any)?.component_type as string | undefined;
         // Best-effort guess, not a certainty -- a file_lister could in
@@ -356,13 +370,21 @@ export function ClassificationWizard({
                       <label className="block text-xs font-medium text-gray-700 mb-1">
                         {newSourceMode === 'csv' ? 'Path or URL to the CSV file' : 'Path / glob'}
                       </label>
-                      <input
-                        type="text"
-                        value={newSourcePath}
-                        onChange={(e) => setNewSourcePath(e.target.value)}
-                        placeholder={newSourceMode === 'csv' ? 's3://my-bucket/tickets.csv' : newSourceMode === 'documents' ? 's3://my-bucket/contracts/**/*.pdf' : 's3://my-bucket/product-images/**/*.jpg'}
-                        className="w-full px-2.5 py-1.5 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono"
-                      />
+                      <div className="flex gap-1.5">
+                        <input
+                          type="text"
+                          value={newSourcePath}
+                          onChange={(e) => setNewSourcePath(e.target.value)}
+                          placeholder={newSourceMode === 'csv' ? 's3://my-bucket/tickets.csv' : newSourceMode === 'documents' ? 's3://my-bucket/contracts/**/*.pdf' : 's3://my-bucket/product-images/**/*.jpg'}
+                          className="w-full px-2.5 py-1.5 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono"
+                        />
+                        <PathPickerButton
+                          mode={newSourceMode === 'csv' ? 'file' : 'directory'}
+                          title={newSourceMode === 'csv' ? 'Choose a CSV file' : 'Choose a folder — add a glob suffix afterward if needed'}
+                          filters={newSourceMode === 'csv' ? [{ name: 'CSV', extensions: ['csv'] }] : undefined}
+                          onPicked={setNewSourcePath}
+                        />
+                      </div>
                     </div>
                     <div className="flex justify-end gap-2 pt-1">
                       <button

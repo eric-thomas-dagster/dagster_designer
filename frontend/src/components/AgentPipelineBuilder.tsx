@@ -1,9 +1,10 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Sparkles, X, Loader2, Check, User, ChevronDown, ChevronRight, DollarSign, Clock, Hash } from 'lucide-react';
 import { useProjectStore } from '@/hooks/useProject';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { notify } from './Notifications';
-import { API_BASE, assetsApi } from '@/services/api';
+import { openSettings, onAiProvidersChanged } from './SettingsDialog';
+import { API_BASE, assetsApi, aiApi, type AiProvidersStatus } from '@/services/api';
 import { applyGeniePicks, resolveComponentIdFromCurrentProject, type GeniePickLike } from '@/lib/applyGeniePicks';
 import { parseUpstreamAssetKeys } from '@/lib/upstreamAssetKeys';
 import { parseStepMetadataFields, formatCost, formatLatency } from '@/lib/stepMetadata';
@@ -274,6 +275,24 @@ export function AgentPipelineBuilder({
   );
   const [planning, setPlanning] = useState(false);
   const [applying, setApplying] = useState(false);
+
+  // Which LLM providers have an API key configured -- surfaced as an
+  // actionable "add a key" banner up front (same pattern as DagsterAIBar),
+  // instead of letting the user type a whole task description only to
+  // hit an opaque "OPENAI_API_KEY is not set on the backend" error after
+  // clicking submit.
+  const [providers, setProviders] = useState<AiProvidersStatus | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    const load = () => {
+      aiApi.providers()
+        .then((d) => { if (!cancelled) setProviders(d); })
+        .catch(() => { if (!cancelled) setProviders({ openai_available: false, anthropic_available: false, any_available: false, anthropic_workspace_id_configured: false }); });
+    };
+    load();
+    const unsubscribe = onAiProvidersChanged(load);
+    return () => { cancelled = true; unsubscribe(); };
+  }, []);
   // Filter text for a long clarifying_question.options list (real project
   // asset names -- could be hundreds, not the 2-4 generic categories a
   // fixed row of chat-bubble buttons was designed for). Reset whenever a
@@ -429,12 +448,31 @@ export function AgentPipelineBuilder({
               asking if it needs anything it can't figure out on its own.
             </p>
 
+            {providers && !providers.any_available && (
+              <div className="flex items-start gap-3 px-4 py-3 border border-amber-200 bg-amber-50 rounded-md">
+                <Sparkles className="w-5 h-5 text-amber-500 flex-shrink-0 mt-0.5" />
+                <div className="flex-1 min-w-0 text-sm">
+                  <div className="font-semibold text-gray-900 mb-1">Genie needs an API key</div>
+                  <div className="text-xs text-gray-600 mb-2">
+                    Add an OpenAI or Anthropic key to plan agents/pipelines — takes effect immediately, no restart needed.
+                  </div>
+                  <button
+                    onClick={openSettings}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-primary text-primary-foreground rounded-md hover:bg-accent"
+                  >
+                    <Sparkles className="w-3.5 h-3.5" />
+                    Add API key…
+                  </button>
+                </div>
+              </div>
+            )}
+
             <textarea
               value={task}
               onChange={(e) => setTask(e.target.value)}
               placeholder="Describe what it should do…"
               rows={4}
-              disabled={planning}
+              disabled={planning || (providers ? !providers.any_available : false)}
               className="w-full px-3 py-2 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
             />
 
@@ -447,7 +485,7 @@ export function AgentPipelineBuilder({
                       key={ex.label}
                       type="button"
                       onClick={() => setTask(ex.task)}
-                      disabled={planning}
+                      disabled={planning || (providers ? !providers.any_available : false)}
                       className="px-2.5 py-1 text-xs border border-gray-300 text-gray-700 bg-white rounded-full hover:border-primary hover:text-primary disabled:opacity-50 disabled:cursor-not-allowed"
                     >
                       {ex.label}
@@ -459,7 +497,7 @@ export function AgentPipelineBuilder({
 
             <button
               onClick={startConversation}
-              disabled={!task.trim() || planning}
+              disabled={!task.trim() || planning || (providers ? !providers.any_available : false)}
               className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-medium bg-primary text-primary-foreground rounded-md hover:bg-accent disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {planning ? (

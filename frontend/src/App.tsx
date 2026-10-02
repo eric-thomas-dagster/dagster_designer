@@ -14,8 +14,14 @@ import { DocumentExtractorConfigStep } from './components/DocumentExtractorConfi
 import { OcrExtractorConfigStep } from './components/OcrExtractorConfigStep';
 import { ClassifierConfigStep, CLASSIFIER_TYPE_CONFIG } from './components/ClassifierConfigStep';
 import { ClassificationReview } from './components/ClassificationReview';
+import { ModelEvaluationPanel } from './components/ModelEvaluationPanel';
+import { JoinConfigStep } from './components/JoinConfigStep';
 import { VideoSceneConfigStep } from './components/VideoSceneConfigStep';
+import { VideoFrameExtractConfigStep } from './components/VideoFrameExtractConfigStep';
+import { VideoAudioExtractConfigStep } from './components/VideoAudioExtractConfigStep';
+import { VideoMetadataConfigStep } from './components/VideoMetadataConfigStep';
 import { AudioDiarizedConfigStep } from './components/AudioDiarizedConfigStep';
+import { AudioTranscriberConfigStep } from './components/AudioTranscriberConfigStep';
 import { MlflowInferenceConfigStep } from './components/MlflowInferenceConfigStep';
 import { AutoMLConfigStep } from './components/AutoMLConfigStep';
 import { LlmJudgeConfigStep } from './components/LlmJudgeConfigStep';
@@ -269,6 +275,15 @@ function App() {
   const [reviewScenesTarget, setReviewScenesTarget] = useState<ComponentInstance | null>(null);
   const [reviewTranscriptsTarget, setReviewTranscriptsTarget] = useState<ComponentInstance | null>(null);
   const [reviewPredictionsTarget, setReviewPredictionsTarget] = useState<ComponentInstance | null>(null);
+  const [evaluationTarget, setEvaluationTarget] = useState<ComponentInstance | null>(null);
+  // Set when the graph toolbar's Transform UI hands off a just-created
+  // transformer asset to "train a model on this" -- opens AutoMLConfigStep
+  // fresh (not editing an existing component) pre-seeded with the new
+  // asset as its upstream.
+  const [pendingAutoMLUpstreamAssetKey, setPendingAutoMLUpstreamAssetKey] = useState<string | null>(null);
+  // Same idea as the AutoML handoff above, for the Transform UI's "Join
+  // in another asset" prompt.
+  const [pendingJoinLeftAssetKey, setPendingJoinLeftAssetKey] = useState<string | null>(null);
   const [reviewJudgmentsTarget, setReviewJudgmentsTarget] = useState<ComponentInstance | null>(null);
   const [reviewKnowledgeBaseTarget, setReviewKnowledgeBaseTarget] = useState<ComponentInstance | null>(null);
   const [addingComponentType, setAddingComponentType] = useState<string | null>(null);
@@ -1859,6 +1874,27 @@ function App() {
             setReviewScenesTarget(c);
           }}
         />
+      ) : editingComponent && currentProject && extractComponentId(editingComponent.component_type) === 'video_frame_extract_asset' ? (
+        <VideoFrameExtractConfigStep
+          componentType={editingComponent.component_type}
+          component={editingComponent}
+          onDone={() => setEditingComponent(null)}
+          onClose={() => setEditingComponent(null)}
+        />
+      ) : editingComponent && currentProject && extractComponentId(editingComponent.component_type) === 'video_audio_extract_asset' ? (
+        <VideoAudioExtractConfigStep
+          componentType={editingComponent.component_type}
+          component={editingComponent}
+          onDone={() => setEditingComponent(null)}
+          onClose={() => setEditingComponent(null)}
+        />
+      ) : editingComponent && currentProject && extractComponentId(editingComponent.component_type) === 'video_metadata_extractor' ? (
+        <VideoMetadataConfigStep
+          componentType={editingComponent.component_type}
+          component={editingComponent}
+          onDone={() => setEditingComponent(null)}
+          onClose={() => setEditingComponent(null)}
+        />
       ) : editingComponent && currentProject && extractComponentId(editingComponent.component_type) === 'audio_diarized_transcriber' ? (
         <AudioDiarizedConfigStep
           componentType={editingComponent.component_type}
@@ -1869,6 +1905,13 @@ function App() {
             setEditingComponent(null);
             setReviewTranscriptsTarget(c);
           }}
+        />
+      ) : editingComponent && currentProject && extractComponentId(editingComponent.component_type) === 'audio_transcriber' ? (
+        <AudioTranscriberConfigStep
+          componentType={editingComponent.component_type}
+          component={editingComponent}
+          onDone={() => setEditingComponent(null)}
+          onClose={() => setEditingComponent(null)}
         />
       ) : editingComponent && currentProject && extractComponentId(editingComponent.component_type) === 'mlflow_model_inference' ? (
         <MlflowInferenceConfigStep
@@ -1890,6 +1933,10 @@ function App() {
           onReviewPredictions={(c) => {
             setEditingComponent(null);
             setReviewPredictionsTarget(c);
+          }}
+          onViewEvaluation={(c) => {
+            setEditingComponent(null);
+            setEvaluationTarget(c);
           }}
         />
       ) : editingComponent && currentProject && extractComponentId(editingComponent.component_type) === 'llm_judge' ? (
@@ -1989,6 +2036,34 @@ function App() {
           projectId={currentProject.id}
           assetKey={reviewPredictionsTarget.attributes?.asset_name || reviewPredictionsTarget.id}
           onClose={() => setReviewPredictionsTarget(null)}
+        />
+      )}
+
+      {evaluationTarget && currentProject && (
+        <ModelEvaluationPanel
+          projectId={currentProject.id}
+          assetKey={evaluationTarget.attributes?.asset_name || evaluationTarget.id}
+          onClose={() => setEvaluationTarget(null)}
+        />
+      )}
+
+      {pendingAutoMLUpstreamAssetKey && currentProject && (
+        <AutoMLConfigStep
+          componentType="automl_asset"
+          initialAttributes={{ upstream_asset_key: pendingAutoMLUpstreamAssetKey }}
+          onDone={() => {
+            setPendingAutoMLUpstreamAssetKey(null);
+            useProjectStore.getState().loadProject(currentProject.id);
+          }}
+          onClose={() => setPendingAutoMLUpstreamAssetKey(null)}
+        />
+      )}
+
+      {pendingJoinLeftAssetKey && currentProject && (
+        <JoinConfigStep
+          initialLeftAssetKey={pendingJoinLeftAssetKey}
+          onDone={() => setPendingJoinLeftAssetKey(null)}
+          onClose={() => setPendingJoinLeftAssetKey(null)}
         />
       )}
 
@@ -2245,6 +2320,14 @@ function App() {
           assetName={dataPreviewAssetName}
           existingComponentAttributes={dataPreviewComponentAttributes}
           existingComponentId={dataPreviewComponentId}
+          onHandoffToAutoML={(newAssetKey) => {
+            setShowDataPreview(false);
+            setPendingAutoMLUpstreamAssetKey(newAssetKey);
+          }}
+          onHandoffToJoin={(newAssetKey) => {
+            setShowDataPreview(false);
+            setPendingJoinLeftAssetKey(newAssetKey);
+          }}
         />
       )}
 

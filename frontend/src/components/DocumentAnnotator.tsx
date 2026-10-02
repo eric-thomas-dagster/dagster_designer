@@ -41,6 +41,12 @@ export function DocumentAnnotator({
   const [drag, setDrag] = useState<{ x0: number; y0: number; x1: number; y1: number } | null>(null);
   const [pendingBox, setPendingBox] = useState<FieldRegion | null>(null);
   const [assignField, setAssignField] = useState('');
+  // Which field the next drawn box goes to -- picked from the persistent
+  // field list BEFORE drawing, so you know what's left to place instead
+  // of only finding out via the dropdown after a box already exists.
+  // Defaults to the first not-yet-placed field so there's always
+  // something sensible pre-selected.
+  const [activeField, setActiveField] = useState<string | null>(() => fields.find((f) => !(initialRegions || {})[f]) || fields[0] || null);
   const containerRef = useRef<HTMLDivElement>(null);
 
   const toFraction = (clientX: number, clientY: number) => {
@@ -70,14 +76,20 @@ export function DocumentAnnotator({
     setDrag(null);
     if (width < 0.01 || height < 0.01) return; // too small -- treat as an accidental click
     setPendingBox({ x, y, width, height });
-    const unassigned = fields.find((f) => !regions[f]);
-    setAssignField(unassigned || fields[0] || '');
+    // Pre-fill with whichever field was actively selected before drawing;
+    // fall back to the old "first unassigned" guess if none was picked.
+    setAssignField(activeField || fields.find((f) => !regions[f]) || fields[0] || '');
   };
 
   const confirmPendingBox = () => {
     if (!pendingBox || !assignField.trim()) return;
-    setRegions((prev) => ({ ...prev, [assignField.trim()]: pendingBox }));
+    const justPlaced = assignField.trim();
+    setRegions((prev) => ({ ...prev, [justPlaced]: pendingBox }));
     setPendingBox(null);
+    // Auto-advance to the next unplaced field so placing a run of fields
+    // is pick-draw, pick-draw, ... instead of re-opening the dropdown
+    // and re-guessing every time.
+    setActiveField(fields.find((f) => f !== justPlaced && !regions[f]) || null);
   };
   const removeRegion = (field: string) => {
     setRegions((prev) => {
@@ -100,7 +112,11 @@ export function DocumentAnnotator({
         <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200">
           <div>
             <h2 className="text-lg font-semibold">Field locations</h2>
-            <p className="text-xs text-gray-500 mt-0.5">Click and drag on the document to mark where a field appears, then assign it a name.</p>
+            <p className="text-xs text-gray-500 mt-0.5">
+              {activeField
+                ? <>Drag a box where <span className="font-mono font-medium text-gray-700">{activeField}</span> appears — or pick a different field on the right first.</>
+                : 'Pick a field on the right, then drag a box around where it appears.'}
+            </p>
           </div>
           <button onClick={onClose} aria-label="Close">
             <X className="w-5 h-5 text-gray-400 hover:text-gray-600" />
@@ -164,6 +180,53 @@ export function DocumentAnnotator({
           </div>
 
           <div className="border-l border-gray-100 overflow-y-auto p-4 space-y-4">
+            <div>
+              <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-1.5">
+                Fields ({Object.keys(regions).length}/{fields.length} placed)
+              </h3>
+              {fields.length === 0 ? (
+                <p className="text-xs text-gray-400 italic">No fields defined yet — add some first, then come back to mark their locations.</p>
+              ) : (
+                <div className="space-y-1">
+                  {fields.map((f) => {
+                    const placed = !!regions[f];
+                    const isActive = activeField === f;
+                    return (
+                      <button
+                        key={f}
+                        onClick={() => setActiveField(f)}
+                        disabled={!!pendingBox}
+                        className={`w-full flex items-center justify-between px-2 py-1.5 rounded-md border text-left disabled:opacity-50 disabled:cursor-not-allowed ${
+                          isActive ? 'border-primary bg-primary/5' : 'border-gray-100 bg-gray-50 hover:bg-gray-100'
+                        }`}
+                      >
+                        <span className="text-xs font-mono flex items-center gap-1.5 min-w-0">
+                          <span
+                            className="w-2.5 h-2.5 rounded-sm inline-block flex-shrink-0"
+                            style={{ backgroundColor: placed ? colorFor(f, fields) : 'transparent', border: placed ? 'none' : '1.5px solid #d1d5db' }}
+                          />
+                          <span className="truncate">{f}</span>
+                        </span>
+                        {placed ? (
+                          <span
+                            role="button"
+                            tabIndex={0}
+                            onClick={(e) => { e.stopPropagation(); removeRegion(f); }}
+                            className="text-gray-300 hover:text-rose-500 flex-shrink-0"
+                            title="Remove this field's location"
+                          >
+                            <Trash2 className="w-3 h-3" />
+                          </span>
+                        ) : (
+                          <span className="text-[10px] text-gray-400 flex-shrink-0">not placed</span>
+                        )}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+
             {pendingBox ? (
               <div className="space-y-2 bg-violet-50 border border-violet-200 rounded-md p-3">
                 <label className="block text-xs font-medium text-gray-700">Assign this region to</label>
@@ -190,30 +253,8 @@ export function DocumentAnnotator({
                   </button>
                 </div>
               </div>
-            ) : (
-              <p className="text-xs text-gray-400">Drag a box on the document to mark a field's location.</p>
-            )}
+            ) : null}
 
-            <div>
-              <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-1.5">Marked fields ({Object.keys(regions).length})</h3>
-              {Object.keys(regions).length === 0 ? (
-                <p className="text-xs text-gray-400 italic">None yet.</p>
-              ) : (
-                <div className="space-y-1">
-                  {Object.keys(regions).map((f) => (
-                    <div key={f} className="flex items-center justify-between px-2 py-1 rounded bg-gray-50 border border-gray-100">
-                      <span className="text-xs font-mono flex items-center gap-1.5">
-                        <span className="w-2.5 h-2.5 rounded-sm inline-block" style={{ backgroundColor: colorFor(f, fields) }} />
-                        {f}
-                      </span>
-                      <button onClick={() => removeRegion(f)} className="text-gray-300 hover:text-rose-500">
-                        <Trash2 className="w-3 h-3" />
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
             <p className="text-[10px] text-gray-400">
               Marked regions are sent to the LLM as close-up crops alongside the full document — a hint, not a hard constraint, so extraction still works if a real document's layout shifts slightly.
             </p>

@@ -1,7 +1,7 @@
 import React, { useState, useMemo } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu';
-import { X, AlertCircle, Table as TableIcon, Wand2, Save, Filter, Columns3, Trash2, Eye, EyeOff, ChevronDown, ChevronRight, SortAsc, SortDesc, Sigma, Group, Calculator, ArrowDownUp, RotateCw, Play, Loader2, Plus, Package, BarChart3 } from 'lucide-react';
+import { X, AlertCircle, Table as TableIcon, Wand2, Save, Filter, Columns3, Trash2, Eye, EyeOff, ChevronDown, ChevronRight, SortAsc, SortDesc, Sigma, Group, Calculator, ArrowDownUp, RotateCw, Play, Loader2, Plus, Package, BarChart3, Combine } from 'lucide-react';
 import { ColumnProfilePanel } from './ColumnProfilePanel';
 import { assetsApi, projectsApi, partitionsApi, type AssetDataPreview } from '@/services/api';
 import { notify } from './Notifications';
@@ -11,6 +11,7 @@ import { MultiColumnSelect } from './MultiColumnSelect';
 import { RecipePanel, type RecipeStep } from './RecipePanel';
 import { SuggestionsStrip } from './SuggestionsStrip';
 import { SelectionSuggestionPopover } from './SelectionSuggestionPopover';
+import { JoinConfigStep } from './JoinConfigStep';
 import { computeColumnSuggestions, computeSelectionSuggestions, type TransformSuggestion } from '@/lib/transformSuggestions';
 
 interface DataPreviewModalProps {
@@ -31,6 +32,16 @@ interface DataPreviewModalProps {
    *  to here just tells the user where to go instead of materializing
    *  blind and failing. */
   onOpenLaunchpad?: (assetKey: string) => void;
+  /** Offer to train a model on the transformer asset just created/updated.
+   *  This is the "ML handoff" -- the moment you've just cleaned up a
+   *  DataFrame in the real Transform UI is exactly when you'd want to
+   *  hand it to AutoML, not go find it again from a separate wizard.
+   *  Omit this prop to keep the old close-and-done behavior (e.g. a
+   *  caller with nowhere sensible to route the handoff to). */
+  onHandoffToAutoML?: (newAssetKey: string) => void;
+  /** Offer to join another asset onto the transformer asset just created --
+   *  the other half of the "what's next" prompt alongside AutoML. */
+  onHandoffToJoin?: (newAssetKey: string) => void;
 }
 
 interface FilterCondition {
@@ -74,12 +85,17 @@ export function DataPreviewModal({
   existingComponentId,
   initialMode = 'view',
   onOpenLaunchpad,
+  onHandoffToAutoML,
+  onHandoffToJoin,
 }: DataPreviewModalProps) {
   const [data, setData] = useState<AssetDataPreview | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [mode, setMode] = useState<'view' | 'transform' | 'profile'>(initialMode);
   const [saving, setSaving] = useState(false);
+  // Set right after a successful create/update, to show the "what's
+  // next" handoff prompt instead of closing immediately.
+  const [justSavedAssetKey, setJustSavedAssetKey] = useState<string | null>(null);
   // How many rows the preview endpoint should return. Defaults to 100 for
   // fast responsiveness on click; Profile mode lets users request more so
   // histograms and top-N counts approach the true distribution.
@@ -388,6 +404,7 @@ export function DataPreviewModal({
 
   const [runningToHere, setRunningToHere] = useState(false);
   const [showCommunityPicker, setShowCommunityPicker] = useState(false);
+  const [showJoinBuilder, setShowJoinBuilder] = useState(false);
 
   const loadData = async (opts?: { sampleLimit?: number; noCache?: boolean }) => {
     setLoading(true);
@@ -1442,7 +1459,16 @@ export function DataPreviewModal({
       }
 
       notify.success(`Successfully created new asset: ${newAssetName}`);
-      handleClose();
+      // The backend derives the real Dagster asset key the same way
+      // SqlTransformConfigStep does client-side (component_id =
+      // newAssetName.replace('-','_').replace(' ','_').lower()) --
+      // see create_transformer_asset in assets.py.
+      const createdAssetKey = newAssetName.trim().replace(/-/g, '_').replace(/ /g, '_').toLowerCase();
+      if (onHandoffToAutoML || onHandoffToJoin) {
+        setJustSavedAssetKey(createdAssetKey);
+      } else {
+        handleClose();
+      }
     } catch (err: any) {
       notify.error(`Failed to create asset: ${err.message}`);
     } finally {
@@ -1798,6 +1824,27 @@ export function DataPreviewModal({
                     </div>
                   </div>
                   <Plus className="w-4 h-4 text-primary/60 group-hover:text-primary flex-shrink-0" />
+                </button>
+
+                {/* Bring in a second asset and combine rows -- a join needs
+                    a real second upstream, which no single-source op here
+                    can express, so this opens its own builder pre-seeded
+                    with the CURRENT asset as the left side rather than
+                    adding a fake "join op" to this asset's own config. */}
+                <button
+                  onClick={() => setShowJoinBuilder(true)}
+                  className="mb-3 w-full flex items-center gap-2 px-3 py-2 border border-dashed border-indigo-300 bg-indigo-50/60 hover:bg-indigo-50 rounded-lg text-left group"
+                >
+                  <Combine className="w-4 h-4 text-indigo-600 flex-shrink-0" />
+                  <div className="flex-1 min-w-0">
+                    <div className="text-xs font-semibold text-indigo-700">
+                      Join another asset in
+                    </div>
+                    <div className="text-[11px] text-gray-500">
+                      Combine this asset with a second one — pick the join type, preview, save
+                    </div>
+                  </div>
+                  <Plus className="w-4 h-4 text-indigo-400 group-hover:text-indigo-600 flex-shrink-0" />
                 </button>
 
                 <div className="space-y-2 flex-1">
@@ -4138,6 +4185,90 @@ export function DataPreviewModal({
           notify.info(`Configure "${instanceName}" from the graph to fill in its attributes.`);
         }}
       />
+
+      {/* Join builder, opened directly from this asset -- no separate
+          hub-level entry point; this asset is always the left side.
+          Nested inside a real Dialog.Content (not just Dialog.Portal
+          alone -- confirmed live that Portal alone isn't enough, Radix's
+          focus-trap/inert-exemption tracking keys off Content
+          specifically): this modal is itself nested inside THIS
+          component's own open Dialog, and Radix marks every non-Content
+          layer inert while a Dialog is open -- same "clicks get killed"
+          issue MultiColumnSelect's own comment describes, confirmed live
+          first as the whole modal not opening, then as its own <select>
+          elements not responding once Portal-only wrapping opened it.
+          `className="contents"` keeps Content itself invisible in layout
+          terms -- JoinConfigStep already renders its own full "fixed
+          inset-0" modal chrome, so Content only needs to exist for
+          Radix's bookkeeping, not add a second visual layer. */}
+      {showJoinBuilder && (
+        <Dialog.Root open onOpenChange={(next) => { if (!next) setShowJoinBuilder(false); }}>
+          <Dialog.Portal>
+            <Dialog.Content className="contents" onOpenAutoFocus={(e) => e.preventDefault()}>
+              <Dialog.Title className="sr-only">Join two assets</Dialog.Title>
+              <Dialog.Description className="sr-only">Combine this asset with another one already in the project.</Dialog.Description>
+              <JoinConfigStep
+                initialLeftAssetKey={assetKey}
+                onDone={() => {
+                  setShowJoinBuilder(false);
+                  if (onTransformerCreated) onTransformerCreated(null);
+                }}
+                onClose={() => setShowJoinBuilder(false)}
+              />
+            </Dialog.Content>
+          </Dialog.Portal>
+        </Dialog.Root>
+      )}
+
+      {/* "What's next" handoff prompt -- shown right after a successful
+          create/update instead of closing immediately, so training a
+          model on the data you just cleaned up is one click away rather
+          than a separate trip back through a wizard. */}
+      {justSavedAssetKey && (onHandoffToAutoML || onHandoffToJoin) && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-[60]">
+          <div className="bg-white rounded-lg shadow-xl w-full max-w-md p-6 space-y-4">
+            <div className="flex items-center gap-2">
+              <Package className="w-5 h-5 text-emerald-600" />
+              <h3 className="text-base font-semibold text-gray-900">Asset saved</h3>
+            </div>
+            <p className="text-sm text-gray-600">
+              <span className="font-mono text-gray-800">{justSavedAssetKey}</span> is ready. Do something with it now, or come back to it later.
+            </p>
+            <div className="flex flex-wrap justify-end gap-2 pt-2">
+              <button
+                onClick={handleClose}
+                className="px-3 py-1.5 text-sm text-gray-600 hover:bg-gray-100 rounded-md"
+              >
+                Not now
+              </button>
+              {onHandoffToJoin && (
+                <button
+                  onClick={() => {
+                    const key = justSavedAssetKey;
+                    setJustSavedAssetKey(null);
+                    onHandoffToJoin(key);
+                  }}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-indigo-700 border border-indigo-200 bg-indigo-50 rounded-md hover:bg-indigo-100"
+                >
+                  <Combine className="w-3.5 h-3.5" /> Join in another asset
+                </button>
+              )}
+              {onHandoffToAutoML && (
+                <button
+                  onClick={() => {
+                    const key = justSavedAssetKey;
+                    setJustSavedAssetKey(null);
+                    onHandoffToAutoML(key);
+                  }}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium bg-primary text-primary-foreground rounded-md hover:bg-accent"
+                >
+                  <BarChart3 className="w-3.5 h-3.5" /> Train a model (AutoML)
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </Dialog.Root>
   );
 }

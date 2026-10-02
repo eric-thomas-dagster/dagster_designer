@@ -1,5 +1,5 @@
-import { useState } from 'react';
-import { X, Loader2, Sparkles, BarChart3 } from 'lucide-react';
+import { useEffect, useState } from 'react';
+import { X, Loader2, Sparkles, BarChart3, Gauge, Database } from 'lucide-react';
 import { useProjectStore } from '@/hooks/useProject';
 import { projectsApi, API_BASE } from '@/services/api';
 import { notify } from './Notifications';
@@ -24,6 +24,7 @@ export function AutoMLConfigStep({
   onDone,
   onClose,
   onReviewPredictions,
+  onViewEvaluation,
 }: {
   componentType: string;
   component?: ComponentInstance | null;
@@ -31,11 +32,38 @@ export function AutoMLConfigStep({
   onDone: () => void;
   onClose: () => void;
   onReviewPredictions?: (component: ComponentInstance) => void;
+  onViewEvaluation?: (component: ComponentInstance) => void;
 }) {
   const { currentProject, loadProject } = useProjectStore();
   const isEditing = !!component;
   const seedAttrs = component?.attributes || initialAttributes || {};
   const upstreamAssetKey: string | undefined = seedAttrs.upstream_asset_key;
+  const seedSource = seedAttrs.source as { kind?: string; resource_key?: string; database_url_env_var?: string; sql?: string } | undefined;
+
+  // Two ways in, same as the Transform UI's own split: an existing asset
+  // already in this project, or straight from a warehouse query with no
+  // asset in between (automl_asset's `source: {kind: warehouse_query, ...}`
+  // dual-ingestion field, same shape SqlTransformConfigStep already uses
+  // for the Transform UI's raw-source entry point).
+  const [sourceMode, setSourceMode] = useState<'asset' | 'warehouse_query'>(seedSource ? 'warehouse_query' : 'asset');
+  const [resources, setResources] = useState<{ name: string }[]>([]);
+  const [resourcesLoading, setResourcesLoading] = useState(false);
+  const [authMode, setAuthMode] = useState<'resource' | 'connection_string'>(
+    seedSource?.database_url_env_var ? 'connection_string' : 'resource',
+  );
+  const [resourceKey, setResourceKey] = useState(seedSource?.resource_key || '');
+  const [databaseUrlEnvVar, setDatabaseUrlEnvVar] = useState(seedSource?.database_url_env_var || '');
+  const [sourceSql, setSourceSql] = useState(seedSource?.sql || '');
+
+  useEffect(() => {
+    if (!currentProject || sourceMode !== 'warehouse_query' || resources.length > 0 || resourcesLoading) return;
+    setResourcesLoading(true);
+    fetch(`${API_BASE}/templates/resources/${currentProject.id}`)
+      .then((r) => r.json())
+      .then((body) => setResources(body.resources || []))
+      .catch(() => notify.error('Failed to load registered resources.'))
+      .finally(() => setResourcesLoading(false));
+  }, [currentProject, sourceMode]);
 
   const [assetName, setAssetName] = useState<string>(
     seedAttrs.asset_name || component?.label || (upstreamAssetKey ? `${upstreamAssetKey}_automl` : 'automl_scored'),
@@ -60,7 +88,10 @@ export function AutoMLConfigStep({
   const [refreshSearch, setRefreshSearch] = useState<boolean>(seedAttrs.refresh_search ?? false);
   const [saving, setSaving] = useState(false);
 
-  const canSave = assetName.trim().length > 0 && !!upstreamAssetKey
+  const sourceReady = sourceMode === 'asset'
+    ? !!upstreamAssetKey
+    : sourceSql.trim().length > 0 && (authMode === 'resource' ? !!resourceKey : databaseUrlEnvVar.trim().length > 0);
+  const canSave = assetName.trim().length > 0 && sourceReady
     && targetColumn.trim().length > 0 && statePath.trim().length > 0;
 
   const handleSave = async () => {
@@ -71,7 +102,6 @@ export function AutoMLConfigStep({
       const config: Record<string, any> = {
         name: assetName.trim(),
         asset_name: assetName.trim(),
-        upstream_asset_key: upstreamAssetKey,
         target_column: targetColumn.trim(),
         task_type: taskType,
         state_path: statePath.trim(),
@@ -79,6 +109,15 @@ export function AutoMLConfigStep({
         output_column: outputColumn.trim() || 'predicted',
         refresh_search: refreshSearch,
       };
+      if (sourceMode === 'asset') {
+        config.upstream_asset_key = upstreamAssetKey;
+      } else {
+        config.source = {
+          kind: 'warehouse_query',
+          sql: sourceSql.trim(),
+          ...(authMode === 'resource' ? { resource_key: resourceKey } : { database_url_env_var: databaseUrlEnvVar.trim() }),
+        };
+      }
       const features = featureColumns.split(',').map((s) => s.trim()).filter(Boolean);
       if (features.length > 0) config.feature_columns = features;
 
@@ -124,13 +163,90 @@ export function AutoMLConfigStep({
         </div>
 
         <div className="flex-1 overflow-hidden grid grid-cols-1 sm:grid-cols-[1fr_380px]">
-          <TextSamplePreviewPanel upstreamAssetKey={upstreamAssetKey} onColumnsChange={handleColumnsResolved} />
+          {sourceMode === 'asset' ? (
+            <TextSamplePreviewPanel upstreamAssetKey={upstreamAssetKey} onColumnsChange={handleColumnsResolved} />
+          ) : (
+            <div className="flex items-center justify-center h-full text-sm text-gray-400 px-8 text-center">
+              No live preview for a direct query — training reads whatever the query returns each time it runs. Set the target/feature column names by hand below.
+            </div>
+          )}
 
           <div className="space-y-4 overflow-y-auto px-6 py-4">
             <div className="bg-blue-50 border border-blue-100 rounded-md p-3 text-xs text-blue-900 space-y-1">
               <p className="font-medium">How this works</p>
               <p>Searches across model families (LightGBM, XGBoost, random forest, linear, ...) to find the best fit for your labeled data — no algorithm choice required. The first run does a real search; every run after reuses the cached recipe with a cheap refit, so repeat runs stay fast.</p>
             </div>
+
+            {!isEditing && (
+              <div>
+                <label className="block text-xs font-medium text-gray-700 mb-1">Source</label>
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => setSourceMode('asset')}
+                    className={`flex-1 px-2.5 py-1.5 text-xs rounded-md border ${sourceMode === 'asset' ? 'bg-primary text-primary-foreground border-primary' : 'border-gray-300 text-gray-600 hover:bg-gray-50'}`}
+                  >
+                    An existing asset
+                  </button>
+                  <button
+                    onClick={() => setSourceMode('warehouse_query')}
+                    className={`flex-1 px-2.5 py-1.5 text-xs rounded-md border ${sourceMode === 'warehouse_query' ? 'bg-primary text-primary-foreground border-primary' : 'border-gray-300 text-gray-600 hover:bg-gray-50'}`}
+                  >
+                    A warehouse query
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {sourceMode === 'warehouse_query' && (
+              <div className="space-y-3 border border-gray-200 rounded-md p-3 bg-gray-50">
+                <div className="flex items-center gap-2 text-xs font-medium text-gray-700">
+                  <Database className="w-3.5 h-3.5 text-gray-500" /> Connect to a warehouse
+                </div>
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => setAuthMode('resource')}
+                    className={`flex-1 px-2 py-1 text-xs rounded-md border ${authMode === 'resource' ? 'bg-primary text-primary-foreground border-primary' : 'border-gray-300 text-gray-600 hover:bg-gray-50'}`}
+                  >
+                    Registered resource
+                  </button>
+                  <button
+                    onClick={() => setAuthMode('connection_string')}
+                    className={`flex-1 px-2 py-1 text-xs rounded-md border ${authMode === 'connection_string' ? 'bg-primary text-primary-foreground border-primary' : 'border-gray-300 text-gray-600 hover:bg-gray-50'}`}
+                  >
+                    Connection string
+                  </button>
+                </div>
+                {authMode === 'resource' ? (
+                  resourcesLoading ? (
+                    <p className="text-xs text-gray-400 flex items-center gap-1.5"><Loader2 className="w-3 h-3 animate-spin" /> Loading resources…</p>
+                  ) : (
+                    <select
+                      value={resourceKey}
+                      onChange={(e) => setResourceKey(e.target.value)}
+                      className="w-full px-2 py-1.5 text-xs border border-gray-300 rounded-md bg-white font-mono"
+                    >
+                      <option value="" disabled>pick a registered resource</option>
+                      {resources.map((r) => <option key={r.name} value={r.name}>{r.name}</option>)}
+                    </select>
+                  )
+                ) : (
+                  <input
+                    type="text"
+                    value={databaseUrlEnvVar}
+                    onChange={(e) => setDatabaseUrlEnvVar(e.target.value)}
+                    placeholder="env var holding the connection string, e.g. WAREHOUSE_URL"
+                    className="w-full px-2 py-1.5 text-xs border border-gray-300 rounded-md font-mono"
+                  />
+                )}
+                <textarea
+                  value={sourceSql}
+                  onChange={(e) => setSourceSql(e.target.value)}
+                  placeholder="SELECT * FROM customers WHERE ..."
+                  rows={4}
+                  className="w-full px-2 py-1.5 text-xs border border-gray-300 rounded-md font-mono"
+                />
+              </div>
+            )}
 
             <div>
               <label className="block text-xs font-medium text-gray-700 mb-1">Asset name</label>
@@ -239,13 +355,25 @@ export function AutoMLConfigStep({
         </div>
 
         <div className="flex justify-end gap-2 px-6 py-4 border-t border-gray-200">
-          {isEditing && onReviewPredictions && (
-            <button
-              onClick={() => onReviewPredictions(component!)}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-emerald-700 border border-emerald-200 bg-emerald-50 rounded-md hover:bg-emerald-100 mr-auto"
-            >
-              <BarChart3 className="w-3.5 h-3.5" /> Review predictions
-            </button>
+          {isEditing && (onReviewPredictions || onViewEvaluation) && (
+            <div className="flex items-center gap-2 mr-auto">
+              {onViewEvaluation && (
+                <button
+                  onClick={() => onViewEvaluation(component!)}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-blue-700 border border-blue-200 bg-blue-50 rounded-md hover:bg-blue-100"
+                >
+                  <Gauge className="w-3.5 h-3.5" /> View evaluation
+                </button>
+              )}
+              {onReviewPredictions && (
+                <button
+                  onClick={() => onReviewPredictions(component!)}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-emerald-700 border border-emerald-200 bg-emerald-50 rounded-md hover:bg-emerald-100"
+                >
+                  <BarChart3 className="w-3.5 h-3.5" /> Review predictions
+                </button>
+              )}
+            </div>
           )}
           <button onClick={onClose} className="px-3 py-1.5 text-sm text-gray-600 hover:bg-gray-100 rounded-md">
             Cancel
