@@ -245,6 +245,19 @@ function LastRunPanel({
  * start including each pick's actual `config` -- without that, the model
  * would have no visibility into what it's supposed to be editing.
  */
+
+// Same ordering/rationale as DagsterAIBar's copy of this list: first
+// available-per-provider entry becomes the default.
+const MODEL_OPTIONS = [
+  { value: 'claude-sonnet-4-5', label: 'Claude Sonnet 4.5 (recommended)' },
+  { value: 'gpt-4o', label: 'GPT-4o (recommended)' },
+  { value: 'claude-opus-4-5', label: 'Claude Opus 4.5 (highest quality)' },
+  { value: 'gpt-5-mini', label: 'GPT-5 mini' },
+  { value: 'gpt-4.1-mini', label: 'GPT-4.1 mini' },
+  { value: 'gpt-4o-mini', label: 'GPT-4o mini (fast, cheap)' },
+  { value: 'claude-haiku-4-5', label: 'Claude Haiku 4.5 (fast)' },
+];
+
 export function AgentPipelineBuilder({
   onClose,
   editingComponent,
@@ -293,6 +306,30 @@ export function AgentPipelineBuilder({
     const unsubscribe = onAiProvidersChanged(load);
     return () => { cancelled = true; unsubscribe(); };
   }, []);
+
+  // The banner above only checked `any_available` (true if EITHER
+  // provider has a key), but the actual /ai/plan request never included a
+  // `model` field at all -- it silently fell through to the backend's
+  // DEFAULT_MODEL ("gpt-4o"), which only works if OPENAI_API_KEY is set.
+  // Configuring only an Anthropic key passed the banner check but still
+  // hit "OPENAI_API_KEY is not set on the backend", confirmed live.
+  // Mirrors DagsterAIBar's provider-aware model selection so a configured
+  // Anthropic-only key actually gets used instead of silently defaulting
+  // to a provider with no key.
+  const availableModels = useMemo(() => {
+    if (!providers) return MODEL_OPTIONS;
+    return MODEL_OPTIONS.filter((m) => {
+      const isClaude = m.value.startsWith('claude');
+      return isClaude ? providers.anthropic_available : providers.openai_available;
+    });
+  }, [providers]);
+  const [model, setModel] = useState(MODEL_OPTIONS[0].value);
+  useEffect(() => {
+    if (!providers || availableModels.length === 0) return;
+    if (!availableModels.find((m) => m.value === model)) {
+      setModel(availableModels[0].value);
+    }
+  }, [providers, availableModels, model]);
   // Filter text for a long clarifying_question.options list (real project
   // asset names -- could be hundreds, not the 2-4 generic categories a
   // fixed row of chat-bubble buttons was designed for). Reset whenever a
@@ -338,6 +375,7 @@ export function AgentPipelineBuilder({
         existing_assets: existing,
         project_id: currentProject.id,
         scope: 'agents_pipelines',
+        model,
       };
       if (answer && latestPlan) {
         body.previous_plan = latestPlan.picks;
