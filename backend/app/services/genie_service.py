@@ -908,6 +908,18 @@ SYSTEM_PROMPT = (
     "    * \"a database\" -> `dataframe_from_sql` (runs a SQL query "
     "  against a configured connection, outputs a DataFrame); "
     "  `database_query` is an acceptable alternative for the same job.\n"
+    "  A dbt model or seed IS a database source for this purpose (it's a "
+    "  real warehouse table once dbt materializes it, dbt just has no "
+    "  DataFrame output of its own) -- confirmed live as a real "
+    "  misclassification: told the data comes from a dbt seed, a prior "
+    "  run picked `dataframe_from_csv` and asked for a CSV path, which is "
+    "  wrong for data that's already a warehouse table. If the task or a "
+    "  prior answer names or implies a dbt model/seed as the source, use "
+    "  `dataframe_from_sql` with `query: \"SELECT * FROM <schema>.<model_"
+    "  name>\"` (the dbt model's real materialized name) and "
+    "  `deps: [\"<dbt_model_asset_key>\"]` so lineage reflects that this "
+    "  reads the dbt model's output -- do NOT ask for a CSV path in this "
+    "  case.\n"
     "  Fill every field of that new pick you can infer from the task; "
     "  TODO-placeholder (see ASK RATHER THAN FABRICATE above) whatever "
     "  you genuinely don't know yet -- typically the file path/URL for a "
@@ -1227,6 +1239,52 @@ async def _post_with_retry(
     return last_response  # pragma: no cover -- loop always returns above
 
 
+def _friendly_provider_error(provider: str, status_code: int, response_text: str) -> str:
+    """Turn a raw provider error response into something a user can act
+    on, instead of a scary unfiltered JSON dump (same complaint the 429
+    retry logic above was already built to avoid, confirmed live again
+    for a 400 -- "Your credit balance is too low" buried inside
+    `{"type":"error","error":{"type":"invalid_request_error","message":
+    "..."}}`, fully opaque at a glance).
+
+    Extracts the real message out of either provider's error envelope
+    (Anthropic: error.message/error.type; OpenAI: error.message/error.code/
+    error.type) and gives a specific, actionable string for the error
+    classes a user can actually do something about (billing, auth).
+    Falls back to the extracted message alone (still far better than the
+    full wrapper) or, if the body isn't even JSON, the raw text.
+    """
+    try:
+        body = json.loads(response_text)
+    except (json.JSONDecodeError, ValueError):
+        return f"{provider} error {status_code}: {response_text[:400]}"
+
+    err = body.get("error") if isinstance(body, dict) else None
+    message = (err or {}).get("message", "") if isinstance(err, dict) else ""
+    err_type = (err or {}).get("type", "") if isinstance(err, dict) else ""
+    err_code = (err or {}).get("code", "") if isinstance(err, dict) else ""
+
+    billing_page = (
+        "console.anthropic.com -> Plans & Billing" if provider == "Anthropic"
+        else "platform.openai.com -> Billing"
+    )
+    is_billing = (
+        "credit balance" in message.lower()
+        or err_code == "insufficient_quota"
+        or "quota" in err_type.lower()
+    )
+    if is_billing:
+        return f"{provider} account is out of credits. Add credits or upgrade your plan at {billing_page}, then try again."
+
+    is_auth = "authentication" in err_type.lower() or err_code == "invalid_api_key"
+    if is_auth:
+        return f"{provider} rejected this API key as invalid. Check the key in Settings → AI Providers."
+
+    if message:
+        return f"{provider} error {status_code}: {message}"
+    return f"{provider} error {status_code}: {response_text[:400]}"
+
+
 async def plan(
     task: str,
     existing_assets: list[dict[str, Any]] | None = None,
@@ -1355,7 +1413,7 @@ async def plan(
             if r.status_code == 429:
                 raise GenieError("Anthropic is rate-limiting this API key right now. Wait a few seconds and try again.")
             if r.status_code != 200:
-                raise GenieError(f"Anthropic error {r.status_code}: {r.text[:400]}")
+                raise GenieError(_friendly_provider_error("Anthropic", r.status_code, r.text))
             data = r.json()
             # Content is a list of blocks; the first text block holds the reply.
             try:
@@ -1396,7 +1454,7 @@ async def plan(
             if r.status_code == 429:
                 raise GenieError("OpenAI is rate-limiting this API key right now. Wait a few seconds and try again.")
             if r.status_code != 200:
-                raise GenieError(f"OpenAI error {r.status_code}: {r.text[:400]}")
+                raise GenieError(_friendly_provider_error("OpenAI", r.status_code, r.text))
             data = r.json()
 
             try:
@@ -1826,12 +1884,20 @@ async def plan(
                 options=[*real_names, "Add a new one instead"],
             )
         else:
+            # Same bug class the `if real_names:` branch above was already
+            # careful about: a bare question with no `options` is a dead
+            # end for the frontend's clickable-choice UI -- confirmed live,
+            # the user saw a free-text question with nothing to click,
+            # mirroring the project's actual situation (no DataFrame
+            # sources at all) but giving no way to act on "add a new one"
+            # without guessing what that even means.
             clarifying_question = GenieClarifyingQuestion(
                 question="I tried to reference an existing asset, but this project "
                 "doesn't have one that outputs a DataFrame yet (a dbt model or a "
                 "side-effect SQL asset doesn't count -- there's nothing for this "
                 "pick to actually read). What should the source actually be, or "
-                "should I add a new one instead?"
+                "should I add a new one instead?",
+                options=["Add a new one instead"],
             )
 
     usage = data.get("usage") or {}
