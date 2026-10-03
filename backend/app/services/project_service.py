@@ -1,6 +1,7 @@
 """Service for managing pipeline projects."""
 
 import json
+import os
 import re
 import shlex
 import uuid
@@ -1962,6 +1963,24 @@ class ProjectService:
         log(f"📂 Project directory: {project_dir}")
         log(f"⚙️  Using UV directly (not uvx) for faster performance")
         log(f"📦 UV cache: ~/.cache/uv/ (730+ packages cached)")
+
+        # On Windows, directories cloned or moved from temp locations can
+        # inherit restrictive ACLs that block writes (WinError 5). Fix the
+        # permissions upfront so that later steps (dbt manifest generation,
+        # uv venv creation, etc.) don't fail with "Access is denied".
+        if sys.platform == "win32":
+            try:
+                result = subprocess.run(
+                    ["icacls", str(project_dir), "/grant", f"{os.environ.get('USERNAME', 'Users')}:(OI)(CI)F", "/T", "/Q"],
+                    capture_output=True,
+                    text=True,
+                )
+                if result.returncode != 0:
+                    log(f"⚠️  icacls permission fix returned {result.returncode}: {result.stderr.strip()}")
+                else:
+                    log(f"✅ Fixed directory permissions on Windows")
+            except Exception as e:
+                log(f"⚠️  Could not fix directory permissions: {e}")
 
         activated_env_vars = self._ensure_env_file_from_example(project_dir)
         if activated_env_vars:

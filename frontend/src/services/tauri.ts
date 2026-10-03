@@ -210,3 +210,22 @@ export async function confirmQuit(): Promise<void> {
   const { invoke } = await import('@tauri-apps/api/core');
   await invoke('confirm_quit');
 }
+
+/**
+ * Fires the handler once when the Rust backend emits "backend-ready" -- i.e.
+ * the Python/uv backend is accepting TCP connections. On fast starts (warm uv
+ * cache, backend already running) this fires almost immediately; on a first
+ * install it can take 30–120 s while uv downloads Python + packages.
+ * No-op outside Tauri (web dev mode talks to a separately running backend).
+ * Returns an unsubscribe function.
+ */
+export async function onBackendReady(handler: () => void): Promise<() => void> {
+  if (!isTauri) return () => {};
+  try {
+    const { listen } = await import('@tauri-apps/api/event');
+    const unlisten = await listen('backend-ready', () => handler());
+    return unlisten;
+  } catch {
+    return () => {};
+  }
+}

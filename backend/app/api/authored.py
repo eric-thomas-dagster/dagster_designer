@@ -397,15 +397,18 @@ async def locations(
                 "authoring_supported": False,
             })
 
-    # Sandbox loc — surface it if the subprocess is ready. Sandbox
-    # always supports authoring (that's the whole point).
-    sandbox_state = designer_loc_service.get_state(project_id)
-    if sandbox_state.is_proc_alive():
-        entries.append({
-            "name": SANDBOX_LOCATION_NAME,
-            "source": "sandbox",
-            "authoring_supported": True,
-        })
+    # Sandbox loc — always surface it. The sandbox is the primary authoring
+    # target for local projects; hiding it until the subprocess happens to
+    # already be running meant "Add Component" showed an empty location list
+    # for any project opened cold (confirmed live: sandbox hadn't been started
+    # yet, is_proc_alive() was False, no entries → location never set →
+    # types never loaded → empty picker). The frontend already handles
+    # "sandbox not running yet" gracefully via the startup status pill.
+    entries.append({
+        "name": SANDBOX_LOCATION_NAME,
+        "source": "sandbox",
+        "authoring_supported": True,
+    })
 
     return {"locations": entries}
 

@@ -76,7 +76,7 @@ class FileService:
                     ]:
                         continue
 
-                    relative_path = str(item.relative_to(relative_to))
+                    relative_path = item.relative_to(relative_to).as_posix()
 
                     if item.is_dir():
                         items.append(
