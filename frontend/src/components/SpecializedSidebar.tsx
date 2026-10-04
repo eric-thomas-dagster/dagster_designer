@@ -6,6 +6,7 @@ import { GeoBoundingBoxSidebar } from './GeoBoundingBoxSidebar';
 import { LLMSidebar } from './LLMSidebar';
 import { AgentSidebar } from './AgentSidebar';
 import { DocumentExtractorSidebar } from './DocumentExtractorSidebar';
+import { DbtProjectSidebar } from './DbtProjectSidebar';
 
 /**
  * Dispatcher for component-specific config panels. If a component_type
@@ -159,6 +160,21 @@ const MATCHERS: Array<{ test: (componentType: string) => boolean; Sidebar: Sideb
     // engine-prefixed sql transform.
     test: makeMatcher(['sql_transform', 'sql_transformer'], ['SqlTransform', 'SqlTransformer']),
     Sidebar: SqlTransformSidebar,
+  },
+  {
+    // Plain dagster_dbt.DbtProjectComponent and EnrichedDbtProjectComponent
+    // (Designer's new default for dbt projects, see
+    // project_service._enriched_dbt_component_type) -- both real
+    // subclasses of the same base, so project/select/exclude/cli_args
+    // always apply. Deliberately NOT matched: DbtProjectWithTranslatorComponent
+    // (the old one-off component, legacy projects only -- genuinely one
+    // field, the generic form is already fine for it) and dbt Cloud
+    // workspace components (EnrichedDbtCloudWorkspaceComponent/
+    // DbtCloudComponent -- job_filter-shaped, not project/select/exclude).
+    test: (t) =>
+      /(?:^|\.)(?:enriched_)?dbt_project(?:$|\.)/i.test(t) ||
+      /\.(?:Enriched)?DbtProjectComponent$/i.test(t),
+    Sidebar: DbtProjectSidebar,
   },
 ];
 

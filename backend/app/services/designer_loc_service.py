@@ -274,30 +274,47 @@ def _drain_stdout_in_background(state: DesignerLocState) -> None:
     t.start()
 
 
+def _lock_for(project_id: str) -> asyncio.Lock:
+    return _locks.setdefault(project_id, asyncio.Lock())
+
+
 async def ensure_running(project_id: str) -> DesignerLocState:
     """Idempotent: scaffold + install + start if needed."""
     state = get_state(project_id)
     if state.status == "ready" and state.is_proc_alive():
         return state
 
-    lock = _locks.setdefault(project_id, asyncio.Lock())
-    async with lock:
-        # Re-check under lock
-        if state.status == "ready" and state.is_proc_alive():
-            return state
+    async with _lock_for(project_id):
+        return await _ensure_running_locked(state)
 
-        state.error = None
-        loop = asyncio.get_event_loop()
-        try:
-            if not state.is_scaffolded():
-                await loop.run_in_executor(None, _scaffold, state)
-            if not state.is_installed():
-                await loop.run_in_executor(None, _install, state)
-            await loop.run_in_executor(None, _start_process, state)
-        except Exception as e:
-            state.status = "error"
-            state.error = str(e)
-            _log(state, f"ERROR: {e}")
+
+async def _ensure_running_locked(state: DesignerLocState) -> DesignerLocState:
+    """The actual scaffold+install+start sequence, assuming the caller
+    already holds this project's lock. Split out so install_community_component/
+    scaffold_component/write_raw_file -- which mutate sandbox files AND
+    need to restart afterward -- can hold the SAME lock across their
+    whole write+restart sequence instead of releasing it just before
+    calling ensure_running(), which would re-acquire it (fine, not a
+    deadlock, asyncio.Lock isn't reentrant so a naive re-acquire from the
+    same coroutine WOULD deadlock) and, worse, leave a gap where a second
+    concurrent request's write could interleave with the first's restart.
+    """
+    # Re-check under lock -- another waiter may have already finished this.
+    if state.status == "ready" and state.is_proc_alive():
+        return state
+
+    state.error = None
+    loop = asyncio.get_event_loop()
+    try:
+        if not state.is_scaffolded():
+            await loop.run_in_executor(None, _scaffold, state)
+        if not state.is_installed():
+            await loop.run_in_executor(None, _install, state)
+        await loop.run_in_executor(None, _start_process, state)
+    except Exception as e:
+        state.status = "error"
+        state.error = str(e)
+        _log(state, f"ERROR: {e}")
 
     return state
 
@@ -487,18 +504,25 @@ async def install_community_component(project_id: str, component_id: str) -> dic
     if not state.is_scaffolded():
         raise RuntimeError("Sandbox is not scaffolded yet")
 
-    loop = asyncio.get_event_loop()
-    canonical_type, req_path, stdout_tail = await loop.run_in_executor(
-        None, _run_dagster_component_add, state, component_id
-    )
+    # Holds the lock across the whole write-then-restart sequence (not
+    # just the restart) -- two concurrent installs (a double-click, or
+    # batch-adding several components) would otherwise run their `uvx`
+    # file writes in parallel against the same sandbox directory, and
+    # whichever's `stop()` lands first could kill the dg dev process out
+    # from under the other's in-flight restart.
+    async with _lock_for(project_id):
+        loop = asyncio.get_event_loop()
+        canonical_type, req_path, stdout_tail = await loop.run_in_executor(
+            None, _run_dagster_component_add, state, component_id
+        )
 
-    if req_path is not None:
-        await loop.run_in_executor(None, _install_template_requirements, state, req_path)
+        if req_path is not None:
+            await loop.run_in_executor(None, _install_template_requirements, state, req_path)
 
-    # New Python deps => restart to pick up the venv changes.
-    _log(state, "restarting sandbox to load newly-installed component")
-    stop(project_id)
-    await ensure_running(project_id)
+        # New Python deps => restart to pick up the venv changes.
+        _log(state, "restarting sandbox to load newly-installed component")
+        stop(project_id)
+        await _ensure_running_locked(state)
 
     return {
         "component_id": component_id,
@@ -526,45 +550,85 @@ async def scaffold_component(
     if not state.is_scaffolded():
         raise RuntimeError("Sandbox is not scaffolded yet")
 
-    module_name = state.dir().name  # matches `ds_<sanitized_project_id>`
-    src_module_dir = state.dir() / "src" / module_name
-    defs_dir = src_module_dir / "defs"
-    defs_dir.mkdir(parents=True, exist_ok=True)
+    # Locked for the whole write-then-restart sequence -- same race this
+    # function's neighbors (install_community_component, write_raw_file)
+    # guard against: two concurrent authors (a double-click, or
+    # batch-adding several components) writing into the same sandbox dir
+    # and racing each other's stop()/restart.
+    async with _lock_for(project_id):
+        module_name = state.dir().name  # matches `ds_<sanitized_project_id>`
+        src_module_dir = state.dir() / "src" / module_name
+        defs_dir = src_module_dir / "defs"
+        defs_dir.mkdir(parents=True, exist_ok=True)
 
-    short = component_type.rsplit(".", 1)[-1]
-    if not component_id:
-        component_id = f"{short}[{_uuid.uuid4().hex[:6]}]"
+        short = component_type.rsplit(".", 1)[-1]
+        if not component_id:
+            component_id = f"{short}[{_uuid.uuid4().hex[:6]}]"
 
-    comp_dir = defs_dir / _sanitize_folder(component_id)
-    comp_dir.mkdir(exist_ok=True)
+        comp_dir = defs_dir / _sanitize_folder(component_id)
+        comp_dir.mkdir(exist_ok=True)
 
-    # Install package on-demand for community components.
-    package_name = _package_for(component_type)
-    needs_restart = False
-    if package_name and not _package_installed(state, package_name):
-        _log(state, f"uv add {package_name}")
-        result = subprocess.run(
-            [find_uv_binary("uv"), "add", package_name],
-            cwd=str(state.dir()),
-            env=project_subprocess_env(state.dir()),
-            capture_output=True,
-            text=True,
-            timeout=300,
-        )
-        if result.returncode != 0:
-            tail = (result.stderr or result.stdout or "").splitlines()[-20:]
-            raise RuntimeError(f"uv add {package_name} failed:\n" + "\n".join(tail))
-        needs_restart = True
+        loop = asyncio.get_event_loop()
 
-    # Write the defs.yaml verbatim — user-supplied YAML already contains
-    # `type: <FQN>` + `attributes:` (seeded from the type's `example`).
-    (comp_dir / "defs.yaml").write_text(attributes_yaml)
-    _log(state, f"wrote {comp_dir / 'defs.yaml'}")
+        # Designer's own built-ins (EnhancedAssetCheckComponent,
+        # SqlTransformerComponent, ...) live at `<module>.dagster_designer_components.*`
+        # -- same convention as every regular (non-sandbox) project, which get
+        # the package copied in by project_service._copy_component_classes_to_project.
+        # A freshly create-dagster-scaffolded sandbox has no equivalent copy
+        # step, so a monitor/transform authored here would reference a module
+        # that was never actually placed on disk -- confirmed live: `_package_for`
+        # correctly skips `uv add` for this prefix (it's not a PyPI package),
+        # but nothing else put the files there either, so `dg` would fail to
+        # import the type at component-load time. Always refresh (not just
+        # install-if-missing) so a fix to dagster_designer_components reaches
+        # already-scaffolded sandboxes too, same as the regular-project path.
+        if component_type.startswith(f"{module_name}.dagster_designer_components."):
+            components_source = Path(__file__).parent.parent.parent / "dagster_designer_components"
+            components_dest = src_module_dir / "dagster_designer_components"
 
-    if needs_restart:
-        _log(state, "package changed; restarting subprocess")
-        stop(project_id)
-        await ensure_running(project_id)
+            def _copy_components_sync():
+                if components_dest.exists():
+                    shutil.rmtree(components_dest)
+                shutil.copytree(components_source, components_dest)
+
+            await loop.run_in_executor(None, _copy_components_sync)
+            _log(state, f"copied dagster_designer_components -> {components_dest}")
+
+        # Install package on-demand for community components. Off the
+        # event loop -- this is a real `uv add` network+resolve call that
+        # can take seconds, and running it inline here (unlike every
+        # other subprocess call in this module) used to freeze the whole
+        # backend -- every endpoint, every project -- for the duration.
+        package_name = _package_for(component_type)
+        needs_restart = False
+        if package_name and not _package_installed(state, package_name):
+            _log(state, f"uv add {package_name}")
+
+            def _uv_add_sync():
+                return subprocess.run(
+                    [find_uv_binary("uv"), "add", package_name],
+                    cwd=str(state.dir()),
+                    env=project_subprocess_env(state.dir()),
+                    capture_output=True,
+                    text=True,
+                    timeout=300,
+                )
+
+            result = await loop.run_in_executor(None, _uv_add_sync)
+            if result.returncode != 0:
+                tail = (result.stderr or result.stdout or "").splitlines()[-20:]
+                raise RuntimeError(f"uv add {package_name} failed:\n" + "\n".join(tail))
+            needs_restart = True
+
+        # Write the defs.yaml verbatim — user-supplied YAML already contains
+        # `type: <FQN>` + `attributes:` (seeded from the type's `example`).
+        (comp_dir / "defs.yaml").write_text(attributes_yaml)
+        _log(state, f"wrote {comp_dir / 'defs.yaml'}")
+
+        if needs_restart:
+            _log(state, "package changed; restarting subprocess")
+            stop(project_id)
+            await _ensure_running_locked(state)
 
     return {
         "component_id": component_id,
@@ -572,6 +636,71 @@ async def scaffold_component(
         "restarted": needs_restart,
         "package": package_name,
     }
+
+
+async def write_raw_file(
+    project_id: str,
+    relative_path: str,
+    content: str,
+    *,
+    mode: str = "write",
+    header: str | None = None,
+    skip_if_contains: str | None = None,
+    ensure_init: bool = False,
+) -> dict:
+    """Write or append a plain Python file directly into the sandbox's
+    `defs/` tree -- the raw-code counterpart to scaffold_component's
+    component-YAML instances.
+
+    Needed for primitives that are hand-written Python rather than a
+    `type:`+`attributes:` component -- resources, IO managers, freshness
+    policies, and Python/SQL assets (see templates.py's /templates/save,
+    which uses scaffold_component for schedule/job/sensor/asset_check but
+    has no equivalent for these until now). dg's defs-folder convention
+    loads plain `.py` files under `defs/` the same way it loads
+    `defs.yaml`, so this is a peer mechanism, not a workaround.
+
+    Always restarts the subprocess afterward: a new or changed top-level
+    `.py` file under `defs/` needs a fresh `dg dev` boot to be
+    discovered, unlike an edit to an already-known component's
+    `defs.yaml`, which hot-reloads. Correctness over speed -- a restart
+    on an already-installed sandbox is a few seconds, not a full
+    scaffold+install.
+    """
+    state = get_state(project_id)
+    if not state.is_scaffolded():
+        raise RuntimeError("Sandbox is not scaffolded yet")
+
+    # Locked for the whole read-modify-write-then-restart sequence.
+    # `mode="append"` in particular is a real read-then-write race without
+    # this: two near-simultaneous resource/freshness-policy adds (common --
+    # that's the one shared-file path every such add goes through) would
+    # both read the same `existing` content, and whichever writes last
+    # would silently discard the other's addition.
+    async with _lock_for(project_id):
+        module_name = state.dir().name
+        defs_dir = state.dir() / "src" / module_name / "defs"
+        target = defs_dir / relative_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+
+        if ensure_init:
+            init_file = target.parent / "__init__.py"
+            if not init_file.exists():
+                init_file.write_text("")
+
+        if mode == "append":
+            existing = target.read_text() if target.exists() else (header or "")
+            if skip_if_contains and skip_if_contains in existing:
+                return {"path": str(target), "restarted": False, "skipped": True}
+            target.write_text(existing + ("\n\n" if existing else "") + content)
+        else:
+            target.write_text(content)
+
+        _log(state, f"wrote {target}")
+        stop(project_id)
+        await _ensure_running_locked(state)
+
+    return {"path": str(target), "restarted": True, "skipped": False}
 
 
 def list_components(project_id: str) -> list[dict]:
@@ -638,13 +767,22 @@ async def publish_serverless(project_id: str, location_name: str | None) -> dict
 
     loc_name = location_name or f"designer-sandbox-{project_id[:8]}"
 
-    loop = asyncio.get_event_loop()
-    tail = await loop.run_in_executor(
-        None,
-        serverless_publish_service.run_serverless_deploy,
-        state.dir(), state.dir().name, org, token, deployment, loc_name,
-        lambda line: _log(state, line),
-    )
+    # Locked for the deploy's whole duration -- it reads whatever's
+    # currently on disk under state.dir(). Without this, a component add
+    # landing mid-deploy (scaffold_component/write_raw_file/
+    # install_community_component all hold this same lock) could publish
+    # a half-written file, or its restart could yank the venv out from
+    # under the deploy subprocess. A publish being briefly blocked behind
+    # another in-flight mutation is the right tradeoff -- a consistent
+    # snapshot beats a faster but possibly-torn one.
+    async with _lock_for(project_id):
+        loop = asyncio.get_event_loop()
+        tail = await loop.run_in_executor(
+            None,
+            serverless_publish_service.run_serverless_deploy,
+            state.dir(), state.dir().name, org, token, deployment, loc_name,
+            lambda line: _log(state, line),
+        )
     return {"location_name": loc_name, "deployment": deployment, "log_tail": tail}
 
 

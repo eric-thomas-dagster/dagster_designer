@@ -1048,58 +1048,71 @@ async def install_component_via_cli(
     if not project_dir.exists():
         raise HTTPException(status_code=404, detail=f"Project directory not found: {project_dir}")
 
-    cmd = [
-        find_uv_binary("uvx"),
-        "--from", "dagster-community-components-cli",
-        "dagster-component",
-        # The CLI caches its OWN copy of manifest.json locally for an hour
-        # (~/.cache/dagster-community-components/manifest.json,
-        # registry.py's CACHE_TTL_SECONDS) -- completely separate from
-        # (and slower to refresh than) the manifest Designer itself reads
-        # via get_manifest() below. Confirmed live: a component added to
-        # the manifest less than an hour ago (structured_document_extractor)
-        # failed with "Component not found" here even though it was
-        # already visible in Designer's own picker/wizard, purely because
-        # of this second, independent cache. --refresh is a GROUP-level
-        # flag (must precede the `add` subcommand, per Click's convention)
-        # that bypasses it -- always pass it so a component that's brand
-        # new to the manifest is never invisible to installs for up to an
-        # hour after being added.
-        "--refresh",
-        "add", component_id,
-        "--auto-install",
-        "--manager", "uv",
-        "--force",
-    ]
-    print(f"[CLI Install] Running: {' '.join(cmd)} (cwd={project_dir})")
+    def _build_cmd(refresh: bool) -> list[str]:
+        cmd = [
+            find_uv_binary("uvx"),
+            "--from", "dagster-community-components-cli",
+            "dagster-component",
+        ]
+        if refresh:
+            cmd.append("--refresh")
+        cmd += ["add", component_id, "--auto-install", "--manager", "uv", "--force"]
+        return cmd
 
-    try:
-        result = subprocess.run(
-            cmd,
-            cwd=str(project_dir),
-            # The CLI itself internally shells out to bare "uv" (that's
-            # what --manager uv above tells it to use) -- putting our
-            # bundled uv on PATH here lets that internal call find it too,
-            # the same way find_uv_binary() resolves it for our own calls.
-            # Also point VIRTUAL_ENV at THIS project's own venv (not just
-            # whatever this backend process itself runs from), since that
-            # internal `uv add` call installs the new component's
-            # requirements.txt and must land them in the right venv.
-            env=env_with_bundled_uv_on_path(project_subprocess_env(project_dir)),
-            capture_output=True,
-            text=True,
-            timeout=300,
-        )
-    except subprocess.TimeoutExpired:
-        raise HTTPException(status_code=504, detail="CLI install timed out after 5 minutes")
-    except FileNotFoundError:
-        raise HTTPException(
-            status_code=500,
-            detail="uvx not found. Install `uv` (https://docs.astral.sh/uv/) to enable CLI-based component installs.",
-        )
+    def _run(refresh: bool):
+        cmd = _build_cmd(refresh)
+        print(f"[CLI Install] Running: {' '.join(cmd)} (cwd={project_dir})")
+        try:
+            return subprocess.run(
+                cmd,
+                cwd=str(project_dir),
+                # The CLI itself internally shells out to bare "uv" (that's
+                # what --manager uv above tells it to use) -- putting our
+                # bundled uv on PATH here lets that internal call find it too,
+                # the same way find_uv_binary() resolves it for our own calls.
+                # Also point VIRTUAL_ENV at THIS project's own venv (not just
+                # whatever this backend process itself runs from), since that
+                # internal `uv add` call installs the new component's
+                # requirements.txt and must land them in the right venv.
+                env=env_with_bundled_uv_on_path(project_subprocess_env(project_dir)),
+                capture_output=True,
+                text=True,
+                timeout=300,
+            )
+        except subprocess.TimeoutExpired:
+            raise HTTPException(status_code=504, detail="CLI install timed out after 5 minutes")
+        except FileNotFoundError:
+            raise HTTPException(
+                status_code=500,
+                detail="uvx not found. Install `uv` (https://docs.astral.sh/uv/) to enable CLI-based component installs.",
+            )
 
+    # The CLI caches its OWN copy of manifest.json locally for an hour
+    # (~/.cache/dagster-community-components/manifest.json, registry.py's
+    # CACHE_TTL_SECONDS) -- completely separate from (and slower to
+    # refresh than) the manifest Designer itself reads via get_manifest()
+    # below. A component added to the manifest less than an hour ago can
+    # 404 here even though it's already visible in Designer's own
+    # picker/wizard, purely because of this second, independent cache.
+    #
+    # --refresh bypasses that cache, but forces a full network re-fetch
+    # of the ENTIRE manifest -- confirmed live, ~2.2s vs ~1.0s for the
+    # same install without it, EVERY single time, to guard against an
+    # edge case (a component added in roughly the last hour) that's rare.
+    # Unconditionally passing it was paying that cost on every ingestion/
+    # activation add -- confirmed live as the "closes, then takes several
+    # seconds" complaint. Try the fast (cached) path first; only pay for
+    # --refresh on the specific "Component not found" failure it exists
+    # to fix, not on every call.
+    result = _run(refresh=False)
     stdout = result.stdout or ""
     stderr = result.stderr or ""
+    if result.returncode != 0 and "Component not found" in (stdout + stderr):
+        print(f"[CLI Install] {component_id} not in cached manifest, retrying with --refresh")
+        result = _run(refresh=True)
+        stdout = result.stdout or ""
+        stderr = result.stderr or ""
+
     print(f"[CLI Install] rc={result.returncode}\nstdout: {stdout}\nstderr: {stderr}")
 
     if result.returncode != 0:

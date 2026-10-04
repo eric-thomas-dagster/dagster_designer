@@ -1626,7 +1626,11 @@ function App() {
               surface over the ingestion-shaped components already in the
               project. Reuses AddDataDialog for the "add" flow. */}
           <Tabs.Content value="ingestions" className="flex-1 overflow-hidden">
-            <IngestionsPanel onAddDataSource={setAddingComponentType} onEditComponent={setEditingComponent} />
+            <IngestionsPanel
+              onAddDataSource={setAddingComponentType}
+              onAddCloudDataSource={setDraftAuthoring}
+              onEditComponent={setEditingComponent}
+            />
           </Tabs.Content>
 
           {/* AI/ML Tab Content — single discoverable home for every

@@ -7,7 +7,8 @@ import {
 } from 'lucide-react';
 import { useProjectStore } from '@/hooks/useProject';
 import { notify } from './Notifications';
-import { API_BASE } from '@/services/api';
+import { API_BASE, designerLocApi, authoredApi, SANDBOX_LOCATION_NAME } from '@/services/api';
+import type { ConfigureAuthoringPayload } from './AddComponentModal';
 
 interface ManifestComponent {
   id: string;
@@ -28,8 +29,22 @@ interface AddDataDialogProps {
   onOpenChange: (open: boolean) => void;
   /** Called with the installed component_type once a source is picked +
    *  installed. Wired to the same setAddingComponentType path the
-   *  palette uses so the config modal opens immediately. */
+   *  palette uses so the config modal opens immediately. Only used for
+   *  plain local projects -- see onCloudSourcePicked for Dagster+. */
   onSourcePicked: (componentType: string) => void;
+  /** Dagster+ projects have no local defs.py to install into (see
+   *  IngestionsPanel's isCloud handling) -- a plain `onSourcePicked`
+   *  install silently went nowhere, since nothing ever carries a
+   *  locally-written component to the real deployment. For these
+   *  projects, install into the Designer-managed sandbox instead (the
+   *  same mechanism AddComponentModal's "Add component" entry point
+   *  already uses) and hand the result to the shared
+   *  draftAuthoring/ComponentConfigModal(mode="draft") flow in App.tsx
+   *  via this payload, so "Promote to PR" / "Publish to Dagster+"
+   *  (already built, see SandboxStatusPill) picks it up same as any
+   *  other sandbox-authored component.
+   */
+  onCloudSourcePicked?: (payload: ConfigureAuthoringPayload) => void;
 }
 
 // Only ingestion-shaped categories from the community manifest — we want
@@ -113,11 +128,12 @@ function classify(comp: ManifestComponent): Group {
   return { key: `bin:${bin.id}`, label: bin.label, icon: bin.icon };
 }
 
-export function AddDataDialog({ open, onOpenChange, onSourcePicked }: AddDataDialogProps) {
+export function AddDataDialog({ open, onOpenChange, onSourcePicked, onCloudSourcePicked }: AddDataDialogProps) {
   const [query, setQuery] = useState('');
   const [installingId, setInstallingId] = useState<string | null>(null);
   const { currentProject } = useProjectStore();
   const queryClient = useQueryClient();
+  const isCloud = !!(currentProject as any)?.is_dagster_plus;
 
   const { data: manifest, isLoading } = useQuery({
     queryKey: ['community-templates-manifest'],
@@ -134,6 +150,62 @@ export function AddDataDialog({ open, onOpenChange, onSourcePicked }: AddDataDia
     mutationFn: async (componentId: string) => {
       if (!currentProject) throw new Error('No project selected');
       setInstallingId(componentId);
+
+      // Dagster+ projects have no local src/ tree a real deployment ever
+      // reads from -- installing via the local CLI path (below) writes
+      // into a scratch directory nobody promotes, so "Add data" silently
+      // did nothing. Route through the Designer-managed sandbox instead,
+      // same as AddComponentModal's "Add component" entry point: install
+      // there for real, then let the caller route the result into the
+      // shared draftAuthoring/ComponentConfigModal(mode="draft") flow so
+      // Promote-to-PR / Publish-to-Dagster+ (SandboxStatusPill) can pick
+      // it up like any other sandbox-authored component.
+      if (isCloud) {
+        await designerLocApi.ensure(currentProject.id);
+        const r = await designerLocApi.installCommunityComponent(currentProject.id, componentId);
+        const componentType = r.component_type;
+        if (!componentType) {
+          throw new Error('Sandbox install succeeded but did not report a component type.');
+        }
+        const sandboxTypes = await authoredApi.componentTypes(currentProject.id, SANDBOX_LOCATION_NAME);
+        const match = sandboxTypes.types.find(
+          (t) => (t.namespace ? `${t.namespace}.${t.name}` : t.name) === componentType,
+        );
+        let initialAttributes: Record<string, any> = {};
+        if (match?.example) {
+          try {
+            const { default: yaml } = await import('js-yaml');
+            const doc = yaml.load(match.example) as any;
+            if (doc?.attributes && typeof doc.attributes === 'object') initialAttributes = doc.attributes;
+          } catch { /* fall through with empty attributes */ }
+        }
+        const comp = manifest?.components.find((c) => c.id === componentId);
+        const payload: ConfigureAuthoringPayload = {
+          componentType,
+          displayName: match?.name ?? comp?.name ?? componentId,
+          schema: match
+            ? {
+                type: componentType,
+                name: match.name,
+                module: match.namespace ?? '',
+                description: match.description ?? comp?.description ?? '',
+                category: 'ingestion',
+                attributes: {},
+                schema: match.formSchema?.dataSchema ?? match.schema ?? {},
+              }
+            : null,
+          initialAttributes,
+          location: SANDBOX_LOCATION_NAME,
+          deployment: null,
+          target: 'sandbox',
+          availableAssets: [],
+          availableJobs: [],
+          availableSchedules: [],
+          availableSensors: [],
+        };
+        return { component_type: componentType, cloudPayload: payload };
+      }
+
       const res = await fetch(`${API_BASE}/templates/install-via-cli/${componentId}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -145,9 +217,19 @@ export function AddDataDialog({ open, onOpenChange, onSourcePicked }: AddDataDia
       });
       const body = await res.json().catch(() => ({} as any));
       if (!res.ok) throw new Error(body.detail || 'Install failed');
-      return body as { component_type: string };
+      return body as { component_type: string; cloudPayload?: undefined };
     },
     onSuccess: async (data) => {
+      if (data.cloudPayload) {
+        if (!onCloudSourcePicked) {
+          notify.error('Installed into the sandbox, but this screen can\'t open the configuration form yet.');
+          return;
+        }
+        notify.success('Installed into the Designer sandbox. Configuring…');
+        onCloudSourcePicked(data.cloudPayload);
+        onOpenChange(false);
+        return;
+      }
       notify.success('Data source added. Configuring…');
       if (currentProject) {
         await queryClient.invalidateQueries({ queryKey: ['installed-components', currentProject.id] });
@@ -207,6 +289,12 @@ export function AddDataDialog({ open, onOpenChange, onSourcePicked }: AddDataDia
               </Dialog.Title>
               <p className="text-sm text-gray-500 mt-0.5">
                 Connect to a data source — a database, warehouse, SaaS app, file, or API — and drop it onto the graph.
+                {dataComponents.length > 0 && (
+                  <>
+                    {' '}
+                    <span className="font-medium text-gray-700">{dataComponents.length}+ connectors</span> available.
+                  </>
+                )}
               </p>
             </div>
             <Dialog.Close asChild>

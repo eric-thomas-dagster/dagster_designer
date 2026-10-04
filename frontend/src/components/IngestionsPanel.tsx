@@ -7,6 +7,7 @@ import { assetsApi, projectsApi, partitionsApi, type IngestionEvent, type Backfi
 import { AiAssistantPanel } from './AiAssistantPanel';
 import { notify } from './Notifications';
 import { AddDataDialog } from './AddDataDialog';
+import type { ConfigureAuthoringPayload } from './AddComponentModal';
 import { PartitionBackfill } from './PartitionBackfill';
 import type { ComponentInstance, GraphNode } from '@/types';
 import { useGroupByCodeLocation } from '@/hooks/useGroupByCodeLocation';
@@ -14,6 +15,12 @@ import { GroupByLocationToggle } from './GroupByLocationToggle';
 
 interface IngestionsPanelProps {
   onAddDataSource: (componentType: string) => void;
+  /** Dagster+ projects route "Add data" through the sandbox instead --
+   *  see AddDataDialog's onCloudSourcePicked. Forwarded straight to
+   *  App.tsx's setDraftAuthoring so it reuses the same
+   *  ComponentConfigModal(mode="draft") + Promote-to-PR/Publish flow
+   *  AddComponentModal already drives. */
+  onAddCloudDataSource?: (payload: ConfigureAuthoringPayload) => void;
   onEditComponent: (component: ComponentInstance) => void;
 }
 
@@ -105,7 +112,7 @@ function syntheticComponentFromNode(node: GraphNode): ComponentInstance {
   };
 }
 
-export function IngestionsPanel({ onAddDataSource, onEditComponent }: IngestionsPanelProps) {
+export function IngestionsPanel({ onAddDataSource, onAddCloudDataSource, onEditComponent }: IngestionsPanelProps) {
   const { currentProject } = useProjectStore();
   const isCloud = !!(currentProject as any)?.is_dagster_plus;
   // Assets the user explicitly tagged as ingestion sources (from the
@@ -1171,6 +1178,7 @@ export function IngestionsPanel({ onAddDataSource, onEditComponent }: Ingestions
         open={addDataOpen}
         onOpenChange={setAddDataOpen}
         onSourcePicked={onAddDataSource}
+        onCloudSourcePicked={onAddCloudDataSource}
       />
     </div>
   );

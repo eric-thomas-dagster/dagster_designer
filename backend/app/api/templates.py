@@ -834,6 +834,101 @@ async def save_template(request: SaveTemplateRequest):
     Returns:
         Path to saved file
     """
+    # A Dagster+ project has no local code a real deployment reads --
+    # writing any of these locally (the plain-project path below) went
+    # nowhere, confirmed live the same way "Add data"/"Add monitor" did.
+    # Two shapes, two sandbox primitives:
+    #  * schedule/job/sensor/asset_check are component instances (a clean
+    #    `type: ...dagster_designer_components.XComponent` + `attributes:`
+    #    YAML -- see save_template_to_project's own module-path-fixing
+    #    logic below) -> designer_loc_service.scaffold_component, same as
+    #    monitors/ingestion.
+    #  * python_asset/sql_asset/resource/io_manager/freshness_policy are
+    #    hand-written Python appended into a shared file (resources.py,
+    #    freshness_policies.py, defs/assets/<name>.py) -- no component
+    #    YAML to hand the sandbox, so these use
+    #    designer_loc_service.write_raw_file instead, mirroring
+    #    save_template_to_project's own per-type path/header/dedupe logic
+    #    (lines ~690-735 below) exactly.
+    if request.primitive_type in ("schedule", "job", "sensor", "asset_check"):
+        from app.services.project_service import project_service as _project_service
+        project = _project_service.get_project(request.project_id)
+        if project and project.is_dagster_plus:
+            import yaml as _yaml
+            from app.services import designer_loc_service
+            try:
+                parsed = _yaml.safe_load(request.code) or {}
+            except Exception as e:
+                raise HTTPException(status_code=400, detail=f"Generated template wasn't valid YAML: {e}")
+            component_class = str(parsed.get("type", "")).split(".")[-1] or request.primitive_type
+            try:
+                state = await designer_loc_service.ensure_running(request.project_id)
+                sandbox_module = state.dir().name
+                doc_type = f"{sandbox_module}.dagster_designer_components.{component_class}"
+                parsed["type"] = doc_type
+                result = await designer_loc_service.scaffold_component(
+                    project_id=request.project_id,
+                    component_type=doc_type,
+                    attributes_yaml=_yaml.dump(parsed, sort_keys=False),
+                    component_id=request.name,
+                )
+            except RuntimeError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+            return {
+                "message": (
+                    "Authored in the Designer sandbox (not your real deployment yet) -- "
+                    "open the Sandbox status pill and \"Promote to PR\" or "
+                    "\"Publish to Dagster+\" to ship it."
+                ),
+                "file_path": result["path"],
+            }
+
+    if request.primitive_type in ("python_asset", "sql_asset", "resource", "io_manager", "freshness_policy"):
+        from app.services.project_service import project_service as _project_service
+        project = _project_service.get_project(request.project_id)
+        if project and project.is_dagster_plus:
+            from app.services import designer_loc_service
+
+            if request.primitive_type in ("python_asset", "sql_asset"):
+                relative_path, mode, header, skip_if_contains, ensure_init = (
+                    f"assets/{request.name}.py", "write", None, None, True,
+                )
+            elif request.primitive_type in ("resource", "io_manager"):
+                relative_path, mode, header, skip_if_contains, ensure_init = (
+                    "resources.py", "append",
+                    '"""Resources and IO managers for this project."""\n\n',
+                    request.code, False,
+                )
+            else:  # freshness_policy
+                relative_path, mode, header, skip_if_contains, ensure_init = (
+                    "freshness_policies.py", "append",
+                    '"""Freshness policy templates for this project."""\n\n',
+                    request.code, False,
+                )
+
+            try:
+                result = await designer_loc_service.write_raw_file(
+                    request.project_id,
+                    relative_path,
+                    request.code,
+                    mode=mode,
+                    header=header,
+                    skip_if_contains=skip_if_contains,
+                    ensure_init=ensure_init,
+                )
+            except RuntimeError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+            return {
+                "message": (
+                    "Already present in the sandbox -- nothing new to add."
+                    if result.get("skipped")
+                    else "Authored in the Designer sandbox (not your real deployment yet) -- "
+                         "open the Sandbox status pill and \"Promote to PR\" or "
+                         "\"Publish to Dagster+\" to ship it."
+                ),
+                "file_path": result["path"],
+            }
+
     try:
         file_path = template_service.save_template_to_project(
             project_id=request.project_id,

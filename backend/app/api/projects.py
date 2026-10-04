@@ -357,6 +357,49 @@ async def connect_dagster_plus(request: ConnectDagsterPlusRequest):
     return _strip_token(project)
 
 
+class UpdateDagsterPlusTokenRequest(BaseModel):
+    token: str
+
+
+@router.put("/{project_id}/dagster-plus/token", response_model=Project)
+async def update_dagster_plus_token(project_id: str, request: UpdateDagsterPlusTokenRequest):
+    """Set/replace the Dagster+ token on an already-connected project.
+
+    connect_dagster_plus only ever runs once, at project creation --
+    there was no path to add or rotate a token afterward (confirmed:
+    a project connected without one, or whose token later went stale,
+    had no way back in short of deleting and recreating the whole
+    project). Reuses the same org/deployment/region already stored so
+    the user only has to paste the token itself.
+    """
+    from ..services.dagster_plus_client import query, DagsterPlusError, PING_QUERY
+
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    if not project.is_dagster_plus:
+        raise HTTPException(status_code=400, detail="Not a Dagster+-connected project.")
+
+    token = request.token.strip()
+    if not token:
+        raise HTTPException(status_code=400, detail="Token cannot be empty.")
+
+    try:
+        await query(
+            project.dagster_plus_org or "",
+            project.dagster_plus_deployment,
+            token,
+            PING_QUERY,
+            region=project.dagster_plus_region or "us",
+        )
+    except DagsterPlusError as e:
+        raise HTTPException(status_code=400, detail=f"Couldn't connect to Dagster+ with this token: {e}")
+
+    project.dagster_plus_token = token
+    project_service._save_project(project)
+    return _strip_token(project)
+
+
 def _strip_token(project: Project) -> Project:
     """Return a copy of the project with the Dagster+ token nulled out
     so it's never sent to the frontend. Modifying the instance in-place
@@ -6119,13 +6162,23 @@ async def add_monitor(project_id: str, request: AddMonitorRequest):
     if request.implementation != 'enhanced_check':
         raise HTTPException(status_code=400, detail=f"Unknown implementation: {request.implementation}")
 
+    # Dagster+ projects have no local code a real deployment ever reads --
+    # writing a local defs.yaml here (the plain-project path below) went
+    # nowhere, confirmed live the same way "Add data" did (see
+    # AddDataDialog's onCloudSourcePicked). Route through the
+    # Designer-managed sandbox instead; the already-built "Promote to PR"
+    # / "Publish to Dagster+" flow (SandboxStatusPill) picks it up from
+    # there same as any other sandbox-authored component.
+    is_cloud = bool(project.is_dagster_plus)
     root = project_service._get_project_dir(project)
-    if not project.directory_name:
-        raise HTTPException(status_code=500, detail="Project has no directory_name — cannot locate defs dir.")
-    defs_root = root / 'src' / project.directory_name / 'defs' / 'monitors' / name
-    if defs_root.exists():
-        raise HTTPException(status_code=409, detail=f"Monitor '{name}' already exists at defs/monitors/{name}. Pick a different name.")
-    defs_root.mkdir(parents=True, exist_ok=True)
+    defs_root = None
+    if not is_cloud:
+        if not project.directory_name:
+            raise HTTPException(status_code=500, detail="Project has no directory_name — cannot locate defs dir.")
+        defs_root = root / 'src' / project.directory_name / 'defs' / 'monitors' / name
+        if defs_root.exists():
+            raise HTTPException(status_code=409, detail=f"Monitor '{name}' already exists at defs/monitors/{name}. Pick a different name.")
+        defs_root.mkdir(parents=True, exist_ok=True)
 
     # Resolve the effective kind + params. If the frontend sent a
     # params_json blob (advanced / any kind path), use it verbatim so
@@ -6168,11 +6221,56 @@ async def add_monitor(project_id: str, request: AddMonitorRequest):
     if alerts_block:
         attributes['alerts'] = alerts_block
 
-    # Canonical component type — the community EnhancedAssetCheck
-    # component looks for this string. Users can rewire to their own
-    # component by editing the yaml if their setup uses a different type.
+    # Canonical component type. `_copy_component_classes_to_project` (called
+    # whenever any other component gets written — see
+    # project_service._generate_component_yaml_files) copies
+    # dagster_designer_components INTO the project's own package, at
+    # `<module_name>.dagster_designer_components`, not as a top-level
+    # importable module — same convention SqlTransformerComponent,
+    # DbtProjectWithTranslatorComponent, etc. all use for their `type:`.
+    # Writing the bare, unprefixed name here was a real, confirmed-live
+    # bug: `dg list defs` fails the whole location with
+    # "Module `dagster_designer_components` not found" the first time any
+    # monitor actually gets added to a Designer-scaffolded project (import
+    # projects with their own top-level dagster_designer_components
+    # dependency are the one case the bare name ever worked for, which is
+    # presumably how this went unnoticed).
+    if is_cloud:
+        from ..services import designer_loc_service
+        state = await designer_loc_service.ensure_running(project_id)
+        sandbox_module = state.dir().name
+        doc_type = f'{sandbox_module}.dagster_designer_components.EnhancedAssetCheckComponent'
+        doc: dict[str, Any] = {'type': doc_type, 'attributes': attributes}
+        header = (
+            "# Monitor authored via Dagster Designer's Add-monitor wizard, routed\n"
+            "# into the Designer sandbox -- this project is connected to Dagster+\n"
+            "# with no local code of its own to write into. Open the Sandbox\n"
+            "# status pill and \"Promote to PR\" or \"Publish to Dagster+\" to ship\n"
+            "# this to a real deployment.\n"
+        )
+        try:
+            result = await designer_loc_service.scaffold_component(
+                project_id=project_id,
+                component_type=doc_type,
+                attributes_yaml=header + _yaml.dump(doc, sort_keys=False),
+                component_id=name,
+            )
+        except RuntimeError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        return AddMonitorResponse(
+            success=True,
+            kind='enhanced_check',
+            relative_path=result['path'],
+            detail=(
+                "Authored in the Designer sandbox (not your real deployment yet) -- "
+                "open the Sandbox status pill and \"Promote to PR\" or "
+                "\"Publish to Dagster+\" to ship it."
+            ),
+        )
+
+    module_name = (project.directory_name or '').replace('-', '_')
     doc: dict[str, Any] = {
-        'type': 'dagster_designer_components.EnhancedAssetCheckComponent',
+        'type': f'{module_name}.dagster_designer_components.EnhancedAssetCheckComponent',
         'attributes': attributes,
     }
 
@@ -8734,7 +8832,28 @@ async def add_dbt_model(project_id: str, request: AddDbtModelRequest):
         if request.description:
             entry['description'] = request.description
         if request.tests:
-            entry['tests'] = request.tests
+            # The one real caller (AddDbtModelDialog's "create test" checkbox,
+            # checked by default) sends [{name, description, columns: [...]}]
+            # -- a pseudo schema.yml model-entry carrying the column-level
+            # test spec, meant to be MERGED into this entry's `columns:`, not
+            # wrapped under a model-level `tests:` key. Nesting it under
+            # `tests:` as a bare passthrough (the previous behavior) wrote a
+            # test definition dict with 2 keys where dbt requires exactly 1
+            # ("name"/"description"/"columns" alongside each other) --
+            # confirmed live: `dbt parse` rejected it and broke the whole
+            # dbt project the first time any model was added with the
+            # default "create test" checkbox left on.
+            merged_columns: list = []
+            leftover_tests: list = []
+            for t in request.tests:
+                if isinstance(t, dict) and 'columns' in t:
+                    merged_columns.extend(c for c in t['columns'] if isinstance(c, dict))
+                elif isinstance(t, dict):
+                    leftover_tests.append(t)
+            if merged_columns:
+                entry['columns'] = merged_columns
+            if leftover_tests:
+                entry['tests'] = leftover_tests
         models.append(entry)
         existing['models'] = models
         schema_path.write_text(_yaml.dump(existing, sort_keys=False))

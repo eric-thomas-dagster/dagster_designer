@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import json
 import os
+import threading
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -17,6 +19,13 @@ from pydantic import BaseModel, Field
 
 CONFIG_PATH = Path.home() / ".dagster-designer" / "config" / "promotion.json"
 CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+# This one file holds the GitHub token AND every (org, location) -> repo
+# mapping for the whole app -- a lost-or-corrupted write here is worse
+# than the per-project drafts case (drafts_service.py has the same
+# fix), since it's shared and holds a credential. A single lock is
+# enough since there's exactly one file, not one per project.
+_lock = threading.Lock()
 
 
 class RepoMapping(BaseModel):
@@ -55,16 +64,36 @@ _HARDCODED_DEFAULTS: list[RepoMapping] = [
 
 def load() -> PromotionConfig:
     """Read the on-disk config, falling back to an empty shell."""
-    if not CONFIG_PATH.exists():
-        return PromotionConfig()
-    try:
-        return PromotionConfig(**json.loads(CONFIG_PATH.read_text()))
-    except Exception:
-        return PromotionConfig()
+    with _lock:
+        if not CONFIG_PATH.exists():
+            return PromotionConfig()
+        try:
+            return PromotionConfig(**json.loads(CONFIG_PATH.read_text()))
+        except Exception as e:
+            # Silently falling back to an empty config here used to mean
+            # a corrupt file (a truncated write from a crash mid-save) read
+            # back as "nothing configured" -- and the NEXT save() would
+            # overwrite it with whatever the UI had at that moment,
+            # permanently losing the GitHub token and every repo mapping
+            # with no error ever surfaced. Archive the unreadable file
+            # instead of silently discarding it.
+            try:
+                bad_path = CONFIG_PATH.with_suffix(f".corrupt-{int(time.time())}.json")
+                CONFIG_PATH.rename(bad_path)
+                print(f"[promotion_config] {CONFIG_PATH} failed to parse ({e}); archived as {bad_path}")
+            except Exception as archive_err:
+                print(f"[promotion_config] {CONFIG_PATH} failed to parse ({e}); could not archive it either: {archive_err}")
+            return PromotionConfig()
 
 
 def save(config: PromotionConfig) -> None:
-    CONFIG_PATH.write_text(json.dumps(config.model_dump(), indent=2))
+    # Atomic: write to a sibling temp file and rename over the real path,
+    # so a crash or kill signal mid-write can never leave a half-written,
+    # unparseable config behind (see load()'s corruption handling above).
+    with _lock:
+        tmp_path = CONFIG_PATH.with_suffix(".tmp")
+        tmp_path.write_text(json.dumps(config.model_dump(), indent=2))
+        os.replace(tmp_path, CONFIG_PATH)
 
 
 def get_github_token() -> str:

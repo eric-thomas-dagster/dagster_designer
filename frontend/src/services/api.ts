@@ -580,6 +580,17 @@ export const projectsApi = {
     return response.data as any;
   },
 
+  // connectDagsterPlus only runs at project creation -- this is the only
+  // way to set/rotate a token on an already-connected project (e.g. one
+  // connected without a token, or whose token went stale).
+  updateDagsterPlusToken: async (
+    projectId: string,
+    token: string,
+  ): Promise<{ id: string }> => {
+    const response = await api.put(`/projects/${projectId}/dagster-plus/token`, { token });
+    return response.data as any;
+  },
+
   getDagsterPlusAssets: async (
     projectId: string,
   ): Promise<{

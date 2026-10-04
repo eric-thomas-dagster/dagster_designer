@@ -15,7 +15,7 @@ from datetime import datetime
 from typing import Dict, Tuple
 
 from ..core.config import settings
-from ..core.uv_binary import find_uv_binary, env_with_bundled_uv_on_path, venv_bin_path
+from ..core.uv_binary import find_uv_binary, env_with_bundled_uv_on_path, venv_bin_path, project_subprocess_env
 from ..models.project import Project, ProjectCreate, ProjectUpdate
 from ..models.partition import PartitionConfig
 from ..models.freshness import FreshnessPolicy
@@ -282,18 +282,19 @@ class ProjectService:
                         print(f"📁 Moving dbt project to {dbt_target_dir}")
                         shutil.move(str(analyze_dir), str(dbt_target_dir))
 
-                        # Add dbt component with translator to resolve key conflicts
+                        # Add dbt component (Enriched dbt Project, see
+                        # _enriched_dbt_component_type) with a translation
+                        # hook to resolve key conflicts
                         from ..models.component import ComponentInstance
                         # Use directory name as module name (with hyphens replaced by underscores)
                         full_module_name = project.directory_name.replace("-", "_")
-                        component_module = f"{full_module_name}.dagster_designer_components.DbtProjectWithTranslatorComponent"
+                        self._install_enriched_dbt_project_component(project_dir)
+                        component_module = self._enriched_dbt_component_type(full_module_name)
                         dbt_component = ComponentInstance(
                             id=f"dbt-{uuid.uuid4().hex[:8]}",
                             component_type=component_module,
                             label=f"{project.name} dbt",
-                            attributes={
-                                "project": target_name,
-                            },
+                            attributes=self._enriched_dbt_attributes(target_name),
                             is_asset_factory=True,
                         )
                         project.components.append(dbt_component)
@@ -344,7 +345,8 @@ class ProjectService:
                             from ..models.component import ComponentInstance
                             # Use directory name as module name (with hyphens replaced by underscores)
                             full_module_name = project.directory_name.replace("-", "_")
-                            component_module = f"{full_module_name}.dagster_designer_components.DbtProjectWithTranslatorComponent"
+                            self._install_enriched_dbt_project_component(project_dir)
+                            component_module = self._enriched_dbt_component_type(full_module_name)
 
                             print(f"📦 Creating {len(dbt_project_relative_paths)} dbt components...")
                             for relative_path in dbt_project_relative_paths:
@@ -357,9 +359,7 @@ class ProjectService:
                                     id=f"dbt-{uuid.uuid4().hex[:8]}",
                                     component_type=component_module,
                                     label=f"{component_name}",
-                                    attributes={
-                                        "project": str(component_path),
-                                    },
+                                    attributes=self._enriched_dbt_attributes(component_path),
                                     is_asset_factory=True,
                                 )
                                 project.components.append(dbt_component)
@@ -409,7 +409,8 @@ class ProjectService:
                             from ..models.component import ComponentInstance
                             # Use directory name as module name (with hyphens replaced by underscores)
                             full_module_name = project.directory_name.replace("-", "_")
-                            component_module = f"{full_module_name}.dagster_designer_components.DbtProjectWithTranslatorComponent"
+                            self._install_enriched_dbt_project_component(project_dir)
+                            component_module = self._enriched_dbt_component_type(full_module_name)
 
                             for dbt_project_path in dbt_projects:
                                 # Calculate relative path from the target_dir
@@ -423,9 +424,7 @@ class ProjectService:
                                     id=f"dbt-{uuid.uuid4().hex[:8]}",
                                     component_type=component_module,
                                     label=f"{component_name}",
-                                    attributes={
-                                        "project": str(component_path),
-                                    },
+                                    attributes=self._enriched_dbt_attributes(component_path),
                                     is_asset_factory=True,
                                 )
                                 project.components.append(dbt_component)
@@ -2429,6 +2428,83 @@ class ProjectService:
 
         print(f"Discovered {len(project.components)} components")
 
+    def _enriched_dbt_component_type(self, full_module_name: str) -> str:
+        """Type string for a new EnrichedDbtProjectComponent instance.
+
+        Replaces DbtProjectWithTranslatorComponent as the default for new
+        dbt projects: a real subclass of dagster_dbt's own
+        DbtProjectComponent (inherits project/select/exclude/cli_args/
+        translation/... for free, plus real opt-in enrichments --
+        freshness policies, contract checks, exposures, semantic layer)
+        instead of a one-off Designer class exposing a single `project`
+        field. Verified live against Jaffle Shop: byte-identical asset
+        keys, all dbt tests passing, zero regressions.
+        """
+        return f"{full_module_name}.components.enriched_dbt_project.EnrichedDbtProjectComponent"
+
+    def _enriched_dbt_attributes(self, relative_project_path) -> dict:
+        """Standard attributes for a new EnrichedDbtProjectComponent instance."""
+        return {
+            # The base DbtProjectComponent resolves a bare relative `project`
+            # path against the component's OWN directory
+            # (defs/<id>/), not the project root -- unlike
+            # DbtProjectWithTranslatorComponent's custom resolution. The
+            # project_root Jinja var (dg's own, documented in
+            # DbtProjectComponent's own docstring) is the correct way to
+            # express a project-root-relative path here. Confirmed live:
+            # a bare path 404s with DagsterDbtProjectNotFoundError.
+            "project": "{{ project_root }}/" + str(relative_project_path).replace("\\", "/"),
+            # Optional[Any] fields resolve to something non-None via dg's
+            # own Jinja NativeTemplate machinery even when omitted from
+            # YAML entirely (same root cause as the sql_transformer.py
+            # calculated_columns bug fixed earlier) -- confirmed live that
+            # leaving this unset makes the component wrongly believe Cloud
+            # mode was requested and raise NotImplementedError on load.
+            # Must be explicit.
+            "dbt_cloud_workspace": None,
+            # Replicates DbtProjectWithTranslatorComponent's
+            # ResourceTypePrefixTranslator (resource-type-prefixed asset
+            # keys -- e.g. models/customers vs sources/customers, avoiding
+            # duplicate-key errors when a model and source share a name)
+            # using the real component's own native translation hook --
+            # no custom Python needed. Verified live to produce
+            # byte-identical asset keys to the old translator.
+            "translation": {"key_prefix": "{{ node['resource_type'] }}s"},
+        }
+
+    def _install_enriched_dbt_project_component(self, project_dir: Path) -> None:
+        """Install the Enriched dbt Project community component's Python
+        files into a freshly scaffolded project.
+
+        Same CLI templates_registry.py's install_component_via_cli uses
+        for "Add data" — called directly here (synchronously, no HTTP
+        round-trip) since project creation is itself a synchronous call
+        chain. Not using --refresh: this component has existed in the
+        catalog for a while, so the fast cached path is expected to
+        always hit (see install_component_via_cli's own comment for when
+        --refresh is actually needed).
+        """
+        cmd = [
+            find_uv_binary("uvx"),
+            "--from", "dagster-community-components-cli",
+            "dagster-component",
+            "add", "enriched_dbt_project",
+            "--auto-install",
+            "--manager", "uv",
+            "--force",
+        ]
+        result = subprocess.run(
+            cmd,
+            cwd=str(project_dir),
+            env=env_with_bundled_uv_on_path(project_subprocess_env(project_dir)),
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+        if result.returncode != 0:
+            tail = (result.stderr or result.stdout or "").strip().splitlines()[-10:]
+            raise Exception("Failed to install enriched_dbt_project component:\n" + "\n".join(tail))
+
     def _copy_component_classes_to_project(self, project: Project):
         """Copy dagster_designer_components to the project so they can be imported."""
         import shutil
@@ -2549,6 +2625,10 @@ class ProjectService:
             "dagster_dlt.DltPipeline": "dagster_dlt.DltPipeline",
             # Custom dbt component with translator (maps to itself - full path already provided)
             f"{module_name}.dagster_designer_components.DbtProjectWithTranslatorComponent": f"{module_name}.dagster_designer_components.DbtProjectWithTranslatorComponent",
+            # Enriched dbt Project (new default for dbt projects created
+            # from here on -- see _enriched_dbt_component_type) - also
+            # maps to itself, full path already provided.
+            self._enriched_dbt_component_type(module_name): self._enriched_dbt_component_type(module_name),
         }
 
         print(f"[YAML Generation] Processing {len(project.components)} components", flush=True)

@@ -22,7 +22,7 @@ that might not be a SQLAlchemy connection at all.
 """
 
 import os
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
 import dagster as dg
 
@@ -68,7 +68,13 @@ class SqlJoinComponent(dg.Component, dg.Model, dg.Resolvable):
     right_columns: Optional[str] = None
 
     suffixes: Optional[str] = None  # comma-separated pair, default "_x,_y"
-    rename_columns: Optional[str] = None      # JSON dict: {"old": "new"}
+    # JSON dict: {"old": "new"}. Typed to also accept a bare dict because dg's
+    # component YAML resolution Jinja-renders every string attribute
+    # (dagster/components/resolved/context.py's NativeTemplate), which
+    # returns a native Python object instead of str whenever the rendered
+    # text is itself a valid Python literal -- true of any JSON dict string.
+    # Confirmed live on the sibling SqlTransformerComponent.
+    rename_columns: Optional[Union[str, dict]] = None
     keep_only_columns: Optional[str] = None   # comma-separated, POST-rename names
 
     group_name: Optional[str] = None
@@ -136,9 +142,13 @@ def _csv(s: Optional[str]) -> list[str]:
     return [p.strip() for p in (s or "").split(",") if p.strip()]
 
 
-def _json_dict(s: Optional[str]) -> dict:
+def _json_dict(s: Optional[Union[str, dict]]) -> dict:
     if not s:
         return {}
+    # Already-resolved by dg's Jinja NativeTemplate coercion -- see the
+    # Union[str, dict] field comment on rename_columns above.
+    if isinstance(s, dict):
+        return s
     import json
     parsed = json.loads(s)
     return parsed if isinstance(parsed, dict) else {}

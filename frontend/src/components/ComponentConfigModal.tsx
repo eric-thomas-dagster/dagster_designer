@@ -278,8 +278,19 @@ export function ComponentConfigModal({
   };
 
   // Check if this is a DBT component (not DuckDB or other components containing "db")
-  // Match patterns like "dbt_project", "DbtProject", "dagster_dbt.X", but not "duckdb_table_writer"
-  const isDbtComponent = /\bdbt[_\.]|^dbt/i.test(type);
+  // Match patterns like "dbt_project", "DbtProject", "dagster_dbt.X", but not "duckdb_table_writer".
+  // The lowercase-plus-separator half only ever matched "DbtProject"-style
+  // class names via a module prefix like "dagster_dbt." happening to be
+  // present earlier in the string -- it never actually matched "Dbt"
+  // followed directly by another capital letter with no separator.
+  // Confirmed live: migrating Jaffle Shop's dbt component from
+  // `dagster_dbt.DbtProjectComponent` (module prefix did the matching) to
+  // the custom `project_x.dagster_designer_components.DbtProjectWithTranslatorComponent`
+  // (no "dagster_dbt" module segment left anywhere in the string) made
+  // this regex stop matching entirely, silently hiding the DBT Adapter
+  // Status panel below. Second alternation (case-sensitive, Python class
+  // names are properly capitalized) catches the CamelCase form directly.
+  const isDbtComponent = /\bdbt[_.]|^dbt/i.test(type) || /\bDbt[A-Z]/.test(type);
 
   // A resource component's OWN `resource_key` field (e.g.
   // BrazeResourceComponent's) is a DECLARATION -- "what name do I
@@ -2375,7 +2386,7 @@ export function ComponentConfigModal({
         {/* Header */}
         <div className="p-4 border-b border-gray-200 flex items-center justify-between gap-3">
           <h2 className="text-lg font-semibold text-gray-900 min-w-0 truncate">
-            {isNew ? 'Add' : 'Edit'} Component: {componentSchema.name}
+            {isNew ? 'Add' : 'Edit'} Component: {!isNew && label ? label : componentSchema.name}
           </h2>
           <div className="flex items-center gap-2 flex-shrink-0">
             {!isNew && !isDraftMode && component && onEditWithGenie && AGENTIC_PIPELINE_FAMILY.has(extractComponentId(component.component_type)) && (

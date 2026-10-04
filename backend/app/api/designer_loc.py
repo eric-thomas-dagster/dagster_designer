@@ -33,6 +33,15 @@ class ScaffoldComponentBody(BaseModel):
     component_id: str | None = None
 
 
+class WriteFileBody(BaseModel):
+    relative_path: str
+    content: str
+    mode: str = "write"              # "write" or "append"
+    header: str | None = None        # prepended once, only if the file doesn't exist yet
+    skip_if_contains: str | None = None
+    ensure_init: bool = False
+
+
 def _require_dagster_plus(project_id: str):
     project = project_service.get_project(project_id)
     if project is None:
@@ -99,6 +108,27 @@ async def install_community(project_id: str, component_id: str):
     _require_dagster_plus(project_id)
     try:
         return await svc.install_community_component(project_id, component_id)
+    except RuntimeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/write-file")
+async def write_file(project_id: str, body: WriteFileBody):
+    """Write/append a plain Python file into the sandbox's `defs/` tree --
+    the raw-code counterpart to scaffold-component's component-YAML
+    instances, for resources/IO managers/freshness policies/Python+SQL
+    assets (see templates.py's /templates/save)."""
+    _require_dagster_plus(project_id)
+    try:
+        return await svc.write_raw_file(
+            project_id,
+            body.relative_path,
+            body.content,
+            mode=body.mode,
+            header=body.header,
+            skip_if_contains=body.skip_if_contains,
+            ensure_init=body.ensure_init,
+        )
     except RuntimeError as e:
         raise HTTPException(status_code=400, detail=str(e))
 

@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
-import { Boxes, Loader2, AlertTriangle, CheckCircle2, ChevronDown, GitPullRequestArrow, Rocket } from 'lucide-react';
+import { Boxes, Loader2, AlertTriangle, CheckCircle2, ChevronDown, GitPullRequestArrow, Rocket, KeyRound } from 'lucide-react';
 import {
   designerLocApi,
   authoredApi,
   draftsApi,
+  projectsApi,
   type AuthoredDeployment,
   type AuthoredLocation,
   type DesignerLocStatus,
@@ -76,6 +77,30 @@ export function SandboxStatusPill({ projectId, isDagsterPlus, status, onPromoted
   const [publishOpen, setPublishOpen] = useState(false);
   const [publishLocationName, setPublishLocationName] = useState('');
   const [publishing, setPublishing] = useState(false);
+
+  // Dagster+ token -- connectDagsterPlus only ever runs once, at project
+  // creation, so a project connected without one (or with one that's
+  // since gone stale) had no way back into this short of deleting and
+  // recreating the whole project. Collapsed by default since most
+  // projects already have a working token; opened manually when needed.
+  const [tokenOpen, setTokenOpen] = useState(false);
+  const [tokenInput, setTokenInput] = useState('');
+  const [savingToken, setSavingToken] = useState(false);
+
+  const handleSaveToken = async () => {
+    if (!projectId || !tokenInput.trim()) return;
+    setSavingToken(true);
+    try {
+      await projectsApi.updateDagsterPlusToken(projectId, tokenInput.trim());
+      notify.success('Dagster+ token saved.');
+      setTokenInput('');
+      setTokenOpen(false);
+    } catch (e: any) {
+      notify.error(`Couldn't save token: ${e?.response?.data?.detail || e?.message || String(e)}`);
+    } finally {
+      setSavingToken(false);
+    }
+  };
 
   const handlePublishServerless = async () => {
     if (!projectId) return;
@@ -182,6 +207,40 @@ export function SandboxStatusPill({ projectId, isDagsterPlus, status, onPromoted
               <div className="whitespace-pre-wrap break-words">{status.error}</div>
             </div>
           )}
+          <div className="mt-2 pt-2 border-t border-gray-200">
+            <button
+              onClick={() => setTokenOpen((v) => !v)}
+              className="w-full flex items-center gap-1.5 text-[11px] font-medium text-gray-700 hover:text-gray-900"
+            >
+              <KeyRound className="w-3.5 h-3.5" />
+              Dagster+ token
+              <ChevronDown className={`w-3 h-3 opacity-60 ml-auto transition-transform ${tokenOpen ? 'rotate-180' : ''}`} />
+            </button>
+            {tokenOpen && (
+              <div className="mt-2 space-y-2">
+                <p className="text-gray-500">
+                  Needed for "Publish to Dagster+" (Serverless) and for GraphQL calls against
+                  this org. Set once at connect time, with no way back in if it's missing or
+                  goes stale -- paste a fresh one here.
+                </p>
+                <input
+                  type="password"
+                  value={tokenInput}
+                  onChange={(e) => setTokenInput(e.target.value)}
+                  placeholder="Dagster+ user token"
+                  className="w-full px-2 py-1 text-[11px] border border-gray-300 rounded font-mono"
+                />
+                <button
+                  onClick={handleSaveToken}
+                  disabled={savingToken || !tokenInput.trim()}
+                  className="w-full flex items-center justify-center gap-1.5 px-2 py-1 text-[11px] font-medium rounded bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {savingToken ? <Loader2 className="w-3 h-3 animate-spin" /> : <KeyRound className="w-3 h-3" />}
+                  {savingToken ? 'Validating…' : 'Save token'}
+                </button>
+              </div>
+            )}
+          </div>
           {s === 'ready' && (
             <div className="mt-2 pt-2 border-t border-gray-200">
               <button

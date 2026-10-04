@@ -23,7 +23,7 @@ import json
 import os
 import string as _string_module
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
 # Regex character class matching Python's string.punctuation exactly (same
 # set the DataFrame backend's str.translate call strips) -- built
@@ -84,47 +84,57 @@ class SqlTransformerComponent(dg.Component, dg.Model, dg.Resolvable):
     # writing).
     columns_to_keep: Optional[str] = None  # comma-separated
     columns_to_drop: Optional[str] = None  # comma-separated
-    rename_columns: Optional[str] = None   # JSON dict: {"old": "new"}
+    # JSON dict: {"old": "new"}. Typed to also accept a bare dict/list because
+    # dg's component YAML resolution runs every string attribute through
+    # Jinja2 NativeTemplate (dagster/components/resolved/context.py), which
+    # returns a native Python object (via ast.literal_eval) instead of a str
+    # whenever the rendered text is itself a valid Python literal -- which a
+    # JSON dict/list string always is. Confirmed live: a `calculated_columns`
+    # JSON string came back from dg as an actual dict and failed pydantic's
+    # `Optional[str]` validation ("Input should be a valid string ...
+    # input_type=dict") even with zero `{{ }}` template syntax involved.
+    # `_json_dict`/`_json_list` below accept either shape already-parsed.
+    rename_columns: Optional[Union[str, dict]] = None
     filter_expression: Optional[str] = None  # a SQL WHERE clause
     sort_by: Optional[str] = None  # comma-separated
     sort_ascending: bool = True
     drop_duplicates: bool = False
     limit_rows: Optional[int] = None
-    calculated_columns: Optional[str] = None  # JSON dict: {"new_col": "SQL expr"}
+    calculated_columns: Optional[Union[str, dict]] = None  # JSON dict: {"new_col": "SQL expr"}
     # JSON list: [{"column", "find", "replace"}]  — REPLACE(col, find, replace).
-    replace_ops: Optional[str] = None
+    replace_ops: Optional[Union[str, list]] = None
     # JSON list: [{"column", "delimiter", "into"}] — dialect-specific split.
     # We emit SPLIT_PART for the common adapters; some dialects need custom
     # handling and will fall back to a per-index expression per new column.
-    split_ops: Optional[str] = None
+    split_ops: Optional[Union[str, list]] = None
     # JSON list: [{"kind", "orderBy", "partitionBy", "orderAsc", "into"}]
     # kind ∈ {rank, dense_rank, row_number}. Compiles to a window function.
-    window_ops: Optional[str] = None
+    window_ops: Optional[Union[str, list]] = None
     # JSON list: [{"column", "operator", "value", "into", "partitionBy"}]
     # Emits COUNT(CASE WHEN … END) OVER (PARTITION BY …) so the count is
     # scoped per-partition (or global when no partition).
-    count_match_ops: Optional[str] = None
+    count_match_ops: Optional[Union[str, list]] = None
     # JSON list: [{"branches":[{column,operator,value,then}], "else", "into"}]
     # Compiles to CASE WHEN cond1 THEN t1 WHEN cond2 THEN t2 ELSE e END.
-    case_when_ops: Optional[str] = None
+    case_when_ops: Optional[Union[str, list]] = None
     # JSON list: [{"columns" (csv), "separator", "into"}] — CONCAT with sep.
-    concat_ops: Optional[str] = None
+    concat_ops: Optional[Union[str, list]] = None
     # JSON list: [{"column", "part", "into"}] — EXTRACT(part FROM col).
-    date_extract_ops: Optional[str] = None
+    date_extract_ops: Optional[Union[str, list]] = None
     # JSON list: [{"column", "start" (1-based), "length"|null, "into"}].
-    substring_ops: Optional[str] = None
+    substring_ops: Optional[Union[str, list]] = None
     # JSON list: [{"column", "op": round|floor|ceil|abs, "digits", "into"}].
-    numeric_ops: Optional[str] = None
+    numeric_ops: Optional[Union[str, list]] = None
     # JSON: {"n" | "fraction", "random"} — TABLESAMPLE on supported dialects.
-    sample_config: Optional[str] = None
+    sample_config: Optional[Union[str, dict]] = None
     # JSON list: [{"column", "boundaries" (csv), "labels" (csv), "into"}]
-    bin_ops: Optional[str] = None
+    bin_ops: Optional[Union[str, list]] = None
     # JSON: {"subsetCols" (csv), "keep": first|last}
-    dedupe_subset: Optional[str] = None
+    dedupe_subset: Optional[Union[str, dict]] = None
     # JSON list: [{"column", "partitionBy", "orderBy", "orderAsc", "into"}]
-    cumsum_ops: Optional[str] = None
+    cumsum_ops: Optional[Union[str, list]] = None
     # JSON list: [{"column", "direction": ffill|bfill, "partitionBy", "orderBy"}]
-    fill_direction_ops: Optional[str] = None
+    fill_direction_ops: Optional[Union[str, list]] = None
     # comma-separated columns to GROUP BY. When set, the SELECT list becomes
     # ONLY the group_by columns + agg_functions expressions -- every other
     # column-projection option (columns_to_keep/drop, calculated_columns,
@@ -136,7 +146,7 @@ class SqlTransformerComponent(dg.Component, dg.Model, dg.Resolvable):
     # Output column is named "<function>_<column>" (e.g. "sum_amount"),
     # matching the same convention the DataFrame backend's pandas
     # groupby().agg() produces.
-    agg_functions: Optional[str] = None
+    agg_functions: Optional[Union[str, dict]] = None
     # Drop rows where any of columns_to_keep (or, if unset, every column
     # referenced elsewhere in this query) is NULL. Full "drop row if ANY
     # column across the whole table is null" isn't expressible without
@@ -147,7 +157,7 @@ class SqlTransformerComponent(dg.Component, dg.Model, dg.Resolvable):
     # JSON list: [{"column", "operation"}]. operation in
     # {upper, lower, title, trim}. Applied in place (same column name),
     # matching the DataFrame backend's str.upper()/.lower()/.title()/.strip().
-    string_operations: Optional[str] = None
+    string_operations: Optional[Union[str, list]] = None
 
     group_name: Optional[str] = None
     description: Optional[str] = None
@@ -1010,9 +1020,13 @@ def _csv(s: Optional[str]) -> list[str]:
     return [c.strip() for c in s.split(',') if c.strip()]
 
 
-def _json_dict(s: Optional[str]) -> dict:
+def _json_dict(s: Optional[Union[str, dict]]) -> dict:
     if not s:
         return {}
+    # Already-resolved by dg's Jinja NativeTemplate coercion (see the
+    # Union[str, dict] field comment above) -- use as-is.
+    if isinstance(s, dict):
+        return s
     try:
         parsed = json.loads(s)
         return parsed if isinstance(parsed, dict) else {}
@@ -1020,9 +1034,11 @@ def _json_dict(s: Optional[str]) -> dict:
         return {}
 
 
-def _json_list(s: Optional[str]) -> list:
+def _json_list(s: Optional[Union[str, list]]) -> list:
     if not s:
         return []
+    if isinstance(s, list):
+        return s
     try:
         parsed = json.loads(s)
         return parsed if isinstance(parsed, list) else []
