@@ -78,6 +78,23 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
         isLoading: false,
         error: cloudError ? `Couldn't load data from Dagster+: ${cloudError}` : null,
       });
+
+      // Sync dependency-install state from the backend so validation is
+      // blocked correctly even after an app restart or project switch.
+      // Without this, dependencyInstallStatus stays 'idle' and the
+      // 2-second validation timer fires while deps are still installing.
+      try {
+        const { status, error, output } = await projectsApi.dependencyStatus(id) as any;
+        if (status === 'installing') {
+          set({ dependencyInstallStatus: 'installing', dependencyInstallError: null, dependencyInstallOutput: output || '' });
+          get().pollDependencyStatus(id);
+        } else if (status === 'error') {
+          set({ dependencyInstallStatus: 'error', dependencyInstallError: error, dependencyInstallOutput: output || '' });
+        }
+        // 'success' and 'idle' — leave current frontend state as-is
+      } catch {
+        // Non-fatal; validation will just run on its normal timer
+      }
     } catch (error) {
       set({ error: 'Failed to load project', isLoading: false });
     }

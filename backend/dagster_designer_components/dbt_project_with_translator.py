@@ -53,8 +53,43 @@ class DbtProjectWithTranslatorComponent(dg.Component, dg.Model, dg.Resolvable):
             # Create the dbt project
             dbt_project = DbtProject(project_dir=project_dir)
 
-            # Generate manifest if in development mode
-            dbt_project.prepare_if_dev()
+            # Generate manifest if in development mode. On Windows the
+            # project directory can have inherited ACLs that deny writes
+            # (WinError 5). If prepare_if_dev() fails:
+            #   - manifest already exists  → use the stale one (no-op)
+            #   - no manifest yet          → try running dbt parse manually
+            #     so the component loads instead of surfacing an error asset.
+            try:
+                dbt_project.prepare_if_dev()
+            except PermissionError:
+                if not dbt_project.manifest_path.exists():
+                    # Try to fix permissions and regenerate via dbt parse.
+                    dbt_name = "dbt.exe" if sys.platform == "win32" else "dbt"
+                    dbt_bin = Path(sys.executable).parent / dbt_name
+                    dbt_exec = str(dbt_bin) if dbt_bin.exists() else "dbt"
+                    try:
+                        if sys.platform == "win32":
+                            import subprocess as _sp
+                            _sp.run(
+                                ["icacls", str(project_dir), "/grant",
+                                 f"{__import__('os').environ.get('USERNAME', 'Users')}:(OI)(CI)F",
+                                 "/T", "/Q"],
+                                capture_output=True,
+                            )
+                        import subprocess as _sp
+                        result = _sp.run(
+                            [dbt_exec, "parse", "--no-use-colors"],
+                            cwd=str(project_dir),
+                            capture_output=True,
+                            text=True,
+                            timeout=120,
+                        )
+                        if result.returncode != 0 or not dbt_project.manifest_path.exists():
+                            raise PermissionError(
+                                f"dbt parse failed after permission fix: {result.stderr[:500]}"
+                            )
+                    except Exception as inner:
+                        raise PermissionError(str(inner)) from inner
 
             # Create a unique resource key based on the project path
             # Replace forward slashes and hyphens with underscores to create a valid key

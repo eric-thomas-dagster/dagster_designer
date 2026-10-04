@@ -58,12 +58,18 @@ export function DagsterAIBar() {
   // Which LLM providers have API keys? Filter the model dropdown and show
   // setup guidance rather than letting the user pick a model that'll 400.
   const [providers, setProviders] = useState<AiProvidersStatus | null>(null);
+  // Whether Claude Code CLI is available (used by Dagster AI in Code Editor).
+  const [cliAvailable, setCliAvailable] = useState(false);
   useEffect(() => {
     let cancelled = false;
     const load = () => {
       aiApi.providers()
         .then((d) => { if (!cancelled) setProviders(d); })
         .catch(() => { if (!cancelled) setProviders({ openai_available: false, anthropic_available: false, any_available: false, anthropic_workspace_id_configured: false }); });
+      fetch(`${API_BASE}/ai/dagster-expert/status`)
+        .then((r) => r.json())
+        .then((d) => { if (!cancelled) setCliAvailable(!!d?.cli_available); })
+        .catch(() => {});
     };
     load();
     // Refetch right after a key is saved/cleared in Settings so this banner
@@ -363,10 +369,17 @@ export function DagsterAIBar() {
             <Sparkles className="w-5 h-5 text-gray-400 flex-shrink-0 mt-0.5" />
             <div className="flex-1 min-w-0 text-sm">
               <div className="font-semibold text-gray-900 mb-1">
-                Dagster AI needs an API key
+                Dagster AI canvas planner needs an API key
               </div>
               <div className="text-xs text-gray-600 space-y-2">
-                <div>Add an OpenAI or Anthropic key to unlock the AI assistant — takes effect immediately, no restart needed.</div>
+                {cliAvailable ? (
+                  <div>
+                    The canvas planner generates structured pipeline plans and needs a direct OpenAI or Anthropic key.
+                    {' '}For free-form Dagster Q&amp;A, try <strong>Dagster AI</strong> in the Code Editor — it works via your Claude Code login.
+                  </div>
+                ) : (
+                  <div>Add an OpenAI or Anthropic key to unlock the AI canvas planner — takes effect immediately, no restart needed.</div>
+                )}
                 <button
                   onClick={openSettings}
                   className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-primary text-primary-foreground rounded-md hover:bg-accent"

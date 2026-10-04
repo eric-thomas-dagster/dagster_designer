@@ -56,7 +56,7 @@ import { PreferencesHost, openPreferences } from './components/PreferencesDialog
 import { useProjectStore } from './hooks/useProject';
 import { useRunNotifications } from './hooks/useRunNotifications';
 import { setActiveTabGlobal } from './services/activeTab';
-import { onMenuAction, onQuitRequested, confirmQuit, openExternalUrl, getPlatform, isTauri } from './services/tauri';
+import { onMenuAction, onQuitRequested, onBackendReady, confirmQuit, openExternalUrl, getPlatform, isTauri } from './services/tauri';
 import { WindowsCaptionButtons } from './components/WindowsCaptionButtons';
 import { hasUnsavedChanges } from './hooks/useUnsavedChanges';
 import { Network, FileCode, Zap, Package, ExternalLink, Settings, SlidersHorizontal, Workflow, ChevronDown, Skull, AlertTriangle, X, Loader2, CheckCircle, XCircle, PanelLeftClose, PanelLeft, Clock, Play, Radar, Timer, Download, Database, ShieldCheck, Cloud, Bell, BarChart3, Sparkles, Send } from 'lucide-react';
@@ -347,6 +347,15 @@ function App() {
   // than flashing the wrong platform's chrome.
   const [platform, setPlatform] = useState<string | null>(null);
   useEffect(() => { getPlatform().then(setPlatform); }, []);
+  // On desktop, the Python backend starts asynchronously after the window
+  // opens (see main.rs). Track readiness so we can show a startup splash
+  // rather than a blank/broken UI while uv/Python initialises.
+  const [backendReady, setBackendReady] = useState(!isTauri);
+  useEffect(() => {
+    if (!isTauri) return;
+    const unlistenPromise = onBackendReady(() => setBackendReady(true));
+    return () => { unlistenPromise.then((fn) => fn()); };
+  }, []);
   const [templateBuilderAssetKey, setTemplateBuilderAssetKey] = useState<string | null>(null);
   // "New asset check" routes to the Monitors wizard instead of
   // TemplateBuilder's own asset-check generator -- that generator writes
@@ -531,7 +540,7 @@ function App() {
     // have a local codebase to install deps for or `dg list defs` to
     // run, so the fallback path always triggers and shows a false-
     // positive validation banner.
-    enabled: !!currentProject && !(currentProject as any).is_dagster_plus && enableValidationCheck && !dismissedValidationError && dependencyInstallStatus !== 'installing',
+    enabled: !!currentProject && !(currentProject as any).is_dagster_plus && enableValidationCheck && !dismissedValidationError && dependencyInstallStatus !== 'installing' && assetGenerationStatus !== 'generating',
     staleTime: 60000, // Consider fresh for 1 minute (matches backend cache)
     refetchInterval: 60000, // Recheck every minute to catch validation changes
     refetchOnWindowFocus: false, // Don't refetch on window focus
@@ -1032,6 +1041,22 @@ function App() {
   // own bg-background instead, so it stays opaque either way.
   return (
     <div className={`h-screen flex text-foreground ${isTauri ? '' : 'bg-background'}`}>
+      {/* Backend startup splash -- only shown in the desktop app on first
+          launch / fresh install while uv downloads Python + packages.
+          Disappears as soon as the Rust side emits "backend-ready". */}
+      {!backendReady && (
+        <div className="fixed inset-0 z-50 flex flex-col items-center justify-center bg-white">
+          <BrandMark />
+          <div className="mt-5 text-sm font-medium text-gray-700">Starting up…</div>
+          <div className="mt-2 text-xs text-gray-400 text-center max-w-xs">
+            First launch may take a minute while the runtime installs.
+          </div>
+          <div className="mt-4 h-1 w-48 bg-gray-100 rounded overflow-hidden">
+            <div className="h-full w-1/3 bg-gradient-to-r from-blue-500 to-cyan-500 rounded" style={{ animation: 'progressSlide 1.4s ease-in-out infinite' }} />
+          </div>
+        </div>
+      )}
+
       {/* Global project-load overlay — surfaces mostly for Dagster+
           projects since cloud hydration (assets + checks + schedules +
           sensors) takes 2-6s on typical orgs. Local projects blip
@@ -1387,8 +1412,12 @@ function App() {
               </DropdownMenu.Root>
             )}
             <ProjectManager />
+            {isTauri && platform === 'windows' && (
+              <div className="-mr-5">
+                <WindowsCaptionButtons />
+              </div>
+            )}
           </div>
-          {isTauri && platform === 'windows' && <WindowsCaptionButtons />}
         </header>
 
 

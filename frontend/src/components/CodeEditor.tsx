@@ -153,6 +153,9 @@ export function CodeEditor({ projectId, fileToOpen, onFileOpened }: CodeEditorPr
   const readFileMutation = useMutation({
     mutationFn: ({ projectId, filePath }: { projectId: string; filePath: string }) =>
       filesApi.read(projectId, filePath),
+    onError: (error: any) => {
+      notify.error(`Failed to open file: ${error?.response?.data?.detail || error?.message || 'Unknown error'}`);
+    },
     onSuccess: (data, variables) => {
       if (data.is_binary) {
         notify.error('Cannot open binary file');

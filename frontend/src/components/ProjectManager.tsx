@@ -6,7 +6,7 @@ import { ConnectDagsterPlusDialog } from './ConnectDagsterPlusDialog';
 import { GitCommitDialog } from './GitCommitDialog';
 import { Launchpad } from './Launchpad';
 import { notify, confirmDialog } from './Notifications';
-import { onMenuAction, isTauri, pickDirectory } from '@/services/tauri';
+import { onMenuAction, onBackendReady, isTauri, pickDirectory } from '@/services/tauri';
 import { openSettings } from './SettingsDialog';
 import {
   FolderOpen,
@@ -91,6 +91,15 @@ export function ProjectManager() {
 
   useEffect(() => {
     loadProjects();
+  }, [loadProjects]);
+
+  // On the desktop app the backend starts asynchronously -- the window
+  // appears before uv/Python is ready, so the initial loadProjects() above
+  // often fails with ECONNREFUSED. Re-fetch as soon as Rust signals the
+  // backend accepted its first connection.
+  useEffect(() => {
+    const unlistenPromise = onBackendReady(() => loadProjects());
+    return () => { unlistenPromise.then((fn) => fn()); };
   }, [loadProjects]);
 
   // Mirrors the in-page "Project" dropdown's actions in the native macOS
@@ -452,7 +461,10 @@ export function ProjectManager() {
       setShowValidationDialog(true);
 
       // Update status based on validation result
-      if (result.valid) {
+      if (result.pending) {
+        // Deps still installing — don't show a false "Validation failed" banner
+        useProjectStore.setState({ validationStatus: 'idle', validationError: null });
+      } else if (result.valid) {
         useProjectStore.setState({ validationStatus: 'success', validationError: null });
         // Auto-dismiss success banner after 3 seconds
         setTimeout(() => {
