@@ -4408,7 +4408,11 @@ async def list_dbt_models(project_id: str, dbt_relative_path: str | None = None)
     dbt_root = (root / chosen.relative_path).resolve()
     manifest = _load_dbt_artifact(dbt_root / 'target' / 'manifest.json')
     catalog = _load_dbt_artifact(dbt_root / 'target' / 'catalog.json')
-    run_results = _load_dbt_artifact(dbt_root / 'target' / 'run_results.json')
+    # Prefer the accumulated results file (maintained by the run endpoint)
+    # so that running a single model doesn't wipe out last-run status for
+    # every other model in the panel.
+    acc_path = dbt_root / 'target' / 'accumulated_run_results.json'
+    run_results = _load_dbt_artifact(acc_path if acc_path.exists() else dbt_root / 'target' / 'run_results.json')
 
     # Build helper maps from the auxiliary artifacts. All optional —
     # freshly-scaffolded projects have no target/ dir yet.
@@ -4820,14 +4824,14 @@ async def dbt_docs_generate(project_id: str, request: ScaffoldDbtDocsRequest):
         raise HTTPException(status_code=404, detail=f"No dbt_project.yml at {request.dbt_relative_path}")
 
     # Use the venv's dbt if present; falls back to whatever is on PATH.
-    from ..core.uv_binary import venv_bin_path as _venv_bin_path
+    from ..core.uv_binary import venv_bin_path as _venv_bin_path, project_subprocess_env as _proj_env
     _dbt_resolved = _venv_bin_path(root / '.venv', 'dbt')
     dbt_bin = str(_dbt_resolved) if _dbt_resolved.exists() else 'dbt'
     started = _time.time()
     try:
         r = _sp.run(
             [dbt_bin, 'docs', 'generate', '--no-use-colors'],
-            cwd=str(dbt_root), capture_output=True, text=True, timeout=600,
+            cwd=str(dbt_root), env=_proj_env(root), capture_output=True, text=True, timeout=600,
         )
     except _sp.TimeoutExpired:
         raise HTTPException(status_code=504, detail="dbt docs generate timed out after 10 minutes")
@@ -8646,9 +8650,10 @@ async def dbt_model_preview(project_id: str, request: DbtModelPreviewRequest):
     if request.target:
         cmd.extend(['--target', request.target])
 
+    from ..core.uv_binary import project_subprocess_env as _proj_env
     started = _time.time()
     try:
-        r = _sp.run(cmd, cwd=str(dbt_root), capture_output=True, text=True, timeout=180)
+        r = _sp.run(cmd, cwd=str(dbt_root), env=_proj_env(root), capture_output=True, text=True, timeout=180)
     except _sp.TimeoutExpired:
         return DbtModelPreviewResponse(success=False, error="dbt show timed out after 3 minutes.", duration_ms=int((_time.time() - started) * 1000))
 
@@ -8916,13 +8921,39 @@ async def run_dbt_model(project_id: str, request: RunDbtModelRequest):
     # No color codes in stdout so the UI can render as plain text.
     cmd.append('--no-use-colors')
 
-    env = None
+    from ..core.uv_binary import project_subprocess_env as _proj_env
+    env = _proj_env(root)
     started = _time.time()
     try:
         r = _sp.run(cmd, cwd=str(dbt_root), env=env, capture_output=True, text=True, timeout=600)
     except _sp.TimeoutExpired:
         raise HTTPException(status_code=504, detail="dbt run timed out after 10 minutes")
     duration_ms = int((_time.time() - started) * 1000)
+
+    # Merge this run's results into the accumulated results file so that
+    # running a single model doesn't wipe out last-run status for every
+    # other model. dbt overwrites run_results.json with only the models
+    # that participated in the current run — we maintain a sidecar file
+    # (target/accumulated_run_results.json) that merges across runs by
+    # unique_id, so the panel always shows the most recent status for
+    # every model regardless of which subset was last built.
+    try:
+        rr_path = dbt_root / 'target' / 'run_results.json'
+        acc_path = dbt_root / 'target' / 'accumulated_run_results.json'
+        fresh = _load_dbt_artifact(rr_path)
+        if fresh.get('results'):
+            accumulated = _load_dbt_artifact(acc_path)
+            by_uid: dict = {x['unique_id']: x for x in accumulated.get('results', []) if x.get('unique_id')}
+            for result in fresh['results']:
+                uid = result.get('unique_id')
+                if uid:
+                    by_uid[uid] = result
+            accumulated['results'] = list(by_uid.values())
+            accumulated['metadata'] = fresh.get('metadata', accumulated.get('metadata', {}))
+            import json as _json
+            acc_path.write_text(_json.dumps(accumulated), encoding='utf-8')
+    except Exception as e:
+        print(f"[dbt] accumulate run_results failed: {e}", flush=True)
 
     # Snapshot dbt test results into the monitor history log so the
     # Monitors drawer can chart history. Non-fatal — the run response
