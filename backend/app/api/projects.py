@@ -8626,10 +8626,9 @@ async def dbt_model_preview(project_id: str, request: DbtModelPreviewRequest):
     if not (dbt_root / 'dbt_project.yml').exists():
         raise HTTPException(status_code=404, detail=f"No dbt_project.yml at {request.dbt_relative_path}")
 
-    # Resolve to an absolute path — subprocess is invoked with
-    # cwd=dbt_root, so a relative dbt_bin path (e.g.
-    # `projects/foo/.venv/bin/dbt`) would fail to be found.
-    dbt_bin = (root / '.venv' / 'bin' / 'dbt').resolve()
+    # Resolve dbt binary — Windows uses Scripts\dbt.exe, Unix uses bin/dbt.
+    from ..core.uv_binary import venv_bin_path as _venv_bin_path
+    dbt_bin = _venv_bin_path(root / '.venv', 'dbt')
     if not dbt_bin.exists():
         return DbtModelPreviewResponse(
             success=False,
@@ -8893,9 +8892,10 @@ async def run_dbt_model(project_id: str, request: RunDbtModelRequest):
     if not (dbt_root / 'dbt_project.yml').exists():
         raise HTTPException(status_code=404, detail=f"No dbt_project.yml at {request.dbt_relative_path}")
 
-    # Resolve to abs path — subprocess runs with cwd=dbt_root.
-    venv_bin = (root / '.venv' / 'bin').resolve()
-    dbt_bin = venv_bin / 'dbt'
+    # Resolve dbt binary — Windows uses Scripts\dbt.exe, Unix uses bin/dbt.
+    import sys as _sys
+    from ..core.uv_binary import venv_bin_path as _venv_bin_path
+    dbt_bin = _venv_bin_path(root / '.venv', 'dbt')
     if not dbt_bin.exists():
         raise HTTPException(
             status_code=500,
