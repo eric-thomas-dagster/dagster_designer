@@ -1912,6 +1912,141 @@ async def plan(
     )
 
 
+async def generate_dbt_model_sql(
+    task: str,
+    available_models: list[str],
+    model_name: str,
+    materialization: str,
+    model: str = DEFAULT_MODEL,
+    model_columns: dict[str, list[str]] | None = None,
+) -> str:
+    """Draft a dbt model's SELECT statement from a natural-language
+    description -- the "AI" tab in AddDbtModelDialog, alongside the
+    existing Visual composer / SQL editor tabs. Deliberately lighter-weight
+    than plan() above: no catalog, no JSON schema, no clarifying
+    questions -- a single one-shot completion returning raw SQL, which
+    the caller drops into the SQL editor for the user to review and edit
+    before saving. Never writes anything itself.
+
+    `model_columns`, when given, maps model name -> its real declared
+    column names (from manifest.json/catalog.json, same data
+    list_dbt_models already surfaces). Without this the model only knows
+    which models exist, not their shape -- confirmed live to produce
+    plausible-looking but wrong guesses (e.g. `customer_name` when the
+    real columns are `first_name`/`last_name`, or re-deriving a value via
+    a join when the source model already has it as a column).
+    """
+    if not task or not task.strip():
+        raise GenieError("Empty description")
+
+    is_anthropic = model.lower().startswith("claude")
+    if is_anthropic:
+        api_key = os.getenv("ANTHROPIC_API_KEY")
+        if not api_key:
+            raise GenieError(
+                "ANTHROPIC_API_KEY is not set on the backend. Set it in Settings -> AI Providers, then try again."
+            )
+    else:
+        api_key = os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            raise GenieError(
+                "OPENAI_API_KEY is not set on the backend. Set it in Settings -> AI Providers, then try again."
+            )
+
+    model_columns = model_columns or {}
+    if available_models:
+        lines = []
+        for m in available_models:
+            cols = model_columns.get(m) or []
+            lines.append(f"- {m} (columns: {', '.join(cols)})" if cols else f"- {m} (columns unknown -- no schema.yml declared for it)")
+        models_list = "\n".join(lines)
+    else:
+        models_list = "(none found -- this may be the first model in the project)"
+    system_prompt = (
+        "You write dbt model SQL. Output ONLY a single SELECT statement (or a CTE "
+        "chain ending in one) -- no `{{ config(...) }}` block (the caller adds that "
+        "separately from a materialization picker), no markdown code fences, no prose "
+        "before or after. Just the raw SQL.\n\n"
+        "Reference other models in this project with {{ ref('model_name') }} and raw "
+        "source tables with {{ source('source_name', 'table_name') }} -- never a bare "
+        "table name. Use the exact model and column names listed below -- don't invent "
+        "a plausible-sounding column name when the real one is given (e.g. if a model "
+        "lists `first_name, last_name`, don't reference `customer_name`). If a model's "
+        "columns are listed as unknown, reference it by name only and don't guess at "
+        "its shape. Never recompute a value via a join/aggregation when an upstream "
+        "model already exposes it as a column -- select that column directly instead. "
+        "Don't invent models that aren't listed unless the request clearly describes a "
+        "new upstream that doesn't exist yet (note that inline as a SQL comment if so).\n\n"
+        f"This model will be named `{model_name}` and materialized as `{materialization}`.\n\n"
+        f"Models already in this project:\n{models_list}"
+    )
+
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        if is_anthropic:
+            anthropic_headers = {
+                "x-api-key": api_key,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            }
+            workspace_id = os.getenv("ANTHROPIC_WORKSPACE_ID")
+            if workspace_id:
+                anthropic_headers["anthropic-workspace-id"] = workspace_id
+            r = await _post_with_retry(
+                client,
+                "https://api.anthropic.com/v1/messages",
+                headers=anthropic_headers,
+                json_body={
+                    "model": model,
+                    "max_tokens": 2048,
+                    "system": system_prompt,
+                    "messages": [{"role": "user", "content": task}],
+                    "temperature": 0.2,
+                },
+            )
+            if r.status_code == 429:
+                raise GenieError("Anthropic is rate-limiting this API key right now. Wait a few seconds and try again.")
+            if r.status_code != 200:
+                raise GenieError(_friendly_provider_error("Anthropic", r.status_code, r.text))
+            data = r.json()
+            blocks = data.get("content") or []
+            content = next((b.get("text", "") for b in blocks if b.get("type") == "text"), "")
+        else:
+            r = await _post_with_retry(
+                client,
+                "https://api.openai.com/v1/chat/completions",
+                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                json_body={
+                    "model": model,
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": task},
+                    ],
+                    "temperature": 0.2,
+                },
+            )
+            if r.status_code == 429:
+                raise GenieError("OpenAI is rate-limiting this API key right now. Wait a few seconds and try again.")
+            if r.status_code != 200:
+                raise GenieError(_friendly_provider_error("OpenAI", r.status_code, r.text))
+            data = r.json()
+            try:
+                content = data["choices"][0]["message"]["content"]
+            except (KeyError, IndexError) as e:
+                raise GenieError(f"Could not parse LLM response: {e}") from e
+
+    sql = (content or "").strip()
+    # Strip a markdown code fence if the model added one despite instructions.
+    if sql.startswith("```"):
+        parts = sql.split("```")
+        sql = parts[1] if len(parts) >= 2 else sql.strip("`")
+        if sql.lower().startswith("sql\n"):
+            sql = sql[4:]
+        sql = sql.strip()
+    if not sql:
+        raise GenieError("Model returned an empty response.")
+    return sql
+
+
 # ------------------------------------------------------------------
 # Config-schema validation (post-plan, pre-repair)
 # ------------------------------------------------------------------

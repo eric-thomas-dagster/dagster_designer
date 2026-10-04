@@ -15,6 +15,7 @@ import { AddDbtProjectDialog } from './AddDbtProjectDialog';
 import { AddDbtSelectorDialog } from './AddDbtSelectorDialog';
 import { PostProcessingRulesDialog } from './PostProcessingRulesDialog';
 import { AddDbtExposureDialog } from './AddDbtExposureDialog';
+import { AddDbtSemanticModelDialog } from './AddDbtSemanticModelDialog';
 import { AddDbtSourceDialog } from './AddDbtSourceDialog';
 import { AddDbtTestDialog } from './AddDbtTestDialog';
 import { AiAssistantPanel } from './AiAssistantPanel';
@@ -73,6 +74,7 @@ export function DbtPanel({ onOpenFile }: DbtPanelProps) {
   const [showAddSelector, setShowAddSelector] = useState(false);
   const [showPostProcessingRules, setShowPostProcessingRules] = useState(false);
   const [showAddExposure, setShowAddExposure] = useState(false);
+  const [showAddSemanticModel, setShowAddSemanticModel] = useState(false);
   const [showAddSource, setShowAddSource] = useState(false);
   // Column-lineage modal — opened from the drawer's action row. Holds
   // the focal model so the modal is standalone and can outlive the
@@ -269,6 +271,16 @@ export function DbtPanel({ onOpenFile }: DbtPanelProps) {
         dbt_relative_path: data.dbt_project_relative_path, name,
       });
       setExposures(r as any);
+    });
+  };
+
+  const handleDeleteSemanticModel = (name: string) => {
+    if (!currentProject || !data?.dbt_project_relative_path) return;
+    guardedDelete(`semantic model "${name}"`, async () => {
+      const r = await projectsApi.deleteDbtSemanticModel(currentProject.id, {
+        dbt_relative_path: data.dbt_project_relative_path, name,
+      });
+      setSemanticModels(r as any);
     });
   };
 
@@ -1160,10 +1172,10 @@ export function DbtPanel({ onOpenFile }: DbtPanelProps) {
       )}
 
       {/* Semantic Models — dbt's semantic layer (MetricFlow): entities,
-          dimensions, and measures layered on top of a model. Read straight
-          from manifest.json, same as Exposures above. Read-only -- these
-          are richer nested objects than a simple add/remove form suits
-          well, so editing stays in the dbt project's own YAML for now. */}
+          dimensions, and measures layered on top of a model. List reads
+          straight from manifest.json, same as Exposures above. Add/delete
+          go through AddDbtSemanticModelDialog -> models/semantic_models.yml,
+          mirroring the Exposures write path. */}
       {data && view === 'semantic-models' && (
         <div className="px-8 py-6">
           <div className="bg-white border border-gray-200 rounded-lg overflow-hidden">
@@ -1176,20 +1188,32 @@ export function DbtPanel({ onOpenFile }: DbtPanelProps) {
                   dbt's semantic layer (MetricFlow) — entities, dimensions, and measures declared on top of a model.
                 </p>
               </div>
-              <span className="text-xs text-gray-500">{semanticModels?.semantic_models.length ?? 0}</span>
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-gray-500">{semanticModels?.semantic_models.length ?? 0}</span>
+                <button
+                  onClick={() => setShowAddSemanticModel(true)}
+                  className="inline-flex items-center gap-1 px-2 py-1 text-xs font-medium bg-primary text-primary-foreground rounded"
+                >
+                  <Plus className="w-3 h-3" /> Add semantic model
+                </button>
+              </div>
             </div>
             {!semanticModels || semanticModels.semantic_models.length === 0 ? (
-              <div className="p-8 text-center text-xs text-gray-500 space-y-1">
+              <div className="p-8 text-center text-xs text-gray-500 space-y-2">
                 <p>No semantic models declared yet.</p>
-                <p>
-                  Define one with a <code className="px-1 py-0.5 bg-gray-100 rounded font-mono">semantic_models:</code> block
-                  in your dbt project's YAML, then re-parse to see it here.
-                </p>
+                <button
+                  onClick={() => setShowAddSemanticModel(true)}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-primary text-primary-foreground rounded"
+                >
+                  <Plus className="w-4 h-4" /> Declare your first semantic model
+                </button>
               </div>
             ) : (
               <ul className="divide-y divide-gray-100">
                 {semanticModels.semantic_models.map((s) => (
                   <li key={s.unique_id} className="px-4 py-3">
+                    <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0">
                     <div className="flex items-baseline gap-2">
                       <span className="font-mono text-sm font-semibold text-gray-900">{s.name}</span>
                       {s.model && (
@@ -1248,6 +1272,15 @@ export function DbtPanel({ onOpenFile }: DbtPanelProps) {
                           </div>
                         </div>
                       )}
+                    </div>
+                    </div>
+                    <button
+                      onClick={() => handleDeleteSemanticModel(s.name)}
+                      className="p-1.5 text-gray-400 hover:text-rose-600 hover:bg-rose-50 rounded flex-shrink-0"
+                      title="Remove this semantic model from semantic_models.yml"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
                     </div>
                   </li>
                 ))}
@@ -1501,6 +1534,18 @@ export function DbtPanel({ onOpenFile }: DbtPanelProps) {
               try {
                 const r = await projectsApi.getDbtExposures(currentProject.id, data.dbt_project_relative_path);
                 setExposures(r);
+              } catch {}
+            }}
+          />
+          <AddDbtSemanticModelDialog
+            open={showAddSemanticModel}
+            onOpenChange={setShowAddSemanticModel}
+            projectId={currentProject.id}
+            dbtRelativePath={data.dbt_project_relative_path}
+            onSaved={async () => {
+              try {
+                const r = await projectsApi.getDbtSemanticModels(currentProject.id, data.dbt_project_relative_path);
+                setSemanticModels(r);
               } catch {}
             }}
           />

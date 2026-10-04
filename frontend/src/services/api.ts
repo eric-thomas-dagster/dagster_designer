@@ -956,6 +956,35 @@ export const projectsApi = {
     return response.data as any;
   },
 
+  addDbtSemanticModel: async (
+    projectId: string,
+    body: {
+      dbt_relative_path: string;
+      name: string;
+      model: string;
+      description?: string | null;
+      primary_entity?: string | null;
+      default_agg_time_dimension?: string | null;
+      entities: Array<{ name: string; type?: string; expr?: string | null; description?: string | null }>;
+      dimensions: Array<{ name: string; type?: string; time_granularity?: string | null; expr?: string | null; description?: string | null }>;
+      measures: Array<{ name: string; agg?: string; expr?: string | null; description?: string | null; agg_time_dimension?: string | null }>;
+    },
+  ): Promise<{
+    dbt_project_relative_path: string;
+    semantic_models: any[];
+  }> => {
+    const response = await api.post(`/projects/${projectId}/dbt-semantic-models`, body);
+    return response.data as any;
+  },
+
+  deleteDbtSemanticModel: async (
+    projectId: string,
+    body: { dbt_relative_path: string; name: string },
+  ): Promise<{ dbt_project_relative_path: string; semantic_models: any[] }> => {
+    const response = await api.post(`/projects/${projectId}/dbt-semantic-models/delete`, body);
+    return response.data as any;
+  },
+
   runDbtModel: async (
     projectId: string,
     body: {
@@ -985,6 +1014,20 @@ export const projectsApi = {
     },
   ): Promise<{ success: boolean; sql_path: string; schema_written: boolean }> => {
     const response = await api.post(`/projects/${projectId}/dbt-model`, body);
+    return response.data as any;
+  },
+
+  generateDbtModelSql: async (
+    projectId: string,
+    body: {
+      dbt_relative_path: string;
+      model_name: string;
+      materialization: string;
+      task: string;
+      ai_model?: string | null;
+    },
+  ): Promise<{ sql: string }> => {
+    const response = await api.post(`/projects/${projectId}/dbt-model/generate-sql`, body);
     return response.data as any;
   },
 

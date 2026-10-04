@@ -1,11 +1,22 @@
 import { useEffect, useMemo, useState } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
 import Editor from '@monaco-editor/react';
-import { X, FileCode, Loader2, Wand2, Code2 } from 'lucide-react';
-import { projectsApi } from '@/services/api';
+import { X, FileCode, Loader2, Wand2, Code2, Sparkles } from 'lucide-react';
+import { projectsApi, aiApi, type AiProvidersStatus } from '@/services/api';
 import { notify } from './Notifications';
 import { DbtVisualComposer } from './DbtVisualComposer';
 import { useIsDarkMode } from '@/hooks/useIsDarkMode';
+import { onAiProvidersChanged } from './SettingsDialog';
+
+// Same ordering/rationale as DagsterAIBar's copy of this list: first
+// available-per-provider entry becomes the default.
+const AI_MODEL_OPTIONS = [
+  { value: 'claude-sonnet-4-5', label: 'Claude Sonnet 4.5 (recommended)' },
+  { value: 'gpt-4o', label: 'GPT-4o (recommended)' },
+  { value: 'claude-opus-4-5', label: 'Claude Opus 4.5 (highest quality)' },
+  { value: 'gpt-4o-mini', label: 'GPT-4o mini (fast, cheap)' },
+  { value: 'claude-haiku-4-5', label: 'Claude Haiku 4.5 (fast)' },
+];
 
 interface AddDbtModelDialogProps {
   open: boolean;
@@ -50,8 +61,35 @@ export function AddDbtModelDialog({ open, onOpenChange, projectId, onCreated }: 
   const [saving, setSaving] = useState(false);
   // Compose mode — visual composer generates SQL live and streams it
   // into the same `sql` state, so switching to the SQL tab shows the
-  // compiled result ready to fine-tune.
-  const [composeMode, setComposeMode] = useState<'visual' | 'sql'>('sql');
+  // compiled result ready to fine-tune. AI works the same way: one
+  // generate call writes into `sql`, then flips to the SQL tab so the
+  // draft always gets a review pass before saving, never saved directly.
+  const [composeMode, setComposeMode] = useState<'visual' | 'sql' | 'ai'>('sql');
+  const [aiTask, setAiTask] = useState('');
+  const [aiGenerating, setAiGenerating] = useState(false);
+  const [aiProviders, setAiProviders] = useState<AiProvidersStatus | null>(null);
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    const load = () => aiApi.providers().then((d) => { if (!cancelled) setAiProviders(d); }).catch(() => {});
+    load();
+    const unsubscribe = onAiProvidersChanged(load);
+    return () => { cancelled = true; unsubscribe(); };
+  }, [open]);
+  const availableAiModels = useMemo(() => {
+    if (!aiProviders) return AI_MODEL_OPTIONS;
+    return AI_MODEL_OPTIONS.filter((m) => {
+      const isClaude = m.value.startsWith('claude');
+      return isClaude ? aiProviders.anthropic_available : aiProviders.openai_available;
+    });
+  }, [aiProviders]);
+  const [aiModel, setAiModel] = useState(AI_MODEL_OPTIONS[0].value);
+  useEffect(() => {
+    if (!aiProviders || availableAiModels.length === 0) return;
+    if (!availableAiModels.find((m) => m.value === aiModel)) {
+      setAiModel(availableAiModels[0].value);
+    }
+  }, [aiProviders, availableAiModels, aiModel]);
 
   useEffect(() => {
     if (!open) return;
@@ -91,6 +129,30 @@ export function AddDbtModelDialog({ open, onOpenChange, projectId, onCreated }: 
   }, [isRemote]);
 
   const canSubmit = !!dbtProjectPath && !!modelName && !nameError && sql.trim().length > 0;
+
+  const handleGenerateSql = async () => {
+    if (!aiTask.trim() || !dbtProjectPath) return;
+    setAiGenerating(true);
+    try {
+      const r = await projectsApi.generateDbtModelSql(projectId, {
+        dbt_relative_path: dbtProjectPath,
+        model_name: modelName || 'new_model',
+        materialization,
+        task: aiTask.trim(),
+        ai_model: aiModel,
+      });
+      setSql(r.sql);
+      // Draft lands in the SQL tab for review -- never saved directly
+      // from here, same as the Visual composer's own generated SQL.
+      setComposeMode('sql');
+      notify.success('Draft generated — review it in the SQL tab before saving.');
+    } catch (e: any) {
+      const detail = e?.response?.data?.detail;
+      notify.error(detail || e?.message || 'Failed to generate SQL.');
+    } finally {
+      setAiGenerating(false);
+    }
+  };
 
   const handleSubmit = async () => {
     if (!canSubmit) return;
@@ -244,16 +306,20 @@ export function AddDbtModelDialog({ open, onOpenChange, projectId, onCreated }: 
               </div>
             </div>
 
-            {/* Compose mode tab bar — Visual or SQL. Visual composer
-                writes into the same `sql` state, so users can flip to
-                SQL and fine-tune the generated result. Not available for
+            {/* Compose mode tab bar — Visual, SQL, or AI. Visual composer
+                and AI both write into the same `sql` state, so users can
+                flip to SQL and fine-tune the generated result -- AI's
+                draft is never saved directly, same review-before-save
+                path the visual composer already uses. Not available for
                 a remote-git dbt project — there's no local project to
-                introspect for sources/columns to compose against. */}
+                introspect for sources/columns (or existing model names,
+                for AI's context) to compose against. */}
             {!isRemote && (
               <div className="border-b border-gray-200 flex items-center gap-1">
                 {([
-                  { v: 'visual', label: 'Visual composer', icon: Wand2, hint: 'Form-driven — pick a source, columns, filters, joins.' },
-                  { v: 'sql',    label: 'SQL editor',      icon: Code2, hint: 'Write raw SQL directly with dbt jinja.' },
+                  { v: 'visual', label: 'Visual composer', icon: Wand2,     hint: 'Form-driven — pick a source, columns, filters, joins.' },
+                  { v: 'sql',    label: 'SQL editor',      icon: Code2,     hint: 'Write raw SQL directly with dbt jinja.' },
+                  { v: 'ai',     label: 'AI',              icon: Sparkles,  hint: 'Describe the model in plain language — generates SQL you review before saving.' },
                 ] as const).map(({ v, label, icon: Icon, hint }) => (
                   <button
                     key={v}
@@ -278,6 +344,46 @@ export function AddDbtModelDialog({ open, onOpenChange, projectId, onCreated }: 
                 dbtRelativePath={dbtProjectPath}
                 onSqlChange={setSql}
               />
+            )}
+
+            {composeMode === 'ai' && !isRemote && (
+              <div className="space-y-2">
+                {availableAiModels.length === 0 ? (
+                  <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded p-2">
+                    No AI provider configured — add an Anthropic or OpenAI key in Settings → AI Providers to use this.
+                  </p>
+                ) : (
+                  <div className="flex items-center justify-end">
+                    <select
+                      value={aiModel}
+                      onChange={(e) => setAiModel(e.target.value)}
+                      className="px-2 py-1 text-xs border border-gray-300 rounded bg-white"
+                    >
+                      {availableAiModels.map((m) => <option key={m.value} value={m.value}>{m.label}</option>)}
+                    </select>
+                  </div>
+                )}
+                <textarea
+                  value={aiTask}
+                  onChange={(e) => setAiTask(e.target.value)}
+                  rows={5}
+                  placeholder={`Describe what this model should do, e.g. "Join orders to customers and compute total spend per customer, filtered to the last 90 days."`}
+                  className="w-full px-3 py-2 text-sm border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
+                <div className="flex items-center justify-between">
+                  <p className="text-[11px] text-gray-500">
+                    Generates a draft into the SQL tab — nothing is saved until you click Create model there.
+                  </p>
+                  <button
+                    onClick={handleGenerateSql}
+                    disabled={aiGenerating || !aiTask.trim() || availableAiModels.length === 0}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-primary text-primary-foreground rounded disabled:opacity-50 disabled:cursor-not-allowed flex-shrink-0"
+                  >
+                    {aiGenerating ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Sparkles className="w-3.5 h-3.5" />}
+                    {aiGenerating ? 'Generating…' : 'Generate SQL'}
+                  </button>
+                </div>
+              </div>
             )}
 
             {composeMode === 'sql' && (

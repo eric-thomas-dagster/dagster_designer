@@ -4928,9 +4928,11 @@ async def get_dbt_exposures(project_id: str, dbt_relative_path: str | None = Non
 
 # ---------------------------------------------------------------------------
 # dbt semantic models — MetricFlow/semantic layer definitions (entities,
-# dimensions, measures) declared on top of a dbt model. Parsed straight out
-# of manifest.json, same as exposures above; read-only for now since these
-# are richer, nested objects than a simple write form suits well.
+# dimensions, measures) declared on top of a dbt model. Read side parses
+# straight out of manifest.json, same as exposures above. Write side
+# (add_dbt_semantic_model/delete_dbt_semantic_model, below the read
+# models) follows exposures' own merge-by-name pattern into a dedicated
+# models/semantic_models.yml.
 # ---------------------------------------------------------------------------
 
 class DbtSemanticEntity(BaseModel):
@@ -5037,6 +5039,118 @@ async def get_dbt_semantic_models(project_id: str, dbt_relative_path: str | None
         dbt_project_relative_path=chosen.relative_path,
         semantic_models=sorted(semantic_models, key=lambda s: s.name),
     )
+
+
+class AddDbtSemanticEntityRequest(BaseModel):
+    name: str
+    type: str = 'foreign'        # primary | foreign | unique | natural
+    expr: str | None = None      # defaults to `name` if the column differs
+    description: str | None = None
+
+
+class AddDbtSemanticDimensionRequest(BaseModel):
+    name: str
+    type: str = 'categorical'    # categorical | time
+    time_granularity: str | None = None  # day | week | month | quarter | year -- only when type == 'time'
+    expr: str | None = None
+    description: str | None = None
+
+
+class AddDbtSemanticMeasureRequest(BaseModel):
+    name: str
+    agg: str = 'sum'             # sum | count | count_distinct | average | min | max | sum_boolean | median
+    expr: str | None = None
+    description: str | None = None
+    agg_time_dimension: str | None = None  # which time dimension this measure aggregates over
+
+
+class AddDbtSemanticModelRequest(BaseModel):
+    dbt_relative_path: str
+    name: str
+    model: str                   # dbt model name (wrapped into ref('...') on write)
+    description: str | None = None
+    primary_entity: str | None = None       # only needed if no entity below has type: primary
+    default_agg_time_dimension: str | None = None  # written as defaults.agg_time_dimension
+    entities: list[AddDbtSemanticEntityRequest] = []
+    dimensions: list[AddDbtSemanticDimensionRequest] = []
+    measures: list[AddDbtSemanticMeasureRequest] = []
+
+
+@router.post('/{project_id}/dbt-semantic-models', response_model=DbtSemanticModelsResponse)
+async def add_dbt_semantic_model(project_id: str, request: AddDbtSemanticModelRequest):
+    """Write a semantic model to <dbt_root>/models/semantic_models.yml.
+    Non-destructive: merges with existing entries by name, same pattern
+    as add_dbt_exposure."""
+    import yaml as _yaml
+    project = project_service.get_project(project_id)
+    dbt_root = _resolve_dbt_root_for_write(project, request.dbt_relative_path)
+    if not request.name.strip():
+        raise HTTPException(status_code=400, detail="Semantic model name is required.")
+    if not request.model.strip():
+        raise HTTPException(status_code=400, detail="Underlying dbt model is required.")
+    if not request.entities:
+        raise HTTPException(status_code=400, detail="At least one entity is required (dbt needs exactly one marked type: primary).")
+
+    sm_path = dbt_root / 'models' / 'semantic_models.yml'
+    existing: dict = {}
+    if sm_path.exists():
+        try:
+            existing = _yaml.safe_load(sm_path.read_text()) or {}
+        except Exception:
+            existing = {}
+    existing.setdefault('version', 2)
+    semantic_models = list(existing.get('semantic_models') or [])
+
+    entities: list[dict] = []
+    for e in request.entities:
+        if not e.name.strip():
+            continue
+        item: dict = {'name': e.name.strip(), 'type': e.type}
+        if e.expr: item['expr'] = e.expr
+        if e.description: item['description'] = e.description
+        entities.append(item)
+    if not any(e.get('type') == 'primary' for e in entities) and not request.primary_entity:
+        raise HTTPException(status_code=400, detail="dbt requires exactly one entity with type: primary (or set primary_entity explicitly).")
+
+    dimensions: list[dict] = []
+    for d in request.dimensions:
+        if not d.name.strip():
+            continue
+        item = {'name': d.name.strip(), 'type': d.type}
+        if d.type == 'time' and d.time_granularity:
+            item['type_params'] = {'time_granularity': d.time_granularity}
+        if d.expr: item['expr'] = d.expr
+        if d.description: item['description'] = d.description
+        dimensions.append(item)
+
+    measures: list[dict] = []
+    for m in request.measures:
+        if not m.name.strip():
+            continue
+        item = {'name': m.name.strip(), 'agg': m.agg}
+        if m.expr: item['expr'] = m.expr
+        if m.description: item['description'] = m.description
+        if m.agg_time_dimension: item['agg_time_dimension'] = m.agg_time_dimension
+        measures.append(item)
+
+    entry: dict = {
+        'name': request.name.strip(),
+        'model': f"ref('{request.model.strip()}')",
+    }
+    if request.description: entry['description'] = request.description
+    if request.primary_entity: entry['primary_entity'] = request.primary_entity
+    if entities: entry['entities'] = entities
+    if dimensions: entry['dimensions'] = dimensions
+    if measures: entry['measures'] = measures
+    if request.default_agg_time_dimension:
+        entry['defaults'] = {'agg_time_dimension': request.default_agg_time_dimension}
+
+    semantic_models = [s for s in semantic_models if s.get('name') != request.name.strip()]
+    semantic_models.append(entry)
+    existing['semantic_models'] = semantic_models
+    sm_path.parent.mkdir(parents=True, exist_ok=True)
+    sm_path.write_text(_yaml.dump(existing, sort_keys=False))
+    return await get_dbt_semantic_models(project_id, dbt_relative_path=request.dbt_relative_path)
 
 
 # ---------------------------------------------------------------------------
@@ -5307,6 +5421,28 @@ async def delete_dbt_exposure(project_id: str, request: DeleteByNameRequest):
     existing['exposures'] = filtered
     exp_path.write_text(_yaml.dump(existing, sort_keys=False))
     return await get_dbt_exposures(project_id, dbt_relative_path=request.dbt_relative_path)
+
+
+@router.post('/{project_id}/dbt-semantic-models/delete', response_model=DbtSemanticModelsResponse)
+async def delete_dbt_semantic_model(project_id: str, request: DeleteByNameRequest):
+    """Remove a semantic model from models/semantic_models.yml by name."""
+    import yaml as _yaml
+    project = project_service.get_project(project_id)
+    dbt_root = _resolve_dbt_root_for_write(project, request.dbt_relative_path)
+    sm_path = dbt_root / 'models' / 'semantic_models.yml'
+    if not sm_path.exists():
+        raise HTTPException(status_code=404, detail="No models/semantic_models.yml — nothing to remove.")
+    try:
+        existing = _yaml.safe_load(sm_path.read_text()) or {}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to parse semantic_models.yml: {e}")
+    semantic_models = list(existing.get('semantic_models') or [])
+    filtered = [s for s in semantic_models if s.get('name') != request.name]
+    if len(filtered) == len(semantic_models):
+        raise HTTPException(status_code=404, detail=f"Semantic model '{request.name}' not found.")
+    existing['semantic_models'] = filtered
+    sm_path.write_text(_yaml.dump(existing, sort_keys=False))
+    return await get_dbt_semantic_models(project_id, dbt_relative_path=request.dbt_relative_path)
 
 
 class DeleteDbtSourceRequest(BaseModel):
@@ -8751,6 +8887,57 @@ async def run_dbt_model(project_id: str, request: RunDbtModelRequest):
         stdout=r.stdout,
         stderr=r.stderr,
     )
+
+
+class GenerateDbtModelSqlRequest(BaseModel):
+    dbt_relative_path: str
+    model_name: str
+    materialization: str = 'view'
+    task: str              # natural-language description of what the model should do
+    ai_model: str | None = None  # Anthropic/OpenAI model id; None -> genie_service.DEFAULT_MODEL
+
+
+class GenerateDbtModelSqlResponse(BaseModel):
+    sql: str
+
+
+@router.post('/{project_id}/dbt-model/generate-sql', response_model=GenerateDbtModelSqlResponse)
+async def generate_dbt_model_sql_endpoint(project_id: str, request: GenerateDbtModelSqlRequest):
+    """AI-draft a dbt model's SQL from a natural-language description --
+    the "AI" tab in AddDbtModelDialog, alongside Visual composer / SQL
+    editor. Returns SQL for the user to review in the SQL tab before
+    saving; never writes anything to disk itself (add_dbt_model below
+    does that, same as every other path through this dialog)."""
+    from ..services import genie_service
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    # Reuse the real model listing (same one the dialog's own model
+    # picker and AddDbtExposureDialog use) so the AI sees the project's
+    # actual model names AND column names instead of guessing at ref()
+    # targets and plausible-but-wrong column names.
+    available_models: list[str] = []
+    model_columns: dict[str, list[str]] = {}
+    try:
+        listing = await list_dbt_models(project_id, dbt_relative_path=request.dbt_relative_path)
+        available_models = [m.name for m in listing.models]
+        model_columns = {m.name: list(m.columns.keys()) for m in listing.models if m.columns}
+    except Exception:
+        pass  # Non-fatal -- the model just won't have existing-model context.
+
+    try:
+        sql = await genie_service.generate_dbt_model_sql(
+            task=request.task,
+            available_models=available_models,
+            model_name=request.model_name,
+            materialization=request.materialization,
+            model=request.ai_model or genie_service.DEFAULT_MODEL,
+            model_columns=model_columns,
+        )
+    except genie_service.GenieError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return GenerateDbtModelSqlResponse(sql=sql)
 
 
 class AddDbtModelRequest(BaseModel):
