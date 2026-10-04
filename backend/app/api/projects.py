@@ -4820,9 +4820,9 @@ async def dbt_docs_generate(project_id: str, request: ScaffoldDbtDocsRequest):
         raise HTTPException(status_code=404, detail=f"No dbt_project.yml at {request.dbt_relative_path}")
 
     # Use the venv's dbt if present; falls back to whatever is on PATH.
-    # Resolve to abs path — subprocess runs with cwd=dbt_root.
-    venv_bin = (project_service._get_project_dir(project) / '.venv' / 'bin' / 'dbt').resolve()
-    dbt_bin = str(venv_bin) if venv_bin.exists() else 'dbt'
+    from ..core.uv_binary import venv_bin_path as _venv_bin_path
+    _dbt_resolved = _venv_bin_path(root / '.venv', 'dbt')
+    dbt_bin = str(_dbt_resolved) if _dbt_resolved.exists() else 'dbt'
     started = _time.time()
     try:
         r = _sp.run(
