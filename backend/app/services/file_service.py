@@ -2,6 +2,7 @@
 
 import os
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -297,18 +298,31 @@ class FileService:
         """
         project_path = self._get_project_path(project_id)
 
-        # Basic command validation - whitelist common safe commands
+        # Allowlist of commands safe to run in a project terminal.
+        # Deliberately excludes destructive system commands (rm -rf /, format,
+        # net user, reg delete, etc.) while covering everything a developer
+        # needs day-to-day in a Dagster project.
         allowed_commands = [
-            "ls",
-            "dg",
-            "dagster",
-            "uv",
-            "python",
-            "pip",
-            "pytest",
-            "black",
-            "ruff",
-            "mypy",
+            # File navigation / inspection
+            "ls", "dir", "cat", "type", "head", "tail", "find", "grep",
+            "tree", "pwd", "echo", "more", "less",
+            # Python / package management
+            "python", "python3", "pip", "pip3", "uv", "uvx",
+            # Dagster / dg CLI
+            "dg", "dagster",
+            # dbt
+            "dbt",
+            # Code quality
+            "pytest", "black", "ruff", "mypy", "isort", "flake8", "pylint",
+            "pre-commit",
+            # Git (read-only and safe write ops)
+            "git",
+            # Node / JS tooling (for projects with a JS layer)
+            "node", "npm", "npx", "yarn", "pnpm",
+            # General dev utilities
+            "make", "curl", "wget", "jq",
+            # Environment inspection
+            "env", "printenv", "set",
         ]
 
         command_parts = command.strip().split()
@@ -316,6 +330,11 @@ class FileService:
             raise ValueError(
                 f"Command not allowed. Allowed commands: {', '.join(allowed_commands)}"
             )
+
+        # On Windows, `ls` is a PowerShell alias — not a real executable.
+        # Remap it to `dir` so users can type either without thinking about it.
+        if sys.platform == "win32" and command_parts[0] == "ls":
+            command_parts[0] = "dir"
 
         # Use project's virtual environment for dg/dagster/python commands
         # Build command as list for subprocess, not shell string
@@ -325,6 +344,12 @@ class FileService:
             if venv_cmd.exists():
                 # Use absolute path to venv command
                 cmd_list = [str(venv_cmd.absolute())] + command_parts[1:]
+
+        # On Windows, several commands are cmd.exe built-ins rather than
+        # standalone executables — wrap them so they resolve correctly.
+        WINDOWS_BUILTINS = {"dir", "type", "tree", "find", "more", "set", "echo", "findstr"}
+        if sys.platform == "win32" and cmd_list[0] in WINDOWS_BUILTINS:
+            cmd_list = ["cmd", "/c"] + cmd_list
 
         try:
             result = subprocess.run(
