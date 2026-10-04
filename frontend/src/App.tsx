@@ -997,6 +997,36 @@ function App() {
   };
 
   const isCloudProject = !!currentProject && !!(currentProject as any).is_dagster_plus;
+
+  // Shared by ComponentPalette (asset components) and ResourcesManager
+  // (community resource/IO-manager installs): after a component TEMPLATE
+  // installs with no instance yet (install-via-cli's template_only path),
+  // open the real configure-and-create step rather than leaving the user
+  // with an installed-but-invisible component and no way to finish setting
+  // it up.
+  const handleAddComponentType = (componentType: string) => {
+    if (isCloudProject) {
+      // Route to sandbox authoring via the same modal + APIs the header
+      // "+ Add component" flow uses. Schema is fetched by
+      // ComponentConfigModal's useComponent hook.
+      setDraftAuthoring({
+        componentType,
+        displayName: componentType.split('.').pop() || componentType,
+        schema: null,
+        initialAttributes: {},
+        location: '__sandbox__',
+        deployment: null,
+        target: 'sandbox',
+        availableAssets: [],
+        availableJobs: [],
+        availableSchedules: [],
+        availableSensors: [],
+      });
+    } else {
+      setAddingComponentType(componentType);
+    }
+  };
+
   // Not gated on whether any pipelines exist yet -- for local projects
   // this tab IS the entry point for creating the first one (its empty
   // state has the "New Pipeline" button), so hiding it whenever the
@@ -1566,30 +1596,7 @@ function App() {
                   </h3>
                 </div>
                 <div className="flex-1 overflow-y-auto">
-                  <ComponentPalette
-                    onComponentClick={(componentType) => {
-                      if (isCloudProject) {
-                        // Route to sandbox authoring via the same modal + APIs
-                        // the header "+ Add component" flow uses. Schema is
-                        // fetched by ComponentConfigModal's useComponent hook.
-                        setDraftAuthoring({
-                          componentType,
-                          displayName: componentType.split('.').pop() || componentType,
-                          schema: null,
-                          initialAttributes: {},
-                          location: '__sandbox__',
-                          deployment: null,
-                          target: 'sandbox',
-                          availableAssets: [],
-                          availableJobs: [],
-                          availableSchedules: [],
-                          availableSensors: [],
-                        });
-                      } else {
-                        setAddingComponentType(componentType);
-                      }
-                    }}
-                  />
+                  <ComponentPalette onComponentClick={handleAddComponentType} />
                 </div>
               </div>
               </>
@@ -1810,7 +1817,7 @@ function App() {
           {/* Resources Tab Content */}
           <Tabs.Content value="resources" className="flex-1 overflow-hidden">
             <div className="h-full">
-              <ResourcesManager onOpenFile={handleOpenFile} />
+              <ResourcesManager onOpenFile={handleOpenFile} onComponentInstalled={handleAddComponentType} />
             </div>
           </Tabs.Content>
         </Tabs.Root>

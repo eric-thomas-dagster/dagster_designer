@@ -131,6 +131,15 @@ export function GenerateMonitorsDialog({ open, onOpenChange, projectId, onGenera
         fail++;
       }
     }
+    if (ok > 0) {
+      // Each addMonitor call above only writes a defs.yaml -- it doesn't
+      // update the project's stored graph, so the Monitors page's own
+      // Refresh would just re-read the same stale list. Every other
+      // "write a new component" flow in the app (CreatePythonAssetDialog,
+      // ComponentConfigModal, AddMonitorDialog, ...) rescans right after
+      // a successful save for exactly this reason.
+      try { await projectsApi.regenerateAssets(projectId); } catch { /* best-effort -- the monitors themselves were created fine */ }
+    }
     setCreating(false);
     if (ok > 0) notify.success(`Created ${ok} monitor${ok === 1 ? '' : 's'}`);
     if (fail > 0) notify.error(`${fail} proposal${fail === 1 ? '' : 's'} failed — check console.`);

@@ -1460,46 +1460,6 @@ export interface FreshnessPolicyParams {
   cron_env_var?: string;
 }
 
-export interface IOManagerParams {
-  io_manager_name: string;
-  io_manager_type: 'filesystem' | 'duckdb' | 'duckdb_pandas' | 'duckdb_polars' | 'duckdb_pyspark' |
-    'snowflake' | 'snowflake_pandas' | 'snowflake_polars' | 'snowflake_pyspark' |
-    'polars' | 'deltalake' | 'deltalake_pandas' | 'deltalake_polars' |
-    'iceberg' | 'custom';
-  description?: string;
-  base_path?: string;
-  database_path?: string;
-  account?: string;
-  user?: string;
-  password?: string;
-  database?: string;
-  schema?: string;
-  warehouse?: string;
-  table_path?: string;
-  config_params?: Record<string, string>;
-}
-
-export interface ResourceParams {
-  resource_name: string;
-  resource_type: 'database' | 'api_client' |
-    'airbyte' | 'fivetran' | 'census' | 'hightouch' |
-    'databricks' | 'snowflake_resource' |
-    'aws_s3' | 'aws_athena' | 'gcp_bigquery' | 'gcp_gcs' | 'azure_blob' |
-    'dbt' | 'sling' |
-    'custom';
-  description?: string;
-  connection_string?: string;
-  api_key?: string;
-  api_url?: string;
-  account_id?: string;
-  region?: string;
-  project_id?: string;
-  workspace_id?: string;
-  host?: string;
-  token?: string;
-  config_params?: Record<string, string>;
-}
-
 export interface TemplateResponse {
   code: string;
 }
@@ -1591,16 +1551,6 @@ export const templatesApi = {
 
   generateFreshnessPolicy: async (params: FreshnessPolicyParams): Promise<TemplateResponse> => {
     const response = await api.post<TemplateResponse>('/templates/freshness-policy', params);
-    return response.data;
-  },
-
-  generateIOManager: async (params: IOManagerParams): Promise<TemplateResponse> => {
-    const response = await api.post<TemplateResponse>('/templates/io-manager', params);
-    return response.data;
-  },
-
-  generateResource: async (params: ResourceParams): Promise<TemplateResponse> => {
-    const response = await api.post<TemplateResponse>('/templates/resource', params);
     return response.data;
   },
 

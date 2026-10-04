@@ -265,6 +265,13 @@ export function AddMonitorDialog({ open, onOpenChange, projectId, onSaved, initi
         dbt_relative_path: implementation === 'dbt_test' ? dbtProjectPath : undefined,
         dbt_model_unique_id: implementation === 'dbt_test' ? dbtModelUid : undefined,
       });
+      // Writing the monitor's defs.yaml (or dbt test) doesn't update the
+      // project's stored graph by itself -- same reason every other
+      // "write a new component" dialog in the app (CreatePythonAssetDialog,
+      // ComponentConfigModal, etc.) calls this right after a successful
+      // save. Without it the Monitors page's own Refresh just re-reads
+      // the same stale graph and looks like nothing happened.
+      try { await projectsApi.regenerateAssets(projectId); } catch { /* best-effort -- the monitor itself was created fine */ }
       notify.success(`Created monitor "${name}"`);
       onSaved?.();
       onOpenChange(false);

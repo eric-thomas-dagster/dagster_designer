@@ -1453,6 +1453,45 @@ async def _merge_sandbox_graph(project: Project) -> None:
     existing_nodes = [n for n in (project.graph.nodes if project.graph else []) if n.source_component != "sandbox"]
     existing_edges = [e for e in (project.graph.edges if project.graph else []) if not e.id.startswith("sandbox::")]
 
+    from datetime import datetime as _dt, timezone as _tz
+    def _epoch_to_iso(ts) -> str | None:
+        if ts is None:
+            return None
+        try:
+            return _dt.fromtimestamp(float(ts), tz=_tz.utc).isoformat()
+        except Exception:
+            return None
+
+    def _sandbox_checks(n: dict, key: str) -> list[dict]:
+        # Mirrors the real cloud hydrate's assetChecksOrError parsing
+        # above (see checks_by_asset) -- same shape, so list_monitors
+        # doesn't need to special-case where a check came from. Without
+        # this, every monitor scaffolded into the sandbox (manually or
+        # via "Generate monitors with AI") silently never showed up on
+        # the Monitors page: the sandbox-merge query never asked for
+        # checks at all, so this list was always empty regardless of
+        # what was actually in the sandbox.
+        chk_or = n.get("assetChecksOrError") or {}
+        if chk_or.get("__typename") != "AssetChecks":
+            return []
+        out = []
+        for c in (chk_or.get("checks") or []):
+            last = c.get("executionForLatestMaterialization") or {}
+            evl = last.get("evaluation") if last else None
+            out.append({
+                "name": c.get("name"),
+                "key": f"{key}::{c.get('name')}",
+                "description": c.get("description"),
+                "source": "sandbox",
+                "blocking": bool(c.get("blocking")),
+                "job_names": list(c.get("jobNames") or []),
+                "last_status": (last.get("status") if last else None),
+                "last_run_at": _epoch_to_iso(last.get("timestamp")) if last else None,
+                "last_severity": (evl.get("severity") if evl else None),
+                "last_success": (evl.get("success") if evl else None),
+            })
+        return out
+
     key_to_id: dict[str, str] = {}
     sandbox_nodes: list[GraphNode] = []
     for i, n in enumerate(raw_nodes):
@@ -1483,7 +1522,7 @@ async def _merge_sandbox_graph(project: Project) -> None:
                 "is_observable": bool(n.get("isObservable")),
                 "is_partitioned": bool(n.get("isPartitioned")),
                 "deps": [],
-                "checks": [],
+                "checks": _sandbox_checks(n, key),
                 "jobs": [],
                 "schedules": [],
                 "sensors": [],
@@ -5974,11 +6013,25 @@ async def list_monitors(project_id: str):
 
     monitors: list[Monitor] = []
 
-    # Dagster+ projects: skip re-hydrating here. The project graph is
-    # already refreshed on GET /projects/{id}, which happens before
-    # /monitors on tab switch. Re-hydrating a second time doubled the
+    # Dagster+ projects: skip re-hydrating the EXPENSIVE part here (the
+    # real Dagster+ GraphQL query) -- the project graph is already
+    # refreshed on GET /projects/{id}, which happens before /monitors
+    # on tab switch, and re-running that query here doubled the
     # response time (5-10s for large orgs) and was tripping the
     # frontend 500 timeout without any new information gained.
+    #
+    # The sandbox merge is a different story though: it's a cheap,
+    # local-only call (no real Dagster+ round trip), and its output is
+    # explicitly never persisted to disk (see _merge_sandbox_graph's
+    # docstring -- the sandbox is ephemeral, so its nodes are recomputed
+    # fresh every time rather than cached). project_service.get_project
+    # above always reloads from disk, so without re-running this merge
+    # here, a monitor scaffolded into the sandbox (e.g. "Generate
+    # monitors with AI" on a Dagster+ project) would NEVER show up on
+    # this page no matter how many times it's refreshed -- confirmed
+    # live as the root cause of exactly that symptom.
+    if project.is_dagster_plus:
+        await _merge_sandbox_graph(project)
 
     # --- Native + enhanced asset checks (from the stored project graph) ---
     def _coerce_ts(v) -> str | None:

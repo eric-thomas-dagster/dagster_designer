@@ -764,6 +764,114 @@ async def _list_cloud_resources(project) -> dict:
     }
 
 
+async def _community_component_instances(
+    project_dir, directory_name: str,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    """Find community-installed resource/IO-manager component INSTANCES
+    (defs.yaml files, as opposed to resources.py functions) -- plus any
+    installed TEMPLATES that never got an instance configured.
+
+    `components/<id>/manifest.yaml` (written by install-via-cli, see
+    templates_registry.py) records the install but not the category --
+    cross-reference each one's `component_type` against the remote
+    manifest's category (keyed by the same `<id>`) to know which
+    installed types are resources/IO-managers at all. Then scan every
+    `defs/<instance>/defs.yaml` (one level deep -- both install-via-cli's
+    stub and project_service._generate_component_yaml_files write
+    instances at exactly this depth) and keep the ones whose `type:`
+    matches a resource/IO-manager category.
+
+    Anything left in `type_to_category` with no matching instance is a
+    template that got installed (e.g. the catalog's "Install" button, or
+    an earlier attempt that was cancelled before a real instance got
+    configured) but never turned into something usable -- install-via-cli
+    marks the type as already-installed so the catalog hides it, yet
+    there's no defs.yaml for it either, so without surfacing it here it's
+    invisible on both sides: not in the catalog (already installed) and
+    not in the resources list (no instance). Confirmed live as exactly
+    what happened with an earlier, pre-fix Braze install attempt.
+    """
+    import yaml as _yaml
+    from .templates_registry import detect_project_structure
+    from ..services.genie_service import fetch_manifest
+
+    project_name_sanitized = directory_name or ""
+    try:
+        base_dir, _module, _use_src, defs_dir, components_dir = detect_project_structure(
+            project_dir, project_name_sanitized,
+        )
+    except ValueError:
+        return [], [], []
+
+    if not components_dir.exists() or not defs_dir.exists():
+        return [], [], []
+
+    try:
+        manifest = await fetch_manifest()
+    except Exception:
+        manifest = {"components": []}
+    id_to_component = {c.get("id"): c for c in (manifest.get("components") or [])}
+
+    # component_type -> (category, display name, source component id)
+    type_to_info: dict[str, tuple[str, str, str]] = {}
+    for item in components_dir.iterdir():
+        if not item.is_dir():
+            continue
+        manifest_file = item / "manifest.yaml"
+        if not manifest_file.exists():
+            continue
+        try:
+            data = _yaml.safe_load(manifest_file.read_text()) or {}
+        except Exception:
+            continue
+        component_type = data.get("component_type")
+        remote = id_to_component.get(item.name) or {}
+        category = (remote.get("category") or "").lower()
+        if component_type and category:
+            type_to_info[component_type] = (category, remote.get("name") or item.name, item.name)
+
+    io_managers: list[dict[str, Any]] = []
+    resources: list[dict[str, Any]] = []
+    matched_types: set[str] = set()
+    for item in defs_dir.iterdir():
+        if not item.is_dir():
+            continue
+        defs_yaml = item / "defs.yaml"
+        if not defs_yaml.exists():
+            continue
+        try:
+            parsed = _yaml.safe_load(defs_yaml.read_text()) or {}
+        except Exception:
+            continue
+        info = type_to_info.get(parsed.get("type"))
+        if not info or info[0] not in ("resource", "resources", "io_manager", "io_managers"):
+            continue
+        matched_types.add(parsed["type"])
+        entry = {
+            "name": (parsed.get("attributes") or {}).get("name") or item.name,
+            "file": str(defs_yaml.relative_to(project_dir)),
+            "line_number": 1,
+            "source": "community",
+        }
+        if info[0] in ("io_manager", "io_managers"):
+            io_managers.append(entry)
+        else:
+            resources.append(entry)
+
+    needs_configuration: list[dict[str, Any]] = []
+    for component_type, (category, name, component_id) in type_to_info.items():
+        if component_type in matched_types:
+            continue
+        needs_configuration.append({
+            "component_id": component_id,
+            "component_type": component_type,
+            "name": name,
+            "category": "io_manager" if category in ("io_manager", "io_managers") else "resource",
+        })
+
+    return io_managers, resources, needs_configuration
+
+
 @router.get("/resources/{project_id}")
 async def list_resources_and_io_managers(project_id: str):
     """List installed resources and IO managers by parsing resources.py.
@@ -813,6 +921,23 @@ async def list_resources_and_io_managers(project_id: str):
             else:
                 resources.append(entry)
 
+    # Community-installed resources/IO managers never show up above --
+    # they're not hand-written functions in resources.py, they're
+    # component-YAML instances (type: + attributes:) under defs/<id>/defs.yaml,
+    # the same shape every other community component (ingestions, monitors,
+    # ...) uses. Confirmed live as the cause of "I installed Braze but it
+    # isn't showing": the install succeeds, but this endpoint never looked
+    # anywhere a component-based resource could actually be.
+    needs_configuration: list[dict[str, Any]] = []
+    try:
+        community_io_managers, community_resources, needs_configuration = await _community_component_instances(
+            project_dir, directory_name,
+        )
+        io_managers.extend(community_io_managers)
+        resources.extend(community_resources)
+    except Exception as e:
+        print(f"[resources] community component scan failed: {e}", flush=True)
+
     return {
         "project_id": project_id,
         "resources_file": (
@@ -820,6 +945,7 @@ async def list_resources_and_io_managers(project_id: str):
         ),
         "io_managers": io_managers,
         "resources": resources,
+        "needs_configuration": needs_configuration,
     }
 
 

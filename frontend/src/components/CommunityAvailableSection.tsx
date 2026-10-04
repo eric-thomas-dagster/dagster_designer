@@ -74,7 +74,11 @@ export function CommunityAvailableSection({
       const res = await fetch(`${API_BASE}/templates/install-via-cli/${componentId}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ project_id: currentProject.id, config: {} }),
+        // template_only: install the component class only, no demo
+        // instance -- matches ComponentPalette's own install flow.
+        // onInstalled below hands the caller the component_type so it
+        // can open a real configure-and-create step right after.
+        body: JSON.stringify({ project_id: currentProject.id, template_only: true }),
       });
       const body = await res.json().catch(() => ({} as any));
       if (!res.ok) throw new Error(body.detail || 'Install failed');
@@ -142,7 +146,7 @@ export function CommunityAvailableSection({
       </button>
 
       {expanded && (
-        <div className="px-4 pb-3 space-y-1.5">
+        <div className="px-4 pb-3">
           <input
             type="text"
             value={search}
@@ -150,34 +154,42 @@ export function CommunityAvailableSection({
             placeholder="Filter community components…"
             className="w-full px-2.5 py-1.5 text-sm border border-gray-200 rounded focus:outline-none focus:ring-2 focus:ring-primary/30 focus:border-primary"
           />
-          {filtered.map((comp) => {
-            const isInstalling = installingId === comp.id;
-            return (
-              <button
-                key={comp.id}
-                onClick={() => !isInstalling && installMutation.mutate(comp.id)}
-                disabled={isInstalling}
-                title={comp.description || comp.name}
-                className="w-full flex items-center gap-2 px-2.5 py-2 border border-dashed border-gray-300 bg-white rounded-md hover:border-primary/50 hover:bg-primary/5 transition-all group text-left disabled:opacity-60"
-              >
-                <ComponentIcon icon={comp.icon} title={comp.name} size={16} />
-                <div className="min-w-0 flex-1">
-                  <div className="text-sm text-gray-900 truncate">{comp.name}</div>
-                  {comp.description && (
-                    <div className="text-[11px] text-gray-500 truncate">{comp.description}</div>
+          {/* No max-height/overflow here on purpose -- every caller
+              (PrimitivesManager's Tabs.Content, ResourcesManager's own
+              wrapper) already provides the actual scrollable region as a
+              flex-1 overflow-y-auto ancestor. A fixed cap here would just
+              compete with that (either double-scrolling or clipping well
+              short of the real available space). */}
+          <div className="mt-1.5 space-y-1.5">
+            {filtered.map((comp) => {
+              const isInstalling = installingId === comp.id;
+              return (
+                <button
+                  key={comp.id}
+                  onClick={() => !isInstalling && installMutation.mutate(comp.id)}
+                  disabled={isInstalling}
+                  title={comp.description || comp.name}
+                  className="w-full flex items-center gap-2 px-2.5 py-2 border border-dashed border-gray-300 bg-white rounded-md hover:border-primary/50 hover:bg-primary/5 transition-all group text-left disabled:opacity-60"
+                >
+                  <ComponentIcon icon={comp.icon} title={comp.name} size={16} />
+                  <div className="min-w-0 flex-1">
+                    <div className="text-sm text-gray-900 truncate">{comp.name}</div>
+                    {comp.description && (
+                      <div className="text-[11px] text-gray-500 truncate">{comp.description}</div>
+                    )}
+                  </div>
+                  {isInstalling ? (
+                    <Loader2 className="w-3.5 h-3.5 text-primary animate-spin flex-shrink-0" />
+                  ) : (
+                    <Download className="w-3.5 h-3.5 text-gray-400 group-hover:text-primary flex-shrink-0" />
                   )}
-                </div>
-                {isInstalling ? (
-                  <Loader2 className="w-3.5 h-3.5 text-primary animate-spin flex-shrink-0" />
-                ) : (
-                  <Download className="w-3.5 h-3.5 text-gray-400 group-hover:text-primary flex-shrink-0" />
-                )}
-              </button>
-            );
-          })}
-          {filtered.length === 0 && q && (
-            <div className="text-xs text-gray-400 py-2 text-center">No matches</div>
-          )}
+                </button>
+              );
+            })}
+            {filtered.length === 0 && q && (
+              <div className="text-xs text-gray-400 py-2 text-center">No matches</div>
+            )}
+          </div>
         </div>
       )}
     </div>

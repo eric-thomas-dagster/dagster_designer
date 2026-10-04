@@ -149,6 +149,22 @@ query DesignerSandboxGraphAssets {
     dependencyKeys { path }
     dependedByKeys { path }
     tags { key value }
+    assetChecksOrError(limit: 1000) {
+      __typename
+      ... on AssetChecks {
+        checks {
+          name
+          description
+          jobNames
+          blocking
+          executionForLatestMaterialization {
+            status
+            timestamp
+            evaluation { severity success }
+          }
+        }
+      }
+    }
   }
 }
 """
