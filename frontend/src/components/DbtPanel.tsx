@@ -47,7 +47,7 @@ export function DbtPanel({ onOpenFile }: DbtPanelProps) {
 
   const [search, setSearch] = useState('');
   const [selectedUniqueId, setSelectedUniqueId] = useState<string | null>(null);
-  const [runningModel, setRunningModel] = useState<string | null>(null);
+  const [runningModels, setRunningModels] = useState<Set<string>>(new Set());
   const [runOutput, setRunOutput] = useState<{ uid: string; stdout: string; stderr: string; success: boolean } | null>(null);
   const [showAddModel, setShowAddModel] = useState(false);
   const [showGitCommit, setShowGitCommit] = useState(false);
@@ -444,7 +444,7 @@ export function DbtPanel({ onOpenFile }: DbtPanelProps) {
 
   const runOne = async (model: Model) => {
     if (!currentProject || !data) return;
-    setRunningModel(model.unique_id);
+    setRunningModels((prev) => new Set(prev).add(model.unique_id));
     setRunOutput(null);
     try {
       const r = await projectsApi.runDbtModel(currentProject.id, {
@@ -460,7 +460,7 @@ export function DbtPanel({ onOpenFile }: DbtPanelProps) {
       const msg = e?.response?.data?.detail || e?.message || String(e);
       notify.error(`Run failed: ${msg}`);
     } finally {
-      setRunningModel(null);
+      setRunningModels((prev) => { const s = new Set(prev); s.delete(model.unique_id); return s; });
     }
   };
 
@@ -784,12 +784,12 @@ export function DbtPanel({ onOpenFile }: DbtPanelProps) {
                           <div className="inline-flex items-center gap-1">
                             <button
                               onClick={() => runOne(m)}
-                              disabled={runningModel === m.unique_id}
+                              disabled={runningModels.has(m.unique_id)}
                               className="inline-flex items-center gap-1 px-2 py-1 text-xs bg-primary text-primary-foreground rounded hover:bg-accent disabled:opacity-40"
                               title="dbt build --select this model"
                             >
-                              {runningModel === m.unique_id ? <Loader2 className="w-3 h-3 animate-spin" /> : <Play className="w-3 h-3" />}
-                              {runningModel === m.unique_id ? 'Running…' : 'Run'}
+                              {runningModels.has(m.unique_id) ? <Loader2 className="w-3 h-3 animate-spin" /> : <Play className="w-3 h-3" />}
+                              {runningModels.has(m.unique_id) ? 'Running…' : 'Run'}
                             </button>
                             {m.relative_sql_path && (
                               <button
@@ -1447,7 +1447,7 @@ export function DbtPanel({ onOpenFile }: DbtPanelProps) {
           onColumnLineage={() => setColumnLineageFor(selected)}
           onAddTest={isCloudProject ? undefined : () => setAddTestFor({ model: selected })}
           onDeleteTest={isCloudProject ? undefined : (uid) => handleDeleteTest(uid)}
-          running={runningModel === selected.unique_id}
+          running={runningModels.has(selected.unique_id)}
         />
       )}
 

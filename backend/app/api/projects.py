@@ -8641,6 +8641,7 @@ async def dbt_model_preview(project_id: str, request: DbtModelPreviewRequest):
 
     cmd = [
         str(dbt_bin),
+        '--log-format', 'json',
         'show',
         '--select', request.model_name,
         '--limit', str(max(1, min(request.limit, 1000))),
@@ -8666,26 +8667,69 @@ async def dbt_model_preview(project_id: str, request: DbtModelPreviewRequest):
         detail = '\n'.join(tail[-8:])
         return DbtModelPreviewResponse(success=False, error=detail, duration_ms=duration_ms)
 
-    # dbt show --output json emits a JSON *stream* — one line per event —
-    # with the last one containing a payload including `show` with the
-    # rows. Parse each line, keep the last with columns+rows.
+    # dbt show --output json may emit rows in different formats across versions:
+    #   dbt 1.5–1.7: structured log event with data.show = list-of-dicts
+    #   dbt 1.8+:    structured log event with data.preview = list-of-dicts
+    #   dbt 1.9+:    --log-format json wraps each entry; rows in data.preview
+    #   some builds: bare JSON array on its own line: [{"col": val}, ...]
+    # Strategy: scan every JSON line from both stdout+stderr; accept the first
+    # list-of-dicts found anywhere in the object tree OR as a bare array.
+    def _coerce_row_list(val):
+        """Return val as a list-of-dicts if possible; None otherwise.
+        dbt 1.10 serializes the preview as a JSON *string* inside the
+        structured log event, so we json.loads() strings before checking."""
+        if isinstance(val, str):
+            try:
+                val = json.loads(val)
+            except Exception:
+                return None
+        if isinstance(val, list) and val and isinstance(val[0], dict):
+            return val
+        return None
+
+    def _find_row_list(obj, depth=0):
+        """Return first list-of-dicts found anywhere in obj (BFS, max depth 6)."""
+        if depth > 6:
+            return None
+        candidate = _coerce_row_list(obj)
+        if candidate is not None:
+            return candidate
+        if isinstance(obj, dict):
+            for key in ('preview', 'show', 'rows', 'results', 'table'):
+                candidate = _coerce_row_list(obj.get(key))
+                if candidate is not None:
+                    return candidate
+            for val in obj.values():
+                if isinstance(val, (dict, list, str)):
+                    found = _find_row_list(val, depth + 1)
+                    if found is not None:
+                        return found
+        return None
+
     columns: list[str] = []
     rows: list[dict] = []
-    for line in r.stdout.splitlines():
+    combined_output = r.stdout + "\n" + r.stderr
+    for line in combined_output.splitlines():
         line = line.strip()
-        if not line or not line.startswith('{'):
+        if not line:
+            continue
+        if not line.startswith('{') and not line.startswith('['):
             continue
         try:
             evt = json.loads(line)
         except Exception:
             continue
-        data = evt.get('data') or {}
-        preview = data.get('preview') or data.get('show')
-        if isinstance(preview, list) and preview:
-            first = preview[0]
-            if isinstance(first, dict):
-                columns = list(first.keys())
-                rows = preview
+        # Bare JSON array of row dicts
+        if isinstance(evt, list) and evt and isinstance(evt[0], dict):
+            columns = list(evt[0].keys())
+            rows = evt
+            break
+        # Structured log object — search for rows nested inside
+        if isinstance(evt, dict):
+            candidate = _find_row_list(evt)
+            if candidate is not None:
+                columns = list(candidate[0].keys())
+                rows = candidate
                 break
 
     # Pull the compiled SQL from disk if it exists — target/compiled/
@@ -8718,6 +8762,18 @@ async def dbt_model_preview(project_id: str, request: DbtModelPreviewRequest):
             else:
                 dtypes[c] = 'string'
             break
+
+    # If dbt succeeded but we couldn't parse any rows, surface the raw output
+    # so the user can see what dbt actually printed (helps diagnose version quirks).
+    if not rows:
+        raw_tail = (r.stdout or r.stderr or '').strip()
+        raw_excerpt = '\n'.join(raw_tail.splitlines()[-20:]) if raw_tail else 'dbt show returned no output'
+        return DbtModelPreviewResponse(
+            success=False,
+            error=f"dbt show succeeded but returned no preview rows.\n\nRaw output:\n{raw_excerpt}",
+            compiled_sql=compiled_sql,
+            duration_ms=duration_ms,
+        )
 
     return DbtModelPreviewResponse(
         success=True,
