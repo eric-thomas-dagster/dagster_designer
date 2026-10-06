@@ -26,6 +26,16 @@ import { useIsDarkMode } from '@/hooks/useIsDarkMode';
 import { useGroupByCodeLocation } from '@/hooks/useGroupByCodeLocation';
 import { GroupByLocationToggle } from './GroupByLocationToggle';
 
+// dg's own `source` field for a component-defined primitive always points
+// at its defs.yaml instance (confirmed live: `dg list defs --json` returns
+// e.g. "src/synthetic_commerce/defs/customer_master_schedule/defs.yaml:1"
+// for a real CronScheduleComponent) -- a plain Python @schedule/@sensor/
+// @job's source is its real .py file instead. Strips a trailing ":line"
+// before checking the extension.
+function isComponentDefsFile(file: string): boolean {
+  return file.split(':')[0].endsWith('defs.yaml');
+}
+
 interface PrimitivesManagerProps {
   onNewPrimitive?: (category: string) => void;
   onOpenFile?: (filePath: string) => void;
@@ -640,6 +650,28 @@ export function PrimitivesManager({
                 <Dialog.Close className="px-4 py-2 text-sm border border-gray-300 rounded-md hover:bg-gray-50">
                   Close
                 </Dialog.Close>
+                {!(currentProject as any)?.is_dagster_plus &&
+                  onOpenFile &&
+                  selectedPrimitive?.file &&
+                  selectedPrimitive.file !== 'N/A' && (
+                    <button
+                      onClick={() => {
+                        onOpenFile(selectedPrimitive.file);
+                        setDetailsOpen(false);
+                      }}
+                      className="px-4 py-2 text-sm border border-blue-300 text-blue-700 rounded-md hover:bg-blue-50 flex items-center gap-1.5"
+                    >
+                      <FileCode className="w-4 h-4" />
+                      {/* dg's own `source` location always points at the
+                          defs.yaml INSTANCE for a component-defined
+                          primitive (there's no per-attribute form here, same
+                          as PropertyPanel's own fallback for a component
+                          without a specialized sidebar -- "edit" means "open
+                          the YAML"), or the real .py file + line for a plain
+                          Python @schedule/@sensor/@job. */}
+                      {isComponentDefsFile(selectedPrimitive.file) ? 'Edit Component' : 'Open Code'}
+                    </button>
+                  )}
                 {!(currentProject as any)?.is_dagster_plus && (
                   <button
                     onClick={() =>
