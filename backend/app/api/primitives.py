@@ -39,6 +39,26 @@ def _format_duration(seconds: int | None) -> str:
     return " ".join(parts) or "0m"
 
 
+def _normalize_primitive_file(p: Dict[str, Any]) -> Dict[str, Any]:
+    """`dg list defs --json`'s own schedule/sensor/job dicts (and the
+    `project.discovered_primitives` snapshot saved straight from them) use
+    the key `source`, e.g. "src/my_project/defs/my_schedule/defs.yaml:1" --
+    confirmed live. Everything else in this file (and the frontend's
+    PrimitiveItem type) expects `file`. Without this rename, any primitive
+    served from the fast asset-introspection cache or the stored snapshot
+    came through with `file` simply undefined -- which the frontend reads
+    as "no source location", hiding both the View/Edit button (gated on a
+    real `file`) and the "find source" fallback button (gated on NOT being
+    one of these -- it assumed only hand-authored/managed primitives ever
+    reached this list), leaving only Delete. The one real fix, in one
+    place, rather than threading `source` through every call site that
+    builds a primitive dict by hand (asset checks/freshness policies
+    already set `file` themselves)."""
+    if "file" not in p or not p["file"]:
+        p = {**p, "file": p.get("source") or "N/A"}
+    return p
+
+
 def _build_cloud_primitives(project) -> Dict[str, List[Dict[str, Any]]]:
     """All primitive categories for a Dagster+ (cloud) project, built from
     `project.discovered_primitives` (schedules/sensors/jobs, populated by
@@ -260,7 +280,7 @@ async def list_primitives(project_id: str, category: PrimitiveCategory):
                 cache_key = cache_key_map.get(category)
 
                 if cache_key and cache_key in cached_defs:
-                    primitives = cached_defs[cache_key]
+                    primitives = [_normalize_primitive_file(p) for p in cached_defs[cache_key]]
                     return {
                         "project_id": project_id,
                         "category": category,
@@ -308,7 +328,7 @@ async def list_primitives(project_id: str, category: PrimitiveCategory):
                     "job": "jobs",
                 }
                 primitives_key = category_map[category]
-                primitives = project.discovered_primitives.get(primitives_key, [])
+                primitives = [_normalize_primitive_file(p) for p in project.discovered_primitives.get(primitives_key, [])]
 
                 if primitives:
                     print(f"[Primitives/{category}] Found {len(primitives)} {category}s in stored project", file=sys.stderr, flush=True)
