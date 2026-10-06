@@ -42,8 +42,21 @@ const KIND_META: Record<SourceKind, { label: string; icon: any; color: string }>
   other:      { label: 'Other sources',          icon: Boxes,    color: 'bg-gray-400' },
 };
 
+// Real catalog component_type values are the dotted PascalCase class name
+// straight from the YAML `type:` field (e.g. "dagster_community_components.
+// SyntheticDataGeneratorComponent", confirmed live in
+// project_service.py's _discover_components: `component_type =
+// yaml_content['type']`, stored verbatim) -- every pattern below was
+// written assuming snake_case, so "SyntheticDataGeneratorComponent" never
+// matched `/synthetic_data_generator/i` at all (no underscores between the
+// words). Inserting an underscore at each lower->upper boundary before
+// matching fixes this for every PascalCase class name, not just this one.
+function toSnakeCase(s: string): string {
+  return s.replace(/([a-z0-9])([A-Z])/g, '$1_$2');
+}
+
 function classifyType(componentType: string, label: string): SourceKind {
-  const blob = (componentType + ' ' + label).toLowerCase();
+  const blob = (toSnakeCase(componentType) + ' ' + componentType + ' ' + label).toLowerCase();
   if (/csv|excel|xlsx|json|parquet|xml|tsv|feather|orc|avro|txt|file|upload|\bs3\b|gcs|azure_blob|adls|minio|ftp|sftp/.test(blob)) return 'files';
   if (/postgres|mysql|mariadb|sqlserver|mssql|oracle|snowflake|bigquery|redshift|clickhouse|duckdb|databricks|athena|presto|trino|singlestore|db2|firebolt|sqlite/.test(blob)) return 'databases';
   if (/salesforce|hubspot|servicenow|workday|adobe|google_analytics|google_ads|facebook|linkedin|twitter|shopify|stripe|zendesk|jira|asana|notion|airtable|slack|intercom|marketo|mailchimp|pipedrive|zoho|freshdesk|greenhouse|okta|auth0|braze|iterable|amplitude|segment|mixpanel|heap|posthog|klaviyo|onelogin/.test(blob)) return 'saas';
@@ -95,7 +108,8 @@ const INGESTION_TYPE_PATTERNS = [
 ];
 
 function isIngestionType(componentType: string): boolean {
-  return INGESTION_TYPE_PATTERNS.some((rx) => rx.test(componentType));
+  const snake = toSnakeCase(componentType);
+  return INGESTION_TYPE_PATTERNS.some((rx) => rx.test(componentType) || rx.test(snake));
 }
 
 // For cloud-hydrated / manually-tagged assets that have no real local
