@@ -254,6 +254,19 @@ class ProjectService:
                             # Patch pyproject.toml at root level
                             self._patch_pyproject_for_dg(project_dir, project_dir.name)
 
+                        # Same discovery import_project() already does for a
+                        # local-path import -- without it, project.components
+                        # stays empty for ANY project imported this way, so
+                        # the Ingestions page (and the Property Panel's
+                        # component list) has nothing to show no matter how
+                        # the classification heuristic is tuned. Confirmed
+                        # missing live: a real quickstart import with 10 real
+                        # component instances (including a
+                        # SyntheticDataGeneratorComponent) landed in Designer
+                        # with an empty ingestions list.
+                        print(f"🔍 Discovering components in imported project...")
+                        self._discover_components(project)
+
                         # Save project metadata
                         self._save_project(project)
                     elif project_type == "dbt":
