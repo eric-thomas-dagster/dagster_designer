@@ -174,7 +174,12 @@ def _parse_automations_from_yaml(project_path: Path) -> Dict[str, List[Dict[str,
                     "tags": attributes.get('tags', {}),
                     "config": attributes.get('config'),
                     "asset_selection": attributes.get('asset_selection', []),
-                    "source": str(yaml_file),
+                    # Relative + named "file" (not "source") -- matches
+                    # every other call site and the frontend's
+                    # PrimitiveItem type, which is what actually drives the
+                    # Edit/Open Code button. An absolute "source" path was
+                    # silently invisible to it.
+                    "file": str(yaml_file.relative_to(project_path)),
                     "_from_yaml": True  # Mark as parsed from YAML
                 }
                 jobs.append(job_data)
@@ -188,7 +193,12 @@ def _parse_automations_from_yaml(project_path: Path) -> Dict[str, List[Dict[str,
                     "timezone": attributes.get('timezone', 'UTC'),
                     "default_status": attributes.get('default_status', 'STOPPED'),
                     "description": attributes.get('description'),
-                    "source": str(yaml_file),
+                    # Relative + named "file" (not "source") -- matches
+                    # every other call site and the frontend's
+                    # PrimitiveItem type, which is what actually drives the
+                    # Edit/Open Code button. An absolute "source" path was
+                    # silently invisible to it.
+                    "file": str(yaml_file.relative_to(project_path)),
                     "_from_yaml": True
                 }
                 schedules.append(schedule_data)
@@ -201,7 +211,12 @@ def _parse_automations_from_yaml(project_path: Path) -> Dict[str, List[Dict[str,
                     "minimum_interval_seconds": attributes.get('minimum_interval_seconds', 30),
                     "description": attributes.get('description'),
                     "default_status": attributes.get('default_status', 'STOPPED'),
-                    "source": str(yaml_file),
+                    # Relative + named "file" (not "source") -- matches
+                    # every other call site and the frontend's
+                    # PrimitiveItem type, which is what actually drives the
+                    # Edit/Open Code button. An absolute "source" path was
+                    # silently invisible to it.
+                    "file": str(yaml_file.relative_to(project_path)),
                     "_from_yaml": True
                 }
                 sensors.append(sensor_data)
@@ -213,7 +228,12 @@ def _parse_automations_from_yaml(project_path: Path) -> Dict[str, List[Dict[str,
                     "asset_key": attributes.get('asset_name') or attributes.get('asset_key'),
                     "check_type": attributes.get('check_type'),
                     "description": attributes.get('description'),
-                    "source": str(yaml_file),
+                    # Relative + named "file" (not "source") -- matches
+                    # every other call site and the frontend's
+                    # PrimitiveItem type, which is what actually drives the
+                    # Edit/Open Code button. An absolute "source" path was
+                    # silently invisible to it.
+                    "file": str(yaml_file.relative_to(project_path)),
                     "_from_yaml": True,
                 }
                 asset_checks.append(check_data)
@@ -394,10 +414,10 @@ async def list_all_primitives(project_id: str):
                 print(f"[Primitives/all] Using shared asset cache for project {project_id} (age: {age:.1f}s)", file=sys.stderr, flush=True)
 
                 primitives = {
-                    "schedules": list(cached_defs.get("schedules", [])),
-                    "jobs": list(cached_defs.get("jobs", [])),
-                    "sensors": list(cached_defs.get("sensors", [])),
-                    "asset_checks": list(cached_defs.get("asset_checks", [])),
+                    "schedules": [_normalize_primitive_file(p) for p in cached_defs.get("schedules", [])],
+                    "jobs": [_normalize_primitive_file(p) for p in cached_defs.get("jobs", [])],
+                    "sensors": [_normalize_primitive_file(p) for p in cached_defs.get("sensors", [])],
+                    "asset_checks": [_normalize_primitive_file(p) for p in cached_defs.get("asset_checks", [])],
                     "freshness_policies": list(cached_defs.get("freshness_policies", [])),
                 }
 
@@ -429,9 +449,9 @@ async def list_all_primitives(project_id: str):
 
         # Start with discovered primitives (from dg list defs — may be stale).
         primitives = {
-            "schedules": project.discovered_primitives.get("schedules", []) if project and project.discovered_primitives else [],
-            "sensors": project.discovered_primitives.get("sensors", []) if project and project.discovered_primitives else [],
-            "jobs": project.discovered_primitives.get("jobs", []) if project and project.discovered_primitives else [],
+            "schedules": [_normalize_primitive_file(p) for p in (project.discovered_primitives.get("schedules", []) if project and project.discovered_primitives else [])],
+            "sensors": [_normalize_primitive_file(p) for p in (project.discovered_primitives.get("sensors", []) if project and project.discovered_primitives else [])],
+            "jobs": [_normalize_primitive_file(p) for p in (project.discovered_primitives.get("jobs", []) if project and project.discovered_primitives else [])],
             "asset_checks": [],
             "freshness_policies": primitives_service.list_primitives(project_id, "freshness_policy"),
         }
