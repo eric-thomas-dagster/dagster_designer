@@ -57,9 +57,7 @@ function TemplateRow({ index, style, components, onSelect }: RowComponentProps<R
         onClick={() => onSelect(c)}
         className="w-full h-full flex items-center gap-3 px-3 my-1 rounded-md border border-gray-200 bg-white hover:border-primary/40 hover:shadow-sm transition-colors text-left group"
       >
-        <div className="w-8 h-8 rounded bg-primary/10 text-primary flex items-center justify-center flex-shrink-0">
-          <ComponentIcon icon={c.icon} title={c.name} size={16} />
-        </div>
+        <ComponentIcon icon={c.icon} title={c.name} size={16} className="flex-shrink-0" />
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2 min-w-0">
             <span className="text-sm font-semibold text-gray-900 truncate">{c.name}</span>

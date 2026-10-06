@@ -169,7 +169,7 @@ export function AiMlHub() {
 
   return (
     <div className="h-full overflow-y-auto bg-gray-50">
-      <div className="px-8 py-6 max-w-4xl mx-auto space-y-6">
+      <div className="px-8 py-6 space-y-6">
         <div>
           <h2 className="text-lg font-semibold text-gray-900">Builders</h2>
           <p className="text-sm text-gray-500 mt-1">
@@ -177,7 +177,7 @@ export function AiMlHub() {
           </p>
         </div>
 
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3">
           {CARDS.map((card) => {
             const Icon = card.icon;
             const disabled = card.status === 'soon';

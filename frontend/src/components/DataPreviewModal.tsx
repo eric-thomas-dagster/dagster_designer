@@ -1,7 +1,7 @@
 import React, { useState, useMemo } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu';
-import { X, AlertCircle, Table as TableIcon, Wand2, Save, Filter, Columns3, Trash2, Eye, EyeOff, ChevronDown, ChevronRight, SortAsc, SortDesc, Sigma, Group, Calculator, ArrowDownUp, RotateCw, Play, Loader2, Plus, Package, BarChart3, Combine } from 'lucide-react';
+import { X, AlertCircle, Table as TableIcon, Wand2, Save, Filter, Columns3, Trash2, Eye, EyeOff, ChevronDown, ChevronRight, SortAsc, SortDesc, Sigma, Group, Calculator, ArrowDownUp, RotateCw, Play, Loader2, Plus, Package, BarChart3, Combine, PanelLeft, PanelLeftClose } from 'lucide-react';
 import { ColumnProfilePanel } from './ColumnProfilePanel';
 import { assetsApi, projectsApi, partitionsApi, type AssetDataPreview } from '@/services/api';
 import { notify } from './Notifications';
@@ -405,6 +405,8 @@ export function DataPreviewModal({
   const [runningToHere, setRunningToHere] = useState(false);
   const [showCommunityPicker, setShowCommunityPicker] = useState(false);
   const [showJoinBuilder, setShowJoinBuilder] = useState(false);
+  const [opsSidebarCollapsed, setOpsSidebarCollapsed] = useState(false);
+  const [recipePanelCollapsed, setRecipePanelCollapsed] = useState(false);
 
   const loadData = async (opts?: { sampleLimit?: number; noCache?: boolean }) => {
     setLoading(true);
@@ -1805,7 +1807,26 @@ export function DataPreviewModal({
           <div className="flex-1 flex overflow-hidden">
             {/* Transform Controls Sidebar */}
             {mode === 'transform' && (
-              <div className="w-80 border-r border-gray-200 overflow-y-auto p-4 bg-gray-50 flex flex-col">
+              <div className={`${opsSidebarCollapsed ? 'w-9' : 'w-80'} transition-[width] duration-150 border-r border-gray-200 flex-shrink-0 flex flex-col overflow-hidden`}>
+              {opsSidebarCollapsed ? (
+                <button
+                  onClick={() => setOpsSidebarCollapsed(false)}
+                  className="flex-1 flex flex-col items-center gap-2 pt-3 text-gray-400 hover:text-gray-700 hover:bg-gray-50 transition-colors"
+                  title="Show transform controls"
+                  aria-label="Show transform controls"
+                >
+                  <PanelLeft className="w-4 h-4" />
+                </button>
+              ) : (
+              <div className="flex-1 overflow-y-auto p-4 bg-gray-50 flex flex-col">
+                <button
+                  onClick={() => setOpsSidebarCollapsed(true)}
+                  className="self-end -mt-1 mb-2 p-0.5 text-gray-400 hover:text-gray-700 hover:bg-gray-200 rounded transition-colors"
+                  title="Collapse sidebar"
+                  aria-label="Collapse sidebar"
+                >
+                  <PanelLeftClose className="w-3.5 h-3.5" />
+                </button>
                 {/* Escape hatch to the community catalog: 124+ transformation
                     components that go beyond the built-in visual ops. Installs
                     via CLI, chains onto this asset. User configures the new
@@ -3720,6 +3741,8 @@ export function DataPreviewModal({
                   </div>
                 </div>
               </div>
+              )}
+              </div>
             )}
 
             {/* Data Table */}
@@ -4137,6 +4160,8 @@ export function DataPreviewModal({
                   setCumsumOps([]);
                   setFillDirectionOps([]);
                 }}
+                collapsed={recipePanelCollapsed}
+                onToggleCollapsed={() => setRecipePanelCollapsed((v) => !v)}
               />
             )}
           </div>

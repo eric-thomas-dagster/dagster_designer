@@ -53,9 +53,16 @@ const bucket = (m: Monitor): Status => {
 interface MonitorsPanelProps {
   onOpenFile?: (path: string) => void;
   onOpenRun?: (runId: string) => void;
+  /** Jump straight to a specific check's monitor row -- e.g. clicked from
+   * the asset graph's Property Panel instead of browsing/searching here. */
+  openMonitorQuery?: { assetKey: string; checkName: string } | null;
+  onOpenMonitorQueryConsumed?: () => void;
+  /** The reverse direction: a target-asset chip or blast-radius chip inside
+   * MonitorDetailPage wants to jump back to that asset in the graph. */
+  onOpenAsset?: (assetKey: string) => void;
 }
 
-export function MonitorsPanel({ onOpenFile, onOpenRun }: MonitorsPanelProps) {
+export function MonitorsPanel({ onOpenFile, onOpenRun, openMonitorQuery, onOpenMonitorQueryConsumed, onOpenAsset }: MonitorsPanelProps) {
   const { currentProject } = useProjectStore();
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -97,6 +104,25 @@ export function MonitorsPanel({ onOpenFile, onOpenRun }: MonitorsPanelProps) {
   useEffect(() => { refresh(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [currentProject?.id]);
 
   const monitors = data?.monitors ?? [];
+
+  // Waits for `data` (the async fetch in `refresh`) rather than firing on
+  // mount, since the monitor to select isn't known until the list loads.
+  useEffect(() => {
+    if (!openMonitorQuery || !data) return;
+    const { assetKey, checkName } = openMonitorQuery;
+    const match = monitors.find(
+      (m) => m.target_asset_keys.includes(assetKey) && m.label === checkName
+    ) ?? monitors.find(
+      (m) => m.target_asset_keys.includes(assetKey) && m.label.includes(checkName)
+    );
+    if (match) {
+      setSelected(match);
+    } else {
+      notify.info(`Couldn't find a monitor for "${checkName}" on ${assetKey} — it may not be discovered yet.`);
+    }
+    onOpenMonitorQueryConsumed?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [openMonitorQuery?.assetKey, openMonitorQuery?.checkName, data]);
 
   const stats = data?.stats ?? {};
   const targets = useMemo(() => {
@@ -177,6 +203,7 @@ export function MonitorsPanel({ onOpenFile, onOpenRun }: MonitorsPanelProps) {
         onBack={() => setSelected(null)}
         onOpenFile={onOpenFile}
         onOpenRun={onOpenRun}
+        onOpenAsset={onOpenAsset}
         onDeleted={() => { setSelected(null); refresh(); }}
       />
     );

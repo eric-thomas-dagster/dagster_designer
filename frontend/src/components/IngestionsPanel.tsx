@@ -22,6 +22,9 @@ interface IngestionsPanelProps {
    *  AddComponentModal already drives. */
   onAddCloudDataSource?: (payload: ConfigureAuthoringPayload) => void;
   onEditComponent: (component: ComponentInstance) => void;
+  /** AI Assistant insight chips reference asset keys -- lets a click jump
+   * to that asset in the graph instead of doing nothing. */
+  onOpenAsset?: (assetKey: string) => void;
 }
 
 type SortColumn = 'name' | 'kind' | 'cadence' | 'freshness' | 'status';
@@ -112,7 +115,7 @@ function syntheticComponentFromNode(node: GraphNode): ComponentInstance {
   };
 }
 
-export function IngestionsPanel({ onAddDataSource, onAddCloudDataSource, onEditComponent }: IngestionsPanelProps) {
+export function IngestionsPanel({ onAddDataSource, onAddCloudDataSource, onEditComponent, onOpenAsset }: IngestionsPanelProps) {
   const { currentProject } = useProjectStore();
   const isCloud = !!(currentProject as any)?.is_dagster_plus;
   // Assets the user explicitly tagged as ingestion sources (from the
@@ -696,6 +699,8 @@ export function IngestionsPanel({ onAddDataSource, onAddCloudDataSource, onEditC
             ]}
             fetchInsights={() => projectsApi.pageInsights(currentProject.id, 'ingestions') as any}
             ask={(q, h) => projectsApi.pageAsk(currentProject.id, 'ingestions', { question: q, history: h }).then(r => ({ answer: r.answer, toolsUsed: r.tools_used }))}
+            onOpenRef={onOpenAsset}
+            refIcon={Layers}
           />
         </div>
       )}

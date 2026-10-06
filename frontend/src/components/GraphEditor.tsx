@@ -27,7 +27,7 @@ import ReactFlow, {
 } from 'reactflow';
 import 'reactflow/dist/style.css';
 import { ComponentNode } from './nodes/ComponentNode';
-import { AssetNode } from './nodes/AssetNode';
+import { AssetNode, type AssetLens, ASSET_LENS_OPTIONS, AssetLensLegend } from './nodes/AssetNode';
 import { DraftNode } from './DraftNode';
 import { useDrafts } from '@/hooks/useDrafts';
 import { usePreviews } from '@/hooks/usePreviews';
@@ -501,6 +501,10 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
   const [assetSearch, setAssetSearch] = useState('');
   const [groupFilter, setGroupFilter] = useState<string>('all');
   const [kindFilter, setKindFilter] = useState<string>('all');
+  // Lens feature -- threaded into each node's `data.lens` by the cheap
+  // perAssetDisplay memo below (not the heavy graph-load effect that
+  // builds the initial React Flow node list from scratch).
+  const [assetLens, setAssetLens] = useState<AssetLens>('last_run');
   // Same "filter by one of Dagster's own facets" idea Dagster+ applies
   // pervasively across its own UI -- code location, tags, owner. The
   // data was already on every node (used in free-text search and the
@@ -1183,6 +1187,20 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
 
       const visibleGraphNodes = currentProject.graph.nodes;
 
+      // Carry over live-status fields from whatever's already on screen
+      // when the incoming data doesn't have them. These are re-derived
+      // fresh only by a real GET /projects/{id} (_merge_local_asset_status
+      // / _merge_local_last_run_status / _hydrate_cloud_graph in
+      // projects.py); this effect also re-fires on the auto-save's
+      // optimistic currentProject update (self-inflicted-update guard
+      // above is meant to skip that, but confirmed live that the color
+      // still goes stale moments after load regardless -- this makes the
+      // rebuild itself non-destructive for these specific fields no
+      // matter what triggers it, rather than depending on that guard
+      // covering every path that can call setNodes from fresh graph data).
+      const existingDataById = new Map(getNodes().map((n) => [n.id, n.data]));
+      const LIVE_STATUS_FIELDS = ['last_run_status', 'stale_status', 'freshness_status'] as const;
+
       const flowNodes: Node[] = visibleGraphNodes.map((node: GraphNode) => {
         // Use IO metadata from node.data if available (from backend), otherwise extract from schema cache
         const ioMetadata = (node.data.io_output_type || node.data.io_input_type)
@@ -1195,12 +1213,21 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
               ? extractNodeIOMetadata(node.source_component)
               : { io_output_type: null, io_input_type: null, io_input_required: false });
 
+        const existingData = existingDataById.get(node.id);
+        const carriedLiveStatus: Record<string, unknown> = {};
+        for (const f of LIVE_STATUS_FIELDS) {
+          if ((node.data as any)[f] === undefined && existingData && (existingData as any)[f] !== undefined) {
+            carriedLiveStatus[f] = (existingData as any)[f];
+          }
+        }
+
         return {
           id: node.id,
           type: node.node_kind === 'asset' ? 'asset' : 'component',
           position: node.position,
           data: {
             ...node.data,
+            ...carriedLiveStatus,
             icon: getIconForCategory(node.data.component_type || ''),
             category: getCategoryFromType(node.data.component_type || ''),
             node_kind: node.node_kind,
@@ -1614,7 +1641,21 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
     }
 
     const hasAssetFactories = currentProject.components.some((c) => c.is_asset_factory);
-    const hasAssets = nodes.some((n) => n.data.node_kind === 'asset');
+    // Checks currentProject.graph (the source of truth, populated the
+    // instant currentProject itself is set) rather than the React Flow
+    // `nodes` state (populated by a SEPARATE effect, asynchronously).
+    // Confirmed live as a real, significant bug: on first mount `nodes`
+    // is still `[]` while this effect's OWN render already has a fully
+    // correct `currentProject.graph` with 8 real assets -- checking
+    // `nodes` here raced that and lost, wrongly concluding "no assets
+    // yet" and firing an unconditional /regenerate-assets call. That
+    // endpoint doesn't run the live-status merge GET /projects/{id}
+    // does, so its response silently overwrote a perfectly correct,
+    // freshly-merged graph with one lacking last_run_status/stale_status
+    // /freshness_status moments after every single page load -- this is
+    // what the lens color flakiness traced back to, not anything in the
+    // save/load round-trip this session spent most of its time on.
+    const hasAssets = currentProject.graph.nodes.some((n) => n.node_kind === 'asset');
 
     // Check dependency status from project store
     const { dependencyInstallStatus } = useProjectStore.getState();
@@ -1728,7 +1769,18 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
 
     const graphNodes: GraphNode[] = nodes.map((node) => {
       // Extract node_kind and source_component from data (where we put them during load)
-      // and put them back at the top level for the backend
+      // and put them back at the top level for the backend.
+      //
+      // Deliberately NOT stripping lens/last_run_status/stale_status/
+      // freshness_status here -- this object also feeds updateGraph's
+      // LOCAL optimistic currentProject update (not just the eventual
+      // PUT payload), and stripping them here removed them from the
+      // live in-memory state too, which is exactly the opposite of what
+      // we want: the client should keep showing the correct live status
+      // between real GETs. Only the bytes actually sent to the server
+      // need to exclude them (see updateGraph's own stripping, right
+      // before the debounced PUT) -- confirmed live as the fix after an
+      // earlier attempt that stripped here broke the in-memory copy too.
       const { node_kind, source_component, icon, category, isSelected, ...restData } = node.data || {};
 
       return {
@@ -2488,11 +2540,21 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
           data: {
             ...node.data,
             isSelected,
+            // Threaded through `data`, not AssetLensContext -- confirmed
+            // live that switching lenses stopped recoloring nodes with
+            // the context approach (suspected: React Flow's own internal
+            // node-rendering optimizations don't reliably propagate
+            // context updates the way plain React reconciliation would).
+            // This memo is cheap (no auto-arrange/layout side effects
+            // like the graph-load effect that originally motivated
+            // avoiding a `data` field), so paying for a recompute on
+            // every lens toggle here is fine.
+            lens: assetLens,
           },
         };
       });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [nodes, selectedAssets, groupFilter, kindFilter, codeLocationFilter, tagFilter, ownerFilter, assetSearch, showAllInGraph, nodesWithDownstream]);
+  }, [nodes, selectedAssets, groupFilter, kindFilter, codeLocationFilter, tagFilter, ownerFilter, assetSearch, showAllInGraph, nodesWithDownstream, assetLens]);
 
   // Group-collapse mode: replace individual assets with one node per
   // group_name (default: "ungrouped"). Edges collapse to inter-group
@@ -3005,6 +3067,21 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
               </button>
             ))}
           </div>
+          {inGraph && (
+            <>
+              <select
+                value={assetLens}
+                onChange={(e) => setAssetLens(e.target.value as AssetLens)}
+                className="text-xs px-2 py-1 border border-gray-300 rounded bg-white max-w-[140px]"
+                title="Color nodes by"
+              >
+                {ASSET_LENS_OPTIONS.map((o) => (
+                  <option key={o.value} value={o.value}>Color: {o.label}</option>
+                ))}
+              </select>
+              <AssetLensLegend lens={assetLens} />
+            </>
+          )}
           {/* Rendered (not conditionally mounted) even in Catalog view, just
               hidden via `invisible` — this + the other `inGraph`-gated
               controls below used to mount/unmount between views, which

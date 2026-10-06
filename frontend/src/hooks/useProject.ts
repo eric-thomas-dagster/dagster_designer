@@ -210,7 +210,28 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
         return;
       }
       try {
-        await projectsApi.update(latest.id, { graph: latest.graph });
+        // Strip fields GET /projects/{id} re-derives fresh every request
+        // (_merge_local_asset_status / _merge_local_last_run_status /
+        // _hydrate_cloud_graph in projects.py) -- live status, never
+        // authored content -- ONLY from what's actually sent to the
+        // server, not from `latest.graph` itself (that would also wipe
+        // them from the in-memory copy the user is currently looking
+        // at). Confirmed live as a real, two-part bug: (1) without any
+        // stripping, the very first auto-save after a page load
+        // persisted a frozen snapshot of last_run_status to project.json,
+        // which then never changed again since this endpoint doesn't
+        // re-run the merge; (2) an earlier fix that stripped these
+        // fields before the LOCAL optimistic update above also erased
+        // them from the live UI the moment the debounce fired, which is
+        // the opposite of what we want.
+        const sanitizedGraph = {
+          nodes: latest.graph.nodes.map((n) => {
+            const { last_run_status, stale_status, freshness_status, lens, ...restData } = (n.data || {}) as any;
+            return { ...n, data: restData };
+          }),
+          edges: latest.graph.edges,
+        };
+        await projectsApi.update(latest.id, { graph: sanitizedGraph });
       } catch (e) {
         console.warn('[useProject] Failed to auto-save graph:', e);
       } finally {

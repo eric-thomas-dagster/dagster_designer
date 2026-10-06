@@ -1,6 +1,7 @@
 import { memo } from 'react';
 import { Handle, Position, NodeProps } from 'reactflow';
 import { Layers, Database, Users, CheckCircle, X, Wand2, Search, Package, AlertTriangle, Zap, Clock, Play, Radar, Loader2 } from 'lucide-react';
+import { classifyStatus } from '@/lib/status';
 
 // Icon mapping for component icons
 const componentIconMap: Record<string, any> = {
@@ -9,6 +10,106 @@ const componentIconMap: Record<string, any> = {
   'Search': Search,
   'Package': Package,
 };
+
+/** Asset Graph's lens feature -- same idea as DbtLineageView's, applied
+ *  to every asset type (not just dbt models). Colors come from real,
+ *  non-fabricated signals: `stale_status` (Dagster's built-in FRESH/
+ *  STALE/MISSING concept, no FreshnessPolicy needed), `freshness_status`
+ *  (HEALTHY/WARNING/DEGRADED, only populated when a FreshnessPolicy is
+ *  actually attached -- null otherwise, which the dot correctly renders
+ *  as "nothing to show" rather than a fake value), and `last_run_status`
+ *  (success/failure of the most recent run that targeted this asset --
+ *  distinct from staleness: an asset can be STALE but its last attempt
+ *  still succeeded, or FRESH from an old run after a newer one failed
+ *  and got retried). All three are merged into node data server-side --
+ *  see _merge_local_asset_status / _merge_local_last_run_status /
+ *  _hydrate_cloud_graph in projects.py. */
+export type AssetLens = 'staleness' | 'freshness' | 'checks' | 'last_run';
+
+// Threaded through each node's `data.lens` (set by GraphEditor's
+// perAssetDisplay memo), not a React Context -- a context was tried
+// first to avoid touching GraphEditor's heavy graph-load effect, but
+// confirmed live that switching lenses stopped recoloring nodes with
+// that approach (React Flow's own internal node-rendering optimizations
+// don't reliably propagate context updates to node components the way
+// plain React reconciliation would). `data` changes are exactly what
+// React Flow already knows how to react to, since that's its one
+// contract with every node type.
+
+const STALE_STATUS_COLOR: Record<string, string> = {
+  FRESH: '#10b981',
+  STALE: '#f59e0b',
+  MISSING: '#9ca3af',
+};
+const FRESHNESS_STATUS_COLOR: Record<string, string> = {
+  HEALTHY: '#10b981',
+  WARNING: '#f59e0b',
+  DEGRADED: '#f43f5e',
+  UNKNOWN: '#9ca3af',
+};
+
+function assetLensDot(lens: AssetLens, data: any): { color: string; title: string } | null {
+  if (lens === 'last_run') {
+    const status = data.last_run_status as string | undefined;
+    if (!status) return null;
+    const c = classifyStatus(status);
+    const color = c === 'success' ? '#10b981' : c === 'failure' ? '#f43f5e' : c === 'warning' ? '#f59e0b' : '#94a3b8';
+    return { color, title: `Last run: ${status}` };
+  }
+  if (lens === 'freshness') {
+    const fs = data.freshness_status as string | undefined;
+    if (!fs || !FRESHNESS_STATUS_COLOR[fs]) return null;
+    return { color: FRESHNESS_STATUS_COLOR[fs], title: `Freshness: ${fs}` };
+  }
+  if (lens === 'checks') {
+    const checks = (data.checks || []) as Array<{ last_status?: string | null }>;
+    if (checks.length === 0) return null;
+    const buckets = checks.map((c) => classifyStatus(c.last_status));
+    const worst = (['failure', 'warning', 'skipped', 'success'] as const).find((p) => buckets.includes(p));
+    if (!worst) return null;
+    const color = worst === 'success' ? '#10b981' : worst === 'failure' ? '#f43f5e' : worst === 'warning' ? '#f59e0b' : '#94a3b8';
+    return { color, title: `Worst check status: ${worst}` };
+  }
+  // 'staleness' (default)
+  const ss = data.stale_status as string | undefined;
+  if (!ss || !STALE_STATUS_COLOR[ss]) return null;
+  return { color: STALE_STATUS_COLOR[ss], title: `Staleness: ${ss}` };
+}
+
+export const ASSET_LENS_OPTIONS: { value: AssetLens; label: string }[] = [
+  { value: 'last_run', label: 'Last run status' },
+  { value: 'staleness', label: 'Staleness' },
+  { value: 'freshness', label: 'Freshness' },
+  { value: 'checks', label: 'Checks' },
+];
+
+/** Same legend pattern as DbtLineageView's LensLegend -- kept as a
+ *  separate component (not shared code) since the two lens systems
+ *  color by different enums (STALE/FRESH/MISSING here vs.
+ *  success/failure/warning there for most lenses). */
+export function AssetLensLegend({ lens }: { lens: AssetLens }) {
+  const entries: { color: string; label: string }[] =
+    lens === 'staleness'
+      ? Object.entries(STALE_STATUS_COLOR).map(([label, color]) => ({ color, label }))
+      : lens === 'freshness'
+      ? Object.entries(FRESHNESS_STATUS_COLOR).map(([label, color]) => ({ color, label }))
+      : [
+          { color: '#10b981', label: lens === 'checks' ? 'all passing' : 'success' },
+          { color: '#f43f5e', label: lens === 'checks' ? 'any failing' : 'failure' },
+          { color: '#f59e0b', label: lens === 'checks' ? 'any warning' : 'warning' },
+          { color: '#94a3b8', label: lens === 'checks' ? 'any skipped' : 'skipped' },
+        ];
+  return (
+    <div className="flex items-center gap-2.5 text-[10px] text-gray-500">
+      {entries.map((e) => (
+        <span key={e.label} className="inline-flex items-center gap-1">
+          <span className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ backgroundColor: e.color }} />
+          {e.label}
+        </span>
+      ))}
+    </div>
+  );
+}
 
 export const AssetNode = memo(({ data, selected, id }: NodeProps) => {
   // Dagster uses a purple/blue color scheme for assets
@@ -34,6 +135,11 @@ export const AssetNode = memo(({ data, selected, id }: NodeProps) => {
 
   // Detect if we're in pipeline builder mode (vertical layout with delete button)
   const isPipelineBuilder = !!data.onDelete;
+
+  // Lens dot -- only in the (non-pipeline-builder) graph view; set by
+  // GraphEditor via a shared `lens` value passed into every node's data.
+  const lens: AssetLens = (data.lens as AssetLens) || 'last_run';
+  const lensDot = isPipelineBuilder ? null : assetLensDot(lens, data);
 
   // Check if this asset has IO types
   const outputType = data.io_output_type;
@@ -119,7 +225,11 @@ export const AssetNode = memo(({ data, selected, id }: NodeProps) => {
       )}
 
       {/* Header with asset icon and key */}
-      <div className={`group/header px-2 py-1.5 rounded-t-md ${isIncomplete ? 'bg-amber-500' : 'bg-primary'}`}>
+      <div
+        className={`group/header px-2 py-1.5 rounded-t-md ${isIncomplete ? 'bg-amber-500' : lensDot ? '' : 'bg-primary'}`}
+        style={!isIncomplete && lensDot ? { backgroundColor: lensDot.color } : undefined}
+        title={!isIncomplete && lensDot ? lensDot.title : undefined}
+      >
         <div className="flex items-center space-x-1.5">
           <div className="flex-shrink-0">
             <Layers className="w-3.5 h-3.5 text-white" />

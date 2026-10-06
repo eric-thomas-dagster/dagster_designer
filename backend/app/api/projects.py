@@ -769,6 +769,26 @@ async def get_project(project_id: str):
             # but tell the frontend WHY so a stale/empty graph isn't silent.
             print(f"[dagster+] hydrate failed for {project.id}: {e}", flush=True)
             project.dagster_plus_last_error = str(e)
+    else:
+        try:
+            await _merge_local_asset_status(project)
+        except Exception as e:
+            # Non-fatal -- the common case is no local dg dev running at
+            # all (the user hasn't opened the Dagster UI for this project),
+            # which just means no stale/freshness lens data this request.
+            print(f"[local] asset status merge failed for {project.id}: {e}", flush=True)
+        try:
+            # Deliberately separate from the call above, not chained onto
+            # it -- _merge_local_asset_status returns early whenever no
+            # dg dev webserver is running (the common case), which would
+            # otherwise skip this too even though it doesn't need one at
+            # all (reads .designer_dagster_home directly). Confirmed live
+            # as a real bug: last_run_status never populated for a project
+            # with a real, successful materialize on record, purely
+            # because dg dev wasn't separately running for it.
+            await _merge_local_last_run_status(project)
+        except Exception as e:
+            print(f"[local] last-run-status merge failed for {project.id}: {e}", flush=True)
 
     # Never leak the Dagster+ token to the frontend — server-side only.
     return _strip_token(project) if project.is_dagster_plus else project
@@ -1558,6 +1578,140 @@ async def _merge_sandbox_graph(project: Project) -> None:
         nodes=existing_nodes + sandbox_nodes,
         edges=existing_edges + sandbox_edges,
     )
+
+
+# Deliberately small -- this exists only to color the main Asset Graph by
+# a lens (see DbtLineageView's lens feature, same idea applied to every
+# asset type, not just dbt models). `staleStatus` (FRESH/STALE/MISSING)
+# needs no FreshnessPolicy configured at all -- it's Dagster's built-in
+# "is this asset's materialization still valid given its own code +
+# upstream" concept, confirmed present on a real local `dg dev` instance's
+# schema. `freshnessStatusInfo` is the opt-in, policy-based signal (only
+# populated when the user has actually attached a FreshnessPolicy) --
+# already used for Dagster+ in _hydrate_cloud_graph; this is the local-OSS
+# equivalent so local projects aren't a second-class surface for it.
+LOCAL_ASSET_STATUS_QUERY = """
+query DesignerLocalAssetStatus {
+  assetNodes {
+    assetKey { path }
+    staleStatus
+    freshnessStatusInfo {
+      freshnessStatus
+      freshnessStatusMetadata {
+        ... on AssetHealthFreshnessMeta { lastMaterializedTimestamp }
+      }
+    }
+  }
+}
+"""
+
+
+async def _merge_local_asset_status(project: Project) -> None:
+    """Merge live stale/freshness status into `project.graph` for a LOCAL
+    (non-Dagster+) project, from whatever `dg dev`/`dagster dev` the user
+    has running for it (see dagster_webserver.py -- started on demand via
+    the "Dagster UI" button, not always-on).
+
+    In-memory only, same reasoning as `_merge_sandbox_graph`: the local
+    webserver is a subprocess the user can start/stop at will, so its
+    status is fetched fresh every request rather than cached to disk.
+    Best-effort -- no webserver running is the common/default state for a
+    local project the user hasn't explicitly opened the Dagster UI for,
+    not an error.
+    """
+    data = await _run_dagster_graphql(project, LOCAL_ASSET_STATUS_QUERY, {})
+    if not data:
+        return
+    raw_nodes = data.get("assetNodes") or []
+    if not raw_nodes:
+        return
+
+    status_by_key: dict[str, dict[str, Any]] = {}
+    for n in raw_nodes:
+        key = "/".join((n.get("assetKey") or {}).get("path") or [])
+        if not key:
+            continue
+        info = n.get("freshnessStatusInfo") or {}
+        status_by_key[key] = {
+            "stale_status": n.get("staleStatus"),
+            "freshness_status": info.get("freshnessStatus"),
+        }
+
+    if not status_by_key:
+        return
+    for node in project.graph.nodes if project.graph else []:
+        if node.node_kind != "asset":
+            continue
+        key = node.data.get("asset_key")
+        status = status_by_key.get(key)
+        if status:
+            node.data["stale_status"] = status["stale_status"]
+            node.data["freshness_status"] = status["freshness_status"]
+
+
+async def _merge_local_last_run_status(project: Project) -> None:
+    """Merge each local asset's last-run status (success/failure) into
+    `project.graph`, read directly from `.designer_dagster_home` -- the
+    persistent instance Designer's OWN materialize flow writes to (see
+    materialize_assets' DAGSTER_HOME pinning), not from any live `dg dev`
+    webserver. Unlike staleness/freshness above, this doesn't need the
+    user to have the Dagster UI running at all: it's a one-shot read of
+    on-disk run history via scripts/extract_asset_run_status.py (see
+    that script's docstring for why this needed its own approach rather
+    than reusing GraphQL -- OSS Dagster has no "last run status" field on
+    AssetNode, and the two Dagster+-oriented alternatives tried first
+    (asset health, failure-materialization events) turned out to be
+    unavailable locally).
+
+    In-memory only, same as every other merge here -- never persisted,
+    recomputed fresh each request.
+    """
+    import asyncio
+    import json as _json
+    import subprocess as _sp
+
+    if not project.graph or not project.graph.nodes:
+        return
+    asset_keys = [
+        node.data.get("asset_key")
+        for node in project.graph.nodes
+        if node.node_kind == "asset" and node.data.get("asset_key")
+    ]
+    if not asset_keys:
+        return
+
+    project_dir = project_service._get_project_dir(project)
+    dagster_home = project_dir / ".designer_dagster_home"
+    if not dagster_home.exists():
+        return  # never materialized through Designer yet -- nothing to read
+    venv_python = venv_bin_path(project_dir / ".venv", "python")
+    if not venv_python.exists():
+        return
+
+    try:
+        from ..core.uv_binary import project_subprocess_env
+        result = await asyncio.to_thread(
+            _sp.run,
+            [str(venv_python.absolute()), "-m", "scripts.extract_asset_run_status", str(dagster_home), ",".join(asset_keys)],
+            cwd=Path.cwd(),  # backend dir -- same convention as materialize_assets' extract_run_metadata call
+            env=project_subprocess_env(project_dir),
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        if result.returncode != 0 or not result.stdout.strip():
+            return
+        status_by_key = _json.loads(result.stdout.strip().splitlines()[-1])
+    except Exception as e:
+        print(f"[local] extract_asset_run_status failed for {project.id}: {e}", flush=True)
+        return
+
+    for node in project.graph.nodes:
+        if node.node_kind != "asset":
+            continue
+        entry = status_by_key.get(node.data.get("asset_key"))
+        if isinstance(entry, dict) and entry.get("status"):
+            node.data["last_run_status"] = entry["status"]
 
 
 class DagsterCloudLocation(BaseModel):
@@ -8271,11 +8425,48 @@ async def get_monitor_history(project_id: str, monitor_id: str, limit: int = 200
     # `event.value`/`value_label` — the legacy single-metric fallback,
     # used by locally-recorded dbt-test events which don't have a
     # `metadata` list. Keep it in the map so those series still render.
+    #
+    # The `not in metrics_by_label` guard is meant to defer to a richer
+    # metadata-based series when one already exists under the same label
+    # (the loop above) -- it must check against a snapshot of THOSE
+    # labels taken before this loop starts, not the dict being built
+    # live here. Checking the live dict was a real, confirmed bug: the
+    # very first dbt-test event for a given value_label (e.g.
+    # "execution_time_s") creates the key, so every subsequent event
+    # with that same label then saw it "already present" and got
+    # silently dropped -- capping every legacy series at exactly one
+    # point no matter how many times the test had actually run, which
+    # is why its chart never rendered (BigTimeSeriesChart requires >1
+    # point) even on a test with a long, real run history.
+    metadata_labels = set(metrics_by_label.keys())
     for e in events:
         vl = e.get("value_label")
         v = e.get("value")
-        if vl and isinstance(v, (int, float)) and vl not in metrics_by_label:
+        # "execution_time_s" is excluded here -- the block right below
+        # derives it from every event's `duration_ms` instead, which is a
+        # strict superset of what this loop would add for it (same
+        # number, just not gated on `failures` having been absent) and
+        # would otherwise double up those few events' points.
+        if vl and vl != "execution_time_s" and isinstance(v, (int, float)) and vl not in metadata_labels:
             metrics_by_label.setdefault(vl, []).append({"ts": e.get("ts"), "value": float(v), "status": e.get("status")})
+
+    # "execution_time_s" independently from `duration_ms` -- NOT from the
+    # value/value_label pair above. snapshot_dbt_run_results only ever
+    # populates ONE of value_label="failures" or "execution_time_s" per
+    # event (it prefers "failures" whenever dbt reports a failure count
+    # at all), so on any test/adapter combo where `failures` is reliably
+    # present -- the common case -- "execution_time_s" would almost never
+    # win that slot and its chart would stay stuck at 0-1 points no
+    # matter how many times the test actually ran. `duration_ms` is
+    # recorded unconditionally on every such event regardless of which
+    # label won, so build this series from that directly instead.
+    if "execution_time_s" not in metadata_labels:
+        for e in events:
+            dur = e.get("duration_ms")
+            if isinstance(dur, (int, float)):
+                metrics_by_label.setdefault("execution_time_s", []).append(
+                    {"ts": e.get("ts"), "value": dur / 1000.0, "status": e.get("status")},
+                )
 
     # Pick a default: prefer things that read as data-quality signals
     # (row counts, null ratios, failures) over Dagster-auto metadata

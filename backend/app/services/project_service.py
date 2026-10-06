@@ -733,6 +733,24 @@ class ProjectService:
             elif field == "graph" and isinstance(value, dict):
                 # Reconstruct PipelineGraph object
                 reconstructed_graph = PipelineGraph(**value)
+                # Strip fields that GET /projects/{id} re-derives fresh every
+                # request (_merge_local_asset_status / _merge_local_last_run_status
+                # / _hydrate_cloud_graph) -- they're live status, never authored
+                # content, and the merge functions only ever ADD them when they
+                # find a fresh match, never clear a stale one. Confirmed live as
+                # a real bug: the frontend's graph auto-save round-trips whatever
+                # was in node.data straight back here, so without stripping them,
+                # the very first auto-save after a page load permanently "locked
+                # in" a snapshot of last_run_status in project.json -- it would
+                # then sit there unchanged (not re-derived, since this endpoint
+                # doesn't run the merge) regardless of what the real run history
+                # later became. The frontend was also fixed to not send these in
+                # the first place, but stripping here too means this can't
+                # regress via some other caller.
+                _ephemeral_node_fields = ("last_run_status", "stale_status", "freshness_status", "lens")
+                for _node in reconstructed_graph.nodes:
+                    for _f in _ephemeral_node_fields:
+                        _node.data.pop(_f, None)
                 setattr(project, field, reconstructed_graph)
                 print(f"[update_project] Reconstructed graph with {len(reconstructed_graph.nodes)} nodes", flush=True)
             elif field == "custom_lineage" and isinstance(value, list):

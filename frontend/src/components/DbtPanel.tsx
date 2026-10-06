@@ -9,7 +9,7 @@ import { SimpleMarkdown } from './SimpleMarkdown';
 import { AddDbtModelDialog } from './AddDbtModelDialog';
 import { GitCommitDialog } from './GitCommitDialog';
 import { SqlDiffDialog } from './SqlDiffDialog';
-import { DbtLineageView } from './DbtLineageView';
+import { DbtLineageView, LENS_OPTIONS, type Lens } from './DbtLineageView';
 import { DbtColumnLineageOverlay } from './DbtColumnLineageOverlay';
 import { AddDbtProjectDialog } from './AddDbtProjectDialog';
 import { AddDbtSelectorDialog } from './AddDbtSelectorDialog';
@@ -54,6 +54,10 @@ export function DbtPanel({ onOpenFile }: DbtPanelProps) {
   const [lineage, setLineage] = useState<Awaited<ReturnType<typeof projectsApi.getDbtColumnLineage>> | null>(null);
   const [diffFor, setDiffFor] = useState<{ path: string; name: string } | null>(null);
   const [view, setView] = useState<'models' | 'lineage' | 'tests' | 'docs' | 'selectors' | 'exposures' | 'semantic-models' | 'freshness'>('models');
+  // Lineage lens -- lives here (not inside DbtLineageView) so the control
+  // renders in this tab bar, matching the main Asset Graph's
+  // toolbar-dropdown pattern instead of a floating-in-canvas control.
+  const [dbtLens, setDbtLens] = useState<Lens>('status');
   // Add-test dialog state — one flow used by drawer + Tests tab. The
   // target model + column are populated by whichever button opens it.
   const [addTestFor, setAddTestFor] = useState<{ model: Model; column?: string } | null>(null);
@@ -549,35 +553,54 @@ export function DbtPanel({ onOpenFile }: DbtPanelProps) {
           the Automation panel's tabs (blue underline for active). Gives
           each dbt sub-surface real presence instead of a tiny pill. */}
       <div className="bg-white border-b border-gray-200 px-8">
-        <div className="flex items-center gap-1">
-          {([
-            // Cloud projects reconstruct dbt data from the asset graph
-            // via GraphQL -- no manifest.json access, so tabs that
-            // depend on manifest-only content (docs, selectors,
-            // exposures, freshness) don't have anything to render.
-            // Hide them entirely rather than surface empty states.
-            { v: 'models',    label: 'Models',    icon: Layers,   cloud: true },
-            { v: 'lineage',   label: 'Lineage',   icon: Network,  cloud: true },
-            { v: 'tests',     label: 'Tests',     icon: TestTube2, cloud: true },
-            { v: 'docs',      label: 'Docs',      icon: Book,     cloud: false },
-            { v: 'selectors', label: 'Selectors', icon: Filter,   cloud: false },
-            { v: 'exposures', label: 'Exposures', icon: Share2,   cloud: false },
-            { v: 'semantic-models', label: 'Semantic Models', icon: Sigma, cloud: false },
-            { v: 'freshness', label: 'Freshness', icon: Clock,    cloud: false },
-          ] as const).filter(({ cloud }) => !isCloudProject || cloud).map(({ v, label, icon: Icon }) => (
-            <button
-              key={v}
-              onClick={() => setView(v)}
-              className={`inline-flex items-center gap-1.5 px-4 py-3 text-sm font-medium border-b-2 -mb-px transition-colors ${
-                view === v
-                  ? 'text-blue-600 border-blue-600'
-                  : 'text-gray-600 border-transparent hover:text-gray-900'
-              }`}
-            >
-              <Icon className="w-4 h-4" />
-              {label}
-            </button>
-          ))}
+        <div className="flex items-center justify-between gap-2">
+          <div className="flex items-center gap-1">
+            {([
+              // Cloud projects reconstruct dbt data from the asset graph
+              // via GraphQL -- no manifest.json access, so tabs that
+              // depend on manifest-only content (docs, selectors,
+              // exposures, freshness) don't have anything to render.
+              // Hide them entirely rather than surface empty states.
+              { v: 'models',    label: 'Models',    icon: Layers,   cloud: true },
+              { v: 'lineage',   label: 'Lineage',   icon: Network,  cloud: true },
+              { v: 'tests',     label: 'Tests',     icon: TestTube2, cloud: true },
+              { v: 'docs',      label: 'Docs',      icon: Book,     cloud: false },
+              { v: 'selectors', label: 'Selectors', icon: Filter,   cloud: false },
+              { v: 'exposures', label: 'Exposures', icon: Share2,   cloud: false },
+              { v: 'semantic-models', label: 'Semantic Models', icon: Sigma, cloud: false },
+              { v: 'freshness', label: 'Freshness', icon: Clock,    cloud: false },
+            ] as const).filter(({ cloud }) => !isCloudProject || cloud).map(({ v, label, icon: Icon }) => (
+              <button
+                key={v}
+                onClick={() => setView(v)}
+                className={`inline-flex items-center gap-1.5 px-4 py-3 text-sm font-medium border-b-2 -mb-px transition-colors ${
+                  view === v
+                    ? 'text-blue-600 border-blue-600'
+                    : 'text-gray-600 border-transparent hover:text-gray-900'
+                }`}
+              >
+                <Icon className="w-4 h-4" />
+                {label}
+              </button>
+            ))}
+          </div>
+          {/* Lens control -- only relevant on the Lineage tab. Lives in
+              this toolbar (not floating over the canvas) to match the
+              main Asset Graph's dropdown placement. */}
+          {view === 'lineage' && (
+            <div className="flex items-center gap-2 pb-2">
+              <select
+                value={dbtLens}
+                onChange={(e) => setDbtLens(e.target.value as Lens)}
+                className="text-xs px-2 py-1 border border-gray-300 rounded bg-white"
+                title="Color nodes by"
+              >
+                {LENS_OPTIONS.map((o) => (
+                  <option key={o.value} value={o.value}>Color by: {o.label}</option>
+                ))}
+              </select>
+            </div>
+          )}
         </div>
       </div>
 
@@ -832,6 +855,7 @@ export function DbtPanel({ onOpenFile }: DbtPanelProps) {
             models={data.models}
             onModelClick={(uid) => setSelectedUniqueId(uid)}
             selectedUniqueId={selectedUniqueId}
+            lens={dbtLens}
           />
           {/* Count badge -- split models vs source refs. The lineage
               view also renders source uids referenced by depends_on
@@ -2224,7 +2248,7 @@ function TestRow({ test, onDelete }: { test: NonNullable<Model['tests_detail']>[
         <span className="text-[10px] text-rose-700 font-medium flex-shrink-0">{test.last_run_failures} failed</span>
       )}
       <span className={`text-[10px] flex-shrink-0 ${tone}`}>
-        {status ? status : 'never run'}
+        {test.last_run_status || 'never run'}
       </span>
       {onDelete && (
         <button

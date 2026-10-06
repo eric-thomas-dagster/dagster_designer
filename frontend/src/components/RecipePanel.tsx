@@ -1,4 +1,4 @@
-import { Filter, ArrowDownUp, SortAsc, Sigma, Trash2, RotateCw, Wand2, Group, Calculator, Columns3, Package, PackageOpen, Play, X } from 'lucide-react';
+import { Filter, ArrowDownUp, SortAsc, Sigma, Trash2, RotateCw, Wand2, Group, Calculator, Columns3, Package, PackageOpen, Play, X, PanelRight, PanelRightClose } from 'lucide-react';
 
 /**
  * Right-side "recipe" panel — shows every op currently applied to the
@@ -40,11 +40,28 @@ interface RecipePanelProps {
   /** Click a step → preview shows data as of that step. null = show final result. */
   previewAtStep?: number | null;
   onSelectStep?: (index: number | null) => void;
+  collapsed?: boolean;
+  onToggleCollapsed?: () => void;
 }
 
-export function RecipePanel({ steps, onClearAll, previewAtStep = null, onSelectStep }: RecipePanelProps) {
+export function RecipePanel({ steps, onClearAll, previewAtStep = null, onSelectStep, collapsed = false, onToggleCollapsed }: RecipePanelProps) {
+  if (collapsed) {
+    return (
+      <div className="w-9 transition-[width] duration-150 flex-shrink-0 border-l border-gray-200 bg-gray-50 flex flex-col overflow-hidden">
+        <button
+          onClick={onToggleCollapsed}
+          className="flex-1 flex flex-col items-center gap-2 pt-3 text-gray-400 hover:text-gray-700 hover:bg-gray-100 transition-colors"
+          title="Show recipe"
+          aria-label="Show recipe"
+        >
+          <PanelRight className="w-4 h-4" />
+        </button>
+      </div>
+    );
+  }
+
   return (
-    <div className="w-72 border-l border-gray-200 bg-gray-50 flex flex-col overflow-hidden">
+    <div className="w-72 transition-[width] duration-150 flex-shrink-0 border-l border-gray-200 bg-gray-50 flex flex-col overflow-hidden">
       <div className="flex-shrink-0 px-3 py-2 border-b border-gray-200 bg-white flex items-center justify-between">
         <div className="flex items-center gap-1.5">
           <PackageOpen className="w-4 h-4 text-primary" />
@@ -53,16 +70,28 @@ export function RecipePanel({ steps, onClearAll, previewAtStep = null, onSelectS
             <span className="text-xs text-gray-400">{steps.length} step{steps.length === 1 ? '' : 's'}</span>
           )}
         </div>
-        {steps.length > 0 && onClearAll && (
-          <button
-            onClick={onClearAll}
-            className="text-[11px] text-gray-500 hover:text-red-600 flex items-center gap-0.5"
-            title="Remove all steps"
-          >
-            <X className="w-3 h-3" />
-            Clear
-          </button>
-        )}
+        <div className="flex items-center gap-2">
+          {steps.length > 0 && onClearAll && (
+            <button
+              onClick={onClearAll}
+              className="text-[11px] text-gray-500 hover:text-red-600 flex items-center gap-0.5"
+              title="Remove all steps"
+            >
+              <X className="w-3 h-3" />
+              Clear
+            </button>
+          )}
+          {onToggleCollapsed && (
+            <button
+              onClick={onToggleCollapsed}
+              className="text-gray-400 hover:text-gray-700 p-0.5 rounded hover:bg-gray-200 transition-colors"
+              title="Collapse sidebar"
+              aria-label="Collapse sidebar"
+            >
+              <PanelRightClose className="w-3.5 h-3.5" />
+            </button>
+          )}
+        </div>
       </div>
 
       <div className="flex-1 overflow-y-auto p-2 space-y-1">

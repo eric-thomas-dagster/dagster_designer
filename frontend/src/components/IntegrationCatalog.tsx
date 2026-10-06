@@ -813,9 +813,7 @@ export function IntegrationCatalog({ projectId }: IntegrationCatalogProps) {
                 {/* Header with icon and title */}
                 <div className="flex items-start justify-between mb-2">
                   <div className="flex items-start space-x-3 flex-1">
-                    <div className="p-2 bg-blue-50 rounded-lg flex-shrink-0">
-                      <IntegrationIcon integration={integration} className="w-5 h-5 text-blue-600" />
-                    </div>
+                    <IntegrationIcon integration={integration} className="w-5 h-5 flex-shrink-0" />
                     <div className="flex-1 min-w-0">
                       <h3 className="font-semibold text-lg truncate">
                         {integration.name}
@@ -889,9 +887,7 @@ export function IntegrationCatalog({ projectId }: IntegrationCatalogProps) {
             <div className="p-6 border-b">
               <div className="flex items-start justify-between">
                 <div className="flex items-start space-x-4">
-                  <div className="p-3 bg-blue-50 rounded-lg">
-                    <IntegrationIcon integration={selectedIntegration} className="w-8 h-8 text-blue-600" />
-                  </div>
+                  <IntegrationIcon integration={selectedIntegration} className="w-8 h-8" />
                   <div>
                     <div className="flex items-center gap-2 mb-2">
                       <h2 className="text-2xl font-bold">{selectedIntegration.name}</h2>

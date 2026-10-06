@@ -17,6 +17,8 @@ import {
   Sparkles,
   Edit,
   Search,
+  PanelLeft,
+  PanelLeftClose,
 } from 'lucide-react';
 import { filesApi, type FileTreeNode } from '@/services/api';
 import { Terminal } from './Terminal';
@@ -24,6 +26,127 @@ import { DagsterExpertPanel } from './DagsterExpertPanel';
 import { notify, confirmDialog } from './Notifications';
 import { useIsDarkMode } from '@/hooks/useIsDarkMode';
 import { useUnsavedChangesStore } from '@/hooks/useUnsavedChanges';
+import { useProjectStore } from '@/hooks/useProject';
+
+interface AssetRefInfo {
+  key: string;
+  description?: string;
+  group?: string;
+  kind?: string;
+  lastRunStatus?: string | null;
+}
+
+interface AssetRefMatch {
+  name: string;
+  start: number;
+  end: number;
+}
+
+/** Asset names referenced from a component's `defs.yaml` -- block-style
+ * `deps:` lists, inline `deps: [a, b]`, and bare `asset_key:`/`key:`
+ * scalars. Position-tracked so callers can turn each match into a Monaco
+ * marker/range without re-scanning the text. */
+function extractYamlAssetRefs(text: string): AssetRefMatch[] {
+  const refs: AssetRefMatch[] = [];
+
+  const blockRe = /\bdeps:[ \t]*\n((?:[ \t]*-[ \t]*[^\n#]+\n?)+)/g;
+  let m: RegExpExecArray | null;
+  while ((m = blockRe.exec(text))) {
+    const block = m[1];
+    const blockStart = m.index + m[0].indexOf(block);
+    const itemRe = /-[ \t]*["']?([A-Za-z0-9_][A-Za-z0-9_\-./]*)["']?/g;
+    let im: RegExpExecArray | null;
+    while ((im = itemRe.exec(block))) {
+      const name = im[1];
+      const localStart = im.index + im[0].lastIndexOf(name);
+      refs.push({ name, start: blockStart + localStart, end: blockStart + localStart + name.length });
+    }
+  }
+
+  const inlineRe = /\bdeps:[ \t]*\[([^\]]*)\]/g;
+  while ((m = inlineRe.exec(text))) {
+    const list = m[1];
+    const listStart = m.index + m[0].indexOf(list);
+    const itemRe = /["']?([A-Za-z0-9_][A-Za-z0-9_\-./]*)["']?/g;
+    let im: RegExpExecArray | null;
+    while ((im = itemRe.exec(list))) {
+      const name = im[1];
+      const localStart = im.index + im[0].lastIndexOf(name);
+      refs.push({ name, start: listStart + localStart, end: listStart + localStart + name.length });
+    }
+  }
+
+  // Deliberately not bare "key:" -- far too generic a YAML field name
+  // across component attributes to treat every value as an asset ref.
+  const scalarRe = /\basset_key:[ \t]*["']?([A-Za-z0-9_][A-Za-z0-9_\-./]*)["']?/g;
+  while ((m = scalarRe.exec(text))) {
+    const name = m[1];
+    const localStart = m.index + m[0].lastIndexOf(name);
+    refs.push({ name, start: localStart, end: localStart + name.length });
+  }
+
+  return refs;
+}
+
+/** Asset names referenced from Python -- `deps=[...]`/`non_argument_deps=[...]`
+ * on an `@asset`, including bare string entries and `AssetKey("...")`. Doesn't
+ * attempt to resolve `@asset` function-parameter names (the other way
+ * Dagster infers deps): a plain identifier is too ambiguous to flag as
+ * "unknown" without false-positiving on `context`, `config`, resource
+ * params, etc. Hover still works on those via the asset-name index below. */
+function extractPythonAssetRefs(text: string): AssetRefMatch[] {
+  const refs: AssetRefMatch[] = [];
+  const depsRe = /\b(?:deps|non_argument_deps)\s*=\s*[\[{]([^\]}]*)[\]}]/g;
+  let m: RegExpExecArray | null;
+  while ((m = depsRe.exec(text))) {
+    const list = m[1];
+    const listStart = m.index + m[0].indexOf(list);
+    const itemRe = /AssetKey\(\s*\[?["']([A-Za-z0-9_][A-Za-z0-9_\-./]*)["']\]?\s*\)|["']([A-Za-z0-9_][A-Za-z0-9_\-./]*)["']/g;
+    let im: RegExpExecArray | null;
+    while ((im = itemRe.exec(list))) {
+      const name = im[1] || im[2];
+      if (!name) continue;
+      const localStart = im.index + im[0].lastIndexOf(name);
+      refs.push({ name, start: listStart + localStart, end: listStart + localStart + name.length });
+    }
+  }
+  return refs;
+}
+
+const ASSET_REF_MARKER_OWNER = 'dagster-asset-refs';
+
+/** Squiggle any `deps`/`asset_key` reference that doesn't resolve to a real
+ * asset in this project's graph. Scoped to structured refs only (see
+ * extractPythonAssetRefs) so it can't false-positive on an ordinary
+ * parameter or local variable name. */
+function runAssetRefDiagnostics(monacoNs: any, model: any, assetIndex: Map<string, AssetRefInfo>) {
+  try {
+    const language = model.getLanguageId();
+    if (language !== 'python' && language !== 'yaml') {
+      monacoNs.editor.setModelMarkers(model, ASSET_REF_MARKER_OWNER, []);
+      return;
+    }
+    const text = model.getValue();
+    const refs = language === 'yaml' ? extractYamlAssetRefs(text) : extractPythonAssetRefs(text);
+    const markers = refs
+      .filter((ref) => !assetIndex.has(ref.name))
+      .map((ref) => {
+        const start = model.getPositionAt(ref.start);
+        const end = model.getPositionAt(ref.end);
+        return {
+          severity: monacoNs.MarkerSeverity.Warning,
+          message: `Unknown asset "${ref.name}" — not found in this project's asset graph.`,
+          startLineNumber: start.lineNumber,
+          startColumn: start.column,
+          endLineNumber: end.lineNumber,
+          endColumn: end.column,
+        };
+      });
+    monacoNs.editor.setModelMarkers(model, ASSET_REF_MARKER_OWNER, markers);
+  } catch {
+    // Best-effort diagnostics -- never let a regex/position edge case break the editor.
+  }
+}
 
 interface CodeEditorProps {
   projectId: string;
@@ -58,6 +181,7 @@ export function CodeEditor({ projectId, fileToOpen, onFileOpened }: CodeEditorPr
   const [aiPanelPendingQuestion, setAiPanelPendingQuestion] = useState<string | null>(null);
   const [sidebarWidth, setSidebarWidth] = useState(256);
   const [isResizing, setIsResizing] = useState(false);
+  const [fileSidebarCollapsed, setFileSidebarCollapsed] = useState(false);
   const [renamingPath, setRenamingPath] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState('');
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; path: string; type: 'file' | 'directory' } | null>(null);
@@ -67,8 +191,60 @@ export function CodeEditor({ projectId, fileToOpen, onFileOpened }: CodeEditorPr
   const [quickOpenQuery, setQuickOpenQuery] = useState('');
   const [quickOpenIndex, setQuickOpenIndex] = useState(0);
   const quickOpenInputRef = useRef<HTMLInputElement | null>(null);
+  const { currentProject } = useProjectStore();
+  const providersRegisteredRef = useRef(false);
+  const monacoRef = useRef<any>(null);
 
   const recentFilesKey = `code.recent.${projectId}`;
+
+  // Every name an asset in this project could plausibly be referenced by --
+  // its full key, last path segment, and the underscore/identifier form
+  // Python code uses -- mapped to the metadata we already have in the
+  // graph. Backs both the hover provider (any matching token, anywhere)
+  // and the "unknown asset" markers (only for structured deps refs).
+  const assetIndex = useMemo(() => {
+    const idx = new Map<string, AssetRefInfo>();
+    const nodes = currentProject?.graph?.nodes ?? [];
+    for (const n of nodes) {
+      if (n.node_kind !== 'asset') continue;
+      const data = (n.data || {}) as any;
+      const key: string | undefined = data.asset_key || n.id;
+      if (!key) continue;
+      const info: AssetRefInfo = {
+        key,
+        description: data.description,
+        group: data.group_name || data.group,
+        kind: data.compute_kind || data.kinds?.[0],
+        lastRunStatus: data.last_run_status ?? null,
+      };
+      const lastSeg = key.split(/[/.]/).pop();
+      const variants = new Set<string>([key, key.replace(/[/.]/g, '_')]);
+      if (lastSeg) {
+        variants.add(lastSeg);
+        variants.add(lastSeg.replace(/-/g, '_'));
+      }
+      for (const v of variants) idx.set(v, info);
+    }
+    return idx;
+  }, [currentProject?.graph?.nodes]);
+
+  const assetIndexRef = useRef(assetIndex);
+  useEffect(() => {
+    assetIndexRef.current = assetIndex;
+  }, [assetIndex]);
+
+  // Re-validate the active model's asset-dep references whenever the asset
+  // index changes (project graph reloaded/regenerated) -- not just when the
+  // user types. The hover provider always reads assetIndexRef live, so it
+  // doesn't need this; markers are computed eagerly and cached on the
+  // model, so they do.
+  useEffect(() => {
+    const editor = editorInstance;
+    const monacoNs = monacoRef.current;
+    if (!editor || !monacoNs) return;
+    const model = editor.getModel();
+    if (model) runAssetRefDiagnostics(monacoNs, model, assetIndex);
+  }, [assetIndex, editorInstance]);
 
   // Load recent files from localStorage on mount / project change.
   useEffect(() => {
@@ -746,6 +922,18 @@ export function CodeEditor({ projectId, fileToOpen, onFileOpened }: CodeEditorPr
   return (
     <div className="flex h-full bg-white relative">
       {/* File Browser - Left Sidebar */}
+      {fileSidebarCollapsed ? (
+        <div className="w-9 transition-[width] duration-150 flex-shrink-0 border-r border-gray-200 flex flex-col">
+          <button
+            onClick={() => setFileSidebarCollapsed(false)}
+            className="flex-1 flex flex-col items-center gap-2 pt-3 text-gray-400 hover:text-gray-700 hover:bg-gray-50 transition-colors"
+            title="Show files"
+            aria-label="Show files"
+          >
+            <PanelLeft className="w-4 h-4" />
+          </button>
+        </div>
+      ) : (
       <div
         className="border-r border-gray-200 flex flex-col shrink-0 relative"
         style={{ width: `${sidebarWidth}px`, minWidth: '200px', maxWidth: '600px' }}
@@ -773,6 +961,14 @@ export function CodeEditor({ projectId, fileToOpen, onFileOpened }: CodeEditorPr
               title="Refresh"
             >
               <RefreshCw className="w-4 h-4 text-gray-600" />
+            </button>
+            <button
+              onClick={() => setFileSidebarCollapsed(true)}
+              className="p-1 hover:bg-gray-200 rounded"
+              title="Collapse sidebar"
+              aria-label="Collapse sidebar"
+            >
+              <PanelLeftClose className="w-4 h-4 text-gray-600" />
             </button>
           </div>
         </div>
@@ -813,6 +1009,7 @@ export function CodeEditor({ projectId, fileToOpen, onFileOpened }: CodeEditorPr
           title="Drag to resize"
         />
       </div>
+      )}
 
       {/* Editor Area - Center */}
       <div className={`flex flex-col ${aiPanelOpen ? 'flex-1 min-w-0' : 'flex-1'}`}>
@@ -921,9 +1118,10 @@ export function CodeEditor({ projectId, fileToOpen, onFileOpened }: CodeEditorPr
               language={getLanguageFromPath(activeFile.path)}
               value={activeFile.content}
               onChange={handleEditorChange}
-              onMount={(editor, _monaco) => {
+              onMount={(editor, monacoNs) => {
                 // Store editor instance
                 setEditorInstance(editor);
+                monacoRef.current = monacoNs;
 
                 // Track selection changes to enable/disable the AI button
                 editor.onDidChangeCursorSelection(() => {
@@ -935,6 +1133,43 @@ export function CodeEditor({ projectId, fileToOpen, onFileOpened }: CodeEditorPr
                     setHasSelection(false);
                   }
                 });
+
+                // Asset-aware hover + "unknown asset" squiggles -- the one
+                // thing Monaco can do here that a generic VS Code Python
+                // extension can't, since it's keyed off this project's own
+                // live asset graph rather than Python/YAML language
+                // semantics. Providers are registered once per `monaco`
+                // instance (not per file); re-registering on every mount
+                // would stack duplicate hovers.
+                if (!providersRegisteredRef.current) {
+                  providersRegisteredRef.current = true;
+                  monacoNs.languages.registerHoverProvider(['python', 'yaml'], {
+                    provideHover(model: any, position: any) {
+                      const word = model.getWordAtPosition(position);
+                      if (!word) return null;
+                      const info = assetIndexRef.current.get(word.word);
+                      if (!info) return null;
+                      const lines = [`**Asset:** \`${info.key}\``];
+                      const facts: string[] = [];
+                      if (info.group) facts.push(`group: ${info.group}`);
+                      if (info.kind) facts.push(`kind: ${info.kind}`);
+                      if (info.lastRunStatus) facts.push(`last run: ${info.lastRunStatus}`);
+                      if (facts.length) lines.push(facts.join(' · '));
+                      if (info.description) lines.push('', info.description);
+                      return {
+                        range: new monacoNs.Range(position.lineNumber, word.startColumn, position.lineNumber, word.endColumn),
+                        contents: [{ value: lines.join('\n\n') }],
+                      };
+                    },
+                  });
+                }
+
+                const runDiagnostics = () => {
+                  const model = editor.getModel();
+                  if (model) runAssetRefDiagnostics(monacoNs, model, assetIndexRef.current);
+                };
+                runDiagnostics();
+                editor.onDidChangeModelContent(runDiagnostics);
               }}
               theme={isDark ? 'vs-dark' : 'vs-light'}
               options={{

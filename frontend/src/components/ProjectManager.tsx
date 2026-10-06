@@ -207,6 +207,8 @@ export function ProjectManager() {
       // a re-introspect + reload.
       if (selectedTemplate === 'jaffle') {
         notify.info('Setting up Jaffle Shop… this takes 30–60s. The graph will populate automatically.');
+      } else if (selectedTemplate === 'synthetic_commerce') {
+        notify.info('Setting up Synthetic Commerce… this takes 30–60s. The graph will populate automatically.');
       }
 
       setNewProjectName('');
@@ -244,11 +246,26 @@ export function ProjectManager() {
     }
   };
 
-  const loadExampleProject = (example: 'jaffle') => {
+  const loadExampleProject = (example: 'jaffle' | 'synthetic_commerce') => {
     setSelectedTemplate(example);
-    setNewProjectName('Jaffle Shop');
-    setNewProjectGitRepo('https://github.com/dbt-labs/jaffle-shop-classic.git');
-    setNewProjectGitBranch('main');
+    if (example === 'jaffle') {
+      setNewProjectName('Jaffle Shop');
+      setNewProjectGitRepo('https://github.com/dbt-labs/jaffle-shop-classic.git');
+      setNewProjectGitBranch('main');
+    } else {
+      // Already a real `dg` project (has its own [tool.dg] pyproject.toml),
+      // so this hits the "existing Dagster project" import branch in
+      // project_service.py -- hands-off, no Designer-side regeneration --
+      // same as any other "import a dg project from GitHub" flow. The
+      // subdirectory is parsed out of the URL itself (GitService.
+      // parse_github_url's tree/<branch>/<path> form), isolating just
+      // this quickstart's files rather than the whole monorepo.
+      setNewProjectName('Synthetic Commerce');
+      setNewProjectGitRepo(
+        'https://github.com/eric-thomas-dagster/dagster-component-templates/tree/main/quickstarts/synthetic_commerce'
+      );
+      setNewProjectGitBranch('main');
+    }
   };
 
   const handleExport = async () => {
@@ -895,6 +912,23 @@ export function ProjectManager() {
                     </div>
                     <div className={`text-xs ${selectedTemplate === 'jaffle' ? 'text-blue-700' : 'text-gray-600'}`}>
                       Classic dbt example project
+                    </div>
+                  </button>
+                  <button
+                    onClick={() => loadExampleProject('synthetic_commerce')}
+                    className={`w-full text-left px-3 py-2 text-sm border rounded-md transition-all ${
+                      selectedTemplate === 'synthetic_commerce'
+                        ? 'border-blue-600 bg-blue-50 ring-2 ring-blue-200'
+                        : 'border-gray-300 hover:bg-gray-50'
+                    }`}
+                  >
+                    <div className={`font-medium ${selectedTemplate === 'synthetic_commerce' ? 'text-blue-900' : ''}`}>
+                      Synthetic Commerce
+                    </div>
+                    <div
+                      className={`text-xs ${selectedTemplate === 'synthetic_commerce' ? 'text-blue-700' : 'text-gray-600'}`}
+                    >
+                      Partitioned assets, schedules, a sensor, asset checks, and dbt -- no external credentials needed
                     </div>
                   </button>
                 </div>

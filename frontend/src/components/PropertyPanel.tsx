@@ -3,7 +3,7 @@ import { useQuery } from '@tanstack/react-query';
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu';
 import { useProjectStore } from '@/hooks/useProject';
 import { useComponent } from '@/hooks/useComponentRegistry';
-import { X, Save, Settings, Play, Trash2, Plus, Wand2, Database, Search, Package, ChevronDown, FileCode, Calendar, Table, Clock, Radar, CheckCircle, Timer } from 'lucide-react';
+import { X, Save, Settings, Play, Trash2, Plus, Wand2, Database, Search, Package, ChevronDown, FileCode, Calendar, Table, Clock, Radar, CheckCircle, Timer, ShieldCheck } from 'lucide-react';
 import { Launchpad } from './Launchpad';
 import { PartitionBackfill } from './PartitionBackfill';
 import { PartitionConfig } from './PartitionConfig';
@@ -73,6 +73,9 @@ interface PropertyPanelProps {
   onNewPrimitiveForAsset?: (category: 'schedule' | 'job' | 'sensor' | 'asset_check' | 'freshness_policy', assetKey: string) => void;
   /** Opens the full-screen AssetDetailPage overlay for this node. */
   onOpenDetail?: (nodeId: string) => void;
+  /** Jumps to this check's row in the Monitors tab (status/history), as an
+   * alternative to opening its source code. */
+  onOpenMonitor?: (assetKey: string, checkName: string) => void;
 }
 
 // Collapsible wrapper for the freshness policy section — collapsed by default
@@ -98,7 +101,7 @@ function FreshnessPolicySection({ isConfigured, children }: { isConfigured: bool
   );
 }
 
-export function PropertyPanel({ nodeId, onConfigureComponent, onOpenFile, onNewPrimitiveForAsset, onOpenDetail }: PropertyPanelProps) {
+export function PropertyPanel({ nodeId, onConfigureComponent, onOpenFile, onNewPrimitiveForAsset, onOpenDetail, onOpenMonitor }: PropertyPanelProps) {
   const { currentProject, updateGraph, loadProject } = useProjectStore();
   const node = currentProject?.graph.nodes.find((n) => n.id === nodeId);
 
@@ -1867,17 +1870,15 @@ export function PropertyPanel({ nodeId, onConfigureComponent, onOpenFile, onNewP
               <label className="block text-sm font-medium text-gray-700">
                 Asset Checks {(node.data.checks?.length ?? 0) > 0 && <span className="text-orange-600">({node.data.checks!.length})</span>}
               </label>
-              <button
-                onClick={() => {
-                  // Navigate to template builder with asset pre-selected
-                  const assetKey = node.data.asset_key || node.id;
-                  window.location.hash = `#/templates?type=asset_check&asset=${encodeURIComponent(assetKey)}`;
-                }}
-                className="flex items-center space-x-1 px-2 py-1 text-xs bg-green-600 text-white rounded hover:bg-green-700"
-              >
-                <Plus className="w-3 h-3" />
-                <span>Add Check</span>
-              </button>
+              {onNewPrimitiveForAsset && (
+                <button
+                  onClick={() => onNewPrimitiveForAsset('asset_check', node.data.asset_key || node.id)}
+                  className="flex items-center space-x-1 px-2 py-1 text-xs bg-green-600 text-white rounded hover:bg-green-700"
+                >
+                  <Plus className="w-3 h-3" />
+                  <span>Add Check</span>
+                </button>
+              )}
             </div>
 
             {node.data.checks && node.data.checks.length > 0 ? (
@@ -1912,45 +1913,56 @@ export function PropertyPanel({ nodeId, onConfigureComponent, onOpenFile, onNewP
                             </div>
                           )}
                         </div>
-                        {check.source && (
-                          <button
-                            onClick={async () => {
-                              if (!onOpenFile || !currentProject) return;
+                        <div className="flex-shrink-0 flex items-center gap-1">
+                          {onOpenMonitor && (
+                            <button
+                              onClick={() => onOpenMonitor(node.data.asset_key || node.id, check.name)}
+                              className="p-1.5 text-orange-600 hover:bg-orange-100 rounded transition-colors"
+                              title="Open in Monitors"
+                            >
+                              <ShieldCheck className="w-4 h-4" />
+                            </button>
+                          )}
+                          {check.source && (
+                            <button
+                              onClick={async () => {
+                                if (!onOpenFile || !currentProject) return;
 
-                              // For dbt tests and other primitives, use the search API to find the actual definition
-                              if (isDbtTest) {
-                                try {
-                                  const searchResult = await primitivesApi.searchPrimitiveDefinition(
-                                    currentProject.id,
-                                    'asset_check',
-                                    check.name
-                                  );
+                                // For dbt tests and other primitives, use the search API to find the actual definition
+                                if (isDbtTest) {
+                                  try {
+                                    const searchResult = await primitivesApi.searchPrimitiveDefinition(
+                                      currentProject.id,
+                                      'asset_check',
+                                      check.name
+                                    );
 
-                                  if (searchResult.found) {
-                                    // Open the file at the specific line number
-                                    const filePath = searchResult.file_path;
-                                    const lineNumber = searchResult.line_number;
-                                    onOpenFile(`${filePath}:${lineNumber}`);
-                                    return;
+                                    if (searchResult.found) {
+                                      // Open the file at the specific line number
+                                      const filePath = searchResult.file_path;
+                                      const lineNumber = searchResult.line_number;
+                                      onOpenFile(`${filePath}:${lineNumber}`);
+                                      return;
+                                    }
+                                  } catch (error) {
+                                    console.error('Failed to search for primitive definition:', error);
+                                    // Fall through to fallback
                                   }
-                                } catch (error) {
-                                  console.error('Failed to search for primitive definition:', error);
-                                  // Fall through to fallback
                                 }
-                              }
 
-                              // Fallback: open the component YAML
-                              const sourcePath = check.source.split(':')[0]; // Remove line number
-                              onOpenFile(sourcePath);
-                            }}
-                            className="flex-shrink-0 p-1.5 text-orange-600 hover:bg-orange-100 rounded transition-colors"
-                            title={isDbtTest ? "Open dbt test definition" : "Open source file"}
-                          >
-                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
-                            </svg>
-                          </button>
-                        )}
+                                // Fallback: open the component YAML
+                                const sourcePath = check.source.split(':')[0]; // Remove line number
+                                onOpenFile(sourcePath);
+                              }}
+                              className="p-1.5 text-orange-600 hover:bg-orange-100 rounded transition-colors"
+                              title={isDbtTest ? "Open dbt test definition" : "Open source file"}
+                            >
+                              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+                              </svg>
+                            </button>
+                          )}
+                        </div>
                       </div>
                     </div>
                   );

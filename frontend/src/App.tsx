@@ -322,6 +322,13 @@ function App() {
     setRunToOpen(runId);
     setActiveMainTab('runs');
   };
+  // Same idea, for jumping from an asset's checks list (Property Panel) to
+  // that check's row in the Monitors tab instead of just opening its code.
+  const [monitorToOpen, setMonitorToOpen] = useState<{ assetKey: string; checkName: string } | null>(null);
+  const handleOpenMonitor = (assetKey: string, checkName: string) => {
+    setMonitorToOpen({ assetKey, checkName });
+    setActiveMainTab('monitors');
+  };
   // Radix's Tabs.onValueChange only fires when the clicked trigger's value
   // differs from the current one -- re-clicking the already-active nav item
   // is a no-op by default, so a user drilled into a detail view (a specific
@@ -1651,6 +1658,7 @@ function App() {
                   onOpenFile={handleOpenFile}
                   onNewPrimitiveForAsset={(category, assetKey) => openNewPrimitive(category, assetKey)}
                   onOpenDetail={setDetailNodeId}
+                  onOpenMonitor={handleOpenMonitor}
                 />
               </aside>
             )}
@@ -1666,6 +1674,7 @@ function App() {
               onAddDataSource={setAddingComponentType}
               onAddCloudDataSource={setDraftAuthoring}
               onEditComponent={setEditingComponent}
+              onOpenAsset={(assetKey) => { setActiveMainTab('assets'); setDetailNodeId(assetKey); }}
             />
           </Tabs.Content>
 
@@ -1722,7 +1731,14 @@ function App() {
               and dbt tests. Read-only v1 — write flow (schedule / add /
               history / charts) lands next. */}
           <Tabs.Content value="monitors" className="flex-1 overflow-hidden">
-            <MonitorsPanel key={tabResetNonce.monitors || 0} onOpenFile={handleOpenFile} onOpenRun={handleOpenRun} />
+            <MonitorsPanel
+              key={tabResetNonce.monitors || 0}
+              onOpenFile={handleOpenFile}
+              onOpenRun={handleOpenRun}
+              openMonitorQuery={monitorToOpen}
+              onOpenMonitorQueryConsumed={() => setMonitorToOpen(null)}
+              onOpenAsset={(assetKey) => { setActiveMainTab('assets'); setDetailNodeId(assetKey); }}
+            />
           </Tabs.Content>
 
           {/* Alerts Tab Content */}
@@ -1758,6 +1774,8 @@ function App() {
                     ]}
                     fetchInsights={() => _projectsApi.pageInsights(currentProject.id, 'pipelines') as any}
                     ask={(q, h) => _projectsApi.pageAsk(currentProject.id, 'pipelines', { question: q, history: h }).then(r => ({ answer: r.answer, toolsUsed: r.tools_used }))}
+                    onOpenRef={(ref) => { setActiveMainTab('assets'); setDetailNodeId(ref); }}
+                    refIcon={Network}
                   />
                 </div>
               )}
@@ -1794,6 +1812,8 @@ function App() {
                     ]}
                     fetchInsights={() => _projectsApi.pageInsights(currentProject.id, 'automation') as any}
                     ask={(q, h) => _projectsApi.pageAsk(currentProject.id, 'automation', { question: q, history: h }).then(r => ({ answer: r.answer, toolsUsed: r.tools_used }))}
+                    onOpenRef={(ref) => { setActiveMainTab('assets'); setDetailNodeId(ref); }}
+                    refIcon={Network}
                   />
                 </div>
               )}
