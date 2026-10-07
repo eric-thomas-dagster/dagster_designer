@@ -320,9 +320,29 @@ async def start_dagster_ui(project_id: str):
                 # Fall back to dagster dev via uv run
                 cmd = [uv_bin, "run", "dagster", "dev", "-p", str(port), "-h", "0.0.0.0"]
 
+            # Same DAGSTER_HOME pinning materialize_assets/launch_backfill
+            # use for their OWN `dg launch` subprocess calls -- without it,
+            # THIS dev server (the one the status bar's "Dev Server" button
+            # actually starts, and the one the Runs page's live GraphQL
+            # queries) reads whatever Dagster's own default instance
+            # location happens to be, not the project-scoped
+            # .designer_dagster_home those other runs were recorded into.
+            # Confirmed live: a run launched via materialize/backfill was
+            # visible when `dg dev` was started with DAGSTER_HOME pinned
+            # by hand, and invisible via this exact code path, since it
+            # never set the variable at all -- two different instances,
+            # same project, neither one wrong on its own, just disagreeing
+            # about where "the" instance lives.
+            import os
+            env = {**os.environ}
+            dagster_home = project_path.absolute() / ".designer_dagster_home"
+            dagster_home.mkdir(exist_ok=True)
+            env["DAGSTER_HOME"] = str(dagster_home)
+
             process = subprocess.Popen(
                 cmd,
                 cwd=str(project_path),
+                env=env,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 start_new_session=True,

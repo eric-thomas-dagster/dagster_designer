@@ -3945,15 +3945,30 @@ class BackfillResponse(BaseModel):
 
 
 @router.post("/{project_id}/backfill", response_model=BackfillResponse)
-async def launch_backfill(project_id: str, request: BackfillRequest):
+async def launch_backfill(project_id: str, request: BackfillRequest, background_tasks: BackgroundTasks):
     """Launch a backfill for partitioned assets.
+
+    Fire-and-forget, matching how a real Dagster UI actually behaves:
+    launching a run returns immediately, and progress is watched on the
+    Runs page rather than blocking the request. A single `dg launch`
+    call takes ~70s even in the best case (cold interpreter start +
+    loading the whole installed component catalog, confirmed live) --
+    the previous synchronous contract blocked the whole UI for that long
+    per partition, sequentially, which for a multi-partition backfill
+    read as "the page waits forever". The real work (still fully
+    synchronous/sequential internally, including the DAGSTER_HOME
+    pinning and per-partition `dg launch` loop) now runs in a
+    BackgroundTask after this response is already sent; its result is
+    only observable via the Runs page and the Ingestions tab's event log
+    (record_event), not this response.
 
     Args:
         project_id: The project ID
         request: Backfill configuration
 
     Returns:
-        BackfillResponse with backfill status
+        BackfillResponse acknowledging the launch -- success here means
+        "accepted for launch", not "completed".
     """
     project = project_service.get_project(project_id)
     if not project:
@@ -3963,6 +3978,24 @@ async def launch_backfill(project_id: str, request: BackfillRequest):
     if not project_dir.exists():
         raise HTTPException(status_code=404, detail="Project directory not found")
 
+    partition_count = len(request.partition_selection) if request.partition_selection else 1
+    background_tasks.add_task(_run_backfill_in_background, project_id, project_dir, request)
+
+    return BackfillResponse(
+        success=True,
+        message=(
+            "Backfill launched -- check the Runs page for progress."
+            if partition_count == 1
+            else f"Backfill launched ({partition_count} partitions) -- check the Runs page for progress."
+        ),
+        stdout="",
+        stderr="",
+    )
+
+
+async def _run_backfill_in_background(project_id: str, project_dir: Path, request: BackfillRequest) -> None:
+    """The actual backfill work -- see launch_backfill's own docstring for
+    why this runs as a BackgroundTask instead of being awaited inline."""
     import time
     _backfill_started_at = time.time()
 
@@ -4105,27 +4138,12 @@ async def launch_backfill(project_id: str, request: BackfillRequest):
         except Exception as _log_e:
             print(f"[backfill] Warning: Failed to record ingestion event: {_log_e}")
 
-        return BackfillResponse(
-            success=success,
-            message=message,
-            stdout=combined_stdout,
-            stderr=combined_stderr,
-        )
+        print(f"[backfill] project={project_id} success={success} message={message!r}", flush=True)
 
     except subprocess.TimeoutExpired:
-        return BackfillResponse(
-            success=False,
-            message="Backfill command timed out",
-            stdout="",
-            stderr="Command exceeded 5 minute timeout",
-        )
+        print(f"[backfill] project={project_id} timed out after 5 minutes on one partition", flush=True)
     except Exception as e:
-        return BackfillResponse(
-            success=False,
-            message=f"Error launching backfill: {str(e)}",
-            stdout="",
-            stderr=str(e),
-        )
+        print(f"[backfill] project={project_id} error launching backfill: {e}", flush=True)
     finally:
         # Clean up temporary config file
         if config_file and config_file.exists():
