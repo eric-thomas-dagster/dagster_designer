@@ -39,9 +39,6 @@ def _format_duration(seconds: int | None) -> str:
     return " ".join(parts) or "0m"
 
 
-_CATEGORY_TYPE_KEYWORD = {"job": "Job", "schedule": "Schedule", "sensor": "Sensor"}
-
-
 def _normalize_primitive_file(p: Dict[str, Any], project_dir: Path | None = None, category: str | None = None) -> Dict[str, Any]:
     """`dg list defs --json`'s own schedule/sensor/job dicts (and the
     `project.discovered_primitives` snapshot saved straight from them) use
@@ -67,18 +64,20 @@ def _normalize_primitive_file(p: Dict[str, Any], project_dir: Path | None = None
     for editing a component instance, instead of a one-off read-only
     viewer.
 
-    A schedule component also implicitly defines the job it targets (no
-    separate file/component of its own) -- confirmed live: `dg list defs`
-    reports that JOB's `source` pointing at the SCHEDULE's own defs.yaml,
-    so a blind re-read would attach the schedule's component_type/
-    attributes to the job entry too, opening a form labeled/shaped like a
-    schedule when the user asked to edit a job. Only attach when the read
-    type's class name actually matches this primitive's own category
-    (same keyword convention _parse_automations_from_yaml already
-    classifies files by) -- otherwise this job has no component of its
-    own to edit, and correctly falls back to opening the raw YAML instead.
-    A missing/unreadable file is a silent no-op here either way -- this is
-    a best-effort enrichment, not the primary thing this function fixes."""
+    Always attaches the REAL type found there, with no category-keyword
+    filtering -- every component has its own real, built-in type, and
+    that's what should drive which editor opens, regardless of which
+    Automations sub-tab (schedule/job/sensor) happens to be listing it. A
+    schedule component implicitly defining the job it targets (no separate
+    file/component of its own -- confirmed live: `dg list defs` reports
+    that job's `source` as the SCHEDULE's own defs.yaml) is exactly this
+    case: that schedule genuinely IS the real, editable thing controlling
+    the job, so clicking the job correctly opens the same schedule editor
+    too, rather than a dead end. `category` is accepted but intentionally
+    unused for gating -- kept so callers don't need to change, in case a
+    future narrower case needs it. A missing/unreadable file is a silent
+    no-op here either way -- this is a best-effort enrichment, not the
+    primary thing this function fixes."""
     if "file" not in p or not p["file"]:
         p = {**p, "file": p.get("source") or "N/A"}
     file_path = str(p.get("file") or "")
@@ -90,10 +89,7 @@ def _normalize_primitive_file(p: Dict[str, Any], project_dir: Path | None = None
                 config = yaml.safe_load(yaml_path.read_text())
                 component_type = config.get("type") if config else None
                 if component_type:
-                    class_name = component_type.rsplit(".", 1)[-1]
-                    keyword = _CATEGORY_TYPE_KEYWORD.get(category or "")
-                    if keyword is None or keyword in class_name:
-                        p = {**p, "component_type": component_type, "attributes": config.get("attributes", {})}
+                    p = {**p, "component_type": component_type, "attributes": config.get("attributes", {})}
         except Exception:
             pass
     return p
