@@ -3963,30 +3963,40 @@ async def launch_backfill(project_id: str, request: BackfillRequest):
     if not project_dir.exists():
         raise HTTPException(status_code=404, detail="Project directory not found")
 
-    # Build the dg asset backfill command
-    cmd = [
-        venv_bin_path(project_dir / ".venv", "dg"),
-        "asset",
-        "backfill",
-    ]
+    # `dg asset backfill` does not exist in the installed dg CLI (confirmed
+    # live: "Error: No such command 'asset'" against a real project's own
+    # venv) -- the real command is `dg launch`, confirmed by reading
+    # dagster_dg_cli's own launch.py, with its own real flags: `--assets`
+    # (one comma-separated selection string, not repeated `--select`),
+    # `--partition` (exactly ONE key), and `--partition-range` ("<start>...
+    # <end>"). There is no flag for an arbitrary multi-partition set in one
+    # call, so a multi-select backfill becomes one `dg launch` per
+    # partition key below -- confirmed this actually launches a real,
+    # successful run end-to-end against a real partitioned asset.
+    # .absolute() matters here -- confirmed live (a real FileNotFoundError):
+    # subprocess.run resolves a relative executable path against the
+    # CALLING process's cwd, not the `cwd=` override passed to the child,
+    # so a bare relative dg path silently breaks the moment this is called
+    # from anywhere other than this file's own working directory. Same
+    # fix materialize_assets already applies for the identical reason (see
+    # its own "use absolute path to dg binary" comment).
+    dg_path = str(venv_bin_path(project_dir / ".venv", "dg").absolute())
+    assets_arg = ",".join(request.asset_keys) if request.asset_keys else None
 
-    # Add asset selection
-    if request.asset_keys:
-        for asset_key in request.asset_keys:
-            cmd.extend(["--select", asset_key])
-
-    # Add partition selection
-    if request.partition_selection:
-        # Convert list of partitions to comma-separated string
-        cmd.extend(["--partitions", ",".join(request.partition_selection)])
-    elif request.partition_range:
-        # Use partition range
+    partition_arg_sets: list[list[str]]
+    if request.partition_range:
         start = request.partition_range.get("start")
         end = request.partition_range.get("end")
         if start and end:
-            cmd.extend(["--partitions", f"[{start}...{end}]"])
+            partition_arg_sets = [["--partition-range", f"{start}...{end}"]]
         elif start:
-            cmd.extend(["--from", start])
+            partition_arg_sets = [["--partition", start]]
+        else:
+            partition_arg_sets = [[]]
+    elif request.partition_selection:
+        partition_arg_sets = [["--partition", p] for p in request.partition_selection]
+    else:
+        partition_arg_sets = [[]]
 
     # Handle config and tags
     config_file = None
@@ -4013,26 +4023,70 @@ async def launch_backfill(project_id: str, request: BackfillRequest):
                 yaml.dump(config_data, f)
                 config_file = Path(f.name)
 
-            cmd.extend(["--config", str(config_file)])
+        # Same DAGSTER_HOME pinning materialize_assets uses (see its own
+        # comment) -- without it, each `dg launch` creates its own
+        # throwaway instance per invocation, so anything it launches is
+        # invisible to the Runs page (which reads from the project's real,
+        # persistent .designer_dagster_home), confirmed live: a run
+        # launched from here never showed up there before this. Also
+        # missing project_subprocess_env entirely, which materialize_assets
+        # sets up for the same reason assets there need it.
+        from ..core.uv_binary import project_subprocess_env
+        project_dir_abs = project_dir.absolute()
+        env = project_subprocess_env(project_dir_abs)
+        dagster_home = project_dir_abs / ".designer_dagster_home"
+        dagster_home.mkdir(exist_ok=True)
+        env["DAGSTER_HOME"] = str(dagster_home)
 
-        # Execute the backfill command
-        result = await asyncio.to_thread(
-            subprocess.run,
-            cmd,
-            cwd=project_dir,
-            capture_output=True,
-            text=True,
-            timeout=300,  # 5 minute timeout for backfills
-        )
+        all_stdout: list[str] = []
+        all_stderr: list[str] = []
+        failed = False
+        for partition_args in partition_arg_sets:
+            cmd = [dg_path, "launch"]
+            if assets_arg:
+                cmd.extend(["--assets", assets_arg])
+            cmd.extend(partition_args)
+            if config_file:
+                cmd.extend(["--config", str(config_file)])
 
-        success = result.returncode == 0
-        message = "Backfill launched successfully" if success else "Backfill failed"
+            result = await asyncio.to_thread(
+                subprocess.run,
+                cmd,
+                cwd=project_dir,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=300,  # 5 minute timeout per partition
+            )
+            all_stdout.append(result.stdout)
+            all_stderr.append(result.stderr)
+            if result.returncode != 0:
+                failed = True
+                break  # stop at the first failure rather than launching the rest
+
+        success = not failed
+        combined_stdout = "\n".join(all_stdout)
+        combined_stderr = "\n".join(all_stderr)
+        # The real `dg` error was already captured into stderr but never
+        # surfaced -- confirmed live, a user-visible "Backfill failed:
+        # Backfill failed" with the actual reason sitting unread in the
+        # response. Last non-empty line is almost always the real message
+        # (a CLI error, a Python traceback's final line, etc.); dg's own
+        # warnings/progress noise precedes it.
+        if success:
+            launched = len(all_stdout)
+            message = "Backfill launched successfully" if launched == 1 else f"Backfill launched successfully ({launched} partitions)"
+        else:
+            # Frontend callers already prefix this with "Backfill failed: "
+            # (e.g. AssetDetailPage.tsx) -- this is just the reason.
+            stderr_lines = [l for l in combined_stderr.splitlines() if l.strip()]
+            message = stderr_lines[-1] if stderr_lines else "no error output captured"
 
         return BackfillResponse(
             success=success,
             message=message,
-            stdout=result.stdout,
-            stderr=result.stderr,
+            stdout=combined_stdout,
+            stderr=combined_stderr,
         )
 
     except subprocess.TimeoutExpired:
