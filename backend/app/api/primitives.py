@@ -39,7 +39,10 @@ def _format_duration(seconds: int | None) -> str:
     return " ".join(parts) or "0m"
 
 
-def _normalize_primitive_file(p: Dict[str, Any], project_dir: Path | None = None) -> Dict[str, Any]:
+_CATEGORY_TYPE_KEYWORD = {"job": "Job", "schedule": "Schedule", "sensor": "Sensor"}
+
+
+def _normalize_primitive_file(p: Dict[str, Any], project_dir: Path | None = None, category: str | None = None) -> Dict[str, Any]:
     """`dg list defs --json`'s own schedule/sensor/job dicts (and the
     `project.discovered_primitives` snapshot saved straight from them) use
     the key `source`, e.g. "src/my_project/defs/my_schedule/defs.yaml:1" --
@@ -62,8 +65,20 @@ def _normalize_primitive_file(p: Dict[str, Any], project_dir: Path | None = None
     nothing about the component that produced it), but the frontend needs
     them to open the SAME generic ComponentConfigModal used everywhere else
     for editing a component instance, instead of a one-off read-only
-    viewer. A missing/unreadable file is a silent no-op here -- this is a
-    best-effort enrichment, not the primary thing this function fixes."""
+    viewer.
+
+    A schedule component also implicitly defines the job it targets (no
+    separate file/component of its own) -- confirmed live: `dg list defs`
+    reports that JOB's `source` pointing at the SCHEDULE's own defs.yaml,
+    so a blind re-read would attach the schedule's component_type/
+    attributes to the job entry too, opening a form labeled/shaped like a
+    schedule when the user asked to edit a job. Only attach when the read
+    type's class name actually matches this primitive's own category
+    (same keyword convention _parse_automations_from_yaml already
+    classifies files by) -- otherwise this job has no component of its
+    own to edit, and correctly falls back to opening the raw YAML instead.
+    A missing/unreadable file is a silent no-op here either way -- this is
+    a best-effort enrichment, not the primary thing this function fixes."""
     if "file" not in p or not p["file"]:
         p = {**p, "file": p.get("source") or "N/A"}
     file_path = str(p.get("file") or "")
@@ -73,8 +88,12 @@ def _normalize_primitive_file(p: Dict[str, Any], project_dir: Path | None = None
         try:
             if yaml_path.exists():
                 config = yaml.safe_load(yaml_path.read_text())
-                if config and "type" in config:
-                    p = {**p, "component_type": config["type"], "attributes": config.get("attributes", {})}
+                component_type = config.get("type") if config else None
+                if component_type:
+                    class_name = component_type.rsplit(".", 1)[-1]
+                    keyword = _CATEGORY_TYPE_KEYWORD.get(category or "")
+                    if keyword is None or keyword in class_name:
+                        p = {**p, "component_type": component_type, "attributes": config.get("attributes", {})}
         except Exception:
             pass
     return p
@@ -328,7 +347,7 @@ async def list_primitives(project_id: str, category: PrimitiveCategory):
 
                 if cache_key and cache_key in cached_defs:
                     project_dir = project_service._get_project_dir(_cloud_project) if _cloud_project else None
-                    primitives = [_normalize_primitive_file(p, project_dir) for p in cached_defs[cache_key]]
+                    primitives = [_normalize_primitive_file(p, project_dir, category) for p in cached_defs[cache_key]]
                     return {
                         "project_id": project_id,
                         "category": category,
@@ -377,7 +396,7 @@ async def list_primitives(project_id: str, category: PrimitiveCategory):
                 }
                 primitives_key = category_map[category]
                 project_dir = project_service._get_project_dir(project)
-                primitives = [_normalize_primitive_file(p, project_dir) for p in project.discovered_primitives.get(primitives_key, [])]
+                primitives = [_normalize_primitive_file(p, project_dir, category) for p in project.discovered_primitives.get(primitives_key, [])]
 
                 if primitives:
                     print(f"[Primitives/{category}] Found {len(primitives)} {category}s in stored project", file=sys.stderr, flush=True)
@@ -444,10 +463,10 @@ async def list_all_primitives(project_id: str):
 
                 project_dir = project_service._get_project_dir(_cloud_project) if _cloud_project else None
                 primitives = {
-                    "schedules": [_normalize_primitive_file(p, project_dir) for p in cached_defs.get("schedules", [])],
-                    "jobs": [_normalize_primitive_file(p, project_dir) for p in cached_defs.get("jobs", [])],
-                    "sensors": [_normalize_primitive_file(p, project_dir) for p in cached_defs.get("sensors", [])],
-                    "asset_checks": [_normalize_primitive_file(p, project_dir) for p in cached_defs.get("asset_checks", [])],
+                    "schedules": [_normalize_primitive_file(p, project_dir, "schedule") for p in cached_defs.get("schedules", [])],
+                    "jobs": [_normalize_primitive_file(p, project_dir, "job") for p in cached_defs.get("jobs", [])],
+                    "sensors": [_normalize_primitive_file(p, project_dir, "sensor") for p in cached_defs.get("sensors", [])],
+                    "asset_checks": [_normalize_primitive_file(p, project_dir, "asset_check") for p in cached_defs.get("asset_checks", [])],
                     "freshness_policies": list(cached_defs.get("freshness_policies", [])),
                 }
 
@@ -480,9 +499,9 @@ async def list_all_primitives(project_id: str):
 
         # Start with discovered primitives (from dg list defs — may be stale).
         primitives = {
-            "schedules": [_normalize_primitive_file(p, project_dir) for p in (project.discovered_primitives.get("schedules", []) if project and project.discovered_primitives else [])],
-            "sensors": [_normalize_primitive_file(p, project_dir) for p in (project.discovered_primitives.get("sensors", []) if project and project.discovered_primitives else [])],
-            "jobs": [_normalize_primitive_file(p, project_dir) for p in (project.discovered_primitives.get("jobs", []) if project and project.discovered_primitives else [])],
+            "schedules": [_normalize_primitive_file(p, project_dir, "schedule") for p in (project.discovered_primitives.get("schedules", []) if project and project.discovered_primitives else [])],
+            "sensors": [_normalize_primitive_file(p, project_dir, "sensor") for p in (project.discovered_primitives.get("sensors", []) if project and project.discovered_primitives else [])],
+            "jobs": [_normalize_primitive_file(p, project_dir, "job") for p in (project.discovered_primitives.get("jobs", []) if project and project.discovered_primitives else [])],
             "asset_checks": [],
             "freshness_policies": primitives_service.list_primitives(project_id, "freshness_policy"),
         }
