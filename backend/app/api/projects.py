@@ -3963,6 +3963,9 @@ async def launch_backfill(project_id: str, request: BackfillRequest):
     if not project_dir.exists():
         raise HTTPException(status_code=404, detail="Project directory not found")
 
+    import time
+    _backfill_started_at = time.time()
+
     # `dg asset backfill` does not exist in the installed dg CLI (confirmed
     # live: "Error: No such command 'asset'" against a real project's own
     # venv) -- the real command is `dg launch`, confirmed by reading
@@ -4081,6 +4084,26 @@ async def launch_backfill(project_id: str, request: BackfillRequest):
             # (e.g. AssetDetailPage.tsx) -- this is just the reason.
             stderr_lines = [l for l in combined_stderr.splitlines() if l.strip()]
             message = stderr_lines[-1] if stderr_lines else "no error output captured"
+
+        # materialize_assets logs an ingestion event per asset so the
+        # Ingestions tab's history/sparklines have real data to show --
+        # this endpoint never did, confirmed live: a successful, visible-
+        # in-the-Runs-page backfill still left the Ingestions page with
+        # nothing, since that page reads its OWN separate event log
+        # (ingestion_history.py), not the Dagster instance directly.
+        try:
+            from ..services.ingestion_history import record_event
+            duration_ms = int((time.time() - _backfill_started_at) * 1000)
+            for ak in request.asset_keys:
+                record_event(
+                    project_dir,
+                    event_type="materialize",
+                    asset_key=ak,
+                    duration_ms=duration_ms,
+                    status="success" if success else "failure",
+                )
+        except Exception as _log_e:
+            print(f"[backfill] Warning: Failed to record ingestion event: {_log_e}")
 
         return BackfillResponse(
             success=success,
