@@ -16,8 +16,10 @@ import {
   X,
   FileCode,
   Timer,
+  Settings,
 } from 'lucide-react';
 import { primitivesApi, pipelinesApi, assetsApi, type PrimitiveCategory, type PrimitiveItem } from '@/services/api';
+import type { ComponentInstance } from '@/types';
 import { useProjectStore } from '@/hooks/useProject';
 import { CommunityAvailableSection } from './CommunityAvailableSection';
 import { InsightMetricCard } from './InsightMetricCard';
@@ -44,6 +46,14 @@ interface PrimitivesManagerProps {
   /** Jump to a specific asset's detail page (e.g. clicking a target asset
    *  chip on a cloud sensor/job's detail view). */
   onOpenAsset?: (nodeId: string) => void;
+  /** Opens the SAME generic ComponentConfigModal used everywhere else in
+   *  the app for editing a component instance -- per explicit feedback,
+   *  NOT a one-off read-only viewer built just for this panel. Schedules/
+   *  sensors/jobs have no asset-graph node for App.tsx's save path to
+   *  resolve a source file from the usual way, so `sourceFile` is passed
+   *  alongside the synthetic ComponentInstance this constructs, to be
+   *  used as a fallback. */
+  onEditComponent?: (component: ComponentInstance, sourceFile: string) => void;
 }
 
 export function PrimitivesManager({
@@ -52,6 +62,7 @@ export function PrimitivesManager({
   openPrimitive,
   onOpenAsset,
   onOpenPrimitiveConsumed,
+  onEditComponent,
 }: PrimitivesManagerProps = {}) {
   const isDark = useIsDarkMode();
   const { currentProject } = useProjectStore();
@@ -116,6 +127,24 @@ export function PrimitivesManager({
   const handleViewDetails = (primitive: PrimitiveItem) => {
     setSelectedPrimitive(primitive);
     setDetailsOpen(true);
+  };
+
+  // Opens the real ComponentConfigModal (via App.tsx's onEditComponent ->
+  // setEditingComponent) instead of this panel's own read-only Details
+  // Dialog -- component_type/attributes come straight from dg's defs.yaml
+  // (see _normalize_primitive_file/_parse_automations_from_yaml backend-
+  // side). The synthetic id is namespaced by category + name since these
+  // have no real ComponentInstance id (no asset-graph node backs them).
+  const handleEditPrimitiveComponent = (primitive: PrimitiveItem, category: PrimitiveCategory) => {
+    if (!onEditComponent || !primitive.component_type) return;
+    const instance: ComponentInstance = {
+      id: `primitive_${category}_${primitive.name}`,
+      component_type: primitive.component_type,
+      label: primitive.name,
+      attributes: primitive.attributes || {},
+      is_asset_factory: false,
+    };
+    onEditComponent(instance, primitive.file);
   };
 
   const handleDelete = (category: PrimitiveCategory, name: string) => {
@@ -381,24 +410,37 @@ export function PrimitivesManager({
                 </div>
               </div>
               <div className="flex items-center space-x-2 ml-4">
-                {(isCloud || (primitive.isManaged && primitive.file && primitive.file !== 'N/A')) && (
+                {isCloud && (
                   <button
                     onClick={() => handleViewDetails(primitive)}
                     className="p-1.5 text-blue-600 hover:bg-blue-50 rounded"
-                    title={isCloud ? 'View details' : 'View code'}
+                    title="View details"
                   >
                     <Eye className="w-4 h-4" />
                   </button>
                 )}
-                {!isCloud && !primitive.isManaged && (
+                {!isCloud && primitive.component_type && onEditComponent && (
                   <button
-                    onClick={() => handleSearchAndOpen(
-                      category === 'schedule' ? 'schedule' : category === 'job' ? 'job' : category === 'sensor' ? 'sensor' : 'asset_check',
-                      primitive.name,
-                      primitive.file !== 'N/A' ? primitive.file : undefined
-                    )}
+                    onClick={() => handleEditPrimitiveComponent(primitive, category)}
                     className="p-1.5 text-blue-600 hover:bg-blue-50 rounded"
-                    title="Find and open source code"
+                    title="Edit component"
+                  >
+                    <Settings className="w-4 h-4" />
+                  </button>
+                )}
+                {!isCloud && !primitive.component_type && (
+                  <button
+                    onClick={() =>
+                      primitive.file && primitive.file !== 'N/A'
+                        ? onOpenFile?.(primitive.file)
+                        : handleSearchAndOpen(
+                            category === 'schedule' ? 'schedule' : category === 'job' ? 'job' : category === 'sensor' ? 'sensor' : 'asset_check',
+                            primitive.name,
+                            undefined
+                          )
+                    }
+                    className="p-1.5 text-blue-600 hover:bg-blue-50 rounded"
+                    title={primitive.file && primitive.file !== 'N/A' ? 'Open code' : 'Find and open source code'}
                   >
                     <FileCode className="w-4 h-4" />
                   </button>

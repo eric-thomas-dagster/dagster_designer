@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import * as Tabs from '@radix-ui/react-tabs';
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu';
 import * as Tooltip from '@radix-ui/react-tooltip';
@@ -263,6 +263,15 @@ function App() {
   useRunNotifications();
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [editingComponent, setEditingComponent] = useState<ComponentInstance | null>(null);
+  // Schedules/sensors/jobs opened for editing from the Automations tab have
+  // no asset-graph node for handleSaveComponent's usual source-path lookup
+  // (component_id -> node.data.source) -- ComponentConfigModal's onSave
+  // rebuilds a brand-new ComponentInstance from scratch (confirmed reading
+  // its own save handler: only `id` survives the round-trip, nothing else
+  // on the object passed in), so this keyed-by-id ref is the one thing
+  // that DOES survive to let handleSaveComponent find the real file and a
+  // same-shape "before" snapshot to diff against.
+  const primitiveSourceRef = useRef<Map<string, { sourceFile: string; originalAttributes: Record<string, any> }>>(new Map());
   // Bridge from ComponentConfigModal's "Edit with Genie" button (shown
   // only for AGENTIC_PIPELINE_FAMILY components) to AgentPipelineBuilder
   // in edit mode -- see editingComponent prop there.
@@ -748,7 +757,8 @@ function App() {
     // everything it doesn't touch) instead of silently no-op'ing.
     if (currentProject.is_imported) {
       const sourceNode = currentProject.graph.nodes.find((n) => n.data?.component_id === component.id);
-      const sourcePath = sourceNode?.data?.source;
+      const primitiveSource = primitiveSourceRef.current.get(component.id);
+      const sourcePath = sourceNode?.data?.source ?? primitiveSource?.sourceFile;
       if (!sourcePath) {
         notify.error("Can't find this component's source defs.yaml to save changes.");
         return;
@@ -760,7 +770,7 @@ function App() {
           body: JSON.stringify({
             source_path: sourcePath,
             attributes: component.attributes,
-            original_attributes: sourceNode?.data?.component_attributes || {},
+            original_attributes: sourceNode?.data?.component_attributes ?? primitiveSource?.originalAttributes ?? {},
           }),
         });
         const body = await res.json().catch(() => ({} as any));
@@ -1823,6 +1833,13 @@ function App() {
                 openPrimitive={primitiveToOpen}
                 onOpenPrimitiveConsumed={() => setPrimitiveToOpen(null)}
                 onOpenAsset={(nodeId) => { setActiveMainTab('assets'); setDetailNodeId(nodeId); }}
+                onEditComponent={(component, sourceFile) => {
+                  primitiveSourceRef.current.set(component.id, {
+                    sourceFile,
+                    originalAttributes: component.attributes,
+                  });
+                  setEditingComponent(component);
+                }}
               />
             </div>
           </Tabs.Content>
