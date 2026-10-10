@@ -1,5 +1,6 @@
 """API endpoints for Dagster CLI operations."""
 
+import asyncio
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import Any
@@ -288,7 +289,8 @@ async def install_component(request: InstallComponentRequest):
             # Install both dagster-dbt and the adapter
             import subprocess
             print(f"Installing dagster-dbt and {adapter_package} for dbt component...")
-            result = subprocess.run(
+            result = await asyncio.to_thread(
+                subprocess.run,
                 [find_uv_binary("uvx"), "--with", "uv", "uv", "add", "dagster-dbt", adapter_package],
                 cwd=str(dagster_project_path),
                 # Point VIRTUAL_ENV at the project's own venv (not just

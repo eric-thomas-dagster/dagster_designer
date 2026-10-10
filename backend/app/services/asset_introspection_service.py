@@ -133,6 +133,39 @@ CACHE_TTL_SECONDS = 60  # Cache results for 60 seconds (increased from 10s for b
 # This prevents the race condition where lineage and automations both try to run dg list defs
 _introspection_locks: Dict[str, asyncio.Lock] = {}
 
+# Shared "did the last real `dg list defs` invocation for this project
+# succeed" outcome, populated by _run_dg_list_defs[_async] on EVERY call
+# (success or failure) -- independent of _assets_cache, which only stores
+# parsed JSON and is deliberately CLEARED by callers (regenerate-assets,
+# validate_project_defs_async) that want a guaranteed-fresh result rather
+# than stale pre-write data. POST /projects/{id}/validate consults this
+# short-TTL cache so a validate() called right after a regenerate-assets
+# (or another validate) a moment earlier -- the common case for every
+# validate-then-rollback write path in the app -- doesn't pay for a
+# second, fully redundant `dg list defs` subprocess: it's the exact same
+# all-or-nothing definitions load either way (see
+# validate_project_defs_async's own docstring). Short TTL so a genuinely
+# separate, later validation (e.g. the user clicking "Validate Project"
+# on its own) still gets a real, fresh check.
+_last_run_result: Dict[str, Tuple[float, bool, str | None]] = {}
+LAST_RUN_RESULT_TTL_SECONDS = 8
+
+
+def record_last_run_result(project_id: str, valid: bool, error: str | None) -> None:
+    _last_run_result[project_id] = (time.time(), valid, error)
+
+
+def get_recent_run_result(project_id: str, max_age: float = LAST_RUN_RESULT_TTL_SECONDS) -> "Tuple[bool, str | None] | None":
+    """Returns (valid, error) from the last `dg list defs` invocation for
+    this project if it finished within `max_age` seconds, else None."""
+    entry = _last_run_result.get(project_id)
+    if not entry:
+        return None
+    timestamp, valid, error = entry
+    if time.time() - timestamp > max_age:
+        return None
+    return valid, error
+
 
 def get_project_defs_lock(project_id: str) -> asyncio.Lock:
     """The same per-project lock _run_dg_list_defs_async uses, exposed for
@@ -473,6 +506,7 @@ class AssetIntrospectionService:
                     await proc.wait()
                     error_msg = "dg list defs timed out after 180 seconds"
                     print(f"❌ {error_msg}", flush=True)
+                    record_last_run_result(project.id, False, error_msg)
                     raise RuntimeError(error_msg)
 
                 if proc.returncode != 0:
@@ -482,6 +516,7 @@ class AssetIntrospectionService:
                     if stdout:
                         error_msg += f"\nStdout: {stdout.decode()}"
                     print(f"❌ {error_msg}", flush=True)
+                    record_last_run_result(project.id, False, error_msg)
                     raise RuntimeError(error_msg)
 
                 print(f"[Asset Introspection] Command completed successfully", flush=True)
@@ -489,6 +524,7 @@ class AssetIntrospectionService:
                 # Parse and cache the results
                 assets_data = json.loads(stdout.decode())
                 _assets_cache[project.id] = (time.time(), assets_data)
+                record_last_run_result(project.id, True, None)
                 print(f"[Asset Introspection] Cached results for project {project.id}", flush=True)
 
                 return assets_data
@@ -496,6 +532,7 @@ class AssetIntrospectionService:
             except json.JSONDecodeError as e:
                 error_msg = f"Failed to parse dg list defs output: {e}"
                 print(f"❌ {error_msg}", flush=True)
+                record_last_run_result(project.id, False, error_msg)
                 raise RuntimeError(error_msg) from e
 
     async def get_assets_for_project_async(self, project: Project, recalculate_layout: bool = False) -> tuple[list[GraphNode], list[GraphEdge]]:

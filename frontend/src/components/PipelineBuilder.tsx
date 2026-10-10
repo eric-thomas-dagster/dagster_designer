@@ -121,6 +121,10 @@ export function PipelineBuilder() {
     queryKey: ['pipelines', currentProject?.id],
     queryFn: () => currentProject ? pipelinesApi.list(currentProject.id) : Promise.reject('No project'),
     enabled: !!currentProject,
+    // Already explicitly invalidated on save (below) -- default
+    // staleTime: 0 forced a refetch on every remount (every tab switch,
+    // since Radix Tabs.Content unmounts inactive panels) for no reason.
+    staleTime: 60_000,
   });
 
   // Only fetch definitions when creating/editing a pipeline (for existing schedule/sensor selection)
@@ -129,6 +133,10 @@ export function PipelineBuilder() {
     queryKey: ['definitions', currentProject?.id],
     queryFn: () => currentProject ? primitivesApi.getAllDefinitions(currentProject.id) : Promise.reject('No project'),
     enabled: !!currentProject && needsDefinitions,
+    // Backed by the dg-list-defs subprocess path -- already explicitly
+    // invalidated on save, so a stale default here just means paying for
+    // a subprocess round trip on every remount for nothing.
+    staleTime: 60_000,
   });
 
   // Always fetch sensor types when project is loaded (cached and instant)
@@ -136,6 +144,7 @@ export function PipelineBuilder() {
     queryKey: ['sensor-types', currentProject?.id],
     queryFn: () => currentProject ? pipelinesApi.getSensorTypes(currentProject.id) : Promise.reject('No project'),
     enabled: !!currentProject,
+    staleTime: 5 * 60_000,
   });
 
   // Always fetch installed community components when project is loaded (cached and instant)
@@ -143,6 +152,7 @@ export function PipelineBuilder() {
     queryKey: ['installed-components', currentProject?.id],
     queryFn: () => currentProject ? templatesApi.getInstalled(currentProject.id) : Promise.reject('No project'),
     enabled: !!currentProject,
+    staleTime: 60_000,
   });
 
   // Filter for sensor components only

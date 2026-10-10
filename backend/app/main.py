@@ -98,6 +98,29 @@ async def _startup_telemetry():
     telemetry_uploader.start()
     log_designer_action("designer_app_launched", {"api_version": settings.api_version})
 
+    # Reap any dev servers left behind by a previous session that didn't
+    # exit cleanly (force-quit, crash, `kill -9`ing the backend directly).
+    # The normal quit path asks this same process to stop its own dev
+    # servers before it dies (see Tauri's kill_backend), but that can't run
+    # if there was no graceful quit to begin with -- this is what actually
+    # catches those orphans, since every fresh backend process passes
+    # through here exactly once.
+    try:
+        # Off the event loop -- kill_all_designer_dev_servers() walks
+        # psutil.process_iter() over EVERY process on the machine, which
+        # can be genuinely slow (especially on Windows, which this app
+        # also targets). FastAPI's startup event has to finish before
+        # uvicorn starts accepting connections at all, so running this
+        # synchronously here blocked the very first request (including
+        # the frontend's own initial project-list fetch) behind a full
+        # system process scan on every app launch.
+        import asyncio
+        killed = await asyncio.to_thread(dagster_webserver.kill_all_designer_dev_servers)
+        if killed:
+            print(f"[startup] reaped {len(killed)} orphaned dev server(s) from a previous session: {killed}", flush=True)
+    except Exception as e:
+        print(f"[startup] dev server reconciliation failed (non-fatal): {e}", flush=True)
+
 
 @app.on_event("shutdown")
 async def _shutdown_telemetry():

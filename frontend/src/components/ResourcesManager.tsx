@@ -78,6 +78,10 @@ export function ResourcesManager({ onOpenFile, onComponentInstalled }: Resources
       return res.json();
     },
     enabled: !!currentProject,
+    // refetchInstalled() (used after installs/edits elsewhere in this
+    // file) always forces a fresh fetch regardless of staleTime -- this
+    // only stops the REDUNDANT automatic refetch on every remount.
+    staleTime: 60_000,
   });
 
   return (

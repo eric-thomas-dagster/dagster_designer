@@ -31,6 +31,23 @@ _dependency_status: Dict[str, Dict[str, str]] = {}
 _dependency_locks: Dict[str, asyncio.Lock] = {}
 
 
+#  get_project() is called from 182 call sites across 28 files -- many of
+# them hit several times within the same request/user action (e.g. a
+# write endpoint reads the project, mutates it, calls update_project(),
+# then a DIFFERENT endpoint it delegates to reads it again moments
+# later). Real project.json files on disk range well into the hundreds
+# of KB, so the disk read + json.loads was real, repeated cost on every
+# single call. Caches the RAW PARSED DICT (not a Project instance) keyed
+# by the file's own mtime -- deliberately NOT caching the constructed
+# Project object itself, since that's a shared mutable graph that
+# different call sites mutate in place before saving; every caller still
+# gets its own fresh `Project(**data)` instance (same isolation
+# guarantee as before -- two callers can't see or clobber each other's
+# in-progress edits), just without re-reading+re-parsing the file when
+# nothing on disk has changed.
+_project_json_cache: dict[str, tuple[float, dict]] = {}
+
+
 class ProjectService:
     """Service for project CRUD operations."""
 
@@ -640,9 +657,16 @@ class ProjectService:
         if not project_file.exists():
             return None
 
-        with open(project_file, "r") as f:
-            data = json.load(f)
-            project = Project(**data)
+        mtime = project_file.stat().st_mtime
+        cached = _project_json_cache.get(project_id)
+        if cached is not None and cached[0] == mtime:
+            data = cached[1]
+        else:
+            with open(project_file, "r") as f:
+                data = json.load(f)
+            _project_json_cache[project_id] = (mtime, data)
+
+        project = Project(**data)
 
         # Enrich with partition configs from component files
         self._enrich_with_partition_configs(project)

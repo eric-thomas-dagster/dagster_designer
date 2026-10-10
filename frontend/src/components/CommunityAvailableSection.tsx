@@ -65,6 +65,9 @@ export function CommunityAvailableSection({
       return res.json() as Promise<{ components: InstalledComponent[] }>;
     },
     enabled: !!currentProject,
+    // Already explicitly invalidated on install (this file's own
+    // mutation below) -- avoids a redundant refetch on every remount.
+    staleTime: 60_000,
   });
 
   const installMutation = useMutation({

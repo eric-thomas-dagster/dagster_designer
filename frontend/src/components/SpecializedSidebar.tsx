@@ -1,8 +1,15 @@
+import { lazy } from 'react';
 import { JoinSidebar } from './JoinSidebar';
 import { FilterSidebar } from './FilterSidebar';
 import { AggregateSidebar } from './AggregateSidebar';
 import { SqlTransformSidebar } from './SqlTransformSidebar';
-import { GeoBoundingBoxSidebar } from './GeoBoundingBoxSidebar';
+// Lazy: the only sidebar here pulling in a heavy third-party dependency
+// (leaflet, 3.8MB) -- for one narrow config step (bounding_box_filter),
+// not worth bundling into every session. The render site (PropertyPanel)
+// wraps `<Specialized>` in a <Suspense> boundary for this.
+const GeoBoundingBoxSidebar = lazy(() =>
+  import('./GeoBoundingBoxSidebar').then((m) => ({ default: m.GeoBoundingBoxSidebar }))
+);
 import { LLMSidebar } from './LLMSidebar';
 import { AgentSidebar } from './AgentSidebar';
 import { DocumentExtractorSidebar } from './DocumentExtractorSidebar';

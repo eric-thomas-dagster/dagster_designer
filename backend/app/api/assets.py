@@ -1,5 +1,6 @@
 """API endpoints for asset operations."""
 
+import asyncio
 import sys
 import json
 import shutil
@@ -1073,7 +1074,8 @@ async def media_probe(project_id: str, path: str):
     if not ffprobe:
         return MediaProbeResponse(available=False, error="ffprobe not found on PATH")
     try:
-        result = subprocess.run(
+        result = await asyncio.to_thread(
+            subprocess.run,
             [ffprobe, "-v", "quiet", "-print_format", "json", "-show_format", "-show_streams", path],
             capture_output=True, text=True, timeout=15,
         )
@@ -1199,16 +1201,58 @@ async def preview_asset_data(
     # Get the project's Python executable
     project_python = project_service._get_project_python_path(project)
 
+    # The graph the backend already loaded for this project tags every
+    # node with `kinds` (e.g. ["dbt", "duckdb"]) -- cheap, in-memory, no
+    # extra file I/O. preview_asset.py otherwise always imports the WHOLE
+    # project's definitions.py first (resolving the entire installed
+    # component catalog) before ever checking whether it could skip
+    # straight to the dbt-show shortcut -- confirmed live as pure wasted
+    # work for a dbt-model preview specifically, since dbt models don't
+    # need any Python-side asset resolution at all. Passing this hint
+    # lets the script skip that expensive import entirely when we already
+    # know the answer.
+    is_dbt_hint = False
+    for node in project.graph.nodes:
+        node_data = node.data or {}
+        if (node_data.get("asset_key") or node.id) == asset_key:
+            is_dbt_hint = "dbt" in (node_data.get("kinds") or [])
+            break
     try:
         # Serialize against any other subprocess call loading this same
         # project's defs (asset introspection, partition info, config
         # schema, ...) -- a state-backed dbt component's manifest refresh
         # writes to a shared on-disk cache, and two of these landing
         # concurrently can race on it with no coordination otherwise.
-        from ..services.asset_introspection_service import get_project_defs_lock
-        async with get_project_defs_lock(project_id):
-            # Run the preview script in the project's Python environment
-            result = subprocess.run(
+        #
+        # Skipped entirely when is_dbt_hint is set: that path never
+        # imports the project's definitions (so never touches the shared
+        # cache this lock protects), but it was still SERIALIZED behind
+        # it anyway -- confirmed live, a dbt preview that should take
+        # under a second instead took 37-39s because an unrelated,
+        # already-slow `dg list defs` call (asset introspection, 30-70s
+        # on this project's large component catalog) happened to be
+        # holding the lock at the same moment. The fast path doesn't need
+        # to wait in a line it was never actually contending for.
+        import contextlib
+
+        @contextlib.asynccontextmanager
+        async def _maybe_defs_lock():
+            if is_dbt_hint:
+                yield
+            else:
+                from ..services.asset_introspection_service import get_project_defs_lock
+                async with get_project_defs_lock(project_id):
+                    yield
+
+        async with _maybe_defs_lock():
+            # Run the preview script in the project's Python environment.
+            # Off the event loop -- a synchronous subprocess.run here
+            # blocks the WHOLE backend (every other open project's
+            # requests), not just this one, for the full execution time;
+            # exactly the kind of multi-second stall the comment above
+            # this block was written to describe for the lock itself.
+            result = await asyncio.to_thread(
+                subprocess.run,
                 [
                     str(project_python),
                     "-m",
@@ -1216,6 +1260,7 @@ async def preview_asset_data(
                     project_module,
                     asset_key,
                     str(sample_limit),
+                    "1" if is_dbt_hint else "0",
                 ],
                 cwd=Path.cwd(),  # Run from backend directory
                 env=env,
@@ -1833,7 +1878,13 @@ async def create_transformer_asset(project_id: str, request: CreateTransformerRe
             print(f"[Create Transformer] dataframe_transformer template not installed; auto-installing via CLI…", flush=True)
             import subprocess
             try:
-                cli_result = subprocess.run(
+                # Off the event loop -- this is a real `uv add`-triggering
+                # install that can take real time, and a synchronous
+                # subprocess.run here would otherwise freeze the WHOLE
+                # backend (every other open project's requests) for the
+                # duration, not just this one.
+                cli_result = await asyncio.to_thread(
+                    subprocess.run,
                     [
                         find_uv_binary("uvx"), "--from", "dagster-community-components-cli",
                         "dagster-component", "add", "dataframe_transformer",
@@ -2128,7 +2179,8 @@ async def create_join_asset(project_id: str, request: CreateJoinRequest):
             print(f"[Create Join] dataframe_join template not installed; auto-installing via CLI…", flush=True)
             import subprocess
             try:
-                cli_result = subprocess.run(
+                cli_result = await asyncio.to_thread(
+                    subprocess.run,
                     [
                         find_uv_binary("uvx"), "--from", "dagster-community-components-cli",
                         "dagster-component", "add", "dataframe_join",

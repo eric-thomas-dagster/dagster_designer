@@ -21,6 +21,7 @@ Ref: https://docs.dagster.io/guides/observe/alerts/yaml-reference
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import subprocess
@@ -838,7 +839,8 @@ async def sync_alerts_to_cloud(project_id: str, request: SyncPushRequest):
     venv_dg = venv_bin_path(project_dir / ".venv", "dg")
     cmd_bin = str(venv_dg) if venv_dg.exists() else "dg"
     try:
-        proc = subprocess.run(
+        proc = await asyncio.to_thread(
+            subprocess.run,
             [cmd_bin, "api", "alert-policy", "sync", str(path)],
             cwd=str(project_dir),
             capture_output=True,
@@ -884,7 +886,8 @@ async def sync_alerts_from_cloud(project_id: str):
     venv_dg = venv_bin_path(project_dir / ".venv", "dg")
     cmd_bin = str(venv_dg) if venv_dg.exists() else "dg"
     try:
-        proc = subprocess.run(
+        proc = await asyncio.to_thread(
+            subprocess.run,
             [cmd_bin, "api", "alert-policy", "list", "--output=json"],
             cwd=str(project_dir),
             capture_output=True,

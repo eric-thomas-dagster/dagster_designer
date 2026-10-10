@@ -1,5 +1,6 @@
 """API endpoints for environment variable management."""
 
+import asyncio
 from pathlib import Path
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
@@ -337,7 +338,7 @@ def _resolve_project_dir(project_id: str) -> Path:
     return project_dir
 
 
-def _run_dg_env(project_dir: Path, action: str, scope: DagsterPlusScope) -> tuple[int, str, str]:
+async def _run_dg_env(project_dir: Path, action: str, scope: DagsterPlusScope) -> tuple[int, str, str]:
     """Run `dg plus env pull|push` in the project's venv and return (rc, stdout, stderr)."""
     import subprocess
     dg_path = venv_bin_path(project_dir / ".venv", "dg")
@@ -354,7 +355,11 @@ def _run_dg_env(project_dir: Path, action: str, scope: DagsterPlusScope) -> tupl
     if action == "pull":
         # Overwrite whatever's currently in .env so the UI reflects Dagster+ state.
         cmd += ["--overwrite"]
-    result = subprocess.run(
+    # Off the event loop -- a synchronous subprocess.run here blocks the
+    # WHOLE backend (every other open project's requests), not just this
+    # one, for the duration of the dg plus env call.
+    result = await asyncio.to_thread(
+        subprocess.run,
         cmd, cwd=str(project_dir), capture_output=True, text=True, timeout=60,
     )
     return result.returncode, result.stdout, result.stderr
@@ -399,9 +404,10 @@ async def get_dagster_plus_scope(project_id: str):
         return {"deployments": [], "code_locations": [], "authenticated": False,
                 "cloud_native": False, "message": "Project venv missing dg CLI"}
 
-    def _run_list(subcommand: list[str]) -> list[str]:
+    async def _run_list(subcommand: list[str]) -> list[str]:
         try:
-            result = subprocess.run(
+            result = await asyncio.to_thread(
+                subprocess.run,
                 [str(dg_path), "plus", *subcommand, "--json"],
                 cwd=str(project_dir),
                 capture_output=True,
@@ -420,8 +426,11 @@ async def get_dagster_plus_scope(project_id: str):
             pass
         return []
 
-    deployments = _run_list(["deployment", "list"])
-    code_locations = _run_list(["code-location", "list"])
+    # Independent calls -- run concurrently instead of one after the other.
+    deployments, code_locations = await asyncio.gather(
+        _run_list(["deployment", "list"]),
+        _run_list(["code-location", "list"]),
+    )
     return {
         "deployments": deployments,
         "code_locations": code_locations,
@@ -502,7 +511,7 @@ async def pull_env_vars_from_plus(project_id: str, scope: DagsterPlusScope):
     be authenticated with `dg plus login` in the project's venv.
     """
     project_dir = _resolve_project_dir(project_id)
-    rc, stdout, stderr = _run_dg_env(project_dir, "pull", scope)
+    rc, stdout, stderr = await _run_dg_env(project_dir, "pull", scope)
     if rc != 0:
         detail = (stderr or stdout or "dg plus env pull failed").strip()
         # Common case: not logged in.
@@ -519,7 +528,7 @@ async def pull_env_vars_from_plus(project_id: str, scope: DagsterPlusScope):
 async def push_env_vars_to_plus(project_id: str, scope: DagsterPlusScope):
     """Push local `.env` vars to Dagster+ using `dg plus env push`."""
     project_dir = _resolve_project_dir(project_id)
-    rc, stdout, stderr = _run_dg_env(project_dir, "push", scope)
+    rc, stdout, stderr = await _run_dg_env(project_dir, "push", scope)
     if rc != 0:
         detail = (stderr or stdout or "dg plus env push failed").strip()
         if "login" in detail.lower() or "auth" in detail.lower():
@@ -557,7 +566,7 @@ async def scoped_fetch_from_plus(project_id: str, scope: DagsterPlusScope):
             cmd += ["--deployment", scope.deployment]
         if scope.code_location:
             cmd += ["--code-location", scope.code_location]
-        result = subprocess.run(cmd, cwd=str(project_dir), capture_output=True, text=True, timeout=60)
+        result = await asyncio.to_thread(subprocess.run, cmd, cwd=str(project_dir), capture_output=True, text=True, timeout=60)
         if result.returncode != 0:
             detail = (result.stderr or result.stdout or "dg plus env pull failed").strip()
             if "login" in detail.lower() or "auth" in detail.lower():
@@ -567,7 +576,7 @@ async def scoped_fetch_from_plus(project_id: str, scope: DagsterPlusScope):
                 # Fallback: read existing .env, run non-scoped pull, capture, restore.
                 env_file = project_dir / ".env"
                 original = env_file.read_text() if env_file.exists() else None
-                rc2, stdout2, stderr2 = _run_dg_env(project_dir, "pull", scope)
+                rc2, stdout2, stderr2 = await _run_dg_env(project_dir, "pull", scope)
                 if rc2 != 0:
                     raise HTTPException(status_code=400, detail=(stderr2 or stdout2).strip())
                 new_content = env_file.read_text() if env_file.exists() else ""
@@ -646,7 +655,7 @@ async def scoped_push_to_plus(project_id: str, request: ScopedPushRequest):
             cmd += ["--deployment", request.scope.deployment]
         if request.scope.code_location:
             cmd += ["--code-location", request.scope.code_location]
-        result = subprocess.run(cmd, cwd=str(project_dir), capture_output=True, text=True, timeout=60)
+        result = await asyncio.to_thread(subprocess.run, cmd, cwd=str(project_dir), capture_output=True, text=True, timeout=60)
         if result.returncode != 0:
             detail = (result.stderr or result.stdout or "dg plus env push failed").strip()
             if "--path" in detail or "unexpected" in detail.lower():
@@ -655,7 +664,7 @@ async def scoped_push_to_plus(project_id: str, request: ScopedPushRequest):
                 original = env_file.read_text() if env_file.exists() else None
                 env_file.write_text(content)
                 try:
-                    rc2, stdout2, stderr2 = _run_dg_env(project_dir, "push", request.scope)
+                    rc2, stdout2, stderr2 = await _run_dg_env(project_dir, "push", request.scope)
                     if rc2 != 0:
                         raise HTTPException(status_code=400, detail=(stderr2 or stdout2).strip())
                 finally:

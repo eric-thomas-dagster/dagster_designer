@@ -56,6 +56,11 @@ export function ComponentPalette({ onComponentClick }: ComponentPaletteProps) {
       return response.json() as Promise<{ components: Array<{ id: string; name: string; description: string; component_type: string; category: string; icon?: string }> }>;
     },
     enabled: !!currentProject,
+    // Already explicitly invalidated on every install/delete (this file's
+    // own mutations below) -- default staleTime: 0 meant every tab switch
+    // (Radix Tabs.Content unmounts inactive panels) forced a redundant
+    // refetch of something that hadn't changed.
+    staleTime: 60_000,
   });
 
   // Component types defined by the project's OWN code (a hand-written

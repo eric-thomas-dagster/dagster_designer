@@ -1,5 +1,6 @@
 """API endpoints for component registry."""
 
+import asyncio
 import json
 import subprocess
 import time
@@ -149,7 +150,7 @@ def _find_installed_schema_json(project, component_type: str) -> dict | None:
     return None
 
 
-def _get_component_schema_via_dg(project, component_type: str) -> "ComponentSchema | None":
+async def _get_component_schema_via_dg(project, component_type: str) -> "ComponentSchema | None":
     """Resolve a component's schema by asking the project's OWN `dg` CLI,
     instead of guessing from a checked-in schema.json (may not exist) or
     parsing Python source with `ast` (the pre-existing fallback below this
@@ -190,7 +191,12 @@ def _get_component_schema_via_dg(project, component_type: str) -> "ComponentSche
     env = project_subprocess_env(project_dir)
 
     try:
-        result = subprocess.run(
+        # Off the event loop -- this runs while holding the per-project
+        # defs lock (see this function's call site), so a synchronous
+        # subprocess.run here would block every OTHER request waiting on
+        # that same lock, not just this one.
+        result = await asyncio.to_thread(
+            subprocess.run,
             [str(dg_path.resolve()), "utils", "inspect-component", component_type, "--defs-yaml-json-schema"],
             cwd=str(work_dir),
             env=env,
@@ -332,7 +338,8 @@ async def list_project_custom_components(project_id: str):
     from ..services.asset_introspection_service import get_project_defs_lock
     async with get_project_defs_lock(project_id):
         try:
-            result = subprocess.run(
+            result = await asyncio.to_thread(
+                subprocess.run,
                 [str(dg_path.resolve()), "list", "components", "--json"],
                 cwd=str(work_dir),
                 env=env,
@@ -452,14 +459,25 @@ async def get_component(component_type: str, project_id: str | None = None):
             # standalone call returned nothing during a real project open.
             from ..services.asset_introspection_service import get_project_defs_lock
             async with get_project_defs_lock(project.id):
-                dg_schema = _get_component_schema_via_dg(project, component_type)
+                dg_schema = await _get_component_schema_via_dg(project, component_type)
             if dg_schema:
                 return dg_schema
 
             project_dir = project_service._get_project_dir(project)
-            # Use the actual directory name from the project, not just the sanitized name
-            # The directory name includes the project ID prefix (e.g., project_acaa97f2_my_test_project)
             directory_name = project.directory_name
+            # The on-disk Python package a component actually lives under is
+            # [tool.dg.project].root_module, which only equals Designer's own
+            # directory_name for projects Designer itself scaffolded. A
+            # quickstart-based project (e.g. "synthetic_commerce") keeps its
+            # own root_module regardless of what Designer names its project
+            # folder (e.g. "project_6a9e2754_synthetic_commerce_3") -- using
+            # directory_name here meant the flat/src candidates below never
+            # existed on disk, so a real, just-installed component's
+            # schema.json was never found. Confirmed live: a fresh
+            # synthetic_commerce install's schema.json sat at
+            # src/synthetic_commerce/components/synthetic_data_generator/
+            # while this was probing src/project_6a9e2754_synthetic_commerce_3/components/.
+            root_module = project_service.get_project_root_module(project)
 
             # Community components installed via `dagster-component add` land
             # in the Designer sandbox (`~/.dagster-designer/designer-locs/ds_<pid>/`),
@@ -478,6 +496,8 @@ async def get_component(component_type: str, project_id: str | None = None):
                 components_dir = flat
             elif (src := project_dir / "src" / directory_name / "components").exists():
                 components_dir = src
+            elif root_module != directory_name and (root_src := project_dir / "src" / root_module / "components").exists():
+                components_dir = root_src
 
             if components_dir:
                 # Locate the component's directory. Two supported shapes:

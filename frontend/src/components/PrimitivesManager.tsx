@@ -71,6 +71,12 @@ export function PrimitivesManager({
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [showLaunchpad, setShowLaunchpad] = useState(false);
   const [selectedJobName, setSelectedJobName] = useState<string>('');
+  // Threaded into Launchpad's assetKeys prop so it can check whether the
+  // job's own assets are partitioned -- a job targeting partitioned
+  // assets needs a --partition just like materializing one directly
+  // does (confirmed live), and the Launchpad had no way to know that for
+  // jobs at all before this carried its asset selection through.
+  const [selectedJobAssetKeys, setSelectedJobAssetKeys] = useState<string[]>([]);
   // Dagster+ projects can have many code locations -- this narrows every
   // tab (schedules/sensors/jobs/checks/freshness) to one at a time. Local
   // projects only ever have a single code location, so the picker stays
@@ -84,6 +90,10 @@ export function PrimitivesManager({
     queryKey: ['primitives', currentProject?.id],
     queryFn: () => currentProject ? primitivesApi.listAll(currentProject.id) : Promise.reject('No project'),
     enabled: !!currentProject,
+    // refetchPrimitives() (this file's own save/delete flows) always
+    // forces a fresh fetch regardless of staleTime -- this only stops
+    // the redundant automatic refetch on every remount.
+    staleTime: 60_000,
   });
 
   // Fetch all definitions (from dg list defs - includes everything)
@@ -91,6 +101,8 @@ export function PrimitivesManager({
     queryKey: ['definitions', currentProject?.id],
     queryFn: () => currentProject ? primitivesApi.getAllDefinitions(currentProject.id) : Promise.reject('No project'),
     enabled: !!currentProject,
+    // Backed by the dg-list-defs subprocess path -- same reasoning.
+    staleTime: 60_000,
   });
 
   // Combine refetch functions
@@ -194,15 +206,31 @@ export function PrimitivesManager({
     }
   };
 
-  const handleLaunchJob = (jobName: string) => {
-    setSelectedJobName(jobName);
+  // A job's target asset keys show up under two different shapes
+  // depending on how the job came to exist: a real, explicitly-authored
+  // JobComponent carries `selection` directly, but a job a
+  // CronScheduleComponent (or similar) implicitly creates for itself
+  // carries it nested under `attributes.asset_keys` instead -- confirmed
+  // live against both customer_master_job and daily_commerce_job (both
+  // schedule-generated), which had no top-level `selection` at all,
+  // silently leaving the Launchpad with nothing to check for partitions.
+  const jobAssetKeys = (primitive: PrimitiveItem): string[] => {
+    if (Array.isArray(primitive.selection)) return primitive.selection as string[];
+    const attrs = (primitive.attributes as Record<string, any> | undefined) || {};
+    if (Array.isArray(attrs.asset_keys)) return attrs.asset_keys as string[];
+    return [];
+  };
+
+  const handleLaunchJob = (primitive: PrimitiveItem) => {
+    setSelectedJobName(primitive.name);
+    setSelectedJobAssetKeys(jobAssetKeys(primitive));
     setShowLaunchpad(true);
   };
 
-  const handleLaunchpadSubmit = async (config?: Record<string, any>, tags?: Record<string, string>) => {
+  const handleLaunchpadSubmit = async (config?: Record<string, any>, tags?: Record<string, string>, partition?: string) => {
     if (!currentProject || !selectedJobName) return;
     try {
-      const result = await pipelinesApi.launch(currentProject.id, selectedJobName, config, tags);
+      const result = await pipelinesApi.launch(currentProject.id, selectedJobName, config, tags, undefined, undefined, partition);
       if (result.success) {
         notify.success(`Job ${selectedJobName} launched successfully!`);
       } else {
@@ -377,9 +405,9 @@ export function PrimitivesManager({
                       Job: {primitive.job_name}
                     </span>
                   )}
-                  {category === 'job' && primitive.selection && (
+                  {category === 'job' && jobAssetKeys(primitive).length > 0 && (
                     <span className="text-xs text-gray-500">
-                      Assets: {primitive.selection.length}
+                      Assets: {jobAssetKeys(primitive).length}
                     </span>
                   )}
                   {category === 'sensor' && primitive.job_name && (
@@ -447,7 +475,7 @@ export function PrimitivesManager({
                 )}
                 {category === 'job' && (
                   <button
-                    onClick={() => handleLaunchJob(primitive.name)}
+                    onClick={() => handleLaunchJob(primitive)}
                     className="p-1.5 text-blue-600 hover:bg-blue-50 rounded transition-colors"
                     title="Launch job"
                   >
@@ -738,6 +766,7 @@ export function PrimitivesManager({
           projectId={currentProject.id}
           mode="job"
           jobName={selectedJobName}
+          assetKeys={selectedJobAssetKeys}
           onLaunch={handleLaunchpadSubmit}
           defaultConfig={{}}
           configSchema={{}}

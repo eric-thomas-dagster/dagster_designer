@@ -1,5 +1,6 @@
 """API endpoints for DBT adapter management."""
 
+import asyncio
 import subprocess
 from pathlib import Path
 from typing import Dict, Any
@@ -270,7 +271,8 @@ async def install_adapter(project_id: str, request: InstallAdapterRequest):
         env = os.environ.copy()
         env["UV_PROJECT_ENVIRONMENT"] = str(venv_dir.absolute())
 
-        result = subprocess.run(
+        result = await asyncio.to_thread(
+            subprocess.run,
             [find_uv_binary("uv"), "pip", "install", package_name],
             cwd=str(project_dir.absolute()),
             capture_output=True,

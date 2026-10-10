@@ -1,5 +1,6 @@
 """API endpoints for dbt Cloud integration."""
 
+import asyncio
 from fastapi import APIRouter, HTTPException, BackgroundTasks
 from pydantic import BaseModel
 from typing import List, Dict, Optional, Any
@@ -325,9 +326,15 @@ async def _setup_dbt_cloud_import(
     # Add dbt dependencies
     print(f"[INFO] Adding dbt dependencies...")
 
-    # Add dagster-dbt
+    # Add dagster-dbt. Off the event loop -- this runs as a
+    # BackgroundTasks coroutine on the SAME event loop as every other
+    # request (not a separate thread/process), so a synchronous
+    # subprocess.run here silently freezes the whole backend for every
+    # other open project, invisibly to the user who triggered this import
+    # (their own request already returned 200 before this runs).
     try:
-        subprocess.run(
+        await asyncio.to_thread(
+            subprocess.run,
             [find_uv_binary("uv"), "add", "dagster-dbt"],
             cwd=project_dir,
             env=env,
@@ -345,7 +352,8 @@ async def _setup_dbt_cloud_import(
     # Add dbt adapters
     for adapter in detected_adapters:
         try:
-            subprocess.run(
+            await asyncio.to_thread(
+                subprocess.run,
                 [find_uv_binary("uv"), "add", adapter],
                 cwd=project_dir,
                 env=env,
@@ -363,7 +371,8 @@ async def _setup_dbt_cloud_import(
     # Set up virtual environment
     print(f"[INFO] Setting up virtual environment...")
     try:
-        subprocess.run(
+        await asyncio.to_thread(
+            subprocess.run,
             [find_uv_binary("uv"), "sync"],
             cwd=project_dir,
             env=env,
@@ -423,14 +432,20 @@ async def _clone_and_setup_dbt_project(
         return
 
     try:
-        # Clone repository
+        # Clone repository. Off the event loop (same reasoning as the `uv
+        # add`/`uv sync` calls above) -- a clone of a real repo can take
+        # real time, and this previously had no timeout at all, so a
+        # hanging clone (bad credentials prompting interactively, a dead
+        # remote) could block the WHOLE backend indefinitely.
         print(f"[INFO] Cloning {dbt_project_name} from {repo_url}...")
-        subprocess.run(
+        await asyncio.to_thread(
+            subprocess.run,
             ["git", "clone", repo_url, str(target_path)],
             cwd=str(target_path.parent),
             check=True,
             capture_output=True,
-            text=True
+            text=True,
+            timeout=300,
         )
         print(f"[INFO] Successfully cloned {dbt_project_name}")
 
