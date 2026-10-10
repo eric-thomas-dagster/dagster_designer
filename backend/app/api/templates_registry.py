@@ -2,6 +2,7 @@
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
+import asyncio
 import httpx
 import yaml
 import json
@@ -17,6 +18,22 @@ from ..services.genie_service import fetch_manifest
 router = APIRouter(prefix="/templates", tags=["templates"])
 
 MANIFEST_URL = "https://raw.githubusercontent.com/eric-thomas-dagster/dagster-component-templates/main/manifest.json"
+
+# Per-project lock serializing install_component_via_cli's uv-add-
+# triggering steps (the CLI's own internal `uv add` for the component's
+# requirements.txt, plus this endpoint's own safety-net requirements.txt
+# install below). Both mutate the SAME shared pyproject.toml/uv.lock for
+# the whole project -- two installs for the same project landing
+# concurrently (e.g. applyGeniePicks.ts applying a multi-pick Agent
+# Builder plan, now fired in parallel instead of one at a time) would
+# otherwise race on that file with no coordination at all. Mirrors the
+# same per-project-lock pattern designer_loc_service.py already uses for
+# its own concurrent-write hazards.
+_install_locks: dict[str, "asyncio.Lock"] = {}
+
+
+def _install_lock_for(project_id: str) -> "asyncio.Lock":
+    return _install_locks.setdefault(project_id, asyncio.Lock())
 
 # Common attribute-name-variant aliases we can rewrite silently instead of
 # dropping -- LLMs love to guess plausible-but-wrong field names (`path`
@@ -685,17 +702,32 @@ async def get_installed_component_schema(project_id: str, component_id: str):
         )
 
 
+# Manifest fetch + full per-component Pydantic validation (~900 entries)
+# is real, repeated work for content that changes rarely -- cached here so
+# get_component_details/install_component's own internal calls to
+# get_manifest() (just to look up ONE entry by id) don't each force a
+# fresh live GitHub round trip + full revalidation. The frontend's own
+# React Query cache (staleTime 5min/Infinity on 'community-templates-
+# manifest') already dedupes repeat calls WITHIN one browser session, but
+# every fresh app launch and every one of those internal server-side calls
+# still paid for this independently before.
+_manifest_cache: tuple[float, "TemplateManifest"] | None = None
+_MANIFEST_CACHE_TTL_SECONDS = 300
+
+
 @router.get("/manifest")
 async def get_manifest() -> TemplateManifest:
     """Fetch the component templates manifest from GitHub."""
+    global _manifest_cache
+    import time as _time
+    if _manifest_cache is not None and (_time.time() - _manifest_cache[0]) < _MANIFEST_CACHE_TTL_SECONDS:
+        return _manifest_cache[1]
     try:
         async with httpx.AsyncClient() as client:
-            # Add cache-busting headers to ensure fresh content from GitHub
-            headers = {
-                'Cache-Control': 'no-cache, no-store, must-revalidate',
-                'Pragma': 'no-cache'
-            }
-            response = await client.get(MANIFEST_URL, headers=headers, timeout=10.0)
+            # No explicit cache-busting headers -- this endpoint now has
+            # its own short TTL cache above, so there's no need to also
+            # defeat GitHub's own CDN caching on every cold fetch.
+            response = await client.get(MANIFEST_URL, timeout=10.0)
             response.raise_for_status()
             data = response.json()
 
@@ -732,12 +764,14 @@ async def get_manifest() -> TemplateManifest:
                     print(f"  - {invalid['id']}: {invalid['error']}")
 
             # Return manifest with only valid components
-            return TemplateManifest(
+            manifest = TemplateManifest(
                 version=data.get('version', '1.0.0'),
                 repository=data.get('repository', ''),
                 last_updated=data.get('last_updated', ''),
                 components=valid_components
             )
+            _manifest_cache = (_time.time(), manifest)
+            return manifest
     except httpx.HTTPError as e:
         raise HTTPException(
             status_code=502,
@@ -766,11 +800,14 @@ async def get_component_details(component_id: str):
         if not component:
             raise HTTPException(status_code=404, detail="Component not found")
 
-        # Fetch additional files
+        # Fetch additional files -- independent URLs, no reason to pay for
+        # 3 sequential round trips when they can run concurrently.
         async with httpx.AsyncClient() as client:
-            readme_response = await client.get(component.readme_url, timeout=10.0)
-            schema_response = await client.get(component.schema_url, timeout=10.0)
-            example_response = await client.get(component.example_url, timeout=10.0)
+            readme_response, schema_response, example_response = await asyncio.gather(
+                client.get(component.readme_url, timeout=10.0),
+                client.get(component.schema_url, timeout=10.0),
+                client.get(component.example_url, timeout=10.0),
+            )
 
             return {
                 "component": component.dict(),
@@ -1060,6 +1097,11 @@ async def install_component_via_cli(
         return cmd
 
     def _run(refresh: bool):
+        # Called via asyncio.to_thread below -- this shells out to `uvx`,
+        # which itself runs `uv add` for the component's requirements.txt,
+        # genuinely slow (seconds, longer on a cold uvx cache). A direct
+        # synchronous call here would freeze the WHOLE backend (every
+        # other open project's requests), not just this one.
         cmd = _build_cmd(refresh)
         print(f"[CLI Install] Running: {' '.join(cmd)} (cwd={project_dir})")
         try:
@@ -1104,61 +1146,71 @@ async def install_component_via_cli(
     # seconds" complaint. Try the fast (cached) path first; only pay for
     # --refresh on the specific "Component not found" failure it exists
     # to fix, not on every call.
-    result = _run(refresh=False)
-    stdout = result.stdout or ""
-    stderr = result.stderr or ""
-    if result.returncode != 0 and "Component not found" in (stdout + stderr):
-        print(f"[CLI Install] {component_id} not in cached manifest, retrying with --refresh")
-        result = _run(refresh=True)
+    # Both _run (via the CLI's own internal `uv add`) and the
+    # requirements.txt safety-net below mutate this project's shared
+    # pyproject.toml/uv.lock -- hold the per-project lock across both so
+    # two installs for the same project (e.g. a multi-pick Agent Builder
+    # plan applying several picks concurrently) serialize instead of
+    # racing on that file. Scoped to just this stretch, not the whole
+    # endpoint, so unrelated work (parsing the written defs.yaml, checking
+    # system deps) doesn't needlessly queue behind another install.
+    async with _install_lock_for(request.project_id):
+        result = await asyncio.to_thread(_run, False)
         stdout = result.stdout or ""
         stderr = result.stderr or ""
+        if result.returncode != 0 and "Component not found" in (stdout + stderr):
+            print(f"[CLI Install] {component_id} not in cached manifest, retrying with --refresh")
+            result = await asyncio.to_thread(_run, True)
+            stdout = result.stdout or ""
+            stderr = result.stderr or ""
 
-    print(f"[CLI Install] rc={result.returncode}\nstdout: {stdout}\nstderr: {stderr}")
+        print(f"[CLI Install] rc={result.returncode}\nstdout: {stdout}\nstderr: {stderr}")
 
-    if result.returncode != 0:
-        detail = (stderr or stdout or "unknown error").strip().splitlines()
-        raise HTTPException(status_code=500, detail=f"CLI install failed: {' | '.join(detail[-5:])}")
+        if result.returncode != 0:
+            detail = (stderr or stdout or "unknown error").strip().splitlines()
+            raise HTTPException(status_code=500, detail=f"CLI install failed: {' | '.join(detail[-5:])}")
 
-    # Safety-net dependency install. Some community templates ship a
-    # `requirements.txt` (e.g. airtable_ingestion needs dlt[airtable])
-    # that `dagster-component add --auto-install` doesn't reliably pick
-    # up — we've hit at least one case where the CLI reported success
-    # but the deps never made it into the venv, leaving Dagster with a
-    # ModuleNotFoundError on the next load. Read the template's
-    # requirements.txt and `uv add` anything listed. Errors here are
-    # non-fatal so a bad line doesn't kill the whole install.
-    try:
-        comp_dirs = list(project_dir.glob(f"src/*/components/{component_id}")) + list(project_dir.glob(f"*/components/{component_id}"))
-        req_path = None
-        for cd in comp_dirs:
-            candidate = cd / "requirements.txt"
-            if candidate.exists():
-                req_path = candidate
-                break
-        if req_path:
-            reqs: list[str] = []
-            for line in req_path.read_text().splitlines():
-                line = line.strip()
-                if not line or line.startswith("#"):
-                    continue
-                reqs.append(line)
-            if reqs:
-                print(f"[CLI Install] Installing template requirements: {reqs}")
-                add_result = subprocess.run(
-                    [find_uv_binary("uv"), "add", *reqs],
-                    cwd=str(project_dir),
-                    env=project_subprocess_env(project_dir),
-                    capture_output=True,
-                    text=True,
-                    timeout=300,
-                )
-                if add_result.returncode != 0:
-                    tail = (add_result.stderr or add_result.stdout or "").strip().splitlines()[-5:]
-                    print(f"[CLI Install] Warning: `uv add` for template deps failed: {' | '.join(tail)}")
-                else:
-                    print(f"[CLI Install] Installed template requirements successfully.")
-    except Exception as _dep_e:
-        print(f"[CLI Install] Warning: could not install template requirements: {_dep_e}")
+        # Safety-net dependency install. Some community templates ship a
+        # `requirements.txt` (e.g. airtable_ingestion needs dlt[airtable])
+        # that `dagster-component add --auto-install` doesn't reliably pick
+        # up — we've hit at least one case where the CLI reported success
+        # but the deps never made it into the venv, leaving Dagster with a
+        # ModuleNotFoundError on the next load. Read the template's
+        # requirements.txt and `uv add` anything listed. Errors here are
+        # non-fatal so a bad line doesn't kill the whole install.
+        try:
+            comp_dirs = list(project_dir.glob(f"src/*/components/{component_id}")) + list(project_dir.glob(f"*/components/{component_id}"))
+            req_path = None
+            for cd in comp_dirs:
+                candidate = cd / "requirements.txt"
+                if candidate.exists():
+                    req_path = candidate
+                    break
+            if req_path:
+                reqs: list[str] = []
+                for line in req_path.read_text().splitlines():
+                    line = line.strip()
+                    if not line or line.startswith("#"):
+                        continue
+                    reqs.append(line)
+                if reqs:
+                    print(f"[CLI Install] Installing template requirements: {reqs}")
+                    add_result = await asyncio.to_thread(
+                        subprocess.run,
+                        [find_uv_binary("uv"), "add", *reqs],
+                        cwd=str(project_dir),
+                        env=project_subprocess_env(project_dir),
+                        capture_output=True,
+                        text=True,
+                        timeout=300,
+                    )
+                    if add_result.returncode != 0:
+                        tail = (add_result.stderr or add_result.stdout or "").strip().splitlines()[-5:]
+                        print(f"[CLI Install] Warning: `uv add` for template deps failed: {' | '.join(tail)}")
+                    else:
+                        print(f"[CLI Install] Installed template requirements successfully.")
+        except Exception as _dep_e:
+            print(f"[CLI Install] Warning: could not install template requirements: {_dep_e}")
 
     # System-level (non-pip) dependencies, e.g. ocr_extractor needs the
     # `tesseract` BINARY -- pip/uv can install pytesseract (the Python
@@ -1205,6 +1257,32 @@ async def install_component_via_cli(
             status_code=500,
             detail=f"defs.yaml at {defs_yaml_path} has no `type:` field to return",
         )
+
+    # Fire-and-forget: warm the dg-introspected schema cache for this type
+    # RIGHT NOW, concurrently with everything else this endpoint still has
+    # to do (and with the response round-trip back to the frontend, which
+    # opens ComponentConfigModal and fires its own GET /components/{type}
+    # a beat later). That second call is a genuinely slow COLD path for a
+    # just-installed type (dg has to actually import the freshly-added
+    # package and run model_json_schema() on it) -- confirmed live as the
+    # "add a data source, component modal takes a while to show fields"
+    # complaint. Not awaited: doesn't delay this response at all, and
+    # whichever caller gets there first (this warmup or the modal's own
+    # fetch) just does the real work once -- same cache, see
+    # _get_component_schema_via_dg / _dg_component_schema_cache in
+    # components.py. Best-effort only: if this fails or the project
+    # disappears mid-flight, the modal's own fetch still works exactly as
+    # it always has, just without the head start.
+    async def _warm_schema_cache() -> None:
+        try:
+            from .components import _get_component_schema_via_dg
+            from ..services.asset_introspection_service import get_project_defs_lock
+            async with get_project_defs_lock(request.project_id):
+                await _get_component_schema_via_dg(project, component_type)
+        except Exception as e:
+            print(f"[CLI Install] Schema cache warmup failed (non-fatal): {e}")
+
+    asyncio.create_task(_warm_schema_cache())
 
     # Persist component_type where /configure/{component_id} (used by the
     # Ingestions "Save" flow) looks for it. manifest.yaml is a

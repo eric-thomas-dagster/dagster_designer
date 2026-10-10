@@ -27,6 +27,41 @@ function isDataFrameType(t: unknown): boolean {
   return typeof t === 'string' && t.toLowerCase().includes('dataframe');
 }
 
+// Generic-field grouping: many catalog components independently declare
+// the same handful of cross-cutting concerns (freshness policy, partition
+// config, retry policy, metadata) as plain schema fields, which rendered
+// as one long undifferentiated list -- confirmed directly against a real
+// ingestion component's schema (freshness_max_lag_minutes/freshness_cron,
+// partition_type/partition_start/partition_values/dynamic_partition_name/
+// partition_dimensions, retry_policy_max_retries/retry_policy_delay_
+// seconds/retry_policy_backoff, description/group_name/owners/asset_tags/
+// kinds, all flat and unlabeled). Classifying by NAME PATTERN (not a
+// per-component allowlist) means this groups correctly for every
+// component that follows these common conventions, not just the one it
+// was found on. Fields that don't match any pattern stay in the main,
+// ungrouped area -- this only tidies the common, recurring concerns, not
+// a component's own unique configuration.
+type GenericFieldGroupKey = 'metadata' | 'freshness' | 'partition' | 'retry' | 'preview';
+
+const GENERIC_FIELD_GROUPS: Array<{ key: GenericFieldGroupKey; label: string; test: (name: string) => boolean }> = [
+  { key: 'freshness', label: 'Freshness policy', test: (n) => /^freshness_/.test(n) },
+  { key: 'partition', label: 'Partitioning', test: (n) => /^partition_/.test(n) || n === 'dynamic_partition_name' },
+  { key: 'retry', label: 'Retry policy', test: (n) => /^retry_policy_|^retry_/.test(n) },
+  { key: 'preview', label: 'Preview', test: (n) => n === 'include_preview_metadata' || n === 'preview_rows' },
+  {
+    key: 'metadata',
+    label: 'Metadata',
+    test: (n) => ['description', 'group_name', 'owners', 'tags', 'asset_tags', 'kinds', 'column_lineage'].includes(n),
+  },
+];
+
+function classifyGenericField(fieldName: string): GenericFieldGroupKey | null {
+  for (const group of GENERIC_FIELD_GROUPS) {
+    if (group.test(fieldName)) return group.key;
+  }
+  return null;
+}
+
 // A component's single-asset identifier can be a plain string
 // (asset_name convention, the common case) OR a list of path segments
 // (some components -- confirmed live with a real SFTP-ingestion
@@ -645,7 +680,23 @@ export function ComponentConfigModal({
       for (const source of removed) {
         await projectsApi.removeCustomLineage(currentProject.id, source, assetName);
       }
+
+      // A new/removed dependency can introduce a cycle or dangling
+      // reference that breaks the whole project's load. Validate and
+      // reverse the delta if so.
+      const { validateProjectOrRollback } = await import('@/lib/validateProjectOrRollback');
+      const result = await validateProjectOrRollback(currentProject.id, async () => {
+        for (const source of added) {
+          await projectsApi.removeCustomLineage(currentProject.id, source, assetName);
+        }
+        for (const source of removed) {
+          await projectsApi.addCustomLineage(currentProject.id, source, assetName);
+        }
+      });
       await loadProject(currentProject.id);
+      if (!result.ok) {
+        notify.error(`Dependencies would have broken the project, so they were undone:\n${result.error}`);
+      }
     } catch (error: any) {
       notify.error(
         `Dependencies: ${error?.response?.data?.detail ?? error?.message ?? error}`
@@ -682,7 +733,21 @@ export function ComponentConfigModal({
         owners: commonOwners.trim() ? commonOwners.split(',').map((o) => o.trim()).filter(Boolean) : null,
         tags: commonTags.trim() ? parseTagsInput(commonTags) : null,
       });
+
+      const { validateProjectOrRollback } = await import('@/lib/validateProjectOrRollback');
+      const result = await validateProjectOrRollback(currentProject.id, async () => {
+        await projectsApi.setAssetFieldOverrides(currentProject.id, assetName, {
+          group_name: initialCommonFields.groupName.trim() || null,
+          owners: initialCommonFields.owners.trim()
+            ? initialCommonFields.owners.split(',').map((o) => o.trim()).filter(Boolean)
+            : null,
+          tags: initialCommonFields.tags.trim() ? parseTagsInput(initialCommonFields.tags) : null,
+        });
+      });
       await loadProject(currentProject.id);
+      if (!result.ok) {
+        notify.error(`Common fields would have broken the project, so they were undone:\n${result.error}`);
+      }
     } catch (error: any) {
       notify.error(
         `Common fields: ${error?.response?.data?.detail ?? error?.message ?? error}`
@@ -2655,42 +2720,86 @@ export function ComponentConfigModal({
               );
               const hasUnifiedSourcePicker = !!properties.source && !!properties.upstream_asset_key;
               if (hasUnifiedSourcePicker) claimedFieldNames.add('upstream_asset_key');
-              return Object.entries(properties).map(([fieldName, fieldSchema]: [string, any]) => {
-              if (claimedFieldNames.has(fieldName) || commonFieldNames.has(fieldName)) {
-                return null;
-              }
-              if (fieldSchema['x-dagster-destination-fields']) {
+
+              const renderGenericFieldEntry = (fieldName: string, fieldSchema: any) => {
+                if (fieldSchema['x-dagster-destination-fields']) {
+                  return (
+                    <div key={fieldName}>
+                      {renderDestinationCredentialsField(fieldName, fieldSchema, fieldSchema['x-dagster-destination-fields'])}
+                    </div>
+                  );
+                }
+                const isUnifiedSource = fieldName === 'source' && hasUnifiedSourcePicker;
+                // Disambiguates from the SEPARATE `source.resource_key` (the
+                // warehouse to query FROM, labeled "Warehouse resource"
+                // inside the Data source box's SQL mode below) -- without
+                // this, a component like BrazeSinkComponent literally shows
+                // two fields both labeled bare "resource_key" with nothing
+                // to tell them apart, confirmed confusing live.
+                const isDestinationResourceKey = fieldName === 'resource_key' && fieldSchema.type !== 'object' && !isResourceComponentType;
                 return (
-                  <div key={fieldName}>
-                    {renderDestinationCredentialsField(fieldName, fieldSchema, fieldSchema['x-dagster-destination-fields'])}
-                  </div>
-                );
-              }
-              const isUnifiedSource = fieldName === 'source' && hasUnifiedSourcePicker;
-              // Disambiguates from the SEPARATE `source.resource_key` (the
-              // warehouse to query FROM, labeled "Warehouse resource"
-              // inside the Data source box's SQL mode below) -- without
-              // this, a component like BrazeSinkComponent literally shows
-              // two fields both labeled bare "resource_key" with nothing
-              // to tell them apart, confirmed confusing live.
-              const isDestinationResourceKey = fieldName === 'resource_key' && fieldSchema.type !== 'object' && !isResourceComponentType;
-              return (
-              <div key={fieldName}>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
-                  {isUnifiedSource ? 'Data source' : isDestinationResourceKey ? 'Destination resource' : fieldName}
-                  {componentSchema.schema?.required?.includes(fieldName) && (
-                    <span className="text-red-500 ml-1">*</span>
+                <div key={fieldName}>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    {isUnifiedSource ? 'Data source' : isDestinationResourceKey ? 'Destination resource' : fieldName}
+                    {componentSchema.schema?.required?.includes(fieldName) && (
+                      <span className="text-red-500 ml-1">*</span>
+                    )}
+                  </label>
+                  {(isUnifiedSource || fieldSchema.description) && (
+                    <p className="text-xs text-gray-500 mb-1">
+                      {isUnifiedSource ? 'Where this asset\'s data comes from -- pick exactly one.' : fieldSchema.description}
+                    </p>
                   )}
-                </label>
-                {(isUnifiedSource || fieldSchema.description) && (
-                  <p className="text-xs text-gray-500 mb-1">
-                    {isUnifiedSource ? 'Where this asset\'s data comes from -- pick exactly one.' : fieldSchema.description}
-                  </p>
-                )}
-                {renderField(fieldName, fieldSchema)}
-              </div>
+                  {renderField(fieldName, fieldSchema)}
+                </div>
+                );
+              };
+
+              // Bucket by recognized group (see classifyGenericField) --
+              // special-cased fields (destination-credentials, the unified
+              // source picker, `source` itself) always stay in the main,
+              // ungrouped area regardless of name, since they're the
+              // component's actual data-shape fields, not a cross-cutting
+              // concern shared across the catalog.
+              const mainEntries: [string, any][] = [];
+              const grouped: Record<GenericFieldGroupKey, [string, any][]> = {
+                metadata: [], freshness: [], partition: [], retry: [], preview: [],
+              };
+              for (const [fieldName, fieldSchema] of Object.entries(properties) as [string, any][]) {
+                if (claimedFieldNames.has(fieldName) || commonFieldNames.has(fieldName)) continue;
+                const isSpecial = !!fieldSchema['x-dagster-destination-fields'] ||
+                  (fieldName === 'source' && hasUnifiedSourcePicker) ||
+                  (fieldName === 'resource_key' && fieldSchema.type !== 'object' && !isResourceComponentType);
+                const groupKey = isSpecial ? null : classifyGenericField(fieldName);
+                if (groupKey) grouped[groupKey].push([fieldName, fieldSchema]);
+                else mainEntries.push([fieldName, fieldSchema]);
+              }
+
+              const hasValue = (fieldName: string) => {
+                const v = (formData as Record<string, any>)[fieldName];
+                return v !== undefined && v !== null && v !== '' && v !== false &&
+                  !(Array.isArray(v) && v.length === 0);
+              };
+
+              return (
+                <>
+                  {mainEntries.map(([fieldName, fieldSchema]) => renderGenericFieldEntry(fieldName, fieldSchema))}
+                  {GENERIC_FIELD_GROUPS.filter((g) => grouped[g.key].length > 0).map((g) => (
+                    <details
+                      key={g.key}
+                      className="border border-gray-200 rounded-md"
+                      open={grouped[g.key].some(([fieldName]) => hasValue(fieldName))}
+                    >
+                      <summary className="cursor-pointer text-sm font-medium text-gray-700 hover:text-gray-900 select-none px-3 py-2 bg-gray-50 rounded-md">
+                        {g.label}
+                      </summary>
+                      <div className="p-3 space-y-3">
+                        {grouped[g.key].map(([fieldName, fieldSchema]) => renderGenericFieldEntry(fieldName, fieldSchema))}
+                      </div>
+                    </details>
+                  ))}
+                </>
               );
-            });
             })()}
               </>
             )}

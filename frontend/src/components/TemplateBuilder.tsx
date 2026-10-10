@@ -57,6 +57,9 @@ export function TemplateBuilder({ initialTab, initialAssetKey, hideSubNav = fals
     queryKey: ['primitives', currentProject?.id],
     queryFn: () => currentProject ? primitivesApi.listAll(currentProject.id) : Promise.reject('No project'),
     enabled: !!currentProject && needsPrimitives,
+    // Already explicitly invalidated on save elsewhere in this file --
+    // default staleTime: 0 forced a refetch on every remount for nothing.
+    staleTime: 60_000,
   });
 
   // Fetch all definitions (from dg list defs - includes all jobs, not just template-created)
@@ -64,6 +67,10 @@ export function TemplateBuilder({ initialTab, initialAssetKey, hideSubNav = fals
     queryKey: ['definitions', currentProject?.id],
     queryFn: () => currentProject ? primitivesApi.getAllDefinitions(currentProject.id) : Promise.reject('No project'),
     enabled: !!currentProject && needsPrimitives,
+    // Backed by the dg-list-defs subprocess path -- already explicitly
+    // invalidated on save, so stale-by-default just pays for a subprocess
+    // round trip on every remount.
+    staleTime: 60_000,
   });
 
   // Merge template-created jobs with discovered jobs from definitions
@@ -88,6 +95,7 @@ export function TemplateBuilder({ initialTab, initialAssetKey, hideSubNav = fals
     queryKey: ['installed-components', currentProject?.id],
     queryFn: () => currentProject ? templatesApi.getInstalled(currentProject.id) : Promise.reject('No project'),
     enabled: !!currentProject,
+    staleTime: 60_000,
   });
 
   // Filter for sensor components only
@@ -479,6 +487,36 @@ ${generateYamlAttributes(communityAssetCheckAttributes, 1)}`;
           loadProject(currentProject.id);
         }
       } else {
+        // A new schedule/job/sensor can still break the whole project
+        // (Dagster's all-or-nothing definitions load) -- e.g. a schedule
+        // naming a job_name that doesn't actually exist, or a sensor
+        // whose asset_keys reference something invalid. Validate and
+        // undo via the existing delete-primitive endpoint if so, same
+        // pattern used for the Agent Builder's installs and the
+        // attach-to-existing dropdowns.
+        if (currentProject && ['schedule', 'job', 'sensor', 'asset_check', 'freshness_policy'].includes(activeTab)) {
+          const primitiveName: Record<string, string> = {
+            schedule: schedule.schedule_name,
+            job: job.job_name,
+            sensor: sensor.sensor_name,
+            asset_check: assetCheck.check_name,
+            freshness_policy: freshnessPolicy.policy_name,
+          };
+          const name = primitiveName[activeTab];
+          const { validateProjectOrRollback } = await import('@/lib/validateProjectOrRollback');
+          const result = await validateProjectOrRollback(currentProject.id, async () => {
+            await primitivesApi.delete(
+              currentProject.id,
+              activeTab as 'schedule' | 'job' | 'sensor' | 'asset_check' | 'freshness_policy',
+              name,
+            );
+          });
+          if (!result.ok) {
+            notify.error(`This ${activeTab} would have broken the project, so it was undone:\n${result.error}`);
+            return;
+          }
+        }
+
         notify.success(`Saved to ${data.file_path}`);
 
         // Invalidate primitives and definitions cache so jobs/schedules/sensors appear immediately

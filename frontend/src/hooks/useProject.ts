@@ -16,6 +16,15 @@ interface ProjectStore {
   dependencyInstallStatus: 'idle' | 'installing' | 'success' | 'error';
   dependencyInstallError: string | null;
   dependencyInstallOutput: string;
+  // `dg dev` takes a real, visible amount of time to boot (cold interpreter
+  // + loading the whole component catalog -- 5-15s is typical, longer for
+  // a big catalog). Without a persistent indicator, clicking "Start dg
+  // dev" just shows a toast that vanishes in a few seconds, then the Runs/
+  // Ingestions pages look empty with no explanation until the server
+  // happens to be ready -- confirmed live, reported as "I saw nothing...
+  // runs EVENTUALLY populated." Mirrors assetGenerationStatus's shape.
+  devServerStartStatus: 'idle' | 'starting' | 'success' | 'error';
+  devServerStartError: string | null;
 
   // Actions
   loadProject: (id: string) => Promise<void>;
@@ -30,6 +39,7 @@ interface ProjectStore {
   dismissAssetGenerationStatus: () => void;
   dismissValidationStatus: () => void;
   dismissDependencyInstallStatus: () => void;
+  dismissDevServerStartStatus: () => void;
   pollDependencyStatus: (projectId: string) => Promise<void>;
 }
 
@@ -38,6 +48,15 @@ interface ProjectStore {
 // without this, arranging + reloading loses the arrangement.
 let _graphSaveTimer: ReturnType<typeof setTimeout> | null = null;
 const GRAPH_SAVE_DELAY_MS = 1500;
+// Snapshot of the graph as it was before the CURRENT burst of edits began
+// (captured once, on the first call of a burst -- not on every keystroke/
+// drag event, which would otherwise make it chase its own tail and always
+// equal the latest, already-possibly-broken value). Used to roll back a
+// confirmed-invalid write at the end of the burst: this is the one place
+// updateGraph's callers (partition config, freshness policy fields, custom
+// lineage drags, node drags) all funnel through, so validating here once
+// per debounced flush catches all of them without validating per-keystroke.
+let _graphBeforeBurst: { nodes: GraphNode[]; edges: GraphEdge[] } | null = null;
 
 export const useProjectStore = create<ProjectStore>((set, get) => ({
   currentProject: null,
@@ -51,6 +70,8 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   dependencyInstallStatus: 'idle',
   dependencyInstallError: null,
   dependencyInstallOutput: '',
+  devServerStartStatus: 'idle',
+  devServerStartError: null,
 
   loadProject: async (id: string) => {
     // Clear currentProject when switching to a different project so
@@ -188,6 +209,14 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     const { currentProject } = get();
     if (!currentProject) return;
 
+    // Only capture at the start of a new burst (no save already pending) --
+    // otherwise this would overwrite the snapshot with each intermediate
+    // keystroke/drag and rollback would restore to the wrong (still mid-
+    // edit) state instead of the state before the whole burst started.
+    if (!_graphSaveTimer) {
+      _graphBeforeBurst = currentProject.graph as { nodes: GraphNode[]; edges: GraphEdge[] };
+    }
+
     // Update local state immediately.
     const updatedProject = {
       ...currentProject,
@@ -209,6 +238,8 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
         useUnsavedChangesStore.getState().setDirty('graph', false);
         return;
       }
+      const graphBeforeBurst = _graphBeforeBurst;
+      _graphBeforeBurst = null;
       try {
         // Strip fields GET /projects/{id} re-derives fresh every request
         // (_merge_local_asset_status / _merge_local_last_run_status /
@@ -232,6 +263,29 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
           edges: latest.graph.edges,
         };
         await projectsApi.update(latest.id, { graph: sanitizedGraph });
+
+        // A partition_config/freshness_policy/custom-lineage edit buried in
+        // this graph write can break the whole project's load just like
+        // any other component write (Dagster's definitions build is
+        // all-or-nothing) -- e.g. a malformed cron string or an inline
+        // freshness policy missing a required field. Node-position-only
+        // drags validate too (the cheapest possible outcome: a pass), since
+        // this one spot is the only place ALL graph writes funnel through,
+        // and that's a better trade than wiring per-keystroke validation
+        // into every individual field's onChange handler.
+        if (graphBeforeBurst) {
+          const { validateProjectOrRollback } = await import('@/lib/validateProjectOrRollback');
+          const result = await validateProjectOrRollback(latest.id, async () => {
+            await projectsApi.update(latest.id, { graph: graphBeforeBurst });
+            const stillCurrent = get().currentProject;
+            if (stillCurrent && stillCurrent.id === latest.id) {
+              set({ currentProject: { ...stillCurrent, graph: graphBeforeBurst } });
+            }
+          });
+          if (!result.ok) {
+            set({ validationStatus: 'error', validationError: result.error || 'Validation failed' });
+          }
+        }
       } catch (e) {
         console.warn('[useProject] Failed to auto-save graph:', e);
       } finally {
@@ -312,6 +366,10 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
 
   dismissDependencyInstallStatus: () => {
     set({ dependencyInstallStatus: 'idle', dependencyInstallError: null });
+  },
+
+  dismissDevServerStartStatus: () => {
+    set({ devServerStartStatus: 'idle', devServerStartError: null });
   },
 
   pollDependencyStatus: async (projectId: string) => {

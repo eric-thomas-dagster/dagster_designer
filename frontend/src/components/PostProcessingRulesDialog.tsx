@@ -82,7 +82,24 @@ export function PostProcessingRulesDialog({ open, onOpenChange }: PostProcessing
           owners: r.owners.trim() ? r.owners.split(',').map((o) => o.trim()).filter(Boolean) : null,
           tags: r.tags.trim() ? parseTagsInput(r.tags) : null,
         }));
+      const previousRules = currentProject.asset_post_processing_rules || [];
       await projectsApi.setPostProcessingRules(currentProject.id, rules);
+
+      // A rule's `target` is a real Dagster selector expression (see the
+      // class doc comment) -- unlike the single-asset "Common fields"
+      // editors, a malformed one here isn't normalized/guarded server-side
+      // and can break the whole project's load. Validate and restore the
+      // prior rules list if so.
+      const { validateProjectOrRollback } = await import('@/lib/validateProjectOrRollback');
+      const result = await validateProjectOrRollback(currentProject.id, async () => {
+        await projectsApi.setPostProcessingRules(currentProject.id, previousRules);
+      });
+      if (!result.ok) {
+        await loadProject(currentProject.id);
+        notify.error(`These rules would have broken the project, so they were undone:\n${result.error}`);
+        return;
+      }
+
       await loadProject(currentProject.id);
       notify.success(`Saved ${rules.length} post-processing rule(s).`);
       onOpenChange(false);

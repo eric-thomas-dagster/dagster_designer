@@ -26,6 +26,27 @@ from ..services import promotion_config
 
 router = APIRouter(prefix="/projects", tags=["projects"])
 
+
+def _row_count_from_metadata(metadata: list[dict] | None) -> int | None:
+    """Pull a row count out of a materialization's own metadata, if the
+    component attached one -- confirmed live: real materializations here
+    (SyntheticDataGeneratorComponent and others) DO attach a
+    `dagster/row_count` entry, contradicting an earlier assumption in this
+    codebase that a materialize "can't cheaply report" a row count (true
+    for `dg launch` itself, false for what the component chooses to log).
+    `metadata` is the already-normalized list extract_run_metadata.py
+    produces ({label, description, type, value} dicts, type as the
+    lowercase int/float/text/... enum -- see its own docstring), not raw
+    Dagster MetadataValue objects.
+    """
+    for entry in (metadata or []):
+        if entry.get("label") == "dagster/row_count" and entry.get("type") in ("int", "float"):
+            try:
+                return int(entry["value"])
+            except (TypeError, ValueError, KeyError):
+                continue
+    return None
+
 # Tracks the background asset-generation step of _install_dependencies_and_generate_assets
 # separately from dependency-status, which only covers `uv sync`. The frontend used to
 # infer "asset generation is done" from heuristics on the saved project (node count,
@@ -2363,7 +2384,7 @@ async def validate_project(project_id: str):
 
     # Check if asset introspection/generation is currently in progress
     # Don't validate while assets are being generated as it may fail or timeout
-    from ..services.asset_introspection_service import asset_introspection_service
+    from ..services.asset_introspection_service import asset_introspection_service, get_recent_run_result, record_last_run_result
     if asset_introspection_service._is_running(project_id):
         return {
             "valid": None,
@@ -2371,6 +2392,27 @@ async def validate_project(project_id: str):
             "message": "Asset generation is in progress. Validation will be available once assets are generated.",
             "details": None
         }
+
+    # A `dg list defs` just ran for this exact project a moment ago --
+    # most commonly regenerate-assets called right before this endpoint by
+    # the same write (every validate-then-rollback call site in the app
+    # does this), but also a previous call to this same endpoint. It's the
+    # same all-or-nothing definitions load either way, so re-running the
+    # full subprocess here would just reproduce the identical answer at
+    # real cost (seconds at minimum, same 180s ceiling on a large project).
+    # Short TTL (8s) so a standalone "Validate Project" click still gets a
+    # genuinely fresh check in the common case where nothing just ran.
+    recent = get_recent_run_result(project_id)
+    if recent is not None:
+        recent_valid, recent_error = recent
+        if recent_valid:
+            return {
+                "valid": True,
+                "message": "Project validation successful! All component definitions are valid. (Reused a check that just ran moments ago for this project.)",
+                "details": None,
+            }
+        else:
+            return {"valid": False, "error": recent_error, "details": {"validation_error": recent_error}}
 
     try:
         # Run dg list defs to validate the project. Off the event loop --
@@ -2435,6 +2477,7 @@ async def validate_project(project_id: str):
             # Return full output (no truncation)
             stdout_full = result.stdout if result.stdout else "No output"
 
+            record_last_run_result(project_id, True, None)
             return {
                 "valid": True,
                 "message": "Project validation successful! All component definitions are valid." +
@@ -2510,6 +2553,7 @@ async def validate_project(project_id: str):
                             _seen.add(cid)
                             failing_components.append(cid)
 
+            record_last_run_result(project_id, False, validation_error or "Project validation failed. Component definitions have errors.")
             return {
                 "valid": False,
                 "error": "Project validation failed. Component definitions have errors.",
@@ -2521,12 +2565,14 @@ async def validate_project(project_id: str):
             }
 
     except subprocess.TimeoutExpired:
+        record_last_run_result(project_id, False, "Validation timed out after 180 seconds")
         return {
             "valid": False,
             "error": "Validation timed out after 180 seconds",
             "details": None
         }
     except Exception as e:
+        record_last_run_result(project_id, False, f"Validation error: {str(e)}")
         return {
             "valid": False,
             "error": f"Validation error: {str(e)}",
@@ -2619,7 +2665,15 @@ async def materialize_assets(project_id: str, request: MaterializeRequest):
 
         # Add tags if provided
         if request.tags:
-            import json
+            # `json` is already imported at module level -- a redundant
+            # local `import json` used to live here, which made Python
+            # treat `json` as local to this WHOLE function (import
+            # anywhere in a function body does that, regardless of which
+            # branch runs). Any materialize call that didn't set tags took
+            # a path that still unconditionally called json.loads() later
+            # (extracting run metadata) and crashed with "cannot access
+            # local variable 'json'" -- confirmed live, silently breaking
+            # both metadata and run_id extraction for the common case.
             # Tags are passed as part of run config in Dagster
             # We'll need to merge them into the config
             tags_config = {"tags": request.tags}
@@ -2693,11 +2747,28 @@ async def materialize_assets(project_id: str, request: MaterializeRequest):
         # preview endpoint records those separately on next preview.
         try:
             from ..services.ingestion_history import record_event
-            asset_keys_logged = request.asset_keys or [
-                node.data.get("asset_key", node.id)
-                for node in project.graph.nodes
-                if node.node_kind == "asset"
-            ]
+            # A FAILED call with no explicit asset_keys ("Materialize All")
+            # most often means `dg launch` never got past loading the code
+            # location at all (e.g. a newly-scaffolded, not-yet-configured
+            # component with a required field unset) -- no asset actually
+            # attempted to run. Fanning a "failure" event out to literally
+            # every asset in the project in that case is actively
+            # misleading: it reads as "every ingestion was just run and
+            # failed" on the Ingestions tab, even for assets the user never
+            # touched. Confirmed live: a brand-new project showed all 7
+            # assets as "failed" moments after creation, from one person
+            # clicking "Materialize All Assets" while exploring the Actions
+            # menu -- not from running anything asset-specific. An explicit,
+            # scoped asset_keys selection that fails IS attributable to
+            # those specific assets, so that case still logs as before.
+            if not success and not request.asset_keys:
+                asset_keys_logged = []
+            else:
+                asset_keys_logged = request.asset_keys or [
+                    node.data.get("asset_key", node.id)
+                    for node in project.graph.nodes
+                    if node.node_kind == "asset"
+                ]
             duration_ms = None
             try:
                 duration_ms = int((time.time() - _materialize_started_at) * 1000)
@@ -2712,6 +2783,7 @@ async def materialize_assets(project_id: str, request: MaterializeRequest):
             # layered on top of the real result, same "logging must never
             # break the caller" spirit as record_event's own try/except.
             metadata_by_key: dict[str, list[dict]] = {}
+            run_id_by_key: dict[str, str] = {}
             if success:
                 try:
                     meta_result = await asyncio.to_thread(
@@ -2734,6 +2806,8 @@ async def materialize_assets(project_id: str, request: MaterializeRequest):
                         for ak, v in parsed.items():
                             if isinstance(v, dict) and v.get("metadata"):
                                 metadata_by_key[ak] = v["metadata"]
+                            if isinstance(v, dict) and v.get("run_id"):
+                                run_id_by_key[ak] = v["run_id"]
                 except Exception as _meta_e:
                     print(f"[materialize] Warning: Failed to extract run metadata: {_meta_e}")
 
@@ -2744,6 +2818,8 @@ async def materialize_assets(project_id: str, request: MaterializeRequest):
                     asset_key=ak,
                     duration_ms=duration_ms,
                     status="success" if success else "failure",
+                    run_id=run_id_by_key.get(ak),
+                    rows=_row_count_from_metadata(metadata_by_key.get(ak)),
                     metadata=metadata_by_key.get(ak),
                 )
         except Exception as _log_e:
@@ -3695,6 +3771,10 @@ async def materialize_asset_partition(project_id: str, asset_key: str, partition
     return MaterializePartitionResponse(success=False, message=message)
 
 
+_partition_info_cache: dict[tuple[str, str], tuple[float, dict]] = {}
+_PARTITION_INFO_CACHE_TTL_SECONDS = 300
+
+
 @router.get("/{project_id}/assets/{asset_key:path}/partitions", response_model=PartitionInfoResponse)
 async def get_asset_partitions(project_id: str, asset_key: str):
     """Get partition definition for an asset.
@@ -3706,6 +3786,8 @@ async def get_asset_partitions(project_id: str, asset_key: str):
     Returns:
         PartitionInfoResponse with partition definition info
     """
+    import time as _time
+
     project = project_service.get_project(project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -3713,6 +3795,23 @@ async def get_asset_partitions(project_id: str, asset_key: str):
     project_dir = project_service._get_project_dir(project)
     if not project_dir.exists():
         raise HTTPException(status_code=404, detail="Project directory not found")
+
+    # A partition definition is static (compiled from the component's own
+    # code, not runtime data) and this call is HEAVY -- confirmed live, 30s
+    # for this project's large installed component catalog, since
+    # scripts.show_partitions has to import the whole thing just like a
+    # `dg launch`/`dg list defs` cold start does. Every caller (GraphEditor's
+    # materialize-partition-check, IngestionsPanel's handleRun,
+    # AssetDetailPage's PartitionsTab info query, the Launchpad) paid that
+    # cost on every single call -- reported live as the Launchpad feeling
+    # "slow all around" across open + partition-list + launch, of which
+    # this 30s was one whole leg. Cache per (project, asset); same TTL
+    # convention as asset introspection's own cache, just longer since this
+    # changes far less often (only when the component's own config does).
+    cache_key = (project_id, asset_key)
+    cached = _partition_info_cache.get(cache_key)
+    if cached and (_time.time() - cached[0]) < _PARTITION_INFO_CACHE_TTL_SECONDS:
+        return PartitionInfoResponse(**cached[1])
 
     # Get the project module name
     project_module = project_service.get_project_root_module(project)
@@ -3756,7 +3855,13 @@ async def get_asset_partitions(project_id: str, asset_key: str):
                 env=env,
                 capture_output=True,
                 text=True,
-                timeout=30,
+                # Was 30s -- confirmed live this call came in at 30.159s
+                # against this project's catalog, meaning the ORIGINAL
+                # timeout was already being brushed up against, not
+                # comfortably inside it. Matches the realistic worst case
+                # already observed elsewhere for this same kind of cold
+                # catalog import (dg launch/dg list defs: 30-70s+).
+                timeout=90,
             )
 
         if result.returncode != 0:
@@ -3789,6 +3894,7 @@ async def get_asset_partitions(project_id: str, asset_key: str):
                 detail=f"No JSON found in output: {stdout[:200]}"
             )
 
+        _partition_info_cache[cache_key] = (_time.time(), partition_info)
         return PartitionInfoResponse(**partition_info)
 
     except subprocess.TimeoutExpired:
@@ -4127,6 +4233,41 @@ async def _run_backfill_in_background(project_id: str, project_dir: Path, reques
         try:
             from ..services.ingestion_history import record_event
             duration_ms = int((time.time() - _backfill_started_at) * 1000)
+
+            # Same metadata/run_id extraction materialize_assets does --
+            # without a run_id, the Ingestions tab's "Recent runs" list has
+            # no way to open the real run detail view (just a dead static
+            # row, confirmed live).
+            metadata_by_key: dict[str, list[dict]] = {}
+            run_id_by_key: dict[str, str] = {}
+            if success and request.asset_keys:
+                try:
+                    venv_python = venv_bin_path(project_dir / ".venv", "python")
+                    meta_result = await asyncio.to_thread(
+                        subprocess.run,
+                        [
+                            str(venv_python.absolute()),
+                            "-m",
+                            "scripts.extract_run_metadata",
+                            str(dagster_home),
+                            ",".join(request.asset_keys),
+                        ],
+                        cwd=Path.cwd(),
+                        env=env,
+                        capture_output=True,
+                        text=True,
+                        timeout=30,
+                    )
+                    if meta_result.returncode == 0 and meta_result.stdout.strip():
+                        parsed = json.loads(meta_result.stdout.strip().splitlines()[-1])
+                        for ak, v in parsed.items():
+                            if isinstance(v, dict) and v.get("metadata"):
+                                metadata_by_key[ak] = v["metadata"]
+                            if isinstance(v, dict) and v.get("run_id"):
+                                run_id_by_key[ak] = v["run_id"]
+                except Exception as _meta_e:
+                    print(f"[backfill] Warning: Failed to extract run metadata: {_meta_e}")
+
             for ak in request.asset_keys:
                 record_event(
                     project_dir,
@@ -4134,6 +4275,9 @@ async def _run_backfill_in_background(project_id: str, project_dir: Path, reques
                     asset_key=ak,
                     duration_ms=duration_ms,
                     status="success" if success else "failure",
+                    run_id=run_id_by_key.get(ak),
+                    rows=_row_count_from_metadata(metadata_by_key.get(ak)),
+                    metadata=metadata_by_key.get(ak),
                 )
         except Exception as _log_e:
             print(f"[backfill] Warning: Failed to record ingestion event: {_log_e}")
@@ -4506,14 +4650,37 @@ class DbtModelListResponse(BaseModel):
     stats: dict[str, int] = {}
 
 
+_dbt_artifact_cache: dict[str, tuple[float, dict]] = {}
+
+
 def _load_dbt_artifact(path: Path) -> dict:
     """Read a dbt artifact JSON if it exists — manifest.json / catalog.json /
     run_results.json. Non-fatal if missing; we degrade gracefully across
-    the dbt experience surfaces."""
+    the dbt experience surfaces.
+
+    Cached in memory, keyed by resolved path and invalidated on the
+    file's own mtime -- these artifacts only change when `dbt parse`/
+    `dbt run` actually writes new ones, which is a cleaner invalidation
+    signal than a blind TTL. Before this cache existed, every one of the
+    13+ endpoints that read manifest.json (dbt-models, lineage, tests,
+    freshness, insights, ...) independently re-read and re-parsed the
+    same file from scratch on every single call -- for a project with a
+    large manifest, that's real, repeated work for content that's
+    usually unchanged between one dbt-tab click and the next. Confirmed
+    as a real complaint: the dbt tab's "Parsing dbt manifest…" spinner
+    firing on every visit even when nothing on disk had changed.
+    """
     if not path.exists():
         return {}
     try:
-        return json.loads(path.read_text())
+        cache_key = str(path.resolve())
+        mtime = path.stat().st_mtime
+        cached = _dbt_artifact_cache.get(cache_key)
+        if cached is not None and cached[0] == mtime:
+            return cached[1]
+        data = json.loads(path.read_text())
+        _dbt_artifact_cache[cache_key] = (mtime, data)
+        return data
     except Exception:
         return {}
 
@@ -7572,10 +7739,38 @@ class PageAskResponse(BaseModel):
     tools_used: list[str] = []
 
 
-async def _run_insights(system_prompt: str, context_lines: list[str], intro: str) -> PageInsightsResponse:
+#  AiAssistantPanel.tsx (the shared component every one of these pages
+# renders) fetches insights in a plain useEffect on EVERY mount -- no
+# frontend caching at all, so switching to the Ingestions tab, away, and
+# back again paid for a brand-new LLM call each time, even though
+# "which assets are failing" doesn't change from one tab-switch to the
+# next. A real wall-clock cost (LLM round trips run 1-5+s) users
+# reported as "this page takes a long time to load" when it's really
+# just this one panel's own fetch, not the page itself.
+#
+# Cached here (not in the frontend) so it's shared across every caller
+# of a given page's insights, server restarts aside. Keyed by
+# (project_id, page) -- distinct pages have genuinely different content
+# and must not share a cache entry.
+_page_insights_cache: dict[str, tuple[float, "PageInsightsResponse"]] = {}
+_PAGE_INSIGHTS_CACHE_TTL_SECONDS = 300
+
+
+async def _run_insights(
+    system_prompt: str, context_lines: list[str], intro: str, *, cache_key: str | None = None,
+) -> PageInsightsResponse:
     """Shared insights runner — sends context + a JSON contract prompt
     to the LLM and parses the result. Returns an empty response when
-    no LLM key is configured so the UI hides the panel."""
+    no LLM key is configured so the UI hides the panel.
+
+    `cache_key` (typically f"{project_id}:{page}") short-circuits the LLM
+    call entirely when a fresh-enough result is already cached -- see the
+    module comment above this function for why that matters."""
+    import time as _time
+    if cache_key is not None:
+        cached = _page_insights_cache.get(cache_key)
+        if cached is not None and (_time.time() - cached[0]) < _PAGE_INSIGHTS_CACHE_TTL_SECONDS:
+            return cached[1]
     import json as _json
     prompt = (
         f"{intro}\n\n"
@@ -7615,7 +7810,10 @@ async def _run_insights(system_prompt: str, context_lines: list[str], intro: str
             ))
         except Exception:
             continue
-    return PageInsightsResponse(summary=str(parsed.get("summary") or ''), insights=ins)
+    response = PageInsightsResponse(summary=str(parsed.get("summary") or ''), insights=ins)
+    if cache_key is not None:
+        _page_insights_cache[cache_key] = (_time.time(), response)
+    return response
 
 
 # ---- dbt page ---------------------------------------------------------
@@ -7666,6 +7864,7 @@ async def dbt_page_insights(project_id: str):
         ),
         context_lines=lines,
         intro="Analyze this dbt project.",
+        cache_key=f"{project_id}:dbt",
     )
 
 
@@ -7751,6 +7950,7 @@ async def ingestions_page_insights(project_id: str):
         ),
         context_lines=lines,
         intro="Analyze this ingestion event log.",
+        cache_key=f"{project_id}:ingestions",
     )
 
 
@@ -7839,6 +8039,7 @@ async def automation_page_insights(project_id: str):
         ),
         context_lines=lines,
         intro="Analyze automation coverage.",
+        cache_key=f"{project_id}:automation",
     )
 
 
@@ -7921,6 +8122,7 @@ async def pipelines_page_insights(project_id: str):
         ),
         context_lines=lines,
         intro="Analyze this pipeline graph.",
+        cache_key=f"{project_id}:pipelines",
     )
 
 
@@ -8992,19 +9194,39 @@ async def dbt_model_preview(project_id: str, request: DbtModelPreviewRequest):
                         return found
         return None
 
+    def _scan_json_values(text: str):
+        """Yield every complete top-level JSON value in text, in order,
+        regardless of internal formatting. Splitting on lines (the
+        original approach here) assumes one JSON value per line -- true
+        for dbt's structured-log events, but NOT always: confirmed live
+        (in scripts/preview_asset.py's identical parser, ported back here)
+        that `dbt --quiet show --output json` can also pretty-print its
+        result across many indented lines, where no single line is
+        independently parseable, silently losing real row data to a "no
+        rows found" fallback. `raw_decode` parses exactly one value
+        starting at a given position and reports where it ended, so it
+        finds a value correctly whether it's on one line or pretty-printed
+        across many, and lets us resume scanning right after it for any
+        further values (the concatenated-structured-log-events case this
+        was originally written for)."""
+        decoder = json.JSONDecoder()
+        i, n = 0, len(text)
+        while i < n:
+            while i < n and text[i] not in '{[':
+                i += 1
+            if i >= n:
+                break
+            try:
+                obj, end = decoder.raw_decode(text, i)
+                yield obj
+                i = end
+            except json.JSONDecodeError:
+                i += 1
+
     columns: list[str] = []
     rows: list[dict] = []
     combined_output = r.stdout + "\n" + r.stderr
-    for line in combined_output.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        if not line.startswith('{') and not line.startswith('['):
-            continue
-        try:
-            evt = json.loads(line)
-        except Exception:
-            continue
+    for evt in _scan_json_values(combined_output):
         # Bare JSON array of row dicts
         if isinstance(evt, list) and evt and isinstance(evt[0], dict):
             columns = list(evt[0].keys())

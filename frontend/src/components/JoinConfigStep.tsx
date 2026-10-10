@@ -181,7 +181,8 @@ export function JoinConfigStep({
     if (!currentProject || !canSave || saving) return;
     setSaving(true);
     try {
-      await assetsApi.createJoinAsset(currentProject.id, {
+      const previousComponentIds = new Set(currentProject.components.map((c) => c.id));
+      const updatedProject = await assetsApi.createJoinAsset(currentProject.id, {
         leftAssetKey,
         rightAssetKey,
         newAssetName: assetName.trim(),
@@ -200,6 +201,24 @@ export function JoinConfigStep({
         leftColumns,
         rightColumns,
       });
+
+      // A bad join config (ambiguous keys, a rename/keepColumns ordering
+      // mistake) can break the whole project's load like any other
+      // component write. Validate and undo via the new component's id
+      // (whichever one wasn't already in the project before this call).
+      const newComponentId = updatedProject.components.find((c) => !previousComponentIds.has(c.id))?.id;
+      if (newComponentId) {
+        const { validateProjectOrRollback } = await import('@/lib/validateProjectOrRollback');
+        const result = await validateProjectOrRollback(currentProject.id, async () => {
+          await projectsApi.deleteComponentInstance(currentProject.id, newComponentId);
+        });
+        if (!result.ok) {
+          await loadProject(currentProject.id);
+          notify.error(`This join would have broken the project, so it was undone:\n${result.error}`);
+          return;
+        }
+      }
+
       notify.success(`Created "${assetName.trim()}" — joining ${leftAssetKey} and ${rightAssetKey}.`);
       await loadProject(currentProject.id);
       onDone();

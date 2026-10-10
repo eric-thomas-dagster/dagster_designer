@@ -272,6 +272,37 @@ export function AddMonitorDialog({ open, onOpenChange, projectId, onSaved, initi
       // save. Without it the Monitors page's own Refresh just re-reads
       // the same stale graph and looks like nothing happened.
       try { await projectsApi.regenerateAssets(projectId); } catch { /* best-effort -- the monitor itself was created fine */ }
+
+      // A bad check config (invalid params_json shape, a dbt test the
+      // generic macro rejects) can break the whole project's load.
+      // Validate and undo via the existing monitor-delete endpoint.
+      const { validateProjectOrRollback } = await import('@/lib/validateProjectOrRollback');
+      const result = await validateProjectOrRollback(projectId, async () => {
+        if (implementation === 'enhanced_check') {
+          // monitor_id for an enhanced check is just the `name` we set.
+          await projectsApi.deleteMonitor(projectId, { kind: 'enhanced_check', monitor_id: name.trim() });
+        } else {
+          // dbt test unique_ids include a dbt-generated hash we can't
+          // construct client-side -- resolve it by re-listing monitors
+          // (validate() above already triggered the reparse that makes
+          // this one show up) and matching the one we just created.
+          const { monitors } = await projectsApi.listMonitors(projectId);
+          const match = monitors.find((m) => m.kind === 'dbt_test' && m.label?.includes(name.trim()));
+          if (match) {
+            await projectsApi.deleteMonitor(projectId, {
+              kind: 'dbt_test',
+              monitor_id: match.id,
+              dbt_relative_path: dbtProjectPath,
+            });
+          }
+        }
+      });
+      if (!result.ok) {
+        notify.error(`This monitor would have broken the project, so it was undone:\n${result.error}`);
+        setSaving(false);
+        return;
+      }
+
       notify.success(`Created monitor "${name}"`);
       onSaved?.();
       onOpenChange(false);

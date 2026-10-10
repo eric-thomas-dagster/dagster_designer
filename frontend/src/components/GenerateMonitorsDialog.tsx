@@ -110,10 +110,16 @@ export function GenerateMonitorsDialog({ open, onOpenChange, projectId, onGenera
     if (accepted.size === 0) { notify.error('Accept at least one proposal.'); return; }
     setCreating(true);
     let ok = 0, fail = 0;
-    for (const i of accepted) {
-      const p = proposals[i];
-      try {
-        await projectsApi.addMonitor(projectId, {
+    const createdNames: string[] = [];
+    // Each addMonitor call writes to its own independent
+    // defs/monitors/<name>/ directory -- no shared file between them, so
+    // these are safe to fire concurrently instead of one at a time
+    // (was previously a sequential for-loop awaiting each call in turn,
+    // which just serializes N network round-trips for no reason).
+    const results = await Promise.allSettled(
+      Array.from(accepted).map((i) => {
+        const p = proposals[i];
+        return projectsApi.addMonitor(projectId, {
           implementation: 'enhanced_check',
           name: p.name,
           target_asset_key: asset,
@@ -124,10 +130,15 @@ export function GenerateMonitorsDialog({ open, onOpenChange, projectId, onGenera
           params_json: p.params,
           schedule_cron: p.schedule_cron || undefined,
           run_on_materialization: p.run_on_materialization ?? true,
-        });
+        }).then(() => p.name);
+      })
+    );
+    for (const result of results) {
+      if (result.status === 'fulfilled') {
+        createdNames.push(result.value);
         ok++;
-      } catch (e: any) {
-        console.error('addMonitor failed for', p.name, e);
+      } else {
+        console.error('addMonitor failed:', result.reason);
         fail++;
       }
     }
@@ -139,6 +150,26 @@ export function GenerateMonitorsDialog({ open, onOpenChange, projectId, onGenera
       // ComponentConfigModal, AddMonitorDialog, ...) rescans right after
       // a successful save for exactly this reason.
       try { await projectsApi.regenerateAssets(projectId); } catch { /* best-effort -- the monitors themselves were created fine */ }
+
+      // One validate call for the whole accepted batch (not per-item --
+      // these are typically applied several at once) rather than per-item,
+      // since a bad params_json shape on any one of them breaks the WHOLE
+      // project's load. Roll back every monitor this batch just created.
+      const { validateProjectOrRollback } = await import('@/lib/validateProjectOrRollback');
+      const result = await validateProjectOrRollback(projectId, async () => {
+        for (const name of createdNames) {
+          try {
+            await projectsApi.deleteMonitor(projectId, { kind: 'enhanced_check', monitor_id: name });
+          } catch (e) {
+            console.error('Rollback: failed to delete monitor', name, e);
+          }
+        }
+      });
+      if (!result.ok) {
+        setCreating(false);
+        notify.error(`These monitors would have broken the project, so they were undone:\n${result.error}`);
+        return;
+      }
     }
     setCreating(false);
     if (ok > 0) notify.success(`Created ${ok} monitor${ok === 1 ? '' : 's'}`);

@@ -1,12 +1,14 @@
 import { Fragment, useEffect, useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { Download, Cloud, Database, FileText, Globe, Sparkles, Boxes, CheckCircle2, AlertTriangle, Play, Settings, Activity, TrendingUp, Loader2, XCircle, Layers, CalendarClock, Clock, X, Tag, Lock, Radar } from 'lucide-react';
+import { Download, CheckCircle2, AlertTriangle, Play, Settings, Activity, TrendingUp, Loader2, XCircle, Layers, CalendarClock, Clock, Tag, Lock, Radar } from 'lucide-react';
 import { SortableTh } from './SortableTh';
 import { useProjectStore } from '@/hooks/useProject';
 import { assetsApi, projectsApi, partitionsApi, type IngestionEvent, type BackfillRequest } from '@/services/api';
 import { AiAssistantPanel } from './AiAssistantPanel';
 import { notify } from './Notifications';
 import { AddDataDialog } from './AddDataDialog';
+import { IngestionDetailPage } from './IngestionDetailPage';
+import { KIND_META, formatRelative, type SourceKind } from './ingestionShared';
 import type { ConfigureAuthoringPayload } from './AddComponentModal';
 import { PartitionBackfill } from './PartitionBackfill';
 import type { ComponentInstance, GraphNode } from '@/types';
@@ -25,22 +27,18 @@ interface IngestionsPanelProps {
   /** AI Assistant insight chips reference asset keys -- lets a click jump
    * to that asset in the graph instead of doing nothing. */
   onOpenAsset?: (assetKey: string) => void;
+  /** Opens a run in the Runs tab's own detail view (RunDetailPage) --
+   *  lets the "Recent runs" drawer list be more than a dead end now that
+   *  local materializes/backfills carry a real run_id. */
+  onOpenRun?: (runId: string) => void;
+  /** Routes "New schedule/job" (from the ingestion detail page's
+   *  Automation card) to App.tsx's TemplateBuilder, pre-targeted at that
+   *  ingestion's asset key -- same wiring PropertyPanel/AssetDetailPage
+   *  already use for every other asset. */
+  onNewPrimitiveForAsset?: (category: 'schedule' | 'job' | 'sensor' | 'asset_check' | 'freshness_policy', assetKey: string) => void;
 }
 
 type SortColumn = 'name' | 'kind' | 'cadence' | 'freshness' | 'status';
-
-// Same bin heuristics as AddDataDialog — keeping them local avoids a
-// cyclic dep and lets the two views drift independently if we ever want
-// different labels here.
-type SourceKind = 'files' | 'databases' | 'saas' | 'apis' | 'synthetic' | 'other';
-const KIND_META: Record<SourceKind, { label: string; icon: any; color: string }> = {
-  files:      { label: 'Files & object storage', icon: FileText, color: 'bg-blue-500' },
-  databases:  { label: 'Databases & warehouses', icon: Database, color: 'bg-emerald-500' },
-  saas:       { label: 'SaaS connectors',        icon: Cloud,    color: 'bg-purple-500' },
-  apis:       { label: 'APIs & webhooks',        icon: Globe,    color: 'bg-orange-500' },
-  synthetic:  { label: 'Synthetic & demo data',  icon: Sparkles, color: 'bg-pink-500' },
-  other:      { label: 'Other sources',          icon: Boxes,    color: 'bg-gray-400' },
-};
 
 // Real catalog component_type values are the dotted PascalCase class name
 // straight from the YAML `type:` field (e.g. "dagster_community_components.
@@ -129,7 +127,7 @@ function syntheticComponentFromNode(node: GraphNode): ComponentInstance {
   };
 }
 
-export function IngestionsPanel({ onAddDataSource, onAddCloudDataSource, onEditComponent, onOpenAsset }: IngestionsPanelProps) {
+export function IngestionsPanel({ onAddDataSource, onAddCloudDataSource, onEditComponent, onOpenAsset, onOpenRun, onNewPrimitiveForAsset }: IngestionsPanelProps) {
   const { currentProject } = useProjectStore();
   const isCloud = !!(currentProject as any)?.is_dagster_plus;
   // Assets the user explicitly tagged as ingestion sources (from the
@@ -161,7 +159,7 @@ export function IngestionsPanel({ onAddDataSource, onAddCloudDataSource, onEditC
     setSortDirection((d) => (d === 'asc' ? 'desc' : 'asc'));
   };
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
-  const [drawerFor, setDrawerFor] = useState<string | null>(null);
+  const [detailFor, setDetailFor] = useState<string | null>(null);
   const [runningBulk, setRunningBulk] = useState(false);
   // When set, opens the PartitionBackfill modal targeting the asset
   // key for a partitioned ingestion. The modal handles per-partition
@@ -185,7 +183,7 @@ export function IngestionsPanel({ onAddDataSource, onAddCloudDataSource, onEditC
   // schedule's target_asset_keys / asset_keys / selection includes the
   // ingestion's asset_name.
   const scheduleByAssetKey = useMemo(() => {
-    const map = new Map<string, { label: string; cron?: string }[]>();
+    const map = new Map<string, { name: string; cron?: string; component?: ComponentInstance }[]>();
     if (!currentProject) return map;
     for (const c of currentProject.components) {
       if (!/Schedule(Component)?$|\bschedule\b/i.test(c.component_type)) continue;
@@ -196,10 +194,18 @@ export function IngestionsPanel({ onAddDataSource, onAddCloudDataSource, onEditC
         if (typeof v === 'string' && v) targets.push(...v.split(',').map((s) => s.trim()));
         else if (Array.isArray(v)) targets.push(...v.map(String));
       }
-      const cron = attrs.cron || attrs.cron_schedule || attrs.schedule;
+      // `schedule_name` is the real, attach-asset-matching name a
+      // CronScheduleComponent carries (confirmed live via /primitives/list) --
+      // c.label/c.id are a Designer-side display fallback that happened to
+      // read "unnamed" for this component type since it has no `label`.
+      // `cron_expression` is CronScheduleComponent's actual attribute name;
+      // the others here are generic fallbacks for other schedule component
+      // shapes that might use a different attribute name.
+      const name = attrs.schedule_name || c.label || c.id;
+      const cron = attrs.cron_expression || attrs.cron || attrs.cron_schedule || attrs.schedule;
       for (const t of targets) {
         if (!map.has(t)) map.set(t, []);
-        map.get(t)!.push({ label: c.label || c.id, cron });
+        map.get(t)!.push({ name, cron, component: c });
       }
     }
     // Cloud-hydrated graph nodes carry accurately-attributed
@@ -214,12 +220,37 @@ export function IngestionsPanel({ onAddDataSource, onAddCloudDataSource, onEditC
         const assetKey = (data?.asset_key as string) || n.id;
         for (const s of (data?.schedules as { name?: string; cron?: string }[] | undefined) || []) {
           if (!map.has(assetKey)) map.set(assetKey, []);
-          map.get(assetKey)!.push({ label: s.name || 'schedule', cron: s.cron });
+          map.get(assetKey)!.push({ name: s.name || 'schedule', cron: s.cron });
         }
       }
     }
     return map;
   }, [currentProject, isCloud]);
+
+  // Same cross-reference as scheduleByAssetKey, but for jobs -- feeds the
+  // ingestion detail page's Automation card ("Jobs" list) so a user can see
+  // which job(s) already include this ingestion before deciding to attach
+  // it to another one or create a new one.
+  const jobByAssetKey = useMemo(() => {
+    const map = new Map<string, { name: string; component?: ComponentInstance }[]>();
+    if (!currentProject) return map;
+    for (const c of currentProject.components) {
+      if (!/Job(Component)?$|\bjob\b/i.test(c.component_type)) continue;
+      const targets: string[] = [];
+      const attrs = (c.attributes || {}) as Record<string, any>;
+      for (const key of ['asset_keys', 'target_asset_keys', 'asset_selection', 'assets', 'selection']) {
+        const v = attrs[key];
+        if (typeof v === 'string' && v) targets.push(...v.split(',').map((s) => s.trim()));
+        else if (Array.isArray(v)) targets.push(...v.map(String));
+      }
+      const name = attrs.job_name || c.label || c.id;
+      for (const t of targets) {
+        if (!map.has(t)) map.set(t, []);
+        map.get(t)!.push({ name, component: c });
+      }
+    }
+    return map;
+  }, [currentProject]);
 
   // Sensor-triggered cloud assets aren't on a cron, but they're still
   // automated (not "manual") -- tracked separately so the Schedule
@@ -246,16 +277,42 @@ export function IngestionsPanel({ onAddDataSource, onAddCloudDataSource, onEditC
     const map = new Map<string, { kind: string; description: string }>();
     if (!currentProject) return map;
     for (const n of currentProject.graph.nodes) {
-      const cfg = (n.data as any)?.partition_config;
-      if (!cfg) continue;
-      const key = (n.data as any)?.asset_key || n.id;
-      const kind = cfg.type || cfg.kind || 'partitioned';
-      const bits: string[] = [];
-      if (cfg.type) bits.push(cfg.type);
-      if (cfg.start_date) bits.push(`from ${cfg.start_date}`);
-      if (cfg.cron_schedule || cfg.schedule) bits.push(cfg.cron_schedule || cfg.schedule);
-      if (cfg.partition_keys?.length) bits.push(`${cfg.partition_keys.length} keys`);
-      map.set(key, { kind, description: bits.join(' · ') || 'partitioned' });
+      const data = n.data as any;
+      const key = data?.asset_key || n.id;
+      // Designer's own "incremental ingestion" config -- set via the
+      // Property Panel, a different concept from a real Dagster
+      // PartitionsDefinition, but genuinely partition-shaped for display
+      // purposes here. Takes priority when present.
+      const cfg = data?.partition_config;
+      if (cfg) {
+        const kind = cfg.type || cfg.kind || 'partitioned';
+        const bits: string[] = [];
+        if (cfg.type) bits.push(cfg.type);
+        if (cfg.start_date) bits.push(`from ${cfg.start_date}`);
+        if (cfg.cron_schedule || cfg.schedule) bits.push(cfg.cron_schedule || cfg.schedule);
+        if (cfg.partition_keys?.length) bits.push(`${cfg.partition_keys.length} keys`);
+        map.set(key, { kind, description: bits.join(' · ') || 'partitioned' });
+        continue;
+      }
+      // A REAL Dagster PartitionsDefinition. `data.is_partitioned` is only
+      // reliable when the graph was built from a live GraphQL query --
+      // when built from the offline `dg list defs` fallback (the common
+      // case whenever no `dg dev` is running), it's just undefined, since
+      // confirmed live: a raw `dg list defs --json` dump has no partition
+      // field anywhere on an asset entry. Component attribute names
+      // aren't standardized across the catalog, but `partition_type`/
+      // `partitions_def`-shaped keys are a convention several real
+      // components (e.g. SyntheticDataGeneratorComponent) already follow
+      // -- good enough to not show "none" for an asset that's
+      // confirmably partitioned via the live partition-status endpoint.
+      const attrs = data?.component_attributes || {};
+      const looksPartitioned = data?.is_partitioned === true || 'partition_type' in attrs || 'partitions_def' in attrs;
+      if (looksPartitioned) {
+        const bits: string[] = [];
+        if (attrs.partition_type) bits.push(attrs.partition_type);
+        if (attrs.partition_start) bits.push(`from ${attrs.partition_start}`);
+        map.set(key, { kind: attrs.partition_type || 'partitioned', description: bits.join(' · ') || 'partitioned' });
+      }
     }
     return map;
   }, [currentProject]);
@@ -347,6 +404,7 @@ export function IngestionsPanel({ onAddDataSource, onAddCloudDataSource, onEditC
       const partition = partitionByAssetKey.get(assetKey);
       const schedules = scheduleByAssetKey.get(assetKey) ?? [];
       const sensors = sensorByAssetKey.get(assetKey) ?? [];
+      const jobs = jobByAssetKey.get(assetKey) ?? [];
       return {
         component: c,
         assetKey,
@@ -364,10 +422,11 @@ export function IngestionsPanel({ onAddDataSource, onAddCloudDataSource, onEditC
         partition,
         schedules,
         sensors,
+        jobs,
         latestStatus: lastRun?.status ?? null,
       };
     });
-  }, [currentProject, schemas, eventsByAssetKey, partitionByAssetKey, scheduleByAssetKey, sensorByAssetKey, isCloud, manualTagSet]);
+  }, [currentProject, schemas, eventsByAssetKey, partitionByAssetKey, scheduleByAssetKey, sensorByAssetKey, jobByAssetKey, isCloud, manualTagSet]);
 
   const kpis = useMemo(() => {
     const total = ingestions.length;
@@ -494,10 +553,30 @@ export function IngestionsPanel({ onAddDataSource, onAddCloudDataSource, onEditC
 
   const handleRunSelected = async () => {
     if (!currentProject || selectedIds.size === 0) return;
-    const assetKeys = ingestions
-      .filter((i) => selectedIds.has(i.component.id) && i.configured && !i.readOnly)
-      .map((i) => i.assetKey);
-    if (assetKeys.length === 0) return;
+    const selected = ingestions.filter((i) => selectedIds.has(i.component.id) && i.configured && !i.readOnly);
+    // A single `dg launch --assets a,b,...` call fails outright for the
+    // WHOLE batch the moment any one of those assets is partitioned (it
+    // needs an explicit `--partition`, which a multi-asset bulk run has no
+    // sensible single value for) -- confirmed: mixing a partitioned and
+    // non-partitioned ingestion in one selection silently materialized
+    // neither, since the single `handleRun` path already knew to redirect a
+    // partitioned asset to the backfill modal but this bulk path never
+    // checked at all. Split instead: run the non-partitioned ones together,
+    // and tell the user to run partitioned ones individually (the backfill
+    // modal this panel already has is single-asset, so there's no bulk
+    // partition picker to send them to).
+    const partitioned = selected.filter((i) => !!i.partition);
+    const runnable = selected.filter((i) => !i.partition);
+    if (partitioned.length > 0) {
+      notify.info(
+        `Skipping ${partitioned.length} partitioned ingestion${partitioned.length === 1 ? '' : 's'} -- run ${partitioned.length === 1 ? 'it' : 'those'} individually to pick partitions.`
+      );
+    }
+    if (runnable.length === 0) {
+      clearSelection();
+      return;
+    }
+    const assetKeys = runnable.map((i) => i.assetKey);
     setRunningBulk(true);
     try {
       const r = await projectsApi.materialize(currentProject.id, assetKeys);
@@ -603,7 +682,16 @@ export function IngestionsPanel({ onAddDataSource, onAddCloudDataSource, onEditC
         if (e.status === 'success') buckets[idx].success++;
         else if (e.status === 'failure') buckets[idx].failure++;
       }
-      if (e.type === 'preview' && e.status === 'success') {
+      // Rows can come from either event type -- a materialize carries a
+      // real row count when the component attaches `dagster/row_count`
+      // metadata (several real components here do, see materialize_assets'
+      // own _row_count_from_metadata call), not just an explicit preview.
+      // Scoping this to preview-only meant the rows line stayed flat for
+      // anyone who materializes rather than previews, even though real row
+      // data was being recorded all along -- same bug class
+      // IngestionDetailPage's own per-asset rows chart was already fixed
+      // for (see its "Rows ingested over time" comment).
+      if (e.status === 'success' && (e.type === 'preview' || e.type === 'materialize')) {
         buckets[idx].rows += e.rows ?? 0;
       }
     }
@@ -612,6 +700,12 @@ export function IngestionsPanel({ onAddDataSource, onAddCloudDataSource, onEditC
 
   const handleRun = async (assetKey: string, componentId: string) => {
     if (!currentProject) return;
+    // Flip to "Running…" immediately on click rather than after the
+    // partition check below resolves -- that round-trip (plus the
+    // subsequent materialize call, which can legitimately take 30-70s+ for
+    // a real dg launch) made the button feel unresponsive for a beat even
+    // though the click registered right away.
+    setRunningId(componentId);
     // materialize() with no partition fails outright for a partitioned
     // asset ("Asset has partitions, but no '--partition' option was
     // provided") -- this panel already has its own backfill modal
@@ -620,9 +714,9 @@ export function IngestionsPanel({ onAddDataSource, onAddCloudDataSource, onEditC
     if (await partitionsApi.isPartitioned(currentProject.id, assetKey)) {
       notify.info(`${assetKey} is partitioned -- pick partitions to backfill.`);
       setBackfillAssetKey(assetKey);
+      setRunningId(null);
       return;
     }
-    setRunningId(componentId);
     try {
       const r = await projectsApi.materialize(currentProject.id, [assetKey]);
       if (!r.success) {
@@ -672,6 +766,47 @@ export function IngestionsPanel({ onAddDataSource, onAddCloudDataSource, onEditC
         Open a project to see its ingestions.
       </div>
     );
+  }
+
+  // Full-page detail — swallows the list when an ingestion is selected,
+  // same "click a row -> dedicated page" pattern MonitorsPanel already
+  // uses for MonitorDetailPage. Replaces the old slide-in RowDetailDrawer,
+  // which had no room for charts/partitions and couldn't open a real run.
+  if (detailFor) {
+    const target = ingestions.find((i) => i.component.id === detailFor);
+    if (target) {
+      return (
+        <>
+          <IngestionDetailPage
+            target={target}
+            projectId={currentProject.id}
+            isCloud={isCloud}
+            currentProject={currentProject}
+            onBack={() => setDetailFor(null)}
+            onEdit={target.readOnly ? undefined : () => onEditComponent(target.component)}
+            onRun={() => handleRun(target.assetKey, target.component.id)}
+            onBackfill={target.partition && !target.readOnly ? () => setBackfillAssetKey(target.assetKey) : undefined}
+            running={runningId === target.component.id}
+            onOpenRun={onOpenRun}
+            onNewPrimitiveForAsset={onNewPrimitiveForAsset}
+            onEditComponent={onEditComponent}
+          />
+          {/* Same modal the list view renders -- the detail page's own
+              "Backfill…" button needs it reachable here too, since this
+              branch returns instead of the list view rather than nesting
+              inside it. */}
+          {backfillAssetKey && currentProject && (
+            <PartitionBackfill
+              open={!!backfillAssetKey}
+              onOpenChange={(open) => !open && setBackfillAssetKey(null)}
+              projectId={currentProject.id}
+              assetKey={backfillAssetKey}
+              onLaunch={handleBackfillLaunch}
+            />
+          )}
+        </>
+      );
+    }
   }
 
   return (
@@ -737,7 +872,7 @@ export function IngestionsPanel({ onAddDataSource, onAddCloudDataSource, onEditC
             onClick={() => {
               const firstFailed = recentFailures[0];
               const target = ingestions.find((i) => i.assetKey === firstFailed.assetKey);
-              if (target) setDrawerFor(target.component.id);
+              if (target) setDetailFor(target.component.id);
             }}
             className="text-xs font-medium text-rose-700 hover:text-rose-900 flex-shrink-0"
           >
@@ -1009,7 +1144,7 @@ export function IngestionsPanel({ onAddDataSource, onAddCloudDataSource, onEditC
                       onClick={(e) => {
                         const target = e.target as HTMLElement;
                         if (target.closest('button, input, select, a')) return;
-                        setDrawerFor(component.id);
+                        setDetailFor(component.id);
                       }}
                     >
                       <td className="px-3 py-2.5" onClick={(e) => e.stopPropagation()}>
@@ -1065,7 +1200,7 @@ export function IngestionsPanel({ onAddDataSource, onAddCloudDataSource, onEditC
                         {schedules.length > 0 ? (
                           <div className="flex flex-col gap-0.5">
                             {schedules.slice(0, 2).map((s, i) => (
-                              <div key={i} className="inline-flex items-center gap-1 text-gray-700" title={s.label}>
+                              <div key={i} className="inline-flex items-center gap-1 text-gray-700" title={s.name}>
                                 <CalendarClock className="w-3 h-3 text-gray-500" />
                                 <span className="font-mono text-[11px]">{s.cron || 'scheduled'}</span>
                               </div>
@@ -1161,27 +1296,7 @@ export function IngestionsPanel({ onAddDataSource, onAddCloudDataSource, onEditC
         </div>
       </div>
 
-      {/* Row detail drawer — opens on row click. Shows recent runs and
-          errors so users can debug without opening the modal. */}
-      {drawerFor && (() => {
-        const target = ingestions.find((i) => i.component.id === drawerFor);
-        if (!target) return null;
-        return (
-          <RowDetailDrawer
-            target={target}
-            onClose={() => setDrawerFor(null)}
-            onEdit={target.readOnly ? undefined : () => {
-              onEditComponent(target.component);
-              setDrawerFor(null);
-            }}
-            onRun={() => handleRun(target.assetKey, target.component.id)}
-            onBackfill={target.partition && !target.readOnly ? () => setBackfillAssetKey(target.assetKey) : undefined}
-            running={runningId === target.component.id}
-          />
-        );
-      })()}
-
-      {/* Partition backfill modal — opened from row action or drawer.
+      {/* Partition backfill modal — opened from row action or the detail page.
           Owns partition-picker UX, launches via partitionsApi. */}
       {backfillAssetKey && currentProject && (
         <PartitionBackfill
@@ -1351,15 +1466,6 @@ function formatBytes(n: number): string {
   return `${(n / (1024 * 1024 * 1024)).toFixed(2)} GB`;
 }
 
-function formatRelative(ts: string): string {
-  const dt = Date.now() - new Date(ts).getTime();
-  if (dt < 60_000) return 'just now';
-  if (dt < 3600_000) return `${Math.floor(dt / 60_000)}m ago`;
-  if (dt < 24 * 3600_000) return `${Math.floor(dt / 3600_000)}h ago`;
-  if (dt < 7 * 24 * 3600_000) return `${Math.floor(dt / (24 * 3600_000))}d ago`;
-  return new Date(ts).toLocaleDateString([], { month: 'short', day: 'numeric' });
-}
-
 // Per-row status squares — last N materializes, green/red left→right.
 // Empty runs render as a light grey placeholder so the width is stable
 // across rows even when a source has never been materialized.
@@ -1414,168 +1520,6 @@ function Sparkline({ runs, size = 8 }: { runs: IngestionEvent[]; size?: number }
           />
         );
       })}
-    </div>
-  );
-}
-
-// Row-detail drawer — recent runs, errors, quick actions. Slides in on
-// row click, gives users a debug surface without leaving the page.
-function RowDetailDrawer({
-  target,
-  onClose,
-  onEdit,
-  onRun,
-  onBackfill,
-  running,
-}: {
-  target: any;
-  onClose: () => void;
-  onEdit?: () => void;
-  onRun: () => void;
-  onBackfill?: () => void;
-  running: boolean;
-}) {
-  const runs = (target.materializes as IngestionEvent[]).slice(-20).reverse();
-  const KindIcon = KIND_META[target.kind as SourceKind].icon;
-  return (
-    <div className="fixed inset-0 z-50 flex" onClick={onClose}>
-      <div className="flex-1 bg-black/30" />
-      <div
-        className="w-[420px] max-w-full bg-white h-full shadow-2xl flex flex-col overflow-hidden"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="px-4 py-3 border-b border-gray-200 flex items-start justify-between gap-2">
-          <div className="min-w-0">
-            <div className="flex items-center gap-2 min-w-0">
-              <KindIcon className="w-4 h-4 text-gray-500 flex-shrink-0" />
-              <h3 className="text-sm font-semibold text-gray-900 truncate">
-                {target.component.label || target.component.id}
-              </h3>
-            </div>
-            <p className="text-[11px] text-gray-500 font-mono truncate mt-0.5" title={target.component.component_type}>
-              {target.component.component_type.split('.').pop()}
-            </p>
-          </div>
-          <button onClick={onClose} className="p-1 hover:bg-gray-100 rounded" aria-label="Close">
-            <X className="w-4 h-4 text-gray-500" />
-          </button>
-        </div>
-
-        {/* Quick facts */}
-        <div className="p-4 space-y-3 flex-shrink-0 border-b border-gray-100 bg-gray-50">
-          <div className="grid grid-cols-2 gap-2 text-xs">
-            <Fact label="Destination asset" value={target.assetKey} mono />
-            <Fact label="Kind" value={KIND_META[target.kind as SourceKind].label} />
-            <Fact
-              label="Cadence"
-              value={
-                target.schedules.length > 0
-                  ? target.schedules.map((s: any) => s.cron || 'scheduled').join(', ')
-                  : (target.sensors as any[]).length > 0
-                    ? (target.sensors as any[]).map((s) => s.name).join(', ') + ' (sensor)'
-                    : 'manual'
-              }
-            />
-            <Fact
-              label="Partition"
-              value={target.partition ? `${target.partition.kind} · ${target.partition.description}` : 'none'}
-            />
-            <Fact
-              label="Configured"
-              value={target.configured ? '✓ yes' : '⚠ needs config'}
-              tone={target.configured ? 'success' : 'warning'}
-            />
-            <Fact
-              label="Last run"
-              value={target.lastRun ? formatRelative(target.lastRun.ts) : 'never'}
-            />
-          </div>
-          <div className="flex items-center gap-2 pt-2 flex-wrap">
-            <button
-              onClick={onRun}
-              disabled={!target.configured || target.readOnly || running}
-              title={target.readOnly ? 'Read-only -- no local component to run' : undefined}
-              className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium bg-primary text-primary-foreground rounded disabled:opacity-40"
-            >
-              {running ? <Loader2 className="w-3 h-3 animate-spin" /> : <Play className="w-3 h-3" />}
-              {running ? 'Running…' : 'Run now'}
-            </button>
-            {onBackfill && (
-              <button
-                onClick={onBackfill}
-                disabled={!target.configured}
-                className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-indigo-700 border border-indigo-200 bg-indigo-50 rounded hover:bg-indigo-100 disabled:opacity-40"
-                title="Re-run specific partitions (e.g. 2026-07-04) or the whole history after a schema change"
-              >
-                <Layers className="w-3 h-3" />
-                Backfill…
-              </button>
-            )}
-            {onEdit && (
-              <button
-                onClick={onEdit}
-                className="inline-flex items-center gap-1 px-2.5 py-1 text-xs text-gray-700 hover:bg-gray-100 rounded"
-              >
-                <Settings className="w-3 h-3" />
-                Configure
-              </button>
-            )}
-          </div>
-        </div>
-
-        {/* Recent runs */}
-        <div className="flex-1 overflow-y-auto">
-          <div className="px-4 py-3 border-b border-gray-100">
-            <h4 className="text-xs font-semibold text-gray-700 uppercase tracking-wider">Recent runs</h4>
-          </div>
-          {runs.length === 0 ? (
-            <div className="p-8 text-center text-xs text-gray-400">
-              No runs recorded yet. Materialize this ingestion to see history here.
-            </div>
-          ) : (
-            <ul className="divide-y divide-gray-50">
-              {runs.map((e, i) => (
-                <li key={i} className="px-4 py-2 flex items-center gap-2 text-xs">
-                  {e.status === 'success' && <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500 flex-shrink-0" />}
-                  {e.status === 'failure' && <XCircle className="w-3.5 h-3.5 text-rose-500 flex-shrink-0" />}
-                  {e.status === 'running' && <Loader2 className="w-3.5 h-3.5 text-blue-500 animate-spin flex-shrink-0" />}
-                  <div className="flex-1 min-w-0">
-                    <div className="text-gray-800">{formatRelative(e.ts)}</div>
-                    <div className="text-[10px] text-gray-400 tabular-nums">
-                      {new Date(e.ts).toLocaleString()}
-                      {e.duration_ms != null && ` · ${(e.duration_ms / 1000).toFixed(1)}s`}
-                      {e.rows != null && ` · ${e.rows.toLocaleString()} rows`}
-                    </div>
-                  </div>
-                </li>
-              ))}
-            </ul>
-          )}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function Fact({
-  label,
-  value,
-  mono,
-  tone,
-}: {
-  label: string;
-  value: string;
-  mono?: boolean;
-  tone?: 'success' | 'warning';
-}) {
-  const toneClass =
-    tone === 'success' ? 'text-emerald-700'
-    : tone === 'warning' ? 'text-amber-700'
-    : 'text-gray-800';
-  return (
-    <div className="flex flex-col gap-0.5">
-      <span className="text-[10px] uppercase tracking-wider text-gray-500">{label}</span>
-      <span className={`${mono ? 'font-mono' : ''} ${toneClass} break-all`}>{value}</span>
     </div>
   );
 }

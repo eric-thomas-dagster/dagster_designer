@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, lazy, Suspense } from 'react';
 import * as Tabs from '@radix-ui/react-tabs';
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu';
 import * as Tooltip from '@radix-ui/react-tooltip';
@@ -14,7 +14,13 @@ import { DocumentExtractorConfigStep } from './components/DocumentExtractorConfi
 import { OcrExtractorConfigStep } from './components/OcrExtractorConfigStep';
 import { ClassifierConfigStep, CLASSIFIER_TYPE_CONFIG } from './components/ClassifierConfigStep';
 import { ClassificationReview } from './components/ClassificationReview';
-import { ModelEvaluationPanel } from './components/ModelEvaluationPanel';
+// Lazy: pulls in ModelMetricsView -> recharts (5.2MB package) via its own
+// eager import, a second path into the main bundle alongside
+// AssetDetailPage's inline "Model" tab. Only opened as a modal from a
+// specific action, never on first paint.
+const ModelEvaluationPanel = lazy(() =>
+  import('./components/ModelEvaluationPanel').then((m) => ({ default: m.ModelEvaluationPanel }))
+);
 import { JoinConfigStep } from './components/JoinConfigStep';
 import { VideoSceneConfigStep } from './components/VideoSceneConfigStep';
 import { VideoFrameExtractConfigStep } from './components/VideoFrameExtractConfigStep';
@@ -31,7 +37,13 @@ import { ActivatePanel } from './components/ActivatePanel';
 import { extractComponentId } from '@/lib/componentId';
 import { PropertyPanel } from './components/PropertyPanel';
 import { ProjectManager } from './components/ProjectManager';
-import { CodeEditor } from './components/CodeEditor';
+// Lazy: pulls in Monaco (+ the embedded terminal's xterm) -- together a
+// large chunk of the app's single eager bundle, for a tab most sessions
+// never open. Loaded on first visit to the Code tab instead of on every
+// app launch.
+const CodeEditor = lazy(() =>
+  import('./components/CodeEditor').then((m) => ({ default: m.CodeEditor }))
+);
 import { TemplateBuilder } from './components/TemplateBuilder';
 import { PrimitivesManager } from './components/PrimitivesManager';
 import { ResourcesManager } from './components/ResourcesManager';
@@ -105,6 +117,9 @@ interface StatusStripProps {
   assetGenerationStatus: string;
   assetGenerationError: string | null;
   onDismissAssetGen: () => void;
+  devServerStartStatus: string;
+  devServerStartError: string | null;
+  onDismissDevServerStart: () => void;
   validationStatus: string;
   validationError: string | null;
   onDismissValidation: () => void;
@@ -182,6 +197,33 @@ function StatusStrip(props: StatusStripProps) {
       label: 'Asset generation failed',
       detail: props.assetGenerationError,
       onDismiss: props.onDismissAssetGen,
+      dismissable: true,
+    });
+  }
+
+  if (props.devServerStartStatus === 'starting') {
+    items.push({
+      key: 'dev-server',
+      kind: 'progress',
+      label: 'Starting dg dev server',
+      detail: 'Needed for the Runs page -- usually 5-15s, longer for a large component catalog',
+      dismissable: false,
+    });
+  } else if (props.devServerStartStatus === 'success') {
+    items.push({
+      key: 'dev-server',
+      kind: 'success',
+      label: 'dg dev server running',
+      onDismiss: props.onDismissDevServerStart,
+      dismissable: true,
+    });
+  } else if (props.devServerStartStatus === 'error') {
+    items.push({
+      key: 'dev-server',
+      kind: 'error',
+      label: 'dg dev server failed to start',
+      detail: props.devServerStartError,
+      onDismiss: props.onDismissDevServerStart,
       dismissable: true,
     });
   }
@@ -454,6 +496,9 @@ function App() {
     dependencyInstallError,
     dependencyInstallOutput,
     dismissDependencyInstallStatus,
+    devServerStartStatus,
+    devServerStartError,
+    dismissDevServerStartStatus,
     isLoading: isProjectLoading,
   } = useProjectStore();
   // Loading target — tracks which project id is currently in flight
@@ -539,6 +584,43 @@ function App() {
     } else {
       setEnableValidationCheck(false);
     }
+  }, [currentProject?.id]);
+
+  // Auto-start the project's `dg dev` server on load -- Runs no longer
+  // needs it (direct instance reads), but Partitions and re-execution
+  // still do, and the position taken here is that needing it is fine as
+  // long as it's transparent: the user shouldn't have to know or care,
+  // it should just be running by the time anything asks for it. Safe to
+  // do unconditionally now that start/stop lifecycle is solid (dedup
+  // check that's no longer port-range-limited, cleanup on every quit
+  // path, reconciliation on every backend startup) -- this exact
+  // sequence used to risk orphaned/duplicate processes, confirmed fixed
+  // earlier this session. getStatus first so an already-running server
+  // (started in a prior session, or by this same effect already) doesn't
+  // trigger a redundant start call or a needless status-strip flicker.
+  // One-shot per project id via the ref -- a project's own re-renders
+  // (graph edits, tab switches) must never retrigger this.
+  const autoStartedProjectRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!currentProject || (currentProject as any).is_dagster_plus) return;
+    if (autoStartedProjectRef.current === currentProject.id) return;
+    autoStartedProjectRef.current = currentProject.id;
+    const projectId = currentProject.id;
+
+    const timer = setTimeout(async () => {
+      try {
+        const status = await dagsterUIApi.getStatus(projectId);
+        if (status.running) return;
+        useProjectStore.setState({ devServerStartStatus: 'starting', devServerStartError: null });
+        await dagsterUIApi.start(projectId);
+        useProjectStore.setState({ devServerStartStatus: 'success' });
+      } catch (e: any) {
+        const detail = e?.response?.data?.detail;
+        const message = typeof detail === 'string' ? detail : detail?.message || detail?.error || e?.message;
+        useProjectStore.setState({ devServerStartStatus: 'error', devServerStartError: message || 'Failed to auto-start dg dev.' });
+      }
+    }, 1500);
+    return () => clearTimeout(timer);
   }, [currentProject?.id]);
 
   // Fetch validation status globally (checks if project validates)
@@ -776,6 +858,32 @@ function App() {
         const body = await res.json().catch(() => ({} as any));
         if (!res.ok) throw new Error(body.detail || 'Save failed');
         if (body.changed_keys?.length) {
+          // A bad attribute edit can break the whole project's load just
+          // like any other component write. Validate and, if it broke,
+          // re-PUT the same endpoint with the original attributes to
+          // restore the file to what it was before this save.
+          const { validateProjectOrRollback } = await import('@/lib/validateProjectOrRollback');
+          const result = await validateProjectOrRollback(currentProject.id, async () => {
+            await fetch(`${API_BASE}/projects/${currentProject.id}/component-source-yaml`, {
+              method: 'PUT',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                source_path: sourcePath,
+                attributes: sourceNode?.data?.component_attributes ?? primitiveSource?.originalAttributes ?? {},
+                original_attributes: component.attributes,
+              }),
+            });
+          });
+          if (!result.ok) {
+            await projectsApi.regenerateAssets(currentProject.id, false);
+            const { loadProject } = useProjectStore.getState();
+            await loadProject(currentProject.id);
+            notify.error(`This change would have broken the project, so it was undone:\n${result.error}`);
+            setEditingComponent(null);
+            setAddingComponentType(null);
+            return;
+          }
+
           notify.success(`Saved ${body.changed_keys.join(', ')} to ${body.path}`);
           // Re-run dg list defs to see the edit reflected -- a plain
           // reload would just re-fetch the same stale graph already on
@@ -829,6 +937,8 @@ function App() {
     }
 
     // Update project with new components AND graph together
+    const previousComponents = currentProject.components;
+    const previousNodes = currentProject.graph.nodes;
     try {
       await projectsApi.update(currentProject.id, {
         components: updatedComponents,
@@ -838,9 +948,27 @@ function App() {
         },
       });
 
+      // A bad component add/edit can break the whole project's load just
+      // like any other write path. Validate and undo by restoring the
+      // prior components/graph if so.
+      const { validateProjectOrRollback } = await import('@/lib/validateProjectOrRollback');
+      const result = await validateProjectOrRollback(currentProject.id, async () => {
+        await projectsApi.update(currentProject.id, {
+          components: previousComponents,
+          graph: { nodes: previousNodes, edges: currentProject.graph.edges },
+        });
+      });
+
       // Update local state
       const { loadProject } = useProjectStore.getState();
       await loadProject(currentProject.id);
+
+      if (!result.ok) {
+        notify.error(`This change would have broken the project, so it was undone:\n${result.error}`);
+        setEditingComponent(null);
+        setAddingComponentType(null);
+        return;
+      }
     } catch (error) {
       console.error('Failed to save component:', error);
       notify.error('Failed to save component. Check console for details.');
@@ -1685,6 +1813,8 @@ function App() {
               onAddCloudDataSource={setDraftAuthoring}
               onEditComponent={setEditingComponent}
               onOpenAsset={(assetKey) => { setActiveMainTab('assets'); setDetailNodeId(assetKey); }}
+              onOpenRun={handleOpenRun}
+              onNewPrimitiveForAsset={(category, assetKey) => openNewPrimitive(category, assetKey)}
             />
           </Tabs.Content>
 
@@ -1796,11 +1926,17 @@ function App() {
           {/* Code Tab Content */}
           <Tabs.Content value="code" className="flex-1 overflow-hidden">
             <div className="h-full">
-              <CodeEditor
-                projectId={currentProject.id}
-                fileToOpen={fileToOpen}
-                onFileOpened={() => setFileToOpen(null)}
-              />
+              <Suspense fallback={
+                <div className="h-full flex items-center justify-center text-sm text-gray-500">
+                  Loading code editor…
+                </div>
+              }>
+                <CodeEditor
+                  projectId={currentProject.id}
+                  fileToOpen={fileToOpen}
+                  onFileOpened={() => setFileToOpen(null)}
+                />
+              </Suspense>
             </div>
           </Tabs.Content>
 
@@ -1888,6 +2024,9 @@ function App() {
           assetGenerationStatus={assetGenerationStatus}
           assetGenerationError={assetGenerationError}
           onDismissAssetGen={dismissAssetGenerationStatus}
+          devServerStartStatus={devServerStartStatus}
+          devServerStartError={devServerStartError}
+          onDismissDevServerStart={dismissDevServerStartStatus}
           validationStatus={validationStatus}
           validationError={validationError}
           onDismissValidation={dismissValidationStatus}
@@ -2117,11 +2256,13 @@ function App() {
       )}
 
       {evaluationTarget && currentProject && (
-        <ModelEvaluationPanel
-          projectId={currentProject.id}
-          assetKey={evaluationTarget.attributes?.asset_name || evaluationTarget.id}
-          onClose={() => setEvaluationTarget(null)}
-        />
+        <Suspense fallback={null}>
+          <ModelEvaluationPanel
+            projectId={currentProject.id}
+            assetKey={evaluationTarget.attributes?.asset_name || evaluationTarget.id}
+            onClose={() => setEvaluationTarget(null)}
+          />
+        </Suspense>
       )}
 
       {pendingAutoMLUpstreamAssetKey && currentProject && (

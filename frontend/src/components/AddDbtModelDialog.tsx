@@ -192,6 +192,30 @@ export function AddDbtModelDialog({ open, onOpenChange, projectId, onCreated }: 
           ? [{ name: modelName, description: description || undefined, columns: [{ name: testColumn, tests: ['not_null', 'unique'] }] }]
           : undefined,
       } as any);
+
+      // Bad SQL (a ref() typo, an invalid Jinja config) or a malformed
+      // schema.yml test entry can break the whole project's load just
+      // like any other component write -- confirmed a real historical
+      // incident for the "tests" shape specifically (see add_dbt_model's
+      // own comment). Validate and undo via the existing model-delete
+      // endpoint if so. dbt's unique_id convention is always
+      // `model.<dbt_project_name>.<model_name>`, independent of subfolder.
+      if (selectedProject) {
+        const modelUniqueId = `model.${selectedProject.name}.${modelName}`;
+        const { validateProjectOrRollback } = await import('@/lib/validateProjectOrRollback');
+        const result = await validateProjectOrRollback(projectId, async () => {
+          await projectsApi.deleteDbtModel(projectId, {
+            dbt_relative_path: dbtProjectPath,
+            model_unique_id: modelUniqueId,
+            delete_schema_entry: true,
+          });
+        });
+        if (!result.ok) {
+          notify.error(`This model would have broken the project, so it was undone:\n${result.error}`);
+          return;
+        }
+      }
+
       notify.success(`Created ${r.sql_path}${r.schema_written ? ' + schema.yml' : ''}.`);
       onCreated?.(r.sql_path, dbtProjectPath);
       onOpenChange(false);

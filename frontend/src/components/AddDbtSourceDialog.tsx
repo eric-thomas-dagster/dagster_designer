@@ -78,6 +78,25 @@ export function AddDbtSourceDialog({ open, onOpenChange, projectId, dbtRelativeP
             tests: [c.not_null && 'not_null', c.unique && 'unique'].filter(Boolean) as string[],
           })),
       });
+
+      // A malformed source (bad freshness config, a column test dbt
+      // rejects) can break the whole project's load just like any other
+      // component write. This is always a brand-new (source_name,
+      // table_name) pair, so rollback is just deleting what was just
+      // added via the existing dbt-sources/delete endpoint.
+      const { validateProjectOrRollback } = await import('@/lib/validateProjectOrRollback');
+      const result = await validateProjectOrRollback(projectId, async () => {
+        await projectsApi.deleteDbtSource(projectId, {
+          dbt_relative_path: dbtRelativePath,
+          source_name: sourceName.trim(),
+          table_name: tableName.trim(),
+        });
+      });
+      if (!result.ok) {
+        notify.error(`This source would have broken the project, so it was undone:\n${result.error}`);
+        return;
+      }
+
       notify.success(`Saved ${sourceName}.${tableName} to models/sources.yml`);
       onSaved?.();
       onOpenChange(false);

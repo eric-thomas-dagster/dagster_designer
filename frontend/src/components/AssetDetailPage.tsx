@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo, useEffect, lazy, Suspense } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   Play, ChevronRight, ChevronDown, Layers as LayersIcon, Database, CheckCircle2, AlertTriangle,
@@ -14,7 +14,11 @@ import { PartitionBackfill } from './PartitionBackfill';
 import { StartDgDevButton } from './RunsPanel';
 import { InsightMetricCard } from './InsightMetricCard';
 import { MetadataEntryList } from './MetadataEntryList';
-import { ModelMetricsView } from './ModelMetricsView';
+// Lazy: pulls in recharts (5.2MB package), only relevant for the narrow
+// AI/ML model-evaluation view, not something most asset detail pages need.
+const ModelMetricsView = lazy(() =>
+  import('./ModelMetricsView').then((m) => ({ default: m.ModelMetricsView }))
+);
 import { hasModelMetrics } from '@/lib/modelMetrics';
 import type { GraphNode, ComponentInstance } from '@/types';
 
@@ -82,7 +86,17 @@ export function AssetDetailPage({ nodeId, onClose, onNewPrimitiveForAsset, onNav
     () => currentProject?.graph.nodes.find((n) => n.id === nodeId) as GraphNode | undefined,
     [currentProject, nodeId],
   );
-  const isPartitioned = !!(node?.data as any)?.is_partitioned;
+  // `is_partitioned` is only reliable when the graph came from a live
+  // GraphQL query -- built from the offline `dg list defs` fallback (the
+  // common case whenever no `dg dev` is running), it's just undefined,
+  // since a raw `dg list defs --json` dump has no partition field
+  // anywhere on an asset entry (confirmed live). Same widened heuristic
+  // as IngestionsPanel's partitionByAssetKey: fall back to sniffing
+  // conventionally-named partition attributes off the component itself
+  // (e.g. SyntheticDataGeneratorComponent's partition_type) so a
+  // genuinely-partitioned asset doesn't silently lose its Partitions tab.
+  const nodeAttrs = (node?.data as any)?.component_attributes || {};
+  const isPartitioned = !!(node?.data as any)?.is_partitioned || 'partition_type' in nodeAttrs || 'partitions_def' in nodeAttrs;
   const assetKeyForModelQuery = (node?.data as any)?.asset_key || nodeId;
 
   // Whether the Model tab shows at all -- name-based on the latest
@@ -213,7 +227,9 @@ export function AssetDetailPage({ nodeId, onClose, onNewPrimitiveForAsset, onNav
         {activeTab === 'overview' && <OverviewTab node={node} isCloud={isCloud} onNewPrimitiveForAsset={onNewPrimitiveForAsset} onNavigate={onNavigate} />}
         {activeTab === 'model' && (
           <div className="p-6 max-w-[900px] mx-auto">
-            <ModelMetricsView entries={latestModelEntries} />
+            <Suspense fallback={<div className="text-sm text-gray-500">Loading metrics…</div>}>
+              <ModelMetricsView entries={latestModelEntries} />
+            </Suspense>
           </div>
         )}
         {activeTab === 'checks' && <ChecksTab node={node} projectId={currentProject.id} onOpenRun={onOpenRun} />}
@@ -626,7 +642,7 @@ const PARTITION_STATUS_TONE: Record<string, string> = {
   missing: 'bg-gray-200',
 };
 
-function PartitionsTab({
+export function PartitionsTab({
   node, isCloud, projectId, currentProject, onOpenRun,
 }: {
   node: GraphNode;
@@ -796,11 +812,18 @@ function PartitionHeatmap({
   const [hovered, setHovered] = useState<{ key: string; status: string } | null>(null);
   return (
     <div>
-      {hovered && (
-        <div className="text-xs text-gray-700 font-mono mb-1.5 h-4">
-          {hovered.key} · <span className="capitalize">{hovered.status}</span> · click for details
-        </div>
-      )}
+      {/* Fixed height whether or not something's hovered -- rendering
+          this conditionally used to shift the grid down the instant a
+          hover started, moving a DIFFERENT square under the cursor and
+          immediately re-triggering enter/leave on it, over and over
+          (confirmed live: exactly the "super jumpy, can't read it"
+          symptom). Reserving the space always, and only swapping the
+          TEXT inside it, keeps the grid perfectly still. */}
+      <div className="text-xs text-gray-700 font-mono mb-1.5 h-4">
+        {hovered && (
+          <>{hovered.key} · <span className="capitalize">{hovered.status}</span> · click for details</>
+        )}
+      </div>
       <div className="flex flex-wrap gap-[3px] max-h-64 overflow-y-auto">
         {keys.map((p) => (
           <button
@@ -1667,6 +1690,23 @@ function DefinitionSection({ node, isCloud }: { node: GraphNode; isCloud: boolea
         tags: Object.keys(tagsDict).length ? tagsDict : null,
         kinds: draft.kinds.length ? draft.kinds : null,
       });
+
+      const { validateProjectOrRollback } = await import('@/lib/validateProjectOrRollback');
+      const result = await validateProjectOrRollback(currentProject.id, async () => {
+        await projectsApi.setAssetFieldOverrides(currentProject.id, assetKey, {
+          description: overrides?.description ?? null,
+          group_name: overrides?.group_name ?? null,
+          owners: overrides?.owners ?? null,
+          tags: overrides?.tags ?? null,
+          kinds: overrides?.kinds ?? null,
+        });
+      });
+      if (!result.ok) {
+        await loadProject(currentProject.id);
+        notify.error(`This change would have broken the project, so it was undone:\n${result.error}`);
+        return;
+      }
+
       await loadProject(currentProject.id);
       notify.success('Asset metadata saved.');
       setEditing(false);
@@ -1820,13 +1860,17 @@ function DefinitionSection({ node, isCloud }: { node: GraphNode; isCloud: boolea
  *     onNewPrimitiveForAsset)
  * All write actions hidden on Dagster+ (read-only).
  */
-function AutomationSection({ node, isCloud, jobs, schedules, sensors, onNewPrimitiveForAsset }: {
+export function AutomationSection({ node, isCloud, jobs, schedules, sensors, onNewPrimitiveForAsset, onEditItem }: {
   node: GraphNode;
   isCloud: boolean;
   jobs: any[];
   schedules: any[];
   sensors: any[];
   onNewPrimitiveForAsset?: (category: 'schedule' | 'job' | 'sensor' | 'asset_check' | 'freshness_policy', assetKey: string) => void;
+  /** See AutomationList's onEditItem -- only items that carry a real
+   *  `component` (a local project's own defs.yaml instance) are editable;
+   *  cloud-hydrated schedules/jobs have no local component to open. */
+  onEditItem?: (component: ComponentInstance) => void;
 }) {
   const { currentProject, loadProject } = useProjectStore();
   const data = node.data as any;
@@ -1867,8 +1911,31 @@ function AutomationSection({ node, isCloud, jobs, schedules, sensors, onNewPrimi
         notify.error(dataResp.detail || `Failed to attach to ${category}`);
         return;
       }
-      if (dataResp.updated) notify.success(`Added "${assetKey}" to ${category} "${primitiveName}".`);
-      else notify.info(dataResp.message || `Already in ${category}.`);
+      if (dataResp.updated) {
+        // See PropertyPanel's attachAssetToExisting for why: attaching an
+        // asset can still break the whole project (Dagster's all-or-
+        // nothing definitions load), so validate and undo via the
+        // mirrored detach-asset endpoint if so.
+        const { validateProjectOrRollback } = await import('@/lib/validateProjectOrRollback');
+        const result = await validateProjectOrRollback(currentProject.id, async () => {
+          await fetch(
+            `/api/v1/primitives/detach-asset/${currentProject.id}/${category}/${encodeURIComponent(primitiveName)}`,
+            {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ asset_key: assetKey }),
+            },
+          );
+        });
+        if (!result.ok) {
+          notify.error(`Adding "${assetKey}" to ${category} "${primitiveName}" would have broken the project, so it was undone:\n${result.error}`);
+          setAttaching(null);
+          return;
+        }
+        notify.success(`Added "${assetKey}" to ${category} "${primitiveName}".`);
+      } else {
+        notify.info(dataResp.message || `Already in ${category}.`);
+      }
       await loadProject(currentProject.id);
       setAttaching(null);
     } catch (e: any) {
@@ -1879,7 +1946,13 @@ function AutomationSection({ node, isCloud, jobs, schedules, sensors, onNewPrimi
   const canWrite = !isCloud && !!onNewPrimitiveForAsset;
 
   return (
-    <div className="bg-white border border-gray-200 rounded-lg overflow-hidden">
+    // No overflow-hidden here (unlike most of these bordered cards) --
+    // AutomationAddMenu's dropdown is an absolutely-positioned child, not a
+    // portal, so clipping overflow also clipped the dropdown itself
+    // whenever it extended past the card's bottom edge. The one child that
+    // actually needs rounded corners (the attach-panel footer) rounds
+    // itself instead, below.
+    <div className="bg-white border border-gray-200 rounded-lg">
       <div className="flex items-center justify-between gap-2 border-b border-gray-100 px-3 py-2">
         <div className="flex items-center gap-2">
           <Zap className="w-4 h-4 text-gray-500" />
@@ -1898,10 +1971,12 @@ function AutomationSection({ node, isCloud, jobs, schedules, sensors, onNewPrimi
           empty="Not in any job."
           onAttach={canWrite ? () => openAttachMenu('job') : undefined}
           onNew={canWrite ? () => onNewPrimitiveForAsset?.('job', assetKey) : undefined}
+          onEditItem={onEditItem}
           items={jobs.map((j: any) => ({
             key: j.name || String(j),
             primary: typeof j === 'string' ? j : (j.name || 'unnamed'),
             meta: null,
+            component: j?.component,
           }))}
         />
         <AutomationList
@@ -1909,10 +1984,12 @@ function AutomationSection({ node, isCloud, jobs, schedules, sensors, onNewPrimi
           empty="No schedules target this asset."
           onAttach={canWrite ? () => openAttachMenu('schedule') : undefined}
           onNew={canWrite ? () => onNewPrimitiveForAsset?.('schedule', assetKey) : undefined}
+          onEditItem={onEditItem}
           items={schedules.map((s: any) => ({
             key: s.name || String(s),
             primary: s.name || 'unnamed',
             meta: s.cron ? <span className="font-mono text-[10px] text-gray-500">{s.cron}</span> : null,
+            component: s?.component,
           }))}
         />
         <AutomationList
@@ -1921,9 +1998,11 @@ function AutomationSection({ node, isCloud, jobs, schedules, sensors, onNewPrimi
           // Sensors don't have an attach-existing endpoint (a sensor's
           // asset targeting is defined in code, not YAML). "New" only.
           onNew={canWrite ? () => onNewPrimitiveForAsset?.('sensor', assetKey) : undefined}
+          onEditItem={onEditItem}
           items={sensors.map((s: any) => ({
             key: s.name || String(s),
             primary: s.name || 'unnamed',
+            component: s?.component,
             meta: s.sensor_type ? <span className="text-[10px] text-gray-500">{s.sensor_type}</span> : null,
           }))}
         />
@@ -1937,7 +2016,7 @@ function AutomationSection({ node, isCloud, jobs, schedules, sensors, onNewPrimi
         const items = attaching.category === 'schedule' ? available.schedules : available.jobs;
         const count = (items || []).length;
         return (
-          <div className="border-t-2 border-blue-300 bg-blue-50/50 p-3">
+          <div className="border-t-2 border-blue-300 bg-blue-50/50 p-3 rounded-b-lg">
             <div className="flex items-center justify-between mb-2">
               <div className="text-[11px] font-semibold text-blue-900">
                 Attach to existing {attaching.category}
@@ -1980,12 +2059,18 @@ function AutomationSection({ node, isCloud, jobs, schedules, sensors, onNewPrimi
   );
 }
 
-function AutomationList({ label, empty, items, onAttach, onNew }: {
+function AutomationList({ label, empty, items, onAttach, onNew, onEditItem }: {
   label: string;
   empty: string;
-  items: { key: string; primary: string; meta: React.ReactNode }[];
+  items: { key: string; primary: string; meta: React.ReactNode; component?: ComponentInstance }[];
   onAttach?: () => void;
   onNew?: () => void;
+  /** Opens the listed schedule/job's OWN component editor (the same
+   *  ComponentConfigModal PrimitivesManager's "Edit component" uses) --
+   *  without this, a schedule/job that already targets the asset showed
+   *  up read-only here with no way back to its cron/selection, even
+   *  though editing it was always one click away from the Primitives tab. */
+  onEditItem?: (component: ComponentInstance) => void;
 }) {
   return (
     <div className="space-y-1">
@@ -2018,12 +2103,23 @@ function AutomationList({ label, empty, items, onAttach, onNew }: {
         <p className="text-[11px] text-gray-500 italic">{empty}</p>
       ) : (
         <div className="space-y-0.5">
-          {items.map((it) => (
-            <div key={it.key} className="flex items-center gap-2 text-[11px]">
-              <span className="font-mono text-gray-700">{it.primary}</span>
-              {it.meta}
-            </div>
-          ))}
+          {items.map((it) => {
+            const canEdit = !!(onEditItem && it.component);
+            return (
+              <div
+                key={it.key}
+                onClick={canEdit ? () => onEditItem!(it.component!) : undefined}
+                className={`flex items-center gap-2 text-[11px] group ${canEdit ? 'cursor-pointer hover:bg-gray-50 -mx-1 px-1 rounded' : ''}`}
+                title={canEdit ? `Edit ${it.primary}` : undefined}
+              >
+                <span className="font-mono text-gray-700">{it.primary}</span>
+                {it.meta}
+                {canEdit && (
+                  <Pencil className="w-2.5 h-2.5 text-gray-300 group-hover:text-gray-500 ml-auto flex-shrink-0" />
+                )}
+              </div>
+            );
+          })}
         </div>
       )}
     </div>
@@ -2130,6 +2226,31 @@ export function AutoCoverageModal({ assetKey, onClose }: { assetKey: string; onC
     try {
       const picked = suggestions.filter((s: any) => selected.has(s.name));
       const r = await assetsApi.coverageApply(currentProject.id, assetKey, picked);
+      const failedNames = new Set((r.failed || []).map((f: any) => f.name));
+      const appliedNames = picked.map((p: any) => p.name).filter((n: string) => !failedNames.has(n));
+
+      if (appliedNames.length > 0) {
+        // Each applied check writes a defs.yaml like any other monitor
+        // component -- a bad config can break the whole project's load.
+        // One validate call for the batch (not per-check), rolling back
+        // every check this call just applied if so.
+        const { validateProjectOrRollback } = await import('@/lib/validateProjectOrRollback');
+        const result = await validateProjectOrRollback(currentProject.id, async () => {
+          for (const name of appliedNames) {
+            try {
+              await projectsApi.deleteMonitor(currentProject.id, { kind: 'enhanced_check', monitor_id: name });
+            } catch (e) {
+              console.error('Rollback: failed to delete monitor', name, e);
+            }
+          }
+        });
+        if (!result.ok) {
+          await loadProject(currentProject.id);
+          notify.error(`These checks would have broken the project, so they were undone:\n${result.error}`);
+          return;
+        }
+      }
+
       if (r.applied > 0) {
         notify.success(`Applied ${r.applied} check${r.applied === 1 ? '' : 's'} to ${assetKey}.`);
       }

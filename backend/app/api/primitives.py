@@ -1,5 +1,7 @@
 """API endpoints for managing Dagster primitives."""
 
+import asyncio
+import os
 import subprocess
 import json
 import time
@@ -14,6 +16,29 @@ from app.core.config import settings
 
 router = APIRouter(prefix="/primitives", tags=["primitives"])
 primitives_service = PrimitivesService(str(settings.projects_dir))
+
+# Directory names never worth descending into while scanning a project for
+# defs.yaml files -- a real project's .venv alone commonly holds tens of
+# thousands of files. `Path.rglob` has no way to skip a subtree once it
+# decides to enter it (a plain `if part not in skip_parts` filter on the
+# yielded results, used elsewhere in this codebase, still pays the full
+# walk cost even though it discards most of what it finds) -- `os.walk`'s
+# `dirs[:] = ...` prune, done here, actually stops the walk from
+# descending into these directories in the first place.
+_DEFS_SCAN_SKIP_DIRS = {'.venv', 'venv', 'node_modules', '.git', '__pycache__'}
+
+
+def _iter_defs_yaml_files(project_dir: Path):
+    """Yields every defs.yaml under project_dir, without descending into
+    .venv/node_modules/etc. Shared by attach/detach-asset below, which
+    previously each had their own unguarded `project_dir.rglob("defs.yaml")`
+    -- confirmed live against a real project whose .venv alone contains
+    40,000+ files that this was walking through on every attach/detach
+    call just to find one small defs.yaml."""
+    for root, dirs, files in os.walk(project_dir):
+        dirs[:] = [d for d in dirs if d not in _DEFS_SCAN_SKIP_DIRS]
+        if "defs.yaml" in files:
+            yield Path(root) / "defs.yaml"
 
 # Simple in-memory cache for definitions to avoid re-running slow dg list defs
 # Cache structure: {project_id: (timestamp, definitions_data)}
@@ -642,7 +667,7 @@ async def attach_asset_to_primitive(project_id: str, category: PrimitiveCategory
     # Find the primitive's defs.yaml by scanning defs/ folders.
     found_path: Path | None = None
     found_data: dict | None = None
-    for defs_yaml in project_dir.rglob("defs.yaml"):
+    for defs_yaml in _iter_defs_yaml_files(project_dir):
         try:
             with open(defs_yaml, 'r') as f:
                 data = yaml.safe_load(f) or {}
@@ -681,6 +706,77 @@ async def attach_asset_to_primitive(project_id: str, category: PrimitiveCategory
         yaml.dump(found_data, f, default_flow_style=False, sort_keys=False)
 
     return {"message": f"Added to {category} '{name}'", "updated": True, "asset_selection": existing}
+
+
+@router.post("/detach-asset/{project_id}/{category}/{name:path}")
+async def detach_asset_from_primitive(project_id: str, category: PrimitiveCategory, name: str, request: dict):
+    """Inverse of attach-asset -- removes an asset from an existing
+    schedule or job's asset_selection. Exists specifically so a caller
+    that attached an asset and then found the resulting project fails to
+    validate (Dagster's all-or-nothing definitions load) can cleanly
+    undo that exact change, the same way applyGeniePicks rolls back a
+    newly-added component instance.
+
+    Body: { "asset_key": str }
+    """
+    asset_key = (request or {}).get("asset_key")
+    if not asset_key:
+        raise HTTPException(status_code=400, detail="asset_key is required")
+
+    if category not in ("schedule", "job"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"detach-asset only supported for schedule and job; got '{category}'",
+        )
+
+    from app.services.project_service import project_service
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    project_dir = project_service._get_project_dir(project)
+
+    found_path: Path | None = None
+    found_data: dict | None = None
+    for defs_yaml in _iter_defs_yaml_files(project_dir):
+        try:
+            with open(defs_yaml, 'r') as f:
+                data = yaml.safe_load(f) or {}
+        except Exception:
+            continue
+        if not isinstance(data, dict):
+            continue
+        attrs = data.get("attributes", {}) or {}
+        comp_type = str(data.get("type") or "")
+        matches = False
+        if category == "schedule" and "Schedule" in comp_type:
+            if attrs.get("schedule_name") == name or defs_yaml.parent.name == name:
+                matches = True
+        elif category == "job" and "Job" in comp_type:
+            if attrs.get("job_name") == name or defs_yaml.parent.name == name:
+                matches = True
+        if matches:
+            found_path = defs_yaml
+            found_data = data
+            break
+
+    if not found_path or not found_data:
+        raise HTTPException(status_code=404, detail=f"{category} '{name}' not found")
+
+    attrs = found_data.get("attributes") or {}
+    existing = attrs.get("asset_selection") or []
+    if isinstance(existing, str):
+        existing = [s.strip() for s in existing.split(",") if s.strip()]
+    if asset_key not in existing:
+        return {"message": f"Asset not in {category}", "updated": False}
+    existing = [k for k in existing if k != asset_key]
+    attrs["asset_selection"] = existing
+    found_data["attributes"] = attrs
+
+    with open(found_path, 'w') as f:
+        yaml.dump(found_data, f, default_flow_style=False, sort_keys=False)
+
+    return {"message": f"Removed from {category} '{name}'", "updated": True, "asset_selection": existing}
 
 
 @router.delete("/delete/{project_id}/{category}/{name:path}")
@@ -1077,7 +1173,12 @@ async def search_primitive_definition(project_id: str, primitive_type: str, name
     Returns:
         File path and line number if found
     """
-    return _search_primitive_definition_internal(project_id, primitive_type, name)
+    # Off the event loop -- this runs a chain of several sequential
+    # find/grep subprocess calls (up to 5+, several seconds each
+    # timeout), and a direct synchronous call here would freeze the
+    # WHOLE backend (every other open project's requests) for the
+    # entire chain, not just this one "jump to source" lookup.
+    return await asyncio.to_thread(_search_primitive_definition_internal, project_id, primitive_type, name)
 
 
 @router.delete("/definitions/cache/{project_id}")

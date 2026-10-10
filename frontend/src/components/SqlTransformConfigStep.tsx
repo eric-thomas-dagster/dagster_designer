@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { X, Loader2, Sparkles, Database } from 'lucide-react';
 import { useProjectStore } from '@/hooks/useProject';
-import { assetsApi, API_BASE } from '@/services/api';
+import { assetsApi, projectsApi, API_BASE } from '@/services/api';
 import { notify } from './Notifications';
 
 /**
@@ -21,7 +21,7 @@ export function SqlTransformConfigStep({
   onConnected: (assetKey: string) => void;
   onClose: () => void;
 }) {
-  const { currentProject } = useProjectStore();
+  const { currentProject, loadProject } = useProjectStore();
 
   const [resources, setResources] = useState<{ name: string }[]>([]);
   const [resourcesLoading, setResourcesLoading] = useState(false);
@@ -56,6 +56,22 @@ export function SqlTransformConfigStep({
         transformConfig: {},
       });
       const componentId = assetName.trim().replace(/-/g, '_').replace(/ /g, '_').toLowerCase();
+
+      // A bad source query/connection can break the whole project's
+      // load just like any other component write. Validate and undo
+      // via the new component's id (deterministic from assetName, same
+      // slug this function already uses to open the transform builder).
+      const { validateProjectOrRollback } = await import('@/lib/validateProjectOrRollback');
+      const result = await validateProjectOrRollback(currentProject.id, async () => {
+        await projectsApi.deleteComponentInstance(currentProject.id, componentId);
+      });
+      if (!result.ok) {
+        await loadProject(currentProject.id);
+        notify.error(`This source would have broken the project, so it was undone:\n${result.error}`);
+        setSaving(false);
+        return;
+      }
+
       notify.success(`Connected "${componentId}" — opening the transform builder…`);
       onConnected(componentId);
     } catch (e: any) {

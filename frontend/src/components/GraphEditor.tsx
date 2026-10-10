@@ -27,7 +27,7 @@ import ReactFlow, {
 } from 'reactflow';
 import 'reactflow/dist/style.css';
 import { ComponentNode } from './nodes/ComponentNode';
-import { AssetNode, type AssetLens, ASSET_LENS_OPTIONS, AssetLensLegend } from './nodes/AssetNode';
+import { AssetNode, type AssetLens, ASSET_LENS_OPTIONS } from './nodes/AssetNode';
 import { DraftNode } from './DraftNode';
 import { useDrafts } from '@/hooks/useDrafts';
 import { usePreviews } from '@/hooks/usePreviews';
@@ -683,7 +683,7 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
   // see everything. The catalog view ignores this -- it shows all
   // assets with connections grouped into their own sections.
   const [showAllInGraph, setShowAllInGraph] = useState(false);
-  const { currentProject, updateGraph, setCurrentProject, isLoading } = useProjectStore();
+  const { currentProject, updateGraph, setCurrentProject, isLoading, loadProject } = useProjectStore();
   // Read-only whenever the project is a Dagster+ connection.
   const readOnlyMode = !!(currentProject as any)?.is_dagster_plus;
   const [nodes, setNodes, onNodesChangeRaw] = useNodesState([]);
@@ -823,6 +823,7 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
         if (result.success) {
           notify.success(`Materialized ${assetKey} + upstream. Opening preview…`);
           setPreviewAssetKey(assetKey);
+          await loadProject(currentProject.id);
         } else {
           const tail = (result.stderr || result.stdout || '').split('\n').slice(-4).join(' | ');
           notify.error(`Materialize failed: ${tail || 'unknown error'}`);
@@ -840,7 +841,7 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
         );
       }
     },
-    [currentProject],
+    [currentProject, loadProject],
   );
 
   // Handlers for asset context menu
@@ -868,11 +869,18 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
       } else {
         notify.error(`Failed to materialize asset ${assetKey}`);
       }
+      // materialize() blocks until the run actually finishes, so the
+      // backend's status fields (last_run_status/stale_status/...) are
+      // already fresh -- just nobody told the frontend to re-read them.
+      // Without this, the node's color never changed until some UNRELATED
+      // action happened to call loadProject() first (confirmed live: this
+      // was the only materialize path in the whole app that never refreshed).
+      await loadProject(currentProject.id);
     } catch (error) {
       console.error('Materialize failed:', error);
       notify.error(`Failed to materialize asset ${assetKey}`);
     }
-  }, [currentProject]);
+  }, [currentProject, loadProject]);
 
   const handleOpenLaunchpad = useCallback((assetKey: string) => {
     setLaunchpadAssetKey(assetKey);
@@ -886,6 +894,7 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
       if (result.success) {
         const partitionMsg = partition ? ` (partition: ${partition})` : '';
         notify.success(`Asset ${launchpadAssetKey}${partitionMsg} materialized successfully!`);
+        await loadProject(currentProject.id);
       } else {
         notify.error(`Failed to materialize asset ${launchpadAssetKey}`);
       }
@@ -893,7 +902,7 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
       console.error('Materialize failed:', error);
       throw error;
     }
-  }, [currentProject, launchpadAssetKey]);
+  }, [currentProject, launchpadAssetKey, loadProject]);
 
   // Load component schemas for IO validation
   useEffect(() => {
@@ -2034,6 +2043,16 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
 
         console.log('[GraphEditor] Creating custom lineage:', sourceAssetKey, '->', targetAssetKey);
 
+        // Snapshot for rollback -- a new custom-lineage edge can introduce
+        // a cycle or otherwise break the whole project's load (Dagster's
+        // definitions build is all-or-nothing), and unlike other write
+        // paths this one wasn't undoing anything on failure: the edge
+        // stayed optimistically drawn and the lineage write stayed
+        // persisted even if regenerate-assets below threw.
+        const nodesBeforeConnect = nodes;
+        const edgesBeforeConnect = edges;
+        const projectBeforeConnect = currentProject;
+
         // Validate IO type compatibility and show alerts if invalid
         const targetInputType = targetNode.data?.io_input_type;
         const targetInputRequired = targetNode.data?.io_input_required;
@@ -2189,6 +2208,18 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
           // Update the project state with the regenerated project (including custom_lineage)
           setCurrentProject(updatedProject);
 
+          const { validateProjectOrRollback } = await import('@/lib/validateProjectOrRollback');
+          const result = await validateProjectOrRollback(updatedProject.id, async () => {
+            await projectsApi.removeCustomLineage(updatedProject.id, sourceAssetKey, targetAssetKey);
+            setNodes(nodesBeforeConnect);
+            setEdges(edgesBeforeConnect);
+            if (projectBeforeConnect) setCurrentProject(projectBeforeConnect);
+          });
+          if (!result.ok) {
+            notify.error(`This connection would have broken the project, so it was undone:\n${result.error}`);
+            return;
+          }
+
           console.log('[GraphEditor] Custom lineage applied successfully');
         } catch (error) {
           console.error('[GraphEditor] Failed to add custom lineage:', error);
@@ -2228,7 +2259,7 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
         );
       }
     },
-    [setEdges, setNodes, nodes, currentProject, isValidConnection]
+    [setEdges, setNodes, nodes, edges, currentProject, isValidConnection]
   );
 
   const handleMaterializeSelected = async () => {
@@ -2244,16 +2275,62 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
         })
         .filter(Boolean);
 
-      console.log('[GraphEditor] Materializing assets:', assetKeys);
-      const result = await projectsApi.materialize(currentProject.id, assetKeys);
+      // `dg launch` fails outright for a partitioned asset with no
+      // `--partition` -- confirmed live: materializing customer_rfm_segments
+      // (daily-partitioned, same as raw_orders) failed with a buried
+      // CheckError ("Asset has partitions, but no '--partition' option was
+      // provided") that the error display below couldn't even surface (see
+      // that fix).
+      const partitionChecks = await Promise.all(
+        assetKeys.map((k) => partitionsApi.isPartitioned(currentProject.id, k))
+      );
+      const partitioned = assetKeys.filter((_, i) => partitionChecks[i]);
+      const runnable = assetKeys.filter((_, i) => !partitionChecks[i]);
+
+      // Single partitioned asset selected -- same redirect
+      // handleMaterializeAsset's own context-menu entry point already uses
+      // (this toolbar button had the identical gap, just not routed
+      // through that one). The Launchpad modal here is wired for exactly
+      // one asset at a time (`launchpadAssetKey` is a single string, not a
+      // list), so this only applies when there's nothing else in the
+      // selection to lose by redirecting instead of materializing.
+      if (assetKeys.length === 1 && partitioned.length === 1) {
+        notify.info(`${partitioned[0]} is partitioned -- pick a partition to run.`);
+        setLaunchpadAssetKey(partitioned[0]);
+        setShowLaunchpad(true);
+        return;
+      }
+
+      // Mixed selection -- no single-partition picker makes sense for
+      // several different partitioned assets at once, so skip them with a
+      // clear pointer to where they CAN be run, and still materialize the
+      // rest of the selection rather than blocking the whole action.
+      if (partitioned.length > 0) {
+        notify.error(
+          `${partitioned.join(', ')} ${partitioned.length === 1 ? 'is' : 'are'} partitioned -- ` +
+          `materialize ${partitioned.length === 1 ? 'it' : 'them'} from the Ingestions page's Backfill picker instead, which lets you choose a partition.`
+        );
+      }
+      if (runnable.length === 0) return;
+
+      console.log('[GraphEditor] Materializing assets:', runnable);
+      const result = await projectsApi.materialize(currentProject.id, runnable);
       console.log('[GraphEditor] Materialization result:', result);
 
       if (result.success) {
-        notify.success(`Successfully materialized ${assetKeys.length} asset(s)!\n\nOutput:\n${result.stdout.slice(0, 500)}`);
+        notify.success(`Successfully materialized ${runnable.length} asset(s)!\n\nOutput:\n${result.stdout.slice(0, 500)}`);
         console.log('Materialization output:', result.stdout);
+        await loadProject(currentProject.id);
       } else {
-        const errorMsg = result.stderr || result.message || 'Unknown error';
-        notify.error(`Materialization failed:\n\n${errorMsg.slice(0, 500)}`);
+        // Last ~500 chars, not first -- `dg launch`'s own startup noise
+        // (the dagster.yaml notice, component field-shadowing warnings)
+        // fills the FIRST 500 chars of stderr on every call, success or
+        // failure, which meant this always showed harmless boilerplate
+        // instead of the actual error (confirmed live: a genuine CheckError
+        // was completely hidden behind it, several hundred lines in).
+        const fullErr = result.stderr || result.message || 'Unknown error';
+        const errorMsg = fullErr.slice(-500);
+        notify.error(`Materialization failed:\n\n${errorMsg}`);
         console.error('Materialization failed - stderr:', result.stderr);
         console.error('Materialization failed - stdout:', result.stdout);
         console.error('Materialization failed - message:', result.message);
@@ -3068,19 +3145,16 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
             ))}
           </div>
           {inGraph && (
-            <>
-              <select
-                value={assetLens}
-                onChange={(e) => setAssetLens(e.target.value as AssetLens)}
-                className="text-xs px-2 py-1 border border-gray-300 rounded bg-white max-w-[140px]"
-                title="Color nodes by"
-              >
-                {ASSET_LENS_OPTIONS.map((o) => (
-                  <option key={o.value} value={o.value}>Color: {o.label}</option>
-                ))}
-              </select>
-              <AssetLensLegend lens={assetLens} />
-            </>
+            <select
+              value={assetLens}
+              onChange={(e) => setAssetLens(e.target.value as AssetLens)}
+              className="text-xs px-2 py-1 border border-gray-300 rounded bg-white max-w-[140px]"
+              title="Color nodes by"
+            >
+              {ASSET_LENS_OPTIONS.map((o) => (
+                <option key={o.value} value={o.value}>Color: {o.label}</option>
+              ))}
+            </select>
           )}
           {/* Rendered (not conditionally mounted) even in Catalog view, just
               hidden via `invisible` — this + the other `inGraph`-gated

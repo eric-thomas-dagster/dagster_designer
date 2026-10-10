@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, Suspense } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu';
 import { useProjectStore } from '@/hooks/useProject';
@@ -128,6 +128,9 @@ export function PropertyPanel({ nodeId, onConfigureComponent, onOpenFile, onNewP
         ? primitivesApi.listAll(currentProject.id)
         : Promise.reject('No project'),
     enabled: !!currentProject,
+    // refetchExistingPrimitives() (below) always forces a fresh fetch --
+    // this only stops the redundant automatic refetch on every remount.
+    staleTime: 60_000,
   });
 
   const attachAssetToExisting = async (
@@ -151,6 +154,27 @@ export function PropertyPanel({ nodeId, onConfigureComponent, onOpenFile, onNewP
         return;
       }
       if (data.updated) {
+        // Attaching an asset to a schedule/job can still break the whole
+        // project (Dagster's definitions load is all-or-nothing) -- e.g.
+        // the attached asset turns out to be partitioned differently than
+        // the schedule expects. Validate and undo via the mirrored
+        // detach-asset endpoint if so, same pattern applyGeniePicks uses
+        // for a newly-added component.
+        const { validateProjectOrRollback } = await import('@/lib/validateProjectOrRollback');
+        const result = await validateProjectOrRollback(currentProject.id, async () => {
+          await fetch(
+            `/api/v1/primitives/detach-asset/${currentProject.id}/${category}/${encodeURIComponent(primitiveName)}`,
+            {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ asset_key: assetKey }),
+            },
+          );
+        });
+        if (!result.ok) {
+          notify.error(`Adding "${assetKey}" to ${category} "${primitiveName}" would have broken the project, so it was undone:\n${result.error}`);
+          return;
+        }
         notify.success(`Added "${assetKey}" to ${category} "${primitiveName}".`);
       } else {
         notify.info(data.message || `Already in ${category}.`);
@@ -479,17 +503,13 @@ export function PropertyPanel({ nodeId, onConfigureComponent, onOpenFile, onNewP
         // there's no per-model component sprawl and no dead
         // `translation.by_key`/split-DbtProjectComponent dance.
         const assetKey = node.data.asset_key || node.id;
+        const previousOverrides = (currentProject.asset_field_overrides || {})[assetKey] || null;
         const tags = editableMetadata.tags.trim() ? parseTagsInput(editableMetadata.tags) : null;
         await projectsApi.setAssetFieldOverrides(currentProject.id, assetKey, {
           description: editableMetadata.description.trim() || null,
           group_name: editableMetadata.group_name.trim() || null,
           owners: editableMetadata.owners.length > 0 ? editableMetadata.owners : null,
           tags,
-        });
-
-        setSaveResult({
-          success: true,
-          message: 'Asset metadata updated successfully.',
         });
 
         // Dependencies: apply the add/remove delta against custom lineage,
@@ -503,13 +523,41 @@ export function PropertyPanel({ nodeId, onConfigureComponent, onOpenFile, onNewP
           await projectsApi.removeCustomLineage(currentProject.id, source, assetKey);
         }
 
-        await loadProject(currentProject.id);
-
         // Always save the graph to persist any partition config changes
         await projectsApi.update(currentProject.id, {
           graph: currentProject.graph,
         });
 
+        const { validateProjectOrRollback } = await import('@/lib/validateProjectOrRollback');
+        const result = await validateProjectOrRollback(currentProject.id, async () => {
+          await projectsApi.setAssetFieldOverrides(currentProject.id, assetKey, {
+            description: previousOverrides?.description ?? null,
+            group_name: previousOverrides?.group_name ?? null,
+            owners: previousOverrides?.owners ?? null,
+            tags: previousOverrides?.tags ?? null,
+          });
+          for (const source of addedDeps) {
+            await projectsApi.removeCustomLineage(currentProject.id, source, assetKey);
+          }
+          for (const source of removedDeps) {
+            await projectsApi.addCustomLineage(currentProject.id, source, assetKey);
+          }
+        });
+        if (!result.ok) {
+          await loadProject(currentProject.id);
+          setSaveResult({
+            success: false,
+            message: `This change would have broken the project, so it was undone:\n${result.error}`,
+          });
+          return;
+        }
+
+        setSaveResult({
+          success: true,
+          message: 'Asset metadata updated successfully.',
+        });
+
+        await loadProject(currentProject.id);
       } catch (error) {
         console.error('Failed to save metadata:', error);
         setSaveResult({
@@ -1280,15 +1328,17 @@ export function PropertyPanel({ nodeId, onConfigureComponent, onOpenFile, onNewP
                 return (
                 <div className="mt-3 p-3 bg-white border border-gray-200 rounded-lg">
                   {Specialized ? (
-                    <Specialized
-                      attributes={inlineAttrs}
-                      onChange={(name, val) => {
-                        setInlineAttrs((prev) => ({ ...prev, [name]: val }));
-                        setInlineDirty(true);
-                      }}
-                      onOpenAdvanced={() => onConfigureComponent(sourceComponent)}
-                      componentType={sourceComponent.component_type}
-                    />
+                    <Suspense fallback={<div className="text-xs text-gray-500">Loading…</div>}>
+                      <Specialized
+                        attributes={inlineAttrs}
+                        onChange={(name, val) => {
+                          setInlineAttrs((prev) => ({ ...prev, [name]: val }));
+                          setInlineDirty(true);
+                        }}
+                        onOpenAdvanced={() => onConfigureComponent(sourceComponent)}
+                        componentType={sourceComponent.component_type}
+                      />
+                    </Suspense>
                   ) : (
                   <InlineAttributesForm
                     properties={sourceComponentSchema.schema.properties}
