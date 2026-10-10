@@ -355,16 +355,25 @@ def _try_dbt_show_preview(asset_key: str, row_limit: int = 100):
         cmd.extend(["--profiles-dir", str(profiles_dir)])
 
     try:
-        result = _sp.run(cmd, capture_output=True, text=True, timeout=180)
+        # cwd matters here even though --project-dir is already passed --
+        # dbt-duckdb resolves profiles.yml's `path:` (often a relative
+        # path, e.g. "../../data/foo.duckdb") against the PROCESS's cwd,
+        # not --project-dir. Without this, the subprocess inherited
+        # whatever cwd the caller happened to have (confirmed live: the
+        # backend's own directory), so a relative duckdb path resolved to
+        # a completely unrelated location (literally .../Contents/data/...
+        # inside the app bundle itself) instead of the real project's
+        # data/ directory, failing with a confusing "No such file" from
+        # deep inside duckdb's own connection code.
+        result = _sp.run(cmd, cwd=str(dbt_project_dir), capture_output=True, text=True, timeout=180)
     except _sp.TimeoutExpired:
         return {"success": False, "error": f"dbt show timed out after 180s for {model_name}"}
     except Exception:
         return None
 
     stdout = result.stdout or ""
-    # `dbt --quiet show` emits pure JSON on stdout; grab from first `{`.
     brace = stdout.find('{')
-    if brace < 0:
+    if brace < 0 and stdout.find('[') < 0:
         # Failure — surface dbt's own error (typically indicates the model
         # isn't materialized yet or has an upstream that isn't built).
         tail = (result.stderr or stdout or 'unknown error').strip().splitlines()[-5:]
@@ -373,12 +382,92 @@ def _try_dbt_show_preview(asset_key: str, row_limit: int = 100):
             "error": f"dbt show couldn't preview '{model_name}': {' | '.join(tail)}",
         }
 
-    try:
-        payload = json.loads(stdout[brace:])
-    except json.JSONDecodeError as e:
-        return {"success": False, "error": f"dbt show returned unparseable JSON: {e}"}
+    # `dbt show --output json` emits a DIFFERENT shape across versions --
+    # confirmed live: parsing stdout[brace:] as ONE JSON blob (the original
+    # approach here) broke with "Expecting property name enclosed in double
+    # quotes: line 1 column 2" the moment dbt's structured JSON logging
+    # emitted more than one JSON value on stdout (one object per log event,
+    # not a single combined one) -- `json.loads` requires the ENTIRE input
+    # to be one value, so anything after the first complete object/array
+    # makes the whole parse fail. projects.py's own dbt-preview endpoint
+    # already solved this exact problem (dbt 1.5-1.10 all emit differently:
+    # data.show, data.preview, a preview field that's itself a JSON
+    # string, or a bare array) by scanning line-by-line and accepting the
+    # first list-of-dicts found anywhere -- same strategy ported here
+    # rather than this script keeping its own, more fragile parser.
+    def _coerce_row_list(val):
+        if isinstance(val, str):
+            try:
+                val = json.loads(val)
+            except Exception:
+                return None
+        if isinstance(val, list) and val and isinstance(val[0], dict):
+            return val
+        return None
 
-    rows = payload.get("show") or []
+    def _find_row_list(obj, depth=0):
+        if depth > 6:
+            return None
+        candidate = _coerce_row_list(obj)
+        if candidate is not None:
+            return candidate
+        if isinstance(obj, dict):
+            for key in ('preview', 'show', 'rows', 'results', 'table'):
+                candidate = _coerce_row_list(obj.get(key))
+                if candidate is not None:
+                    return candidate
+            for val in obj.values():
+                if isinstance(val, (dict, list, str)):
+                    found = _find_row_list(val, depth + 1)
+                    if found is not None:
+                        return found
+        return None
+
+    def _scan_json_values(text: str):
+        """Yield every complete top-level JSON value in text, in order,
+        regardless of internal formatting. Splitting on lines (the first
+        version of this fix) assumed one JSON value per line -- true for
+        dbt's structured-log events, but NOT for this specific case,
+        confirmed live: `dbt --quiet show --output json` here pretty-
+        prints its result across many indented lines, so no single line
+        was ever independently parseable and this always fell through to
+        "no rows found" despite the real data sitting right there.
+        `raw_decode` parses exactly one value starting at a given
+        position and reports where it ended, so it finds a value
+        correctly whether it's on one line or pretty-printed across many,
+        and lets us resume scanning right after it for any further values
+        (the original concatenated-structured-log-events case)."""
+        decoder = json.JSONDecoder()
+        i, n = 0, len(text)
+        while i < n:
+            while i < n and text[i] not in '{[':
+                i += 1
+            if i >= n:
+                break
+            try:
+                obj, end = decoder.raw_decode(text, i)
+                yield obj
+                i = end
+            except json.JSONDecodeError:
+                i += 1
+
+    rows: list = []
+    combined_output = stdout + "\n" + (result.stderr or "")
+    for evt in _scan_json_values(combined_output):
+        if isinstance(evt, list) and evt and isinstance(evt[0], dict):
+            rows = evt
+            break
+        if isinstance(evt, dict):
+            candidate = _find_row_list(evt)
+            if candidate is not None:
+                rows = candidate
+                break
+
+    if not rows:
+        raw_tail = combined_output.strip()
+        raw_excerpt = '\n'.join(raw_tail.splitlines()[-10:]) if raw_tail else 'dbt show returned no output'
+        return {"success": False, "error": f"dbt show succeeded but returned no preview rows.\n\nRaw output:\n{raw_excerpt}"}
+
     columns = list(rows[0].keys()) if rows else []
     # Coerce non-JSON-safe values (Decimal, datetime, bytes) to strings.
     data = [
@@ -668,6 +757,29 @@ def main():
     except ValueError:
         sample_limit = 100
     sample_limit = max(1, min(sample_limit, 50000))
+    # Caller already knows this from the project graph's own `kinds` tag
+    # (cheap, in-memory, no file I/O) -- see assets.py's preview_asset_data.
+    is_dbt_hint = len(sys.argv) > 4 and sys.argv[4] == "1"
+
+    if is_dbt_hint:
+        # Skip the expensive full-project import entirely for a known dbt
+        # model -- confirmed live as pure wasted work otherwise (importing
+        # definitions.py resolves the WHOLE installed component catalog,
+        # the same cost as a `dg launch`/`dg list defs` cold start, before
+        # ever reaching the point where a dbt asset would take this exact
+        # shortcut anyway). Same two-step fallback the multi-asset path
+        # below already uses: a direct DuckDB file read first (<100ms if
+        # already materialized), then `dbt show` (~1-2s, works for every
+        # adapter). Falls through to the normal import-based path below
+        # only if both come back empty, as a safety net.
+        duckdb_result = _try_duckdb_preview(asset_key, sample_limit)
+        if duckdb_result is not None:
+            print(json.dumps(duckdb_result))
+            return
+        dbt_result = _try_dbt_show_preview(asset_key, sample_limit)
+        if dbt_result is not None:
+            print(json.dumps(dbt_result))
+            return
 
     try:
         # Import the definitions module

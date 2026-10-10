@@ -115,7 +115,18 @@ def agents_pipelines_component_ids(components: list[dict[str, Any]]) -> set[str]
     # `ingestion` category (file_ingestion, database_replication, ...) --
     # those are heavier ELT-style components that belong on the dedicated
     # Ingestions page, not folded into a single agent/pipeline pick.
-    source_ids = {"dataframe_from_csv", "dataframe_from_sql", "database_query"} & {
+    # synthetic_data_generator belongs here too -- confirmed live as a real
+    # gap: a user repeatedly answering "generate synthetic tickets" to the
+    # data-source question had NO effect, because this fixed id set is the
+    # entire candidate pool for a scoped "agents_pipelines" plan (no
+    # catalog-wide keyword prefiltering happens for this scope at all --
+    # see `scope` on plan()), and synthetic_data_generator was never in
+    # it. The LLM could only ever reach for dataframe_from_csv/sql/
+    # database_query regardless of what the user actually asked for. It
+    # fits the same "lightweight DataFrame source, no extra resource
+    # wiring" criteria as the other three -- even more so, since it needs
+    # no connection string/env var at all.
+    source_ids = {"dataframe_from_csv", "dataframe_from_sql", "database_query", "synthetic_data_generator"} & {
         c["id"] for c in components if c.get("id")
     }
     return agent_ids | source_ids
@@ -324,7 +335,7 @@ def _pip_available(pkg: str) -> bool:
 
 def _keyword_prefilter(
     components: list[dict[str, Any]], task: str, cap: int = 250
-) -> tuple[list[dict[str, Any]], set[str]]:
+) -> tuple[list[dict[str, Any]], set[str], set[str]]:
     """Filter + rank the catalog before sending it to the planner LLM.
 
     Strategy (inspired by planned_catalog_agent):
@@ -337,10 +348,14 @@ def _keyword_prefilter(
        pipeline plan always has viable endpoints.
     5. Fill remaining slots with the top overall scorers.
 
-    Returns (picked, priority_ids) -- priority_ids is the subset from steps
-    0/4 (task-forced mentions + reserved-category top scorers), which
-    _catalog_lines renders at full detail; everything step 5 adds on top is
-    lower-relevance breadth filler, rendered compact instead. See the
+    Returns (picked, priority_ids, schema_ids) -- priority_ids is the
+    subset from steps 0/4 (task-forced mentions + reserved-category top
+    scorers), which _catalog_lines renders at full detail; everything
+    step 5 adds on top is lower-relevance breadth filler, rendered
+    compact instead. schema_ids is a smaller subset of priority_ids
+    (forced mentions + top 20 by actual score, not the full
+    reserved-category quota) -- see its assignment below for why real
+    schema injection is narrowed further than text-detail rendering. See the
     priority_ids assignment below for why.
     """
     # 1. Drop hidden.
@@ -456,9 +471,19 @@ def _keyword_prefilter(
     # that _NON_ASSET_CATEGORIES excludes them from the candidate pool
     # altogether (Genie only proposes asset-graph picks; Designer has
     # separate dedicated UI for resources).
+    #
+    # "transformation" (the manifest's real category string, confirmed
+    # against the real 1044-component manifest -- NOT "transform") was
+    # missing from this dict entirely despite the comment above literally
+    # describing the goal as "source -> transform -> sink" -- the middle
+    # stage of that exact pipeline shape had zero reserved coverage. It's
+    # also the 4th-largest category in the whole manifest (128
+    # components), well above source (92) or sink (63), so this wasn't a
+    # minor gap.
     reserved_per_category = {
         "source": 20,
         "ingestion": 20,
+        "transformation": 20,
         "sink": 20,
     }
 
@@ -501,19 +526,45 @@ def _keyword_prefilter(
     # tier doesn't need the planner to reason deeply about.
     priority_ids = set(seen_ids)
 
+    # schema_ids: a SMALLER subset of priority_ids for real schema
+    # injection specifically (see plan()'s _fetch_schemas_bulk call) --
+    # forced mentions (always -- guaranteed relevant) + the top 20 by
+    # actual keyword SCORE, not the full reserved-category quota.
+    # Confirmed live as a real cost problem: the 60-ish reserved-category
+    # quota (20 each for source/ingestion/sink, there purely to guarantee
+    # BREADTH across essential categories) schema-injected the Genie bar's
+    # general-catalog flow up to 48k+ prompt tokens, even though most of
+    # those 60 are "coverage filler," not components this specific task
+    # actually scored well against -- real schemas are valuable for what
+    # the planner is likely to USE, not for guaranteeing every category
+    # has SOME representative on hand. Text-level detail (description/
+    # agent_hints/examples) stays on the full priority_ids set -- this
+    # only narrows which of them ALSO get a real schema fetched.
+    # `scored` is already sorted by -score(), so slicing the first 20
+    # IDs that made it into priority_ids gives the top 20 by actual
+    # relevance score, not a flat per-category quota. forced_ids might
+    # push the total slightly past 20 -- fine, they're guaranteed-
+    # relevant by definition (the task named them directly), not subject
+    # to the same "is this really going to get used" doubt as a
+    # reserved-category filler pick.
+    ranked_in_priority = [c["id"] for c in scored if c["id"] in priority_ids]
+    schema_ids = set(forced_ids) | set(ranked_in_priority[:20])
+
     # Pass 2: fill remaining slots with the top overall scorers.
     for c in scored:
         if len(picked) >= cap:
             break
         add(c)
 
-    return picked, priority_ids
+    return picked, priority_ids, schema_ids
 
 
 def _catalog_lines(
     components: list[dict[str, Any]],
     description_max: int = 240,
     priority_ids: set[str] | None = None,
+    schemas_by_id: dict[str, dict[str, Any] | None] | None = None,
+    common_fields: dict[str, Any] | None = None,
 ) -> list[str]:
     """Render the filtered catalog into terse lines for the prompt.
 
@@ -594,12 +645,31 @@ def _catalog_lines(
         # tool_use_loop, handoff …). Without these, the LLM invents field
         # names — `server: github` (should be a dict), `tool:` (should be
         # `mcp_tool_name`), `proposers: [strings]` (should be dicts). With
-        # them, the LLM copies the shape verbatim. This is the biggest
-        # single lever we have short of full schema-injection.
+        # them, the LLM copies the shape verbatim. Kept alongside the real
+        # schema below (not replaced by it) -- examples show SHAPE/nesting
+        # patterns a flat field list doesn't convey, the schema gives
+        # exact field names/types/required-ness the examples don't
+        # guarantee are complete or current.
         snippets = hints.get("example_yaml_snippets")
         if isinstance(snippets, dict) and snippets:
             snippet_str = json.dumps(snippets, separators=(",", ":"))
             parts.append(f"example_yaml_snippets: {snippet_str[:6000]}")
+        # Real schema.json fields (see _render_schema_fields) -- no longer
+        # "short of full schema-injection": now that prompt caching (see
+        # plan()) makes this a one-time-per-conversation cost instead of
+        # paying full price every single call, injecting the actual
+        # authoritative field list for priority components is affordable.
+        # This is the single most direct fix for the "dropped unrecognized
+        # field(s)" class of bug confirmed live, repeatedly, this session
+        # (num_rows instead of row_count, asset_name instead of
+        # asset_name_prefix on a whole-pipeline component, ...) -- the
+        # planner no longer has to infer field names from prose/examples
+        # alone when this is present.
+        schema = (schemas_by_id or {}).get(c["id"])
+        if schema:
+            rendered = _render_schema_fields(schema, common_fields=common_fields)
+            if rendered:
+                parts.append(f"real_schema_fields: {rendered}")
         # `steps_schemas` — discriminated-union JSON Schema for whole-pipeline
         # components. Cheaper than shipping the full schema.json; the LLM
         # can use this to validate its per-step field choices before
@@ -747,6 +817,45 @@ SYSTEM_PROMPT = (
     "  fixtures, model-test data, or custom numeric distributions.\n"
     "- If refining a previous plan, keep what still fits and only change what the user "
     "  asked to change.\n"
+    "- PER-ROW DATAFRAME WORK VS. ONE AGGREGATE REASONING CHAIN (critical): "
+    "  `agentic_pipeline` materializes each of its `outputs.assets` step "
+    "  ids as the FULL step dict (reasoning, proposals, history, usage) -- "
+    "  this is correct for ONE aggregate output per run (a debate's "
+    "  verdict, a research brief, a routing decision), and WRONG for a "
+    "  task that means \"run this over EVERY ROW of a DataFrame\" (e.g. "
+    "  \"classify each incoming ticket/transaction/review\", \"draft a "
+    "  reply to each support ticket\") -- that output is a dict, not the "
+    "  row-per-item DataFrame the project's IO manager (and the task "
+    "  itself) expects, and materializing it fails with a DuckDBIOManager/"
+    "  whatever-IO-manager \"no handler for type dict\" error. Confirmed "
+    "  live: a \"triage incoming support tickets\" task (plural tickets, "
+    "  i.e. a DataFrame of many rows) got built as one `agentic_pipeline` "
+    "  pick anyway, and failed exactly this way on materialize. A plural "
+    "  noun in the task (tickets, reviews, transactions, rows, each "
+    "  one/every) describing something an LLM step should process is the "
+    "  signal to use the per-row shape instead: `litellm_inference_asset` "
+    "  / `openai_llm` / `openrouter_llm` for a single LLM call per row "
+    "  (chain multiple instances via upstream_asset_names for multiple "
+    "  per-row steps, same \"classify -> draft -> flag\" shape, each as "
+    "  its own pick/asset). DO NOT \"fix\" this by adding dynamic/"
+    "  per-item partitioning to an `agentic_pipeline` pick instead of "
+    "  switching component -- confirmed live: the model tried exactly "
+    "  this (`partition_type: dynamic`, one partition per ticket id, "
+    "  reasoning \"partitioned = per-row\"), and it does NOT work. "
+    "  Partitioning changes how many times the SAME dict-producing code "
+    "  runs, not what type it returns -- each partition's materialization "
+    "  is still the one full step dict, and the IO manager still has no "
+    "  handler for it; this fails the SAME \"no handler for type dict\" "
+    "  error, just once per partition instead of once overall. There is "
+    "  no partitioning scheme that fixes a dict-vs-DataFrame mismatch --"
+    "  only switching to a per-row component does. Reserve "
+    "  `agentic_pipeline` (and `ml_pipeline`/`polars_pipeline`/"
+    "  `warehouse_pipeline`) for when the task is genuinely ONE "
+    "  multi-step reasoning chain over a SINGLE input (singular: \"the "
+    "  incoming request\", \"this document\"), or when it explicitly "
+    "  needs agentic_pipeline-only machinery (MCP "
+    "  tools, routing between specialists, multi-agent debate) that "
+    "  doesn't apply per-row.\n"
     "- WHOLE-PIPELINE COMPONENTS (critical): if a catalog entry lists "
     "  `produces: [...multi_asset...]`, that component emits N first-class "
     "  Dagster assets from a SINGLE instance via its own `steps:` list "
@@ -783,7 +892,18 @@ SYSTEM_PROMPT = (
     "  after a TODO (see ASK RATHER THAN FABRICATE above). If the task "
     "  DOES already name a provider or model (\"use Claude\", "
     "  \"gpt-4o-mini\"), skip the question and fill it in directly "
-    "  everywhere -- don't ask what you already know.\n"
+    "  everywhere -- don't ask what you already know. For \"Claude "
+    "  (Anthropic)\" specifically, use exactly `claude-sonnet-5` -- NOT "
+    "  a dated snapshot id like `claude-3-5-sonnet-20241022`. Confirmed "
+    "  live: a dated Claude snapshot from your own training data got "
+    "  picked, Anthropic had since retired it, and every materialize "
+    "  failed with an opaque 404 from api.anthropic.com -- dated "
+    "  snapshots age out; `claude-sonnet-5` is the current alias and "
+    "  won't go stale the same way. For GPT-4o, use `gpt-4o` (OpenAI "
+    "  keeps this as a live alias to their current snapshot, not a "
+    "  dated one, so it doesn't have this problem). For Gemini, prefer "
+    "  a plain, non-dated name (e.g. `gemini-2.0-flash`) over a dated "
+    "  or preview-suffixed one for the same reason.\n"
     "- CROSS-PICK COORDINATION (critical): when your plan contains "
     "  multiple picks whose configs reference each other (e.g. one "
     "  pick's `upstream_asset_keys` / `upstream_asset_key` naming an "
@@ -861,9 +981,23 @@ SYSTEM_PROMPT = (
     "  asset with no return value, has nothing this pick can actually "
     "  consume as its input even though the asset key exists. Only fall "
     "  back to a fixed generic choice like [\"An existing asset\", \"A "
-    "  file\", \"A URL/API\"] when `existing_assets` has no "
-    "  DataFrame-outputting entries at all, so there's nothing real to "
-    "  list. "
+    "  file\", \"A URL/API\", \"Generate synthetic test data\"] when "
+    "  `existing_assets` has no DataFrame-outputting entries at all, so "
+    "  there's nothing real to list. ALWAYS include \"Generate synthetic "
+    "  test data\" as one of the options for a data-source question -- "
+    "  confirmed live as a real gap: a user asked for synthetic data "
+    "  explicitly, more than once, and it was never offered as a choice "
+    "  and the plan kept defaulting to a CSV-file reader with a TODO path "
+    "  instead. The user should never have to already know this is "
+    "  possible; make it an explicit, visible option every time, not "
+    "  something they have to guess at or type unprompted. Picking it "
+    "  means: use `synthetic_data_generator` as the source pick, with "
+    "  `schema_type` set to whichever of its built-in shapes (customers, "
+    "  orders, support_tickets, product_reviews, employees, "
+    "  fhir_patients, transactions, events, users, and others -- check "
+    "  the component's own schema for the full list) best matches what "
+    "  the task needs -- NOT a generic/literal/MCP-based data-generation "
+    "  step bolted onto the pipeline itself. "
     "  Leave `options` null for a genuinely open-ended question "
     "  question (e.g. \"What should the destination table be called?\") "
     "  where a canned choice list wouldn't actually help. The user "
@@ -1122,7 +1256,10 @@ def _build_user_prompt(
     previous_plan: list[dict[str, Any]] | None = None,
     refinement: str | None = None,
     claude_md: str = "",
-) -> str:
+    common_fields_block: str = "",
+) -> tuple[str, str]:
+    """Returns (stable_prefix, variable_suffix) -- see the comment above
+    `stable_parts` below for why this is split instead of one string."""
     # Render existing assets with their observed schemas (when previewed at
     # least once) so the planner can reference REAL columns instead of
     # guessing. This is the primary defense against column hallucination on
@@ -1152,7 +1289,25 @@ def _build_user_prompt(
 
     existing = "\n".join(_existing_line(a) for a in existing_assets[:80]) or "(none)"
     catalog = "\n".join(catalog_lines)
-    parts = []
+
+    # Split into a STABLE prefix (identical across every turn of a
+    # conversation on this project -- the catalog only depends on
+    # scope/catalog_cap/model, existing_assets only on the project's
+    # current graph) and a VARIABLE suffix (task/previous_plan/refinement,
+    # different on every single call). Previously this was one
+    # concatenated string with the variable parts FIRST and the catalog
+    # (by far the largest, most expensive part -- hundreds of component
+    # entries) LAST, which defeats prompt caching on both providers:
+    # Anthropic's explicit cache_control breakpoints cache a PREFIX, and
+    # OpenAI's automatic caching matches the longest common PREFIX against
+    # recent requests -- either way, variable content early in the prompt
+    # invalidates the cache for everything that comes after it, including
+    # the catalog, on every single call. Reordering so the stable part
+    # comes first (and splitting the return value so callers can mark
+    # exactly where the cacheable boundary is) lets a multi-turn
+    # conversation reuse the same cached prefix turn after turn instead of
+    # re-paying for the whole catalog every time.
+    stable_parts = []
     # CLAUDE.md preamble — the community-templates authoring guide. Include
     # only the sections most relevant to producing well-shaped configs (the
     # opt-in flags block, common gotchas, agentic_pipeline op catalog, and
@@ -1163,14 +1318,21 @@ def _build_user_prompt(
     if claude_md:
         distilled = _distill_claude_md(claude_md)
         if distilled:
-            parts.append(
+            stable_parts.append(
                 "Community-components authoring guide (excerpt — treat as ground truth for field shapes and composition rules):\n"
                 + distilled
             )
-    parts += [
-        f"Task:\n{task}",
-        f"Existing assets in the graph:\n{existing}",
-    ]
+    # Rendered BEFORE the catalog -- the catalog's own per-component
+    # real_schema_fields entries reference this block ("+N standard
+    # field(s), see 'Standard fields' above"), so it needs to actually
+    # come first for that to read correctly.
+    if common_fields_block:
+        stable_parts.append(common_fields_block)
+    stable_parts.append(f"Available components ({len(catalog_lines)} shown):\n{catalog}")
+    stable_parts.append(f"Existing assets in the graph:\n{existing}")
+    stable_prefix = "\n\n".join(stable_parts) + "\n"
+
+    parts = [f"Task:\n{task}"]
     if previous_plan:
         # Real bug, not just a nice-to-have: this used to render only
         # asset_name/component_type/upstream_asset_names -- never the
@@ -1209,8 +1371,31 @@ def _build_user_prompt(
     if refinement:
         parts.append(f"User refinement request:\n{refinement}\n\n"
                      "Adjust the previous plan per the refinement. Keep unchanged steps identical.")
-    parts.append(f"Available components ({len(catalog_lines)} shown):\n{catalog}")
-    return "\n\n".join(parts) + "\n"
+    variable_suffix = "\n\n".join(parts) + "\n"
+    return stable_prefix, variable_suffix
+
+
+def _anthropic_cached_messages(history_messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Converts a plain {role, content} history into Anthropic's block
+    form, with TWO cache_control breakpoints (Anthropic allows up to 4):
+    one on the first message (covers the stable_prefix -- catalog/
+    existing_assets/CLAUDE.md -- already prepended onto its content by the
+    caller) and one on the second-to-last message (covers every turn up
+    through the PRIOR one). Anthropic's cache matches the longest prefix
+    ending at any breakpoint, so a conversation that's grown to turn N
+    reuses the cached read for everything through turn N-1 and only pays
+    full price for the single newest message -- genuinely cheaper/faster
+    as the conversation gets longer, not just a flat per-call saving.
+
+    A 1-message history (the very first turn) only gets the first
+    breakpoint -- there's no "prior turn" yet to mark separately.
+    """
+    out = [{"role": m["role"], "content": [{"type": "text", "text": m["content"]}]} for m in history_messages]
+    if out:
+        out[0]["content"][0]["cache_control"] = {"type": "ephemeral"}
+    if len(out) > 1:
+        out[-2]["content"][-1]["cache_control"] = {"type": "ephemeral"}
+    return out
 
 
 _RETRY_AFTER_RE = re.compile(r"try again in ([\d.]+)s", re.IGNORECASE)
@@ -1328,12 +1513,38 @@ async def plan(
     # and the user has already narrowed scope by which flow they opened --
     # no need for the LLM to also pick a category out of the full ~700.
     scope: str | None = None,
+    # Real multi-turn conversation history: [{role: "user"|"assistant",
+    # content: str}, ...], ending in the newest user message. When given,
+    # this REPLACES the previous_plan/refinement reconstruction below --
+    # the model sees its own actual prior JSON replies as assistant turns
+    # instead of a condensed "Previous plan" summary rebuilt from them.
+    # Confirmed live, repeatedly, as the root cause of a whole bug class
+    # (picks silently dropped between turns, already-answered fields
+    # regressing to TODO, already-answered questions re-asked): the old
+    # reconstruction is lossy by construction, and no amount of prompt
+    # wording telling the model to "keep what fits" fixed it reliably --
+    # giving the model its own actual past turns instead of a paraphrase
+    # of them removes the opportunity for that class of drift entirely.
+    # Backward compatible: omitted (None/empty), this is unchanged from
+    # before -- existing callers (the general Genie bar) keep working.
+    history: list[dict[str, str]] | None = None,
 ) -> GeniePlan:
     if not task or not task.strip():
         raise GenieError("Empty task")
 
     is_anthropic = model.lower().startswith("claude")
     if catalog_cap is None:
+        # Reverted a 350->450 bump attempted in the same change as real
+        # schema injection below -- confirmed live that was a mistake:
+        # the two increases compound (priority_ids' ~60 real-schema'd
+        # components ALSO got bigger from the wider cap pulling in a
+        # different top-N), and the combined non-scoped Genie-bar prompt
+        # measured 52,657 tokens on a real account, uncomfortably close
+        # to a lower-tier Claude rate limit for a single cold-cache call.
+        # Keeping cap at the original, already-reasoned 350 and letting
+        # schema injection be the one real change here -- re-evaluate
+        # bumping this again separately, on its own, once schema
+        # injection's actual steady-state size is well understood.
         catalog_cap = 350 if is_anthropic else 200
     if is_anthropic:
         api_key = os.getenv("ANTHROPIC_API_KEY")
@@ -1371,13 +1582,92 @@ async def plan(
     if scoped_ids is not None:
         filtered = [c for c in components if c.get("id") in scoped_ids]
         priority_ids = {c["id"] for c in filtered}
+        # Already a small, hand-curated pool (~16 for agents_pipelines) --
+        # no need to narrow further for schema injection the way the
+        # general catalog path below does.
+        schema_ids = priority_ids
     else:
-        filtered, priority_ids = _keyword_prefilter(components, task, cap=catalog_cap)
-    lines = _catalog_lines(filtered, priority_ids=priority_ids)
-    user_prompt = _build_user_prompt(
+        filtered, priority_ids, schema_ids = _keyword_prefilter(components, task, cap=catalog_cap)
+
+    # Real schemas for `schema_ids` -- a SMALLER, higher-confidence subset
+    # of priority_ids (forced mentions + top 20 by actual keyword score;
+    # see _keyword_prefilter), not all of priority_ids. Confirmed live as
+    # a real cost problem: priority_ids' reserved-category quota (~80
+    # components -- see reserved_per_category) exists purely to guarantee
+    # BREADTH across essential categories, not because every one of them
+    # is likely to actually get used on THIS task -- schema-injecting all
+    # of them pushed the general Genie-bar flow to 48k+ prompt tokens for
+    # mostly-unused "coverage filler." Text-level detail (description/
+    # agent_hints/examples) is unaffected -- it still renders for the
+    # full priority_ids set; this only narrows which ones ALSO get a real
+    # schema fetched and injected. Bounded concurrency + a shared client
+    # (see _fetch_schemas_bulk) keep this safe regardless of size; the
+    # per-URL 15-min cache means this is a real network round-trip only on
+    # a cold cache, same amortization story as everything else prompt
+    # caching covers.
+    schema_urls = {
+        c["id"]: c["schema_url"]
+        for c in filtered
+        if c["id"] in schema_ids and c.get("schema_url")
+    }
+    schemas_by_id = await _fetch_schemas_bulk(schema_urls)
+    # See _compute_common_schema_fields docstring: fields shared by most
+    # of these schemas (owners, asset_tags, partition_*, retry_policy_*,
+    # freshness_*, ...) get rendered ONCE here instead of once per
+    # component below -- same information, a fraction of the tokens.
+    common_fields = _compute_common_schema_fields(schemas_by_id)
+    common_fields_block = (
+        "Standard fields most components accept (shown once here, not "
+        "repeated per-component below -- every component's own field "
+        "list may still show them individually if it customizes one, but "
+        "assume these names/types apply unless a component says "
+        "otherwise): "
+        + ", ".join(_format_field_spec(name, spec) for name, spec in common_fields.items())
+    ) if common_fields else ""
+    lines = _catalog_lines(filtered, priority_ids=priority_ids, schemas_by_id=schemas_by_id, common_fields=common_fields)
+    stable_prefix, variable_suffix = _build_user_prompt(
         task, lines, existing_assets or [], previous_plan=previous_plan, refinement=refinement,
-        claude_md=claude_md,
+        claude_md=claude_md, common_fields_block=common_fields_block,
     )
+
+    # Real conversation history path (see `history` param docstring above).
+    # `stable_prefix` (catalog + existing_assets + CLAUDE.md) gets
+    # prepended onto the FIRST turn's content, same as before -- rebuilt
+    # fresh every call from the CURRENT project/catalog state (so a
+    # change elsewhere in the project is picked up next turn), but
+    # textually identical across repeat calls when nothing's changed,
+    # which is exactly what both providers' caching keys off of.
+    history_messages: list[dict[str, Any]] | None = None
+    if history:
+        history_messages = []
+        for i, turn in enumerate(history):
+            role = turn.get("role")
+            content = turn.get("content") or ""
+            if i == 0 and role == "user":
+                content = stable_prefix + "\n\n" + content
+            history_messages.append({"role": role, "content": content})
+
+        # Derive `previous_plan` from the last assistant turn when a
+        # caller didn't already pass one explicitly -- every backstop
+        # below this point (invalid-edit-target recovery, model-field
+        # reconciliation, carry-forward-missing-picks) keys off
+        # `previous_plan`, and `history`-based callers (AgentPipelineBuilder,
+        # DagsterAIBar) stopped sending it once they switched to real
+        # history. Confirmed live as a real regression, not hypothetical:
+        # without this, the SAME "model emits action=edit targeting its
+        # own just-proposed pick as if it were a real existing asset" bug
+        # that was already fixed once came right back for history-based
+        # callers, because the fix's recovery path has nothing to match
+        # against without a previous_plan to look in.
+        if previous_plan is None:
+            last_assistant = next(
+                (h for h in reversed(history) if h.get("role") == "assistant"), None
+            )
+            if last_assistant:
+                try:
+                    previous_plan = json.loads(last_assistant["content"]).get("picks")
+                except (json.JSONDecodeError, AttributeError, KeyError):
+                    pass
 
     async with httpx.AsyncClient(timeout=60.0) as client:
         if is_anthropic:
@@ -1393,6 +1683,10 @@ async def plan(
             anthropic_headers = {
                 "x-api-key": api_key,
                 "anthropic-version": "2023-06-01",
+                # Harmless if prompt caching is already GA for this account/
+                # model (unneeded beta flags are ignored) -- defensive in
+                # case it's still gated behind this header for some tier.
+                "anthropic-beta": "prompt-caching-2024-07-31",
                 "content-type": "application/json",
             }
             workspace_id = os.getenv("ANTHROPIC_WORKSPACE_ID")
@@ -1405,8 +1699,40 @@ async def plan(
                 json_body={
                     "model": model,
                     "max_tokens": 4096,
-                    "system": SYSTEM_PROMPT + "\n\nRespond with ONLY the JSON object, no prose, no code fences.",
-                    "messages": [{"role": "user", "content": user_prompt}],
+                    # Block form + cache_control, not a plain string --
+                    # SYSTEM_PROMPT is byte-identical on EVERY call, from
+                    # EVERY user, for EVERY project (it's the component-
+                    # selection/op-catalog rules, never templated), so
+                    # it's the single highest-value thing to cache: once
+                    # warm, every other Genie call anywhere reuses it.
+                    "system": [{
+                        "type": "text",
+                        "text": SYSTEM_PROMPT + "\n\nRespond with ONLY the JSON object, no prose, no code fences.",
+                        "cache_control": {"type": "ephemeral"},
+                    }],
+                    # Two shapes, by whether a real `history` was given:
+                    #   - WITH history: the actual multi-turn conversation
+                    #     (see `_anthropic_cached_messages`) -- a SECOND
+                    #     cache breakpoint lands on the second-to-last
+                    #     message, so each new turn reuses everything
+                    #     through the PRIOR turn from cache and only pays
+                    #     for the one new message, growing cheaper/faster
+                    #     turn over turn instead of flat per-call.
+                    #   - WITHOUT history (legacy previous_plan/refinement
+                    #     reconstruction, still used by the general Genie
+                    #     bar flow): one cache breakpoint after
+                    #     stable_prefix, same as before.
+                    "messages": (
+                        _anthropic_cached_messages(history_messages)
+                        if history_messages is not None
+                        else [{
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": stable_prefix, "cache_control": {"type": "ephemeral"}},
+                                {"type": "text", "text": variable_suffix},
+                            ],
+                        }]
+                    ),
                     "temperature": 0.2,
                 },
             )
@@ -1430,23 +1756,51 @@ async def plan(
                 parsed = json.loads(content)
                 raw_picks = parsed.get("picks") or []
                 usage = data.get("usage") or {}
+                # With cache_control in play, Anthropic splits prompt
+                # tokens across THREE fields instead of one:
+                # input_tokens (newly-processed, uncached), plus
+                # cache_creation_input_tokens (this call warmed the
+                # cache) or cache_read_input_tokens (this call hit an
+                # already-warm cache) -- confirmed live: input_tokens
+                # alone read as a suspiciously tiny ~31 right after
+                # adding cache_control, because almost everything moved
+                # into the other two fields. Summing all three keeps
+                # tokens_prompt an accurate total prompt size for the
+                # existing cost-estimate UI, cache hit or miss either way.
                 data["usage"] = {
-                    "prompt_tokens": usage.get("input_tokens", 0),
+                    "prompt_tokens": (
+                        usage.get("input_tokens", 0)
+                        + usage.get("cache_creation_input_tokens", 0)
+                        + usage.get("cache_read_input_tokens", 0)
+                    ),
                     "completion_tokens": usage.get("output_tokens", 0),
                 }
             except (KeyError, IndexError, json.JSONDecodeError) as e:
                 raise GenieError(f"Could not parse Claude response: {e}") from e
         else:
+            # OpenAI's prompt caching is automatic (no cache_control, no
+            # opt-in) for any prompt over ~1024 tokens -- it matches the
+            # longest common PREFIX against the org's recent requests. No
+            # API changes needed here beyond ordering: stable_prefix
+            # (catalog + existing_assets) before variable_suffix (task/
+            # previous_plan/refinement) is what makes that prefix actually
+            # long and reusable turn to turn, instead of invalidating on
+            # the first variable token the way the old task-first
+            # ordering did.
             r = await _post_with_retry(
                 client,
                 "https://api.openai.com/v1/chat/completions",
                 headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
                 json_body={
                     "model": model,
-                    "messages": [
-                        {"role": "system", "content": SYSTEM_PROMPT},
-                        {"role": "user", "content": user_prompt},
-                    ],
+                    "messages": (
+                        [{"role": "system", "content": SYSTEM_PROMPT}] + history_messages
+                        if history_messages is not None
+                        else [
+                            {"role": "system", "content": SYSTEM_PROMPT},
+                            {"role": "user", "content": stable_prefix + "\n\n" + variable_suffix},
+                        ]
+                    ),
                     "response_format": {"type": "json_object"},
                     "temperature": 0.2,
                 },
@@ -1587,6 +1941,40 @@ async def plan(
                     # Self-duplicate (see raw_add_names comment above) --
                     # the add pick with this name is what lands, so this is
                     # silent, expected cleanup, not a user-facing problem.
+                    continue
+                # SYSTEM_PROMPT already warns against this exact mistake
+                # (see "EDITING OR REMOVING EXISTING ASSETS" above) and it
+                # still happens: the model emits action=edit targeting a
+                # pick IT proposed on a PRIOR turn (sitting in
+                # previous_plan, never actually applied to the project) as
+                # if that were a real existing asset. The existing-name
+                # check correctly refuses to let this silently corrupt a
+                # real asset, but for THIS specific case -- the name is
+                # still just a pending proposal, not a stranger's asset --
+                # dropping the pick entirely was a dead end: confirmed
+                # live, it made the whole pipeline pick vanish from the
+                # plan with nothing but an easy-to-miss warning note, no
+                # recovery. Since nothing's been applied yet, there's
+                # nothing wrong with just continuing to treat it as the
+                # same "add" pick it always was, carrying forward
+                # whatever real config it already had and merging in
+                # whatever this turn wanted to change.
+                prev_match = next(
+                    (pp for pp in (previous_plan or []) if pp.get("asset_name") == target_name),
+                    None,
+                )
+                if prev_match is not None:
+                    merged_config = dict(prev_match.get("config") or {})
+                    merged_config.update(p.get("config") or {})
+                    picks.append(
+                        GeniePick(
+                            component_type=prev_match.get("component_type") or "",
+                            asset_name=target_name,
+                            upstream_asset_names=prev_match.get("upstream_asset_names") or [],
+                            config=merged_config,
+                            reason=p.get("reason") or prev_match.get("reason") or "",
+                        )
+                    )
                     continue
                 notes.append(
                     f"⚠︎ Pick #{i + 1} ({action}) references unknown existing asset "
@@ -1739,6 +2127,97 @@ async def plan(
         if drop_indices:
             picks = [pk for i, pk in enumerate(picks) if i not in drop_indices]
 
+    # Carry forward any previous_plan pick this turn's regeneration simply
+    # OMITTED from its response -- no code anywhere else in this function
+    # re-adds a pick that's just plain missing from `raw_picks`, only ones
+    # that got an invalid edit/remove target (see above). Confirmed live:
+    # across a multi-turn conversation refining ONE pick (e.g. answering
+    # "which LLM" for the pipeline), a later turn's regenerated `picks`
+    # array sometimes contains ONLY the pick that turn was actively about,
+    # silently dropping an earlier, already-accepted, completely unrelated
+    # pick (a synthetic-data-source asset) with no `action: "remove"`, no
+    # note, nothing -- the user only discovers it's gone after clicking
+    # "Add to graph" and getting a totally unrelated DagsterInvalidDefinitionError
+    # ("Input asset ... is not produced by any ... source") from the OTHER
+    # pick that referenced it. previous_plan picks were never applied to
+    # the project yet (they're proposals, same as this turn's), so unless
+    # THIS turn explicitly said to remove one, nothing is lost by treating
+    # a merely-unmentioned one as still wanted.
+    if previous_plan:
+        current_names = {pk.asset_name for pk in picks}
+        removed_names = {
+            str(p.get("asset_name") or "").strip()
+            for p in raw_picks
+            if (p.get("action") or "add") == "remove"
+        }
+        for pp in previous_plan:
+            name = str(pp.get("asset_name") or "").strip()
+            if not name or name in current_names or name in removed_names:
+                continue
+            picks.append(
+                GeniePick(
+                    component_type=pp.get("component_type") or "",
+                    asset_name=name,
+                    upstream_asset_names=pp.get("upstream_asset_names") or [],
+                    config=pp.get("config") or {},
+                    reason=pp.get("reason") or "",
+                )
+            )
+            notes.append(
+                f"ℹ Carried forward '{name}' from the previous turn's plan -- "
+                "this turn's response didn't mention it, but nothing asked "
+                "to remove it either."
+            )
+
+    # Reapply already-resolved model/api_key_env_var fields from the PRIOR
+    # turn's accepted plan wherever this turn's regeneration regressed them
+    # back to missing/TODO. _repair_picks has its own, narrower version of
+    # this for the one-shot auto-repair call, but the bug isn't confined to
+    # that path -- confirmed live: a user answered "Claude (Anthropic)"
+    # once, then on a LATER turn (answering an unrelated upstream-source
+    # question, no repair involved at all) the model field came back
+    # blank and _model_provider_gap asked again, because the main
+    # plan-generation call re-renders the WHOLE pick's config each turn
+    # and has no code-level guarantee it echoes back fields it wasn't
+    # asked to change. This runs on every turn, before the repair/gap
+    # checks below, so neither path can regress an answer the user
+    # already gave.
+    if previous_plan:
+        prev_by_name = {
+            str(pp.get("asset_name") or ""): pp
+            for pp in previous_plan
+            if pp.get("asset_name")
+        }
+        # Exact-name matching alone wasn't enough -- confirmed live: the
+        # SAME pipeline's asset_name/asset_name_prefix drifted turn to turn
+        # (e.g. "ticket_triage" -> "support_ticket_triage") even though
+        # nothing about the pipeline itself changed, since the LLM
+        # regenerates asset names fresh each turn rather than treating them
+        # as stable ids. That silently missed every lookup above, so the
+        # model/api_key_env_var fields never got restored at all. Realistic
+        # fallback: a conversation only ever iterates on ONE pipeline at a
+        # time, so when there's exactly one agentic-pipeline-family pick on
+        # each side and the name lookup missed, match those two directly.
+        prev_family_picks = [
+            pp for pp in (previous_plan or [])
+            if pp.get("component_type") in _AGENTIC_PIPELINE_FAMILY
+        ]
+        for pk in picks:
+            prev = prev_by_name.get(pk.asset_name)
+            if prev is None and pk.component_type in _AGENTIC_PIPELINE_FAMILY and len(prev_family_picks) == 1:
+                prev = prev_family_picks[0]
+            prev_config = prev.get("config") if prev else None
+            if isinstance(prev_config, dict) and isinstance(pk.config, dict):
+                _reapply_resolved_model_fields(pk.config, prev_config)
+
+    # Same-turn fill-forward (see _fill_forward_model_fields docstring) --
+    # runs regardless of whether there was a previous_plan to reconcile
+    # against, since it also covers a brand new step added THIS turn that
+    # has no prior-turn counterpart at all to restore from.
+    for pk in picks:
+        if pk.component_type in _AGENTIC_PIPELINE_FAMILY and isinstance(pk.config, dict):
+            _fill_forward_model_fields(pk.config)
+
     picks_by_name: dict[str, GeniePick] = {pk.asset_name: pk for pk in picks}
     # Existing-asset lookup, by name, for the same check below. These never
     # carry agent_hints (that's a manifest-only concept) -- io_output_type
@@ -1825,6 +2304,30 @@ async def plan(
             for iss in all_issues:
                 notes.append(f"⚠︎ Issue: {iss}")
             notes.append(f"⚠︎ Auto-repair failed: {type(e).__name__}: {str(e)[:120]}")
+
+    # Hard, deterministic block -- see _per_row_partition_misuse's
+    # docstring. Checked before every other backstop: a plan built this
+    # way is GUARANTEED to fail materialize (confirmed live, twice), so
+    # it must never reach "Ready" even if every other check would
+    # otherwise be satisfied (model/api_key_env_var can be fully
+    # resolved and this is STILL broken -- that's exactly what happened).
+    if _per_row_partition_misuse(picks):
+        clarifying_question = GenieClarifyingQuestion(
+            question=(
+                "This pipeline processes each row of a DataFrame "
+                "(classify/draft/flag per item), but it was built as one "
+                "agentic_pipeline chaining plain per-row steps in "
+                "sequence against the whole upstream DataFrame at once -- "
+                "that doesn't work: each step still produces the same "
+                "aggregate dict agentic_pipeline always returns (one "
+                "call over the whole input, not one per row), which your "
+                "project's IO manager can't store (materialize fails "
+                "with \"no handler for type dict\"). Should I rebuild "
+                "this as separate chained per-row steps instead "
+                "(litellm_inference_asset-style, one LLM call per row)?"
+            ),
+            options=["Yes, rebuild it that way", "Something else"],
+        )
 
     # Anticipated backstop, same lesson as the generic one below but with
     # a SPECIFIC, useful question + real options instead of a generic
@@ -2052,31 +2555,159 @@ async def generate_dbt_model_sql(
 # ------------------------------------------------------------------
 
 
-async def _fetch_schema(url: str) -> dict[str, Any] | None:
+async def _fetch_schema(url: str, client: "httpx.AsyncClient | None" = None) -> dict[str, Any] | None:
     """Fetch one component's config schema.json, cached (15 min TTL).
     Returns None on any failure (missing url, 404, network error, bad
     JSON) -- callers treat that as "nothing to validate" for that
     component, never as a plan-blocking error. Note: this registry's
     schema.json is NOT standard JSON Schema -- required-ness is a
     per-field boolean under `attributes`, not a top-level `required`
-    array (see _required_fields)."""
+    array (see _required_fields).
+
+    `client`: pass a shared AsyncClient when fetching many schemas at once
+    (see _fetch_schemas_bulk) for connection pooling -- omitted, this
+    opens its own client per call same as before, fine for the original
+    "a handful of component types in one plan" caller (_detect_schema_issues).
+    """
     import time
     now = time.time()
     cached = _schema_cache.get(url)
     if cached and (now - cached[0]) < _SCHEMA_TTL:
         return cached[1]
-    try:
-        async with httpx.AsyncClient() as client:
-            r = await client.get(url, timeout=10.0)
+
+    async def _get(c: "httpx.AsyncClient") -> dict[str, Any] | None:
+        try:
+            r = await c.get(url, timeout=10.0)
             if r.status_code != 200:
                 _schema_cache[url] = (now, None)
                 return None
             schema = r.json()
-    except Exception:
-        _schema_cache[url] = (now, None)
-        return None
-    _schema_cache[url] = (now, schema)
-    return schema
+        except Exception:
+            _schema_cache[url] = (now, None)
+            return None
+        _schema_cache[url] = (now, schema)
+        return schema
+
+    if client is not None:
+        return await _get(client)
+    async with httpx.AsyncClient() as owned_client:
+        return await _get(owned_client)
+
+
+async def _fetch_schemas_bulk(urls: dict[str, str], max_concurrent: int = 15) -> dict[str, dict[str, Any] | None]:
+    """Fetch many components' schemas at once -- bounded concurrency and a
+    single shared client, unlike _detect_schema_issues' existing
+    asyncio.gather (fully unbounded, one-client-per-request), which was
+    only ever exercised with "a handful of component types in one plan"
+    and was never going to hold up at the scale this is for: up to
+    catalog_cap (~350) "priority" components, proactively fetched to
+    inject real schemas into the planning prompt instead of just the
+    hand-authored example_yaml_snippets. A semaphore caps simultaneous
+    requests to the component registry; the shared client reuses
+    connections across them instead of opening ~350 separate ones.
+    Per-URL caching/failure-handling is unchanged (still _fetch_schema +
+    _schema_cache), so a cold cache here still costs ~350 requests once,
+    but every repeat call within the 15-min TTL is free regardless of
+    which path (this or _detect_schema_issues) warmed it first.
+    """
+    if not urls:
+        return {}
+    sem = asyncio.Semaphore(max_concurrent)
+
+    async def _bounded(component_id: str, url: str, client: "httpx.AsyncClient"):
+        async with sem:
+            return component_id, await _fetch_schema(url, client=client)
+
+    async with httpx.AsyncClient() as client:
+        results = await asyncio.gather(*(_bounded(cid, u, client) for cid, u in urls.items()))
+    return dict(results)
+
+
+def _format_field_spec(name: str, spec: dict[str, Any]) -> str:
+    bits = [spec.get("type") or "any"]
+    enum = spec.get("enum")
+    if isinstance(enum, list) and enum:
+        bits.append(f"enum=[{','.join(str(v) for v in enum[:12])}]")
+    if spec.get("required"):
+        bits.append("required")
+    return f"{name}({','.join(bits)})"
+
+
+def _compute_common_schema_fields(
+    schemas_by_id: dict[str, dict[str, Any] | None], min_frequency: float = 0.4, min_count: int = 3,
+) -> dict[str, dict[str, Any]]:
+    """Finds fields that show up, by name, across a MAJORITY of the
+    fetched schemas -- these are generic bolt-on fields (owners,
+    asset_tags, kinds, every partition_*/retry_policy_* field, freshness_*,
+    column_lineage, deps, metadata, preview_rows, ...) that describe
+    standard Dagster-asset-level concerns, not what a SPECIFIC component
+    actually does. Confirmed live against a real schema: ~23 of ~28
+    fields on a typical component were this kind of shared boilerplate,
+    repeated verbatim on every single component we schema-inject.
+    Rendering this set ONCE (in the cached stable_prefix, see plan())
+    instead of once per component is a straightforward token win with
+    zero information loss -- the model still sees every field, just told
+    about the shared ones a single time instead of N times.
+
+    Requires at least `min_count` schemas with non-empty attributes
+    before bothering (not worth a separate shared block for 2-3
+    components), and a field must appear in at least `min_frequency` of
+    them BY NAME to count as common -- doesn't require identical specs
+    across components, just uses whichever spec is encountered first for
+    the shared block's rendering (these are schema'd by a shared
+    base/mixin pattern in practice, so in practice they match anyway).
+    """
+    valid_schemas = [s for s in schemas_by_id.values() if isinstance(s, dict) and isinstance(s.get("attributes"), dict)]
+    if len(valid_schemas) < min_count:
+        return {}
+    field_counts: dict[str, int] = {}
+    field_spec_sample: dict[str, dict[str, Any]] = {}
+    for schema in valid_schemas:
+        for name, spec in schema["attributes"].items():
+            if not isinstance(spec, dict):
+                continue
+            field_counts[name] = field_counts.get(name, 0) + 1
+            field_spec_sample.setdefault(name, spec)
+    threshold = max(min_count, int(len(valid_schemas) * min_frequency))
+    return {name: field_spec_sample[name] for name, count in field_counts.items() if count >= threshold}
+
+
+def _render_schema_fields(
+    schema: dict[str, Any], common_fields: dict[str, Any] | None = None, max_chars: int = 1800,
+) -> str:
+    """Compact, planner-readable summary of a component's REAL schema
+    fields -- name(type[,enum=...][,required]) per field, comma-joined.
+    Deliberately terse (not the full raw JSON Schema object, which
+    carries UI-widget hints, descriptions, and other fields no help for
+    AUTHORING a config) -- this exists specifically to give the planner
+    the exact, authoritative field names/types/required-ness so it stops
+    guessing (`num_rows` instead of `row_count`, `asset_name` instead of
+    `asset_name_prefix` on a whole-pipeline component, ...), the single
+    most common class of "dropped unrecognized field(s)" warning and
+    install-time repair this session ever hit.
+
+    `common_fields`, when given (see _compute_common_schema_fields), are
+    skipped here and summarized as a trailing count instead of spelled
+    out again -- they're already rendered once in stable_prefix.
+    """
+    attrs = schema.get("attributes") or {}
+    if not isinstance(attrs, dict) or not attrs:
+        return ""
+    parts = []
+    skipped = 0
+    for name, spec in attrs.items():
+        if not isinstance(spec, dict):
+            continue
+        if common_fields and name in common_fields:
+            skipped += 1
+            continue
+        parts.append(_format_field_spec(name, spec))
+    if skipped:
+        parts.append(f"+{skipped} standard field(s) (see 'Standard fields' above)")
+    rendered = ", ".join(parts)
+    if len(rendered) > max_chars:
+        rendered = rendered[:max_chars] + ", ...[truncated]"
+    return rendered
 
 
 def _required_fields(schema: dict[str, Any]) -> list[str]:
@@ -2246,6 +2877,66 @@ def _model_provider_gap(picks: list[GeniePick]) -> bool:
     )
 
 
+# Ops that only ever produce ONE aggregate result (a routing decision, a
+# debate verdict, a synthesized summary, ...) -- genuinely justify
+# `agentic_pipeline`'s whole-pipeline-in-one-component shape. Their
+# presence means this ISN'T the per-row misuse _per_row_partition_misuse
+# checks for, even if the pipeline also happens to be partitioned.
+_WHOLE_PIPELINE_ONLY_OPS = {
+    "route", "conditional_route", "debate", "synthesize", "critique_loop",
+    "self_reflect", "map", "reduce", "handoff", "tool_use_loop",
+    "agent_call", "delegate", "sub_pipeline", "invoke_component",
+}
+
+
+def _per_row_partition_misuse(picks: list[GeniePick]) -> bool:
+    """True if an agentic_pipeline-family pick is built as a plain linear
+    chain of per-row-only ops (classify/llm_call/extract, each reading the
+    previous step's single output as `source`) with NOTHING that actually
+    needs whole-pipeline orchestration (route/debate/synthesize/map/
+    reduce/...) -- the signature of per-row DataFrame work (e.g. "classify
+    each ticket, draft a reply, flag refunds") forced into a component
+    that was never built for it, instead of chained per-row components
+    (litellm_inference_asset / openai_llm / openrouter_llm).
+
+    This does NOT work -- confirmed live, three times, against the real
+    component source, in two different shapes:
+      1. Dynamic per-item partitioning bolted on (reasoning "partitioned =
+         per-row"). Doesn't work: partitioning changes how many times the
+         pipeline's own dict-producing code runs, never what type it
+         returns. Each partition's materialization is still the one full
+         step dict `agentic_pipeline` always produces.
+      2. No partitioning at all -- steps just chained sequentially
+         against the WHOLE upstream DataFrame as one input, each step
+         reading the prior step's single dict output as `source`. Doesn't
+         work either, for the more basic reason the user themselves
+         caught live: it's "sequential and not multi-asset" -- one
+         classify call over an entire multi-row input, not one call per
+         row, and still the same bare-dict output type at the end.
+    Either way the project's IO manager (DuckDB or otherwise) has no
+    handler for a bare dict, and prompt wording alone did not reliably
+    stop the model from reaching for this (it even cited the CORRECT
+    reasoning in its own `reason` field while still emitting the wrong
+    shape), so this is a hard, deterministic block rather than guidance.
+    Deliberately NOT conditioned on partition_type any more -- the
+    partitioned case was the first one caught, but the unpartitioned
+    sequential-chain case slipped through that narrower check entirely;
+    the real, sufficient signal is just "every step is a plain per-row op,
+    nothing here needs actual pipeline orchestration."
+    """
+    for p in picks:
+        if p.component_type not in _AGENTIC_PIPELINE_FAMILY or p.action == "remove":
+            continue
+        config = p.config or {}
+        steps = config.get("steps")
+        if not isinstance(steps, list) or not steps:
+            continue
+        ops = {s.get("op") for s in steps if isinstance(s, dict)}
+        if ops and not (ops & _WHOLE_PIPELINE_ONLY_OPS):
+            return True
+    return False
+
+
 async def _detect_schema_issues(picks: list[GeniePick], components_by_id: dict[str, dict[str, Any]]) -> list[str]:
     """Deterministic checks the LLM-based validation never covered: does
     each "add" pick's config actually include every required attribute
@@ -2398,6 +3089,106 @@ def _detect_coordination_issues(picks: list[GeniePick]) -> list[str]:
     return issues
 
 
+def _is_todo_or_missing(v: Any) -> bool:
+    return v is None or v == "" or (isinstance(v, str) and v.upper().startswith("TODO"))
+
+
+def _reapply_resolved_model_fields(repaired: Any, original: Any) -> None:
+    """Patches `model`/`api_key_env_var` back onto `repaired` (in place)
+    wherever the repair call regressed an already-answered value to
+    missing/TODO while `original` still has a real one.
+
+    The repair prompt asks the model to "keep every unchanged field
+    identical," but that's prose, not an enforced contract -- confirmed
+    live: a repair pass triggered by an UNRELATED pick's field-name
+    mismatch (a CSV source's `path`/`connection_env_var`) re-rendered this
+    agentic_pipeline pick's config as part of "the full plan" and dropped
+    the model/api_key_env_var the user had already picked two turns
+    earlier, which made the stateless _model_provider_gap() backstop
+    think it was never answered and re-ask it -- the exact "endless loop"
+    this was reported as. Only ever restores a value the user already
+    gave; never invents one that wasn't there originally.
+    """
+    if isinstance(repaired, dict) and isinstance(original, dict):
+        for key in ("model", "api_key_env_var"):
+            if key in repaired and _is_todo_or_missing(repaired.get(key)) and not _is_todo_or_missing(original.get(key)):
+                repaired[key] = original[key]
+        for k, v in repaired.items():
+            if k in original:
+                _reapply_resolved_model_fields(v, original[k])
+    elif isinstance(repaired, list) and isinstance(original, list):
+        # A plain index-for-index zip only works when the list is EXACTLY
+        # the same shape turn to turn -- confirmed live as too strict: the
+        # plan evolved to add a new step ("generate tickets" prepended
+        # ahead of classify_urgency/draft_reply/flag_refund"), so every
+        # existing step shifted position and the old, already-resolved
+        # `model`/`api_key_env_var` never got reapplied to ANY of them,
+        # not even the untouched ones. `steps` entries carry a stable `id`
+        # (classify_urgency, draft_reply, ...) -- match on that instead of
+        # position whenever both sides have one, so an insertion elsewhere
+        # in the list doesn't break reconciliation for entries that didn't
+        # move conceptually. Falls back to positional zip only when items
+        # aren't id-bearing dicts (e.g. a list of plain strings).
+        if all(isinstance(x, dict) and x.get("id") for x in repaired) and all(isinstance(x, dict) and x.get("id") for x in original):
+            original_by_id = {o["id"]: o for o in original}
+            for r_item in repaired:
+                o_item = original_by_id.get(r_item["id"])
+                if o_item is not None:
+                    _reapply_resolved_model_fields(r_item, o_item)
+        elif len(repaired) == len(original):
+            for r_item, o_item in zip(repaired, original):
+                _reapply_resolved_model_fields(r_item, o_item)
+
+
+def _fill_forward_model_fields(config: Any) -> None:
+    """Within a SINGLE pick's config, propagates the first resolved
+    `model`/`api_key_env_var` pair found anywhere in it onto every other
+    node that's missing one -- in place.
+
+    Covers the case _reapply_resolved_model_fields (cross-turn) can't: a
+    BRAND NEW step added this turn (e.g. the user asked to also generate
+    the source data, and a new "generate_tickets" step got inserted) has
+    no prior-turn counterpart to restore from at all, so it's genuinely
+    missing model/api_key_env_var for the first time -- but the SYSTEM_PROMPT
+    rule is "pick a model once, apply to every step," and the user already
+    did that for the pipeline's other steps. Re-asking for a value that's
+    sitting right there two steps over defeats that rule. Only ever
+    copies a real value onto a missing one; never overwrites a step that
+    deliberately specifies something different.
+    """
+    found: list[tuple[str, str]] = []
+
+    def _collect(node: Any) -> None:
+        if isinstance(node, dict):
+            model, key_var = node.get("model"), node.get("api_key_env_var")
+            if not _is_todo_or_missing(model) and not _is_todo_or_missing(key_var):
+                found.append((model, key_var))
+            for v in node.values():
+                _collect(v)
+        elif isinstance(node, list):
+            for v in node:
+                _collect(v)
+
+    _collect(config)
+    if not found:
+        return
+    model, key_var = found[0]
+
+    def _apply(node: Any) -> None:
+        if isinstance(node, dict):
+            if "model" in node and _is_todo_or_missing(node.get("model")):
+                node["model"] = model
+            if "api_key_env_var" in node and _is_todo_or_missing(node.get("api_key_env_var")):
+                node["api_key_env_var"] = key_var
+            for v in node.values():
+                _apply(v)
+        elif isinstance(node, list):
+            for v in node:
+                _apply(v)
+
+    _apply(config)
+
+
 async def _repair_picks(
     original_picks: list[GeniePick],
     issues: list[str],
@@ -2506,12 +3297,15 @@ async def _repair_picks(
             # invent picks. Better to keep the original than to trust
             # a hallucinated addition.
             continue
+        repaired_config = p.get("config") or original.config
+        if original.component_type in _AGENTIC_PIPELINE_FAMILY:
+            _reapply_resolved_model_fields(repaired_config, original.config)
         out.append(
             GeniePick(
                 component_type=p.get("component_type") or original.component_type,
                 asset_name=name,
                 upstream_asset_names=p.get("upstream_asset_names") or original.upstream_asset_names,
-                config=p.get("config") or original.config,
+                config=repaired_config,
                 reason=p.get("reason") or original.reason,
                 # `action` was never passed here at all -- confirmed live
                 # as a real bug: GeniePick.action defaults to "add", so

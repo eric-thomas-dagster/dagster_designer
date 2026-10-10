@@ -2326,10 +2326,14 @@ export const pipelinesApi = {
     // and a local one doesn't.
     locationName?: string,
     repositoryName?: string,
+    // Required when the job's own assets are partitioned -- `dg launch
+    // --job` rejects a partitioned job with no partition the same way it
+    // does a partitioned asset (confirmed live).
+    partition?: string,
   ): Promise<LaunchJobResponse> => {
     const response = await api.post<LaunchJobResponse>(
       `/pipelines/${projectId}/${jobName}/launch`,
-      { config, tags, location_name: locationName, repository_name: repositoryName }
+      { config, tags, location_name: locationName, repository_name: repositoryName, partition }
     );
     return response.data;
   },

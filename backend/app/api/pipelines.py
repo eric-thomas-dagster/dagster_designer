@@ -3,7 +3,7 @@
 import json
 from pathlib import Path
 from typing import List, Literal
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, BackgroundTasks
 from pydantic import BaseModel
 
 from app.core.config import settings
@@ -793,6 +793,16 @@ class LaunchJobRequest(BaseModel):
     # endpoint above, which the frontend splits back apart to fill these in.
     location_name: str | None = None
     repository_name: str | None = None
+    # Required when the job's own assets are partitioned -- confirmed
+    # live: running e.g. a CronScheduleComponent-backed job manually with
+    # no partition fails with DagsterInvariantViolationError (the asset's
+    # compute function reads context.partition_key_range, which only
+    # exists when a partition was specified). `dg launch --job ... `
+    # accepts the exact same --partition/--partition-range flags it does
+    # for --assets (confirmed by reading dagster_dg_cli's launch.py
+    # directly), so this just threads the same option through for jobs.
+    partition: str | None = None
+    partition_range: dict[str, str] | None = None  # {"start": ..., "end": ...}
 
 
 class LaunchJobResponse(BaseModel):
@@ -804,14 +814,20 @@ class LaunchJobResponse(BaseModel):
 
 
 @router.post("/{project_id}/{job_name}/launch", response_model=LaunchJobResponse)
-async def launch_job(project_id: str, job_name: str, request: LaunchJobRequest):
+async def launch_job(project_id: str, job_name: str, request: LaunchJobRequest, background_tasks: BackgroundTasks):
     """Launch a job using dg launch command.
 
-    This executes the dg launch command to run a specific job.
+    Fire-and-forget for local projects, matching launch_backfill's own
+    reasoning (see its docstring): a `dg launch` call on this project's
+    catalog takes ~20s+ even in the ordinary case, confirmed live as
+    exactly this endpoint sitting there with no feedback until the whole
+    run finished -- "it is working!!! ... it sits there for a while,
+    like its just waiting for the job to finish rather than start". The
+    real work now runs in a BackgroundTask after this response is
+    already sent; its result is only observable via the Runs page.
+    Cloud (Dagster+) stays synchronous -- it's a GraphQL mutation, not a
+    cold local subprocess, so there's nothing slow to hide it from.
     """
-    import asyncio
-    import subprocess
-    from pathlib import Path
     from app.services.project_service import project_service
 
     project = project_service.get_project(project_id)
@@ -828,26 +844,55 @@ async def launch_job(project_id: str, job_name: str, request: LaunchJobRequest):
         run_id = await _launch_cloud_job(project, request.location_name, request.repository_name, job_name)
         return LaunchJobResponse(success=True, message=f"Launched run {run_id}", stdout="", stderr="")
 
-    # Get project path - construct it the same way as during project creation
-    project_name_sanitized = project.name.lower().replace(" ", "_").replace("-", "_")
-    project_dir_name = f"project_{project_id.split('-')[0]}_{project_name_sanitized}"
-    project_path = Path("./projects") / project_dir_name
+    # Get project path. This used to hand-reconstruct the directory name
+    # from the project's display name and a short id prefix, then resolve
+    # it against a RELATIVE "./projects" path -- which is the backend's
+    # own cwd, never where real projects actually live (~/Library/
+    # Application Support/.../projects/, confirmed live: this guaranteed
+    # a 404 for every project, every call, since the guessed relative
+    # path could never exist). Every other endpoint in this codebase
+    # already uses this real, established helper instead.
+    project_path = project_service._get_project_dir(project)
     if not project_path.exists():
         raise HTTPException(status_code=404, detail=f"Project directory not found: {project_path}")
 
-    try:
-        # Build dg launch command using project's venv
-        venv_python = venv_bin_path(project_path / ".venv", "python")
-        venv_dg = venv_bin_path(project_path / ".venv", "dg")
+    venv_dg = venv_bin_path(project_path / ".venv", "dg")
+    if not venv_dg.exists():
+        raise HTTPException(
+            status_code=500,
+            detail="Project virtual environment not found. Please ensure the project was created successfully."
+        )
 
-        if not venv_dg.exists():
-            raise HTTPException(
-                status_code=500,
-                detail="Project virtual environment not found. Please ensure the project was created successfully."
-            )
+    background_tasks.add_task(_run_job_launch_in_background, project_id, project_path, job_name, request)
+    return LaunchJobResponse(
+        success=True,
+        message="Job launched -- check the Runs page for progress.",
+        stdout="",
+        stderr="",
+    )
+
+
+async def _run_job_launch_in_background(project_id: str, project_path: Path, job_name: str, request: LaunchJobRequest) -> None:
+    """The actual job-launch work -- see launch_job's own docstring for
+    why this runs as a BackgroundTask instead of being awaited inline."""
+    import asyncio
+    import subprocess
+
+    try:
+        # Build dg launch command using project's venv. venv_dg's own
+        # existence was already checked in launch_job before this task was
+        # even scheduled.
+        venv_dg = venv_bin_path(project_path / ".venv", "dg")
 
         # Build the command - use absolute path to dg binary
         cmd = [str(venv_dg.absolute()), "launch", "--job", job_name]
+        if request.partition:
+            cmd.extend(["--partition", request.partition])
+        elif request.partition_range:
+            start = request.partition_range.get("start")
+            end = request.partition_range.get("end")
+            if start and end:
+                cmd.extend(["--partition-range", f"{start}...{end}"])
 
         # Add config if provided
         config_file_path = None
@@ -891,28 +936,71 @@ async def launch_job(project_id: str, job_name: str, request: LaunchJobRequest):
         project_path_abs = project_path.absolute()
         env = project_subprocess_env(project_path_abs)
 
+        # Same DAGSTER_HOME pinning materialize_assets/launch_backfill use
+        # for their own `dg launch` calls -- without it, this job's run
+        # goes into `dg`'s default/ephemeral instance location instead of
+        # the project's real, persistent one, making it invisible to the
+        # Runs page (same bug class those two had, fixed earlier this
+        # session; this third subprocess-launching endpoint had never
+        # gotten the same fix since this whole code path was unreachable
+        # until the project-path bug above was fixed).
+        dagster_home = project_path_abs / ".designer_dagster_home"
+        dagster_home.mkdir(exist_ok=True)
+        env["DAGSTER_HOME"] = str(dagster_home)
+
         print(f"[launch_job] Using venv: {project_path_abs / '.venv'}")
 
-        # Run command off the event loop -- same reasoning as the
-        # materialize endpoint's identical fix: a job can legitimately run
-        # for minutes, and a direct blocking call here would freeze every
-        # other request against this backend for that whole time.
-        result = await asyncio.to_thread(
-            subprocess.run,
-            cmd,
-            cwd=str(project_path),
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=300  # 5 minute timeout
-        )
+        # Serialize against any other BACKEND-initiated subprocess call
+        # loading this same project's defs (asset preview, partition
+        # info, ...) -- a state-backed dbt component's manifest refresh
+        # writes to a shared on-disk cache (.local_defs_state), and this
+        # endpoint was the one subprocess-launching call site in the file
+        # that never took this lock.
+        from ..services.asset_introspection_service import get_project_defs_lock
+
+        # This lock alone doesn't fully solve it, though: confirmed live,
+        # TWICE, that the same "Did not find dbt_project.yml at expected
+        # path .../local_defs_state/.../project/dbt_project.yml" error
+        # happens even with the lock held, because the thing actually
+        # racing this read isn't another backend call at all -- it's the
+        # project's own auto-started `dg dev` process (a separate, already-
+        # running OS process this backend's in-process lock has no way to
+        # coordinate with), regenerating that same staged directory on its
+        # own schedule. Both times, retrying the exact same call
+        # immediately after succeeded with no other change, confirming
+        # this is a real but transient race, not a permanent failure --
+        # so retry once automatically rather than surfacing a scary
+        # traceback for something that fixes itself a moment later.
+        _TRANSIENT_DEFS_STATE_MARKERS = ("local_defs_state", "dbt_project.yml")
+
+        async def _run_launch():
+            async with get_project_defs_lock(project_id):
+                # Run command off the event loop -- same reasoning as the
+                # materialize endpoint's identical fix: a job can
+                # legitimately run for minutes, and a direct blocking call
+                # here would freeze every other request against this
+                # backend for that whole time.
+                return await asyncio.to_thread(
+                    subprocess.run,
+                    cmd,
+                    cwd=str(project_path),
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    timeout=300  # 5 minute timeout
+                )
+
+        result = await _run_launch()
+        if result.returncode != 0 and all(m in result.stderr for m in _TRANSIENT_DEFS_STATE_MARKERS):
+            print("[launch_job] Hit the known local_defs_state race -- retrying once", flush=True)
+            result = await _run_launch()
 
         print(f"[launch_job] Return code: {result.returncode}")
         print(f"[launch_job] stdout: {result.stdout[:500]}")  # First 500 chars
         print(f"[launch_job] stderr: {result.stderr[:500]}")  # First 500 chars
 
         success = result.returncode == 0
-        message = "Job launched successfully" if success else "Job launch failed"
+        print(f"[launch_job] project={project_id} job={job_name} success={success}", flush=True)
 
         # Clean up temporary config file
         if config_file_path:
@@ -922,28 +1010,19 @@ async def launch_job(project_id: str, job_name: str, request: LaunchJobRequest):
             except Exception as e:
                 print(f"[launch_job] Warning: Failed to delete temp config file: {e}")
 
-        return LaunchJobResponse(
-            success=success,
-            message=message,
-            stdout=result.stdout,
-            stderr=result.stderr
-        )
-
     except subprocess.TimeoutExpired:
-        # Clean up config file on timeout
+        print(f"[launch_job] project={project_id} job={job_name} timed out after 5 minutes", flush=True)
         if config_file_path:
             try:
                 import os
                 os.unlink(config_file_path)
-            except:
+            except Exception:
                 pass
-        raise HTTPException(status_code=408, detail="Job launch timed out after 5 minutes")
     except Exception as e:
-        # Clean up config file on error
+        print(f"[launch_job] project={project_id} job={job_name} error: {e}", flush=True)
         if config_file_path:
             try:
                 import os
                 os.unlink(config_file_path)
-            except:
+            except Exception:
                 pass
-        raise HTTPException(status_code=500, detail=f"Failed to launch job: {str(e)}")

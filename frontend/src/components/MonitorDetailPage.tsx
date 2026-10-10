@@ -722,7 +722,7 @@ export function BigTimeSeriesChart({ points }: { points: NumericPoint[] }) {
  * Big pass/fail history strip for the overview when we don't have
  * numeric metrics to chart. Each slot is a full-height colored bar.
  */
-function BigPassFailStrip({ events }: { events: Array<{ status: string; ts: string }> }) {
+export function BigPassFailStrip({ events }: { events: Array<{ status: string; ts: string }> }) {
   const slots = events.slice(-120);
   if (slots.length === 0) {
     return <div className="text-xs text-gray-500 italic py-8 text-center">No run history yet — trigger the check to populate this chart.</div>;

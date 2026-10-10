@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Sparkles, X, Loader2, Check, User, ChevronDown, ChevronRight, DollarSign, Clock, Hash } from 'lucide-react';
+import { Sparkles, X, Loader2, Check, User, ChevronDown, ChevronRight, DollarSign, Clock, Hash, FolderOpen } from 'lucide-react';
 import { useProjectStore } from '@/hooks/useProject';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { notify } from './Notifications';
 import { openSettings, onAiProvidersChanged } from './SettingsDialog';
 import { API_BASE, assetsApi, aiApi, type AiProvidersStatus } from '@/services/api';
+import { pickFile } from '@/services/tauri';
 import { applyGeniePicks, resolveComponentIdFromCurrentProject, type GeniePickLike } from '@/lib/applyGeniePicks';
 import { parseUpstreamAssetKeys } from '@/lib/upstreamAssetKeys';
 import { parseStepMetadataFields, formatCost, formatLatency } from '@/lib/stepMetadata';
@@ -44,20 +45,74 @@ type Turn =
 // time -- clicking one sets `task` to its text directly.
 const EXAMPLE_TASKS: { label: string; task: string }[] = [
   {
+    // Plain analyst-voice phrasing, not schema-literal -- the earlier,
+    // equally-plain version of this exact example ("Triage incoming
+    // support tickets: classify by urgency...") was what first exposed a
+    // real planner bug: it got built as ONE agentic_pipeline chaining
+    // plain classify/llm_call steps against the whole ticket DataFrame at
+    // once, which always fails materialize (that component only ever
+    // emits one aggregate dict, never a per-row DataFrame the project's
+    // IO manager can store). That's now covered by a deterministic
+    // backstop (_per_row_partition_misuse in genie_service.py) plus
+    // stronger SYSTEM_PROMPT guidance, so the example text itself can go
+    // back to reading like a real request instead of leaking component
+    // internals (upstream_asset_key, response_column, ...) that have no
+    // business being in a "just describe it" example. Model choice
+    // (gpt-4o-mini) baked in to match every one of these examples' own
+    // validated reference run and skip the "which LLM" question --
+    // a real analyst describing this would already know what they want.
     label: 'Triage support tickets',
-    task: 'Triage incoming support tickets: classify by urgency, draft a suggested reply, and flag anything that mentions a refund for human review.',
+    task: 'We get a steady stream of customer support tickets and I want to automatically triage them: figure out how urgent each one is, draft a suggested reply the team can review, and flag anything that mentions a refund so a person double-checks it before it goes out. Use gpt-4o-mini for all of it.',
   },
   {
+    // Matches the officially-bundled document_summarization example --
+    // ran for real against a checkout-latency incident postmortem.
     label: 'Summarize documents',
-    task: 'Summarize incoming documents into a short executive summary and extract key action items.',
+    task: 'Summarize incoming documents (think incident postmortems, status reports, that kind of thing) into a short executive summary and extract key action items. Use gpt-4o-mini.',
   },
   {
+    // Matches the officially-bundled route_to_specialist example's real,
+    // validated roster + sample questions verbatim.
     label: 'Route to a specialist',
-    task: 'Route incoming questions to the right specialist (billing, technical, or general), then have that specialist draft a response.',
+    task: 'We have three specialists -- billing (refunds, subscription charges, payment issues), technical (bugs, errors, API problems), and general (plans, pricing, anything that doesn\'t fit the other two) -- and I want incoming customer questions routed to whichever one actually fits, then have that specialist draft a response. Use gpt-4o-mini.',
   },
   {
+    // Matches the officially-bundled debate_best_answer example's real
+    // proposal verbatim.
     label: 'Debate the best answer',
-    task: 'Have two proposers debate the best answer to an incoming question, then have an arbitrator pick the winning response.',
+    task: 'Have two agents debate this proposal: "our team should switch from a 2-week sprint cadence to continuous/weekly releases." One should argue for it, one against, then a separate arbitrator should weigh both sides and render a final verdict. Use gpt-4o-mini.',
+  },
+  {
+    // Matches the officially-bundled pipeline_incident_triage example
+    // (tool_use_loop: one agent, three real tools, iterating freely
+    // until it has enough evidence -- not a forced single call).
+    label: 'Pipeline incident triage',
+    task: 'When something breaks in one of our pipelines, I want an assistant that pulls together the vendor status page, recent deploys, and anything we know from past incidents, figures out the likely root cause, and tells me whether to just wait it out or start actually debugging. Use gpt-4o-mini.',
+  },
+  {
+    // Matches the officially-bundled oncall_escalation_simulator example
+    // (extends pipeline_incident_triage one stage further: diagnosis,
+    // THEN a genuine semantic delegate pick of which on-call team owns
+    // it -- no required_capabilities lookup table, real judgment call).
+    label: 'On-call escalation',
+    task: 'When an incident needs to be escalated, look at the vendor status, recent deploys, and our runbooks to figure out what\'s actually going on, then decide which on-call team -- infra, data, or payments -- should own it, and draft them a message explaining why. Use gpt-4o-mini.',
+  },
+  {
+    // Matches the officially-bundled pr_review_bot example, including
+    // the exact real, benign PR it was validated against
+    // (dagster-io/dagster#31999) so this is runnable as-is, not just
+    // illustrative.
+    label: 'PR review bot',
+    task: 'When a pull request comes in, pull its real diff from GitHub, have a security reviewer, a style reviewer, and a test-coverage reviewer each look it over from their own angle, then combine their feedback into one review. Use dagster-io/dagster#31999 as the pull request to review, and gpt-4o-mini for all three reviewers.',
+  },
+  {
+    // Matches the officially-bundled support_fleet_mission_control
+    // example's real, validated 6-agent roster verbatim (the "at scale"
+    // story: a whole roster of agents loaded from one external manifest,
+    // each incoming item routed to whichever one genuinely fits,
+    // digested into one summary via synthesize).
+    label: 'Specialist fleet routing',
+    task: 'We have a roster of six specialists -- billing, technical, security, refunds, legal, and enterprise -- and a stream of incoming support tickets. For each ticket, route it to whichever specialist on the roster actually fits, then give me one daily digest summarizing what got routed where and why. Use gpt-4o-mini.',
   },
 ];
 
@@ -351,12 +406,13 @@ export function AgentPipelineBuilder({
   const isReady = !!latestPlan && latestPlan.picks.length > 0 && !latestPlan.clarifying_question
     && (!editingComponent || turns.length > 1);
 
-  // `answer`, when given, is the user's reply to Genie's last
-  // clarifying_question -- resubmits with the prior plan as context so
-  // Genie can fill in what it asked about instead of starting over. Same
-  // refine/regenerate contract DagsterAIBar uses. With no `answer`, this
-  // is the FIRST message in the conversation (the initial task).
-  const send = async (text: string, answer?: string) => {
+  // `text` is this turn's new message -- either the very first task
+  // description, or the user's reply to Genie's last clarifying_question.
+  // No separate "answer" param needed any more: with real `history` now
+  // doing the remembering (see below), every call is just "here's the
+  // next thing the user said," the same shape whether it's turn 1 or
+  // turn 10.
+  const send = async (text: string) => {
     if (!currentProject || !text.trim() || planning) return;
     setPlanning(true);
     setTurns((prev) => [...prev, { role: 'user', text: text.trim() }]);
@@ -370,17 +426,43 @@ export function AgentPipelineBuilder({
           io_output_type: n.data?.io_output_type,
           kinds: n.data?.kinds,
         }));
+      // Real conversation history instead of a previous_plan/refinement
+      // reconstruction -- see genie_service.py's `history` param
+      // docstring for why. `turns` already has exactly what's needed
+      // (every past user message + every past Genie JSON reply); this
+      // just maps it to {role, content} pairs and appends the NEWEST
+      // user message (not yet in `turns` -- setTurns above is
+      // async/batched, so building from the closure value plus this
+      // call's own `text` is the reliable way to include it).
+      const history: { role: 'user' | 'assistant'; content: string }[] = [];
+      const firstTurn = turns[0];
+      if (firstTurn?.role === 'genie') {
+        // Edit-mode seed: turns starts with a Genie turn (the existing
+        // component's current config), no user turn before it -- both
+        // providers require the first message to be `user`, and a human
+        // reader needs the same framing. Synthesize one.
+        history.push({ role: 'user', content: `Here is the existing "${firstTurn.plan.picks[0]?.asset_name}" component's current configuration:\n${JSON.stringify(firstTurn.plan)}` });
+      }
+      for (const t of turns) {
+        if (t.role === 'user') {
+          history.push({ role: 'user', content: t.text });
+        } else if (t !== firstTurn) {
+          // The seed turn (if any) was already pushed above as the
+          // synthetic user message's "content" -- don't also push it
+          // here as a second, redundant assistant turn.
+          history.push({ role: 'assistant', content: JSON.stringify(t.plan) });
+        }
+      }
+      history.push({ role: 'user', content: text.trim() });
+
       const body: Record<string, any> = {
         task: task.trim(),
         existing_assets: existing,
         project_id: currentProject.id,
         scope: 'agents_pipelines',
         model,
+        history,
       };
-      if (answer && latestPlan) {
-        body.previous_plan = latestPlan.picks;
-        body.refinement = answer;
-      }
       const res = await fetch(`${API_BASE}/ai/plan`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -414,15 +496,44 @@ export function AgentPipelineBuilder({
 
   const replyTo = (answer: string) => {
     if (!answer.trim()) return;
-    send(answer, answer);
+    send(answer);
     setReply('');
+  };
+
+  // A clarifying_question can bundle two unrelated asks into one turn --
+  // e.g. "What's the path to the CSV, AND which LLM provider?" -- where
+  // only the second half has quick-pick option buttons. Clicking an
+  // option used to call replyTo(opt) directly, which SILENTLY DISCARDED
+  // whatever the user had just typed into the reply box for the other
+  // half (setReply('') clears it without ever reading it first).
+  // Confirmed live: typing a CSV path then clicking "Claude (Anthropic)"
+  // sent only "Claude (Anthropic)" -- the path was never sent at all, so
+  // the next turn asked the exact same combined question again, looking
+  // like an endless loop. Folding any pending typed text in with the
+  // clicked option fixes this without needing to restructure
+  // clarifying_question into separate sub-answers.
+  const pickOption = (opt: string) => {
+    const typed = reply.trim();
+    replyTo(typed && typed !== opt ? `${typed}; ${opt}` : opt);
+  };
+
+  // Heuristic, not a structured field from the backend (clarifying_question
+  // only ever carries {question, options} -- no "kind" to key off) --
+  // good enough to decide whether a "Browse…" file picker is worth
+  // offering alongside the plain text reply box.
+  const pendingQuestionWantsPath = /\bpath\b|\bfile\b|\bcsv\b|\burl\b/i.test(
+    latestPlan?.clarifying_question?.question || ''
+  );
+  const browseForFile = async () => {
+    const picked = await pickFile({ filters: [{ name: 'Data files', extensions: ['csv', 'json', 'parquet', 'tsv'] }] });
+    if (picked) setReply((prev) => (prev.trim() ? `${prev.trim()} ${picked}` : picked));
   };
 
   const apply = async () => {
     if (!latestPlan || !currentProject || applying || latestPlan.picks.length === 0) return;
     setApplying(true);
     try {
-      const { installed, failed, warnings } = await applyGeniePicks(
+      const { installed, failed, warnings, rolledBack } = await applyGeniePicks(
         currentProject.id,
         latestPlan.picks,
         resolveComponentIdFromCurrentProject,
@@ -431,6 +542,17 @@ export function AgentPipelineBuilder({
       await queryClient.invalidateQueries({ queryKey: ['primitives', currentProject.id] });
       await queryClient.invalidateQueries({ queryKey: ['definitions', currentProject.id] });
       await queryClient.invalidateQueries({ queryKey: ['installed-resources', currentProject.id] });
+
+      if (rolledBack) {
+        // Dagster's definitions build is all-or-nothing -- applyGeniePicks
+        // already caught this (post-install validation) and undid the
+        // adds, so the project is back to exactly how it was before this
+        // click. Said plainly so the user knows nothing is broken AND
+        // nothing silently landed, rather than reading like an ordinary
+        // per-pick failure.
+        notify.error(`This plan would have broken the project, so nothing was added:\n${rolledBack}`);
+        return;
+      }
 
       if (failed === 0) {
         notify.success(`Added ${installed} asset${installed === 1 ? '' : 's'} to the graph.`);
@@ -446,6 +568,15 @@ export function AgentPipelineBuilder({
       if (warnings.length > 0) {
         notify.warning(`Some applied config differs from the plan:\n${warnings.join('\n')}`);
       }
+    } catch (e) {
+      // This try had no catch before -- confirmed live as the reason a
+      // partial-apply failure was completely invisible: applyGeniePicks
+      // (or the invalidateQueries calls after it) throwing here used to
+      // propagate as an unhandled rejection, logged only to the browser
+      // console, while the modal just sat there looking like nothing
+      // happened. Now it's an ordinary visible error instead.
+      const msg = e instanceof Error ? e.message : String(e);
+      notify.error(`Failed to add picks to the graph: ${msg}`);
     } finally {
       setApplying(false);
     }
@@ -504,6 +635,18 @@ export function AgentPipelineBuilder({
                 </div>
               </div>
             )}
+
+            {/* Confirmed live: users describe a pipeline assuming it'll
+                somehow handle the data question for them, then get stuck
+                being asked for a file path they don't have. Setting the
+                expectation up front, before they even start typing, beats
+                them discovering the constraint mid-conversation. */}
+            <p className="text-xs text-gray-500">
+              The pipeline needs real data to run on: an existing asset in this
+              project, a file/database/API you can point to, or synthetic test
+              data Designer generates for you. You'll be asked which, if it
+              isn't obvious from your description.
+            </p>
 
             <textarea
               value={task}
@@ -677,7 +820,7 @@ export function AgentPipelineBuilder({
                                   .map((opt) => (
                                     <button
                                       key={opt}
-                                      onClick={() => replyTo(opt)}
+                                      onClick={() => pickOption(opt)}
                                       disabled={planning}
                                       className="block w-full text-left px-2.5 py-1.5 text-xs text-violet-700 hover:bg-violet-50 disabled:opacity-50 disabled:cursor-not-allowed"
                                     >
@@ -691,7 +834,7 @@ export function AgentPipelineBuilder({
                               {turn.plan.clarifying_question.options.map((opt) => (
                                 <button
                                   key={opt}
-                                  onClick={() => replyTo(opt)}
+                                  onClick={() => pickOption(opt)}
                                   disabled={planning}
                                   className="px-2.5 py-1 text-xs border border-violet-300 text-violet-700 bg-white rounded-full hover:bg-violet-50 disabled:opacity-50 disabled:cursor-not-allowed"
                                 >
@@ -717,9 +860,33 @@ export function AgentPipelineBuilder({
 
             {/* Persistent reply box -- answers a pending question when
                 there is one, or just keeps refining the plan otherwise
-                (e.g. "also handle Spanish-language tickets"). */}
+                (e.g. "also handle Spanish-language tickets"). The pending
+                question itself only ever appeared up in the scrolling chat
+                transcript, with nothing tying it to this box -- confirmed
+                live as genuinely confusing: it read as a generic "ask for
+                changes" field, not "this is where you answer the question
+                above," especially once the transcript had scrolled. Each
+                question gets restated right here, directly above where
+                the answer goes, closing that gap. */}
+            {latestPlan?.clarifying_question && (
+              <div className="px-4 pt-2.5 pb-1.5 bg-violet-50 border-t border-violet-100 text-xs text-violet-900">
+                <span className="font-semibold">Answering:</span>{' '}
+                {latestPlan.clarifying_question.question}
+              </div>
+            )}
             <div className="px-4 py-3 border-t border-gray-100 bg-gray-50">
               <div className="flex items-center gap-2">
+                {pendingQuestionWantsPath && (
+                  <button
+                    onClick={browseForFile}
+                    disabled={planning || applying}
+                    title="Browse for a local file -- fills in its path below"
+                    className="inline-flex items-center gap-1 px-2.5 py-1.5 text-sm text-gray-700 border border-gray-300 bg-white rounded-md hover:bg-gray-100 disabled:opacity-50"
+                  >
+                    <FolderOpen className="w-3.5 h-3.5" />
+                    Browse…
+                  </button>
+                )}
                 <input
                   type="text"
                   value={reply}
@@ -747,6 +914,16 @@ export function AgentPipelineBuilder({
                   Send
                 </button>
               </div>
+              {/* A clarifying_question can bundle an open-ended ask (the
+                  file path) together with quick-pick options (the model) in
+                  one turn -- type the path here, THEN click a model button
+                  below; both now get sent together instead of the typed
+                  text being silently dropped. */}
+              {pendingQuestionWantsPath && latestPlan?.clarifying_question?.options && (
+                <p className="mt-1.5 text-[11px] text-gray-500">
+                  Type the path above, then click a model below — both get sent together.
+                </p>
+              )}
             </div>
           </>
         )}

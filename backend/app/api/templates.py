@@ -862,6 +862,17 @@ async def _community_component_instances(
     for component_type, (category, name, component_id) in type_to_info.items():
         if component_type in matched_types:
             continue
+        # The "matched" branch above only ever adds a type to io_managers/
+        # resources when its category is actually resource-like (see the
+        # `info[0] not in (...)` check) -- this branch was missing that
+        # same filter, so EVERY installed-but-unconfigured component
+        # (including "source"/ingestion types like synthetic_data_generator,
+        # whose real category is "source") defaulted to "resource" here.
+        # Confirmed live: Synthetic Data Generator showed up on the
+        # Resources page's "installed, not configured yet" list even
+        # though it's an ingestion component, not a resource.
+        if category not in ("resource", "resources", "io_manager", "io_managers"):
+            continue
         needs_configuration.append({
             "component_id": component_id,
             "component_type": component_type,

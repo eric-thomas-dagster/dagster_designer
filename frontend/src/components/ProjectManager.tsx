@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useProjectStore } from '@/hooks/useProject';
-import { codegenApi, projectsApi, filesApi, pipelinesApi } from '@/services/api';
+import { codegenApi, projectsApi, filesApi, pipelinesApi, partitionsApi } from '@/services/api';
 import { DbtCloudImportModal } from './DbtCloudImportModal';
 import { ConnectDagsterPlusDialog } from './ConnectDagsterPlusDialog';
 import { GitCommitDialog } from './GitCommitDialog';
@@ -308,8 +308,37 @@ export function ProjectManager() {
     setMaterializeAllResult(null);
 
     try {
-      // Call materialize without asset_keys to materialize all assets
-      const result = await projectsApi.materialize(currentProject.id);
+      // `dg launch` rejects a partitioned asset outright with no
+      // '--partition' option -- and it rejects the WHOLE invocation, not
+      // just the partitioned asset(s) within it, so a single partitioned
+      // asset anywhere in the project failed "Materialize All" entirely,
+      // with every OTHER asset (including ones that would have succeeded
+      // fine on their own) getting swept up and logged as "failed" too.
+      // Confirmed live: a brand-new project with 2 partitioned assets
+      // showed all 7 of its assets as failed after one "Materialize All"
+      // click. GraphEditor's own multi-select materialize already works
+      // around this (skip partitioned, run the rest) -- mirrored here.
+      const allAssetKeys = currentProject.graph.nodes
+        .filter((n) => n.node_kind === 'asset')
+        .map((n) => (n.data as any)?.asset_key || n.id);
+      const partitionChecks = await Promise.all(
+        allAssetKeys.map((k) => partitionsApi.isPartitioned(currentProject.id, k).catch(() => false))
+      );
+      const partitioned = allAssetKeys.filter((_, i) => partitionChecks[i]);
+      const runnable = allAssetKeys.filter((_, i) => !partitionChecks[i]);
+
+      if (partitioned.length > 0) {
+        notify.error(
+          `${partitioned.join(', ')} ${partitioned.length === 1 ? 'is' : 'are'} partitioned -- ` +
+          `materialize ${partitioned.length === 1 ? 'it' : 'them'} from the Ingestions page's Backfill picker instead, which lets you choose a partition. Materializing the rest now.`
+        );
+      }
+      if (runnable.length === 0) {
+        setMaterializeAllResult({ success: false, message: 'Every asset in this project is partitioned -- nothing to materialize here.' });
+        return;
+      }
+
+      const result = await projectsApi.materialize(currentProject.id, runnable);
 
       setMaterializeAllResult({
         success: result.success,
@@ -318,7 +347,7 @@ export function ProjectManager() {
 
       if (result.success) {
         console.log('Materialization output:', result.stdout);
-        notify.success('All assets materialized successfully!');
+        notify.success(`${runnable.length} asset(s) materialized successfully!`);
       } else {
         console.error('Materialization failed:', result.stderr);
         notify.error('Materialization failed. Check console for details.');

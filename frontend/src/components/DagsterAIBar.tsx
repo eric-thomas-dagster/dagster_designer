@@ -52,6 +52,18 @@ export function DagsterAIBar() {
   const [applying, setApplying] = useState(false);
   const [plan, setPlan] = useState<AIPlanResponse | null>(null);
   const [refinement, setRefinement] = useState('');
+  // Real conversation history (see genie_service.py's `history` param +
+  // AgentPipelineBuilder.tsx's identical mechanism) -- scoped to ONE
+  // continuous refine-the-same-plan sequence, not accumulated forever.
+  // This bar is a persistent fixture on the graph canvas used for many
+  // separate, unrelated asks over a session (schedule this, then later,
+  // unrelated, fix that filter) -- unlike the Agent Builder's own
+  // conversation (a dedicated modal with a clean open/close lifetime),
+  // blindly accumulating history across EVERY submit here would drag
+  // stale context from a finished, unrelated task into a brand new one.
+  // Reset to [] on every non-refinement submit (a genuinely new task);
+  // built up turn by turn only while isRefinement is true.
+  const [history, setHistory] = useState<{ role: 'user' | 'assistant'; content: string }[]>([]);
   const [showModelMenu, setShowModelMenu] = useState(false);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
 
@@ -132,16 +144,19 @@ export function DagsterAIBar() {
           kinds: n.data?.kinds,
         }));
 
+      // See the `history` state declaration above for why this resets on
+      // a fresh task instead of accumulating across every submit.
+      const thisTurnHistory = isRefinement && plan
+        ? [...history, { role: 'user' as const, content: refineWith! }]
+        : [{ role: 'user' as const, content: task.trim() }];
+
       const body: Record<string, any> = {
         task: task.trim(),
         existing_assets: existing,
         model,
         project_id: currentProject.id,
+        history: thisTurnHistory,
       };
-      if (isRefinement && plan) {
-        body.previous_plan = plan.picks;
-        body.refinement = refineWith;
-      }
 
       const res = await fetch(`${API_BASE}/ai/plan`, {
         method: 'POST',
@@ -154,6 +169,7 @@ export function DagsterAIBar() {
       }
       const data: AIPlanResponse = await res.json();
       setPlan(data);
+      setHistory([...thisTurnHistory, { role: 'assistant', content: JSON.stringify(data) }]);
       if (isRefinement) setRefinement('');
       if (data.picks.length === 0) {
         notify.warning(data.notes.join('\n') || 'Dagster AI could not build a plan for that task.');
@@ -204,6 +220,7 @@ export function DagsterAIBar() {
       }
       setPlan(null);
       setTask('');
+      setHistory([]);
     } finally {
       setApplying(false);
     }
@@ -212,6 +229,7 @@ export function DagsterAIBar() {
   const cancel = () => {
     setPlan(null);
     setRefinement('');
+    setHistory([]);
   };
 
   return (

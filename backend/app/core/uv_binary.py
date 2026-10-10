@@ -87,6 +87,19 @@ def project_subprocess_env(project_dir: Path) -> dict[str, str]:
     env["VIRTUAL_ENV"] = str(venv_dir.resolve())
     env["PATH"] = f"{bin_dir}{os.pathsep}{env.get('PATH', '')}"
     env.pop("PYTHONHOME", None)
+    # Lets a dbt profiles.yml reference the project's real data/ dir via
+    # `{{ env_var('DESIGNER_PROJECT_DATA_DIR') }}` instead of a relative
+    # path -- confirmed live as the root cause of a real materialize
+    # failure: a state-backed dbt component's `.local_defs_state` staging
+    # copies the dbt project (profiles.yml included) into a nested cache
+    # directory at a DIFFERENT depth than its canonical location, so a
+    # relative duckdb path that resolves correctly from one breaks from
+    # the other ("Cannot open file .../local_defs_state/data/foo.duckdb:
+    # No such file or directory" -- two directory levels short of the
+    # real project data dir). An absolute path sidesteps the staging
+    # depth entirely, regardless of which copy of profiles.yml dbt
+    # actually reads from for a given invocation.
+    env["DESIGNER_PROJECT_DATA_DIR"] = str((project_dir / "data").resolve())
     return env
 
 

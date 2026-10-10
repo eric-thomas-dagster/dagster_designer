@@ -120,6 +120,12 @@ class GeniePlanRequest(BaseModel):
     # Currently just "agents_pipelines" (the AI/ML page's scoped "describe
     # your agent" flow).
     scope: str | None = None
+    # Real multi-turn conversation: [{role: "user"|"assistant", content},
+    # ...], ending in the newest user message. When sent, REPLACES
+    # previous_plan/refinement -- see plan()'s `history` param docstring.
+    # Optional/backward compatible: a caller that doesn't send this keeps
+    # getting the previous_plan/refinement reconstruction unchanged.
+    history: list[dict[str, str]] | None = None
 
 
 class GeniePickResponse(BaseModel):
@@ -171,6 +177,7 @@ async def genie_plan(req: GeniePlanRequest) -> GeniePlanResponse:
             previous_plan=req.previous_plan,
             refinement=req.refinement,
             scope=req.scope,
+            history=req.history,
         )
     except GenieError as e:
         raise HTTPException(status_code=400, detail=str(e))

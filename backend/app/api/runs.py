@@ -15,18 +15,71 @@ Design decisions:
 """
 from __future__ import annotations
 
+import asyncio
+import json
+import subprocess
+from pathlib import Path
 from typing import Any
 
 import httpx
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
+from ..core.uv_binary import venv_bin_path
 from ..services.project_service import project_service
 from ..services.dagster_plus_client import query as dp_query, DagsterPlusError, RUNS_QUERY
 from .dagster_webserver import resolve_local_graphql_port
 
 
 router = APIRouter(prefix="/projects", tags=["runs"])
+
+
+async def _query_local(project, mode: str, args: dict | None = None) -> dict[str, Any]:
+    """Run scripts/query_local_runs.py in the project's own venv against
+    its persistent instance (.designer_dagster_home) -- the direct-
+    instance replacement for what used to be an HTTP call to a live
+    `dg dev` GraphQL server. See that script's module docstring for why:
+    every OTHER local feature (asset overview, events, metadata, checks)
+    already reads the instance directly and "just works" with no running
+    process; Runs and Partitions were the two exceptions, which is why
+    they (and only they) needed `dg dev` running at all, confirmed
+    directly responsible for a string of real issues (empty Runs page,
+    "none" partition status, a stuck run with no visible explanation).
+
+    Raises HTTPException(502) with a clear message on genuine failure
+    (corrupted instance, dagster import error, etc). No longer raises
+    "is dg dev running?" for ordinary browsing, since none of this needs
+    it anymore.
+    """
+    project_dir = project_service._get_project_dir(project)
+    dagster_home = project_dir / ".designer_dagster_home"
+    dagster_home.mkdir(exist_ok=True)
+    venv_python = venv_bin_path(project_dir / ".venv", "python")
+    if not venv_python.exists():
+        raise HTTPException(status_code=500, detail="Project virtual environment not found. Please reinstall dependencies.")
+
+    cmd = [str(venv_python.absolute()), "-m", "scripts.query_local_runs", str(dagster_home), mode, json.dumps(args or {})]
+    # Must run with cwd=the backend directory for `-m scripts....` to
+    # resolve -- Path.cwd() already IS that directory at runtime (Designer
+    # always launches uvicorn with the backend dir as cwd), same
+    # convention materialize_assets' own extract_run_metadata.py call uses.
+    result = await asyncio.to_thread(
+        subprocess.run, cmd, cwd=str(Path.cwd()), capture_output=True, text=True, timeout=30,
+    )
+    if result.returncode != 0 and not result.stdout.strip():
+        raise HTTPException(status_code=502, detail=f"Local run query failed: {result.stderr[-2000:] or 'unknown error'}")
+    try:
+        data = json.loads(result.stdout.strip().splitlines()[-1])
+    except Exception:
+        raise HTTPException(status_code=502, detail=f"Local run query returned invalid output: {result.stdout[-500:]}")
+    if isinstance(data, dict) and data.get("error") and not data.get("traceback") is None:
+        # Only script-level hard failures carry a traceback (see
+        # query_local_runs.main's except branch) -- a mode-level "not
+        # found"/business-logic error (e.g. run_detail's {"error":
+        # "not_found", ...}) is handled by each call site instead, not
+        # treated as a transport failure here.
+        raise HTTPException(status_code=502, detail=data.get("error"))
+    return data
 
 
 class Run(BaseModel):
@@ -51,47 +104,6 @@ class RunsListResponse(BaseModel):
 
 
 LOCAL_GRAPHQL_URL_TEMPLATE = "http://localhost:{port}/graphql"
-
-
-async def _fetch_local_runs_v2(
-    port: int,
-    limit: int,
-    cursor: str | None,
-    *,
-    statuses: list[str] | None = None,
-    job_name: str | None = None,
-    tags: list[dict[str, str]] | None = None,
-    created_after: float | None = None,
-    created_before: float | None = None,
-    updated_after: float | None = None,
-) -> dict[str, Any]:
-    """Hit the local dagster dev GraphQL endpoint with the full filter
-    surface. Same response shape as cloud so callers don't branch."""
-    url = LOCAL_GRAPHQL_URL_TEMPLATE.format(port=port)
-    body: dict[str, Any] = {
-        "query": RUNS_QUERY,
-        "variables": {
-            "limit": limit,
-            "cursor": cursor,
-            "filter": _build_filter(
-                statuses=statuses,
-                job_name=job_name,
-                tags=tags,
-                created_after=created_after,
-                created_before=created_before,
-                updated_after=updated_after,
-            ),
-        },
-    }
-    async with httpx.AsyncClient(timeout=15.0) as client:
-        r = await client.post(url, json=body, headers={"content-type": "application/json"})
-    if r.status_code >= 400:
-        raise HTTPException(status_code=502, detail=f"Local Dagster GraphQL returned HTTP {r.status_code}. Is `dg dev` running?")
-    data = r.json()
-    if data.get("errors"):
-        msg = "; ".join(e.get("message", "") for e in data["errors"])
-        raise HTTPException(status_code=502, detail=f"GraphQL errors from local Dagster: {msg}")
-    return data.get("data") or {}
 
 
 def _build_filter(
@@ -225,37 +237,38 @@ async def query_runs(project_id: str, params: RunsQueryParams):
         )
 
     # ---- Local path -----------------------------------------------------
-    # Talk to the local dagster dev GraphQL. If dev isn't running,
-    # httpx will fail with ConnectError -- return a helpful message so
-    # the panel shows "start dev" instead of a scary 500.
-    port = resolve_local_graphql_port(project_id)
+    # Direct instance read -- see _query_local's docstring. No longer
+    # needs `dg dev` running at all.
     merged_tags = [t.model_dump() for t in (params.tags or [])]
     if params.code_location:
         merged_tags.append({"key": "dagster/code_location", "value": params.code_location})
-    try:
-        data = await _fetch_local_runs_v2(
-            port, limit, params.cursor,
-            statuses=params.statuses,
-            job_name=params.job_name,
-            tags=merged_tags,
-            created_after=params.created_after,
-            created_before=params.created_before,
-            updated_after=params.updated_after,
+    data = await _query_local(project, "list_runs", {
+        "limit": limit,
+        "cursor": params.cursor,
+        "statuses": params.statuses,
+        "job_name": params.job_name,
+        "tags": merged_tags,
+        "created_after": params.created_after,
+        "created_before": params.created_before,
+        "updated_after": params.updated_after,
+    })
+    runs = [
+        Run(
+            run_id=r["run_id"],
+            job_name=r.get("job_name"),
+            pipeline_name=r.get("job_name"),
+            status=r.get("status") or "",
+            start_time=r.get("start_time"),
+            end_time=r.get("end_time"),
+            steps_succeeded=r.get("steps_succeeded"),
+            steps_failed=r.get("steps_failed"),
+            materializations=r.get("materializations"),
         )
-    except HTTPException:
-        raise
-    except httpx.ConnectError:
-        return RunsListResponse(
-            runs=[], next_cursor=None, source="local",
-            error="Local Dagster isn't running yet. Start it below to see this project's run history.",
-        )
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Local Dagster GraphQL error: {e}")
-
-    runs, next_cursor = _normalize_runs(data)
+        for r in data.get("runs", [])
+    ]
     return RunsListResponse(
         runs=runs,
-        next_cursor=next_cursor if len(runs) == limit else None,
+        next_cursor=data.get("next_cursor") if len(runs) == limit else None,
         source="local",
     )
 
@@ -322,20 +335,12 @@ async def list_code_locations(project_id: str):
             code_locations=_extract_location_names(data), source="cloud",
         )
 
-    port = resolve_local_graphql_port(project_id)
-    url = LOCAL_GRAPHQL_URL_TEMPLATE.format(port=port)
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            r = await client.post(url, json={"query": CODE_LOCATIONS_QUERY},
-                                  headers={"content-type": "application/json"})
-    except httpx.ConnectError:
-        return CodeLocationsResponse(code_locations=[], source="local")
-    if r.status_code >= 400:
-        return CodeLocationsResponse(code_locations=[], source="local")
-    return CodeLocationsResponse(
-        code_locations=_extract_location_names(r.json().get("data") or {}),
-        source="local",
-    )
+    # `dagster/code_location` is fundamentally a multi-location-deployment
+    # concept (Dagster+ specifically) -- a local project is always exactly
+    # one location, so there's nothing meaningful to enumerate here and
+    # never was (this used to need `dg dev` running just to ask a
+    # question with one unchanging answer: "none"). No subprocess needed.
+    return CodeLocationsResponse(code_locations=[], source="local")
 
 
 class JobNamesResponse(BaseModel):
@@ -395,20 +400,25 @@ async def list_job_names(project_id: str):
             raise HTTPException(status_code=502, detail=str(e))
         return JobNamesResponse(job_names=_extract_job_names(data), source="cloud")
 
-    port = resolve_local_graphql_port(project_id)
-    url = LOCAL_GRAPHQL_URL_TEMPLATE.format(port=port)
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            r = await client.post(url, json={"query": JOB_NAMES_QUERY},
-                                  headers={"content-type": "application/json"})
-    except httpx.ConnectError:
+    # Reuses the SAME cached `dg list defs` output every other local
+    # feature already populates (asset introspection) rather than a fresh
+    # live query -- its `jobs` key already lists every declared job,
+    # whether or not it's ever actually run. Best-effort: if nothing's
+    # cached yet (e.g. right after app start, before any asset-related
+    # page triggered introspection), this returns empty rather than
+    # forcing a slow fresh `dg list defs` just for a filter dropdown --
+    # same graceful-empty behavior this endpoint already had when
+    # `dg dev` wasn't reachable.
+    from ..services.asset_introspection_service import _assets_cache
+    cached = _assets_cache.get(project_id)
+    if not cached:
         return JobNamesResponse(job_names=[], source="local")
-    if r.status_code >= 400:
-        return JobNamesResponse(job_names=[], source="local")
-    return JobNamesResponse(
-        job_names=_extract_job_names(r.json().get("data") or {}),
-        source="local",
-    )
+    _, cached_data = cached
+    names = sorted({
+        j.get("name") for j in (cached_data.get("jobs") or [])
+        if j.get("name") and not j["name"].startswith("__")
+    })
+    return JobNamesResponse(job_names=names, source="local")
 
 
 class TagKeysResponse(BaseModel):
@@ -476,15 +486,12 @@ async def list_tag_keys(project_id: str):
             )
         except DagsterPlusError:
             return TagKeysResponse(tag_keys=[])
-    else:
-        try:
-            data = await _run_local_query(resolve_local_graphql_port(project_id), RUN_TAG_KEYS_QUERY)
-        except httpx.ConnectError:
-            return TagKeysResponse(tag_keys=[])
+        node = data.get("runTagKeysOrError") or {}
+        keys = node.get("keys") or []
+        return TagKeysResponse(tag_keys=sorted(set(k for k in keys if k)))
 
-    node = data.get("runTagKeysOrError") or {}
-    keys = node.get("keys") or []
-    return TagKeysResponse(tag_keys=sorted(set(k for k in keys if k)))
+    data = await _query_local(project, "tag_keys")
+    return TagKeysResponse(tag_keys=data.get("tag_keys") or [])
 
 
 @router.get("/{project_id}/runs/tag-values", response_model=TagValuesResponse)
@@ -508,18 +515,15 @@ async def list_tag_values(project_id: str, key: str):
             )
         except DagsterPlusError:
             return TagValuesResponse(key=key, values=[])
-    else:
-        try:
-            data = await _run_local_query(resolve_local_graphql_port(project_id), RUN_TAG_VALUES_QUERY, {"tagKeys": [key]})
-        except httpx.ConnectError:
-            return TagValuesResponse(key=key, values=[])
+        node = data.get("runTagsOrError") or {}
+        values: list[str] = []
+        for t in (node.get("tags") or []):
+            if t.get("key") == key:
+                values.extend(t.get("values") or [])
+        return TagValuesResponse(key=key, values=sorted(set(v for v in values if v)))
 
-    node = data.get("runTagsOrError") or {}
-    values: list[str] = []
-    for t in (node.get("tags") or []):
-        if t.get("key") == key:
-            values.extend(t.get("values") or [])
-    return TagValuesResponse(key=key, values=sorted(set(v for v in values if v)))
+    data = await _query_local(project, "tag_values", {"key": key})
+    return TagValuesResponse(key=key, values=data.get("values") or [])
 
 
 def _extract_location_names(data: dict[str, Any]) -> list[str]:
@@ -667,60 +671,60 @@ async def get_run_detail(project_id: str, run_id: str):
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
 
+    # ---- Local path -------------------------------------------------
+    # Direct instance read -- query_local_runs.py's run_detail mode
+    # already computes steps/step_edges/materializations/stats/config in
+    # one pass (same retry-chain + dynamic-fanout logic as the GraphQL
+    # path below, just against the instance directly instead of a live
+    # server). Everything from here down to the end of this function is
+    # now reached only for Dagster+ (cloud) projects.
+    if not getattr(project, "is_dagster_plus", False):
+        data = await _query_local(project, "run_detail", {"run_id": run_id})
+        if data.get("error") == "not_found":
+            raise HTTPException(status_code=404, detail=data.get("message") or f"Run {run_id} not found")
+        return RunDetailResponse(
+            run_id=data.get("run_id") or run_id,
+            job_name=data.get("job_name"),
+            pipeline_name=data.get("job_name"),
+            status=data.get("status") or "",
+            start_time=data.get("start_time"),
+            end_time=data.get("end_time"),
+            run_config_yaml=data.get("run_config_yaml"),
+            tags=data.get("tags") or {},
+            steps=[RunStep(**s) for s in (data.get("steps") or [])],
+            step_edges=[StepEdge(**e) for e in (data.get("step_edges") or [])],
+            materializations=[RunMaterialization(**m) for m in (data.get("materializations") or [])],
+            steps_succeeded=data.get("steps_succeeded"),
+            steps_failed=data.get("steps_failed"),
+            source="local",
+            external_url=f"http://localhost:3000/runs/{run_id}",
+        )
+
+    # ---- Cloud path (Dagster+) ---------------------------------------
     variables = {"runId": run_id}
 
     async def _run_query(gql: str, strict: bool = True) -> dict:
-        """Run a GraphQL query against the appropriate endpoint. When
-        `strict` is True (default), any top-level `errors` array raises
-        HTTP 502. When strict=False we log and return whatever partial
-        `data` came back -- useful for optional field probes where we
-        don't want a single missing field to sink the whole endpoint."""
-        if getattr(project, "is_dagster_plus", False):
-            try:
-                return await dp_query(
-                    project.dagster_plus_org or "",
-                    project.dagster_plus_deployment or "",
-                    project.dagster_plus_token or "",
-                    gql,
-                    variables=variables,
-                )
-            except DagsterPlusError as e:
-                if strict:
-                    raise HTTPException(status_code=502, detail=str(e))
-                print(f"[runs] non-strict Dagster+ error: {e}", flush=True)
-                return {}
-        url = LOCAL_GRAPHQL_URL_TEMPLATE.format(port=resolve_local_graphql_port(project_id))
+        """Run a GraphQL query against Dagster+ -- local already returned
+        above, so this is cloud-only now. When `strict` is True (default),
+        any top-level `errors` array raises HTTP 502. When strict=False we
+        log and return whatever partial `data` came back -- useful for
+        optional field probes where we don't want a single missing field
+        to sink the whole endpoint."""
         try:
-            async with httpx.AsyncClient(timeout=15.0) as client:
-                r = await client.post(url, json={"query": gql, "variables": variables})
-        except httpx.ConnectError:
-            raise HTTPException(
-                status_code=502,
-                detail="Local Dagster isn't running yet -- start it from Actions > Open Dagster UI, or the button on the Runs page.",
+            return await dp_query(
+                project.dagster_plus_org or "",
+                project.dagster_plus_deployment or "",
+                project.dagster_plus_token or "",
+                gql,
+                variables=variables,
             )
-        except Exception as e:
+        except DagsterPlusError as e:
             if strict:
-                raise HTTPException(status_code=502, detail=f"Local Dagster GraphQL error: {e}")
-            print(f"[runs] non-strict local error: {e}", flush=True)
+                raise HTTPException(status_code=502, detail=str(e))
+            print(f"[runs] non-strict Dagster+ error: {e}", flush=True)
             return {}
-        try:
-            body = r.json()
-        except Exception:
-            if strict:
-                raise HTTPException(status_code=502, detail=f"Non-JSON response from local Dagster GraphQL (HTTP {r.status_code}).")
-            return {}
-        # Surface GraphQL errors -- these are the real failure mode when
-        # the schema drifts (unknown field, wrong type, etc.). Without
-        # this we'd fall through and return 404 with a misleading message.
-        if body.get("errors"):
-            msgs = "; ".join(e.get("message", "") for e in body["errors"])
-            if strict:
-                raise HTTPException(status_code=502, detail=f"GraphQL errors from local Dagster: {msgs}")
-            # Non-strict: log and return the (possibly partial) data.
-            print(f"[runs] non-strict GraphQL errors on optional query: {msgs}", flush=True)
-        return body.get("data") or {}
 
-    source = "cloud" if getattr(project, "is_dagster_plus", False) else "local"
+    source = "cloud"  # local returns early above
     data = await _run_query(RUN_DETAIL_QUERY)
     node = data.get("runOrError") or {}
     tn = node.get("__typename")
@@ -911,14 +915,10 @@ async def get_run_detail(project_id: str, run_id: str):
     )
 
     # External URL to open in Dagster UI (as a fallback for logs)
-    external_url = None
-    if source == "cloud":
-        from ..services.dagster_plus_client import org_base_url
-        base = org_base_url(project.dagster_plus_org or "", project.dagster_plus_region)
-        dep = project.dagster_plus_deployment or ""
-        external_url = f"{base}/{dep}/runs/{run_id}" if dep else f"{base}/runs/{run_id}"
-    else:
-        external_url = f"http://localhost:3000/runs/{run_id}"
+    from ..services.dagster_plus_client import org_base_url
+    base = org_base_url(project.dagster_plus_org or "", project.dagster_plus_region)
+    dep = project.dagster_plus_deployment or ""
+    external_url = f"{base}/{dep}/runs/{run_id}" if dep else f"{base}/runs/{run_id}"
 
     return RunDetailResponse(
         run_id=node.get("runId") or run_id,
@@ -996,38 +996,33 @@ async def get_run_logs(
     project = project_service.get_project(project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
-    variables = {"runId": run_id, "cursor": cursor, "limit": max(1, min(limit, 1000))}
 
-    if getattr(project, "is_dagster_plus", False):
-        try:
-            data = await dp_query(
-                project.dagster_plus_org or "",
-                project.dagster_plus_deployment or "",
-                project.dagster_plus_token or "",
-                RUN_LOGS_QUERY,
-                variables=variables,
-            )
-        except DagsterPlusError as e:
-            raise HTTPException(status_code=502, detail=str(e))
-        source = "cloud"
-    else:
-        url = LOCAL_GRAPHQL_URL_TEMPLATE.format(port=resolve_local_graphql_port(project_id))
-        try:
-            async with httpx.AsyncClient(timeout=15.0) as client:
-                r = await client.post(url, json={"query": RUN_LOGS_QUERY, "variables": variables})
-            body = r.json()
-        except httpx.ConnectError:
-            return RunLogsResponse(events=[], source="local", error="Local Dagster isn't running, so there are no logs to show yet.")
-        except Exception as e:
-            raise HTTPException(status_code=502, detail=f"Local Dagster GraphQL error: {e}")
-        # Surface GraphQL errors -- previously they were being swallowed
-        # and the frontend just saw an empty log list. If the schema
-        # drifted on the events fragment, users see the exact issue.
-        if body.get("errors"):
-            msgs = "; ".join(e.get("message", "") for e in body["errors"])
-            raise HTTPException(status_code=502, detail=f"GraphQL errors from local Dagster logs: {msgs}")
-        data = body.get("data") or {}
-        source = "local"
+    # ---- Local path -------------------------------------------------
+    # Direct instance read -- see _query_local's docstring.
+    if not getattr(project, "is_dagster_plus", False):
+        clamped = max(1, min(limit, 1000))
+        data = await _query_local(project, "run_logs", {"run_id": run_id, "cursor": cursor, "limit": clamped})
+        events = [LogEvent(**e) for e in (data.get("events") or [])]
+        return RunLogsResponse(
+            events=events,
+            cursor=data.get("cursor"),
+            has_more=bool(data.get("has_more")),
+            source="local",
+        )
+
+    # ---- Cloud path (Dagster+) ---------------------------------------
+    variables = {"runId": run_id, "cursor": cursor, "limit": max(1, min(limit, 1000))}
+    try:
+        data = await dp_query(
+            project.dagster_plus_org or "",
+            project.dagster_plus_deployment or "",
+            project.dagster_plus_token or "",
+            RUN_LOGS_QUERY,
+            variables=variables,
+        )
+    except DagsterPlusError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    source = "cloud"
 
     node = data.get("logsForRun") or {}
     tn = node.get("__typename")
@@ -1190,30 +1185,30 @@ async def terminate_run(project_id: str, run_id: str):
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
 
+    # ---- Local path -------------------------------------------------
+    # Direct instance.run_launcher.terminate() -- the exact same call the
+    # GraphQL terminatePipelineExecution resolver makes under the hood, so
+    # behavior (including "fails if the run's worker/code-server is
+    # already gone", confirmed live against a genuinely abandoned run)
+    # matches exactly. No `dg dev` needed.
+    if not getattr(project, "is_dagster_plus", False):
+        data = await _query_local(project, "terminate", {"run_id": run_id})
+        if data.get("success"):
+            return RunActionResponse(success=True, status=data.get("status"), detail="Termination requested.")
+        raise HTTPException(status_code=400, detail=data.get("message") or "Termination failed")
+
+    # ---- Cloud path (Dagster+) ---------------------------------------
     variables = {"runId": run_id}
-    if getattr(project, "is_dagster_plus", False):
-        try:
-            data = await dp_query(
-                project.dagster_plus_org or "",
-                project.dagster_plus_deployment or "",
-                project.dagster_plus_token or "",
-                TERMINATE_MUTATION,
-                variables=variables,
-            )
-        except DagsterPlusError as e:
-            raise HTTPException(status_code=502, detail=str(e))
-    else:
-        url = LOCAL_GRAPHQL_URL_TEMPLATE.format(port=resolve_local_graphql_port(project_id))
-        try:
-            async with httpx.AsyncClient(timeout=15.0) as client:
-                r = await client.post(url, json={"query": TERMINATE_MUTATION, "variables": variables})
-            body = r.json()
-        except httpx.ConnectError:
-            raise HTTPException(status_code=502, detail="Local Dagster isn't running, so there's nothing to terminate.")
-        if body.get("errors"):
-            msgs = "; ".join(e.get("message", "") for e in body["errors"])
-            raise HTTPException(status_code=502, detail=f"GraphQL errors: {msgs}")
-        data = body.get("data") or {}
+    try:
+        data = await dp_query(
+            project.dagster_plus_org or "",
+            project.dagster_plus_deployment or "",
+            project.dagster_plus_token or "",
+            TERMINATE_MUTATION,
+            variables=variables,
+        )
+    except DagsterPlusError as e:
+        raise HTTPException(status_code=502, detail=str(e))
 
     node = data.get("terminatePipelineExecution") or {}
     tn = node.get("__typename")
@@ -1236,6 +1231,15 @@ async def get_run_status(project_id: str, run_id: str):
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
 
+    # ---- Local path -------------------------------------------------
+    if not getattr(project, "is_dagster_plus", False):
+        try:
+            data = await _query_local(project, "run_status", {"run_id": run_id})
+        except HTTPException as e:
+            return RunStatusResponse(run_id=run_id, status="UNKNOWN", error=str(e.detail))
+        return RunStatusResponse(run_id=run_id, status=data.get("status") or "UNKNOWN", error=data.get("message"))
+
+    # ---- Cloud path (Dagster+) ---------------------------------------
     STATUS_QUERY = """
       query RunStatus($runId: ID!) {
         runOrError(runId: $runId) {
@@ -1246,26 +1250,16 @@ async def get_run_status(project_id: str, run_id: str):
       }
     """
     variables = {"runId": run_id}
-
-    if getattr(project, "is_dagster_plus", False):
-        try:
-            data = await dp_query(
-                project.dagster_plus_org or "",
-                project.dagster_plus_deployment or "",
-                project.dagster_plus_token or "",
-                STATUS_QUERY,
-                variables=variables,
-            )
-        except DagsterPlusError as e:
-            return RunStatusResponse(run_id=run_id, status="UNKNOWN", error=str(e))
-    else:
-        url = LOCAL_GRAPHQL_URL_TEMPLATE.format(port=resolve_local_graphql_port(project_id))
-        try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                r = await client.post(url, json={"query": STATUS_QUERY, "variables": variables})
-            data = r.json().get("data") or {}
-        except Exception as e:
-            return RunStatusResponse(run_id=run_id, status="UNKNOWN", error=str(e))
+    try:
+        data = await dp_query(
+            project.dagster_plus_org or "",
+            project.dagster_plus_deployment or "",
+            project.dagster_plus_token or "",
+            STATUS_QUERY,
+            variables=variables,
+        )
+    except DagsterPlusError as e:
+        return RunStatusResponse(run_id=run_id, status="UNKNOWN", error=str(e))
 
     node = (data.get("runOrError") or {})
     if node.get("__typename") == "Run":

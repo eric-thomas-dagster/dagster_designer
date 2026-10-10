@@ -1513,14 +1513,35 @@ export function StartDgDevButton({ onStarted }: { onStarted: () => void }) {
   const start = async () => {
     if (!currentProject) return;
     setBusy(true);
+    // The backend's /start route doesn't actually return until `dg dev`
+    // has printed its "Serving..." line (or 30s timeout) -- so the awaited
+    // call below already blocks for the real startup time (5-15s typical,
+    // longer for a big component catalog). Previously the ONLY feedback
+    // during that whole wait was this click itself; a toast fired only
+    // after it already resolved, then vanished in a few seconds while the
+    // Runs/Ingestions pages still looked empty -- confirmed live, reported
+    // as "I saw nothing... runs EVENTUALLY populated." Surfacing this in
+    // the persistent status strip (matching "Generating assets") instead
+    // gives visible feedback for the actual duration of the wait.
+    useProjectStore.setState({ devServerStartStatus: 'starting', devServerStartError: null });
     try {
       await dagsterUIApi.start(currentProject.id);
-      notify.success('Starting `dg dev`… giving it a few seconds to spin up.');
-      // Dev takes a moment to bind the port + serve GraphQL. Small
-      // grace period, then re-fetch runs.
-      setTimeout(onStarted, 4000);
+      useProjectStore.setState({ devServerStartStatus: 'success' });
+      // Small grace period past the "Serving..." line before GraphQL
+      // queries reliably succeed, then re-fetch runs.
+      setTimeout(onStarted, 1500);
     } catch (e: any) {
-      notify.error(e?.response?.data?.detail || e?.message || 'Failed to start dg dev.');
+      // `detail` can be a plain string (most HTTPExceptions) or a
+      // structured object (the dev-server-start route's failure cases --
+      // {message, error, command, startup_log, returncode}). Passing that
+      // object straight to a toast crashes the whole app with React error
+      // #31 ("Objects are not valid as a React child") -- confirmed live:
+      // a `dg dev` start failure (missing dagster-webserver package) hit
+      // exactly this path.
+      const detail = e?.response?.data?.detail;
+      const message = typeof detail === 'string' ? detail : detail?.message || detail?.error || e?.message;
+      useProjectStore.setState({ devServerStartStatus: 'error', devServerStartError: message || 'Failed to start dg dev.' });
+      notify.error(message || 'Failed to start dg dev.');
     } finally {
       setBusy(false);
     }

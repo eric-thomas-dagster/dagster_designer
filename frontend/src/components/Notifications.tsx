@@ -36,9 +36,34 @@ function emitConfirm() {
   confirmListeners.forEach((l) => l(activeConfirm));
 }
 
-function pushToast(kind: ToastKind, message: string, durationMs = 4000) {
+// Call sites across the app do `notify.error(e?.response?.data?.detail || ...)`,
+// and a backend HTTPException's `detail` isn't always a string -- several
+// routes (e.g. dagster-ui/start's failure cases) raise a structured object
+// like {message, error, command, startup_log, returncode}. Rendering that
+// object as a toast's text crashed the whole app with React error #31
+// ("Objects are not valid as a React child") -- confirmed live. Coercing
+// defensively here, once, closes this for every call site (existing and
+// future) instead of relying on each of the ~15 call sites to remember to
+// unwrap it themselves.
+function toMessage(value: unknown): string {
+  if (typeof value === 'string') return value;
+  if (value == null) return 'Unknown error';
+  if (typeof value === 'object') {
+    const obj = value as Record<string, unknown>;
+    if (typeof obj.message === 'string') return obj.message;
+    if (typeof obj.error === 'string') return obj.error;
+    try {
+      return JSON.stringify(value);
+    } catch {
+      return String(value);
+    }
+  }
+  return String(value);
+}
+
+function pushToast(kind: ToastKind, message: unknown, durationMs = 4000) {
   const id = ++toastSeq;
-  toasts = [...toasts, { id, kind, message }];
+  toasts = [...toasts, { id, kind, message: toMessage(message) }];
   emitToasts();
   if (durationMs > 0) {
     setTimeout(() => {
@@ -49,10 +74,10 @@ function pushToast(kind: ToastKind, message: string, durationMs = 4000) {
 }
 
 export const notify = {
-  success: (message: string) => pushToast('success', message),
-  error: (message: string) => pushToast('error', message, 6000),
-  info: (message: string) => pushToast('info', message),
-  warning: (message: string) => pushToast('warning', message, 5000),
+  success: (message: unknown) => pushToast('success', message),
+  error: (message: unknown) => pushToast('error', message, 6000),
+  info: (message: unknown) => pushToast('info', message),
+  warning: (message: unknown) => pushToast('warning', message, 5000),
 };
 
 export function confirmDialog(

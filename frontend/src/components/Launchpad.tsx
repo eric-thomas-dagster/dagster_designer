@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
 import * as Tabs from '@radix-ui/react-tabs';
 import Editor from '@monaco-editor/react';
-import { X, Play, Tag, AlertCircle, CheckCircle2, Calendar } from 'lucide-react';
+import { X, Play, Tag, AlertCircle, CheckCircle2, Calendar, Loader2 } from 'lucide-react';
 import yaml from 'js-yaml';
 import { partitionsApi, type PartitionDef } from '@/services/api';
 import { useIsDarkMode } from '@/hooks/useIsDarkMode';
@@ -56,15 +56,27 @@ export function Launchpad({
     }
   }, [open, defaultConfig]);
 
-  // Fetch partition info for single asset materialization
+  // Fetch partition info for single-asset materialization, or for a job
+  // -- a job's own constituent assets can be partitioned too (confirmed
+  // live: `dg launch --job` rejects a partitioned job with no partition
+  // key the exact same way it rejects a partitioned asset), but this
+  // used to only ever check for `mode === 'materialize'`, so the job
+  // Launchpad never showed a partition picker at all even when the job
+  // genuinely needed one. A job can have several assets in its
+  // selection; checking the first one is a reasonable proxy since a
+  // job's assets are expected to share a compatible partition scheme
+  // (that's what lets one `--partition` flag apply to the whole run).
   useEffect(() => {
-    if (open && mode === 'materialize' && assetKeys.length === 1) {
+    const checkKey = mode === 'materialize' ? (assetKeys.length === 1 ? assetKeys[0] : null)
+      : mode === 'job' ? (assetKeys.length >= 1 ? assetKeys[0] : null)
+      : null;
+    if (open && checkKey) {
       setLoadingPartitions(true);
       setPartitionDef(null);
       setSelectedPartition('');
 
       partitionsApi
-        .getPartitionInfo(projectId, assetKeys[0])
+        .getPartitionInfo(projectId, checkKey)
         .then((response) => {
           if (response.is_partitioned && response.partitions_def) {
             setPartitionDef(response.partitions_def);
@@ -82,7 +94,7 @@ export function Launchpad({
           setLoadingPartitions(false);
         });
     } else {
-      // Reset partition state if not a single asset
+      // Reset partition state if nothing to check
       setPartitionDef(null);
       setSelectedPartition('');
     }
@@ -156,20 +168,30 @@ export function Launchpad({
                 </Dialog.Description>
               </div>
 
-              {/* Partition selector */}
-              {partitionDef && (
+              {/* Partition selector -- shown as soon as we START checking
+                  (not just once we've confirmed the asset/job IS
+                  partitioned), so there's never a silent gap where the
+                  user can't tell whether anything is loading at all.
+                  Previously this whole block was gated on `partitionDef`,
+                  which stays null for the entire fetch -- confirmed live,
+                  reported as "the user thinks they can launch a job/asset
+                  but need to wait" with no visible indication why. */}
+              {(loadingPartitions || partitionDef) && (
                 <div className="flex items-center gap-2 ml-4">
                   <Calendar className="w-4 h-4 text-gray-400" />
                   <label className="text-sm font-medium text-gray-700">Partition:</label>
                   {loadingPartitions ? (
-                    <span className="text-sm text-gray-500">Loading...</span>
+                    <span className="inline-flex items-center gap-1.5 text-sm text-gray-500">
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      Checking for partitions…
+                    </span>
                   ) : (
                     <select
                       value={selectedPartition}
                       onChange={(e) => setSelectedPartition(e.target.value)}
                       className="px-2 py-1 text-sm border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
                     >
-                      {partitionDef.partition_keys?.map((key) => (
+                      {partitionDef!.partition_keys?.map((key) => (
                         <option key={key} value={key}>
                           {key}
                         </option>
@@ -329,11 +351,12 @@ export function Launchpad({
 
                 <button
                   onClick={handleLaunch}
-                  disabled={isLaunching || errors.length > 0}
+                  disabled={isLaunching || errors.length > 0 || loadingPartitions}
+                  title={loadingPartitions ? 'Still checking whether this needs a partition…' : undefined}
                   className="flex items-center gap-2 px-4 py-2 bg-black text-white rounded hover:bg-gray-800 disabled:bg-gray-300 disabled:cursor-not-allowed"
                 >
                   <Play className="w-4 h-4" />
-                  {isLaunching ? 'Launching...' : buttonText}
+                  {isLaunching ? 'Launching...' : loadingPartitions ? 'Checking…' : buttonText}
                 </button>
               </div>
 

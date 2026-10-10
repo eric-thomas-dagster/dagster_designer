@@ -16,8 +16,16 @@ Event shape (one line per event):
         "bytes":      987654,                               # optional, best-effort
         "duration_ms": 4210,                                # optional
         "status":     "success" | "failure" | "running",
+        "run_id":     "a1b2c3d4-...",                       # optional -- see below
         "metadata":   [{"label": "cost_usd", "value": 0.0012, "type": "FloatMetadataValue"}, ...],  # optional
     }
+
+`run_id` lets the Ingestions tab's "Recent runs" list open the real run
+detail view (RunsPanel's RunDetailPage) instead of being a dead end --
+previously only Dagster+ (cloud) events carried one; local materializes
+now get it too, pulled from the same fetch_materializations() call
+extract_run_metadata.py already makes for metadata (event_log_entry.run_id
+is always present on a real materialization event, no extra query needed).
 
 `metadata` is real Dagster metadata pulled from the local instance right
 after a materialize (see extract_run_metadata.py + the DAGSTER_HOME
@@ -56,6 +64,7 @@ def record_event(
     bytes_ingested: int | None = None,
     duration_ms: int | None = None,
     status: str = "success",
+    run_id: str | None = None,
     metadata: list[dict[str, Any]] | None = None,
 ) -> None:
     """Append a single event. Non-fatal on any error — the primary flow
@@ -76,6 +85,8 @@ def record_event(
             event["bytes"] = bytes_ingested
         if duration_ms is not None:
             event["duration_ms"] = duration_ms
+        if run_id is not None:
+            event["run_id"] = run_id
         if metadata:
             event["metadata"] = metadata
         with open(path, "a") as f:

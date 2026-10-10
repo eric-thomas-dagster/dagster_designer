@@ -127,6 +127,7 @@ def main():
         entries = [_normalize_entry(label, mv) for label, mv in (mat.metadata or {}).items()]
         out[asset_key] = {
             "timestamp": record.event_log_entry.timestamp,
+            "run_id": record.event_log_entry.run_id,
             "metadata": entries,
         }
 
