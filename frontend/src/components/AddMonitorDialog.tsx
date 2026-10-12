@@ -3,9 +3,9 @@ import * as Dialog from '@radix-ui/react-dialog';
 import Editor from '@monaco-editor/react';
 import {
   X, ShieldCheck, Loader2, Plus, Clock, Sparkles,
-  Wand2, Code2, Layers,
+  Wand2, Code2, Layers, Play,
 } from 'lucide-react';
-import { projectsApi } from '@/services/api';
+import { projectsApi, assetsApi } from '@/services/api';
 import { notify } from './Notifications';
 import { useIsDarkMode } from '@/hooks/useIsDarkMode';
 
@@ -99,6 +99,7 @@ export function AddMonitorDialog({ open, onOpenChange, projectId, onSaved, initi
   // Step state — a very lightweight wizard. We show all sections at
   // once but scope validation to what's currently active.
   const [step, setStep] = useState<'kind' | 'target' | 'config' | 'schedule' | 'review'>('kind');
+  const [generatingPreview, setGeneratingPreview] = useState(false);
   const [assets, setAssets] = useState<string[]>([]);
   const [dbtProjects, setDbtProjects] = useState<Array<{ relative_path: string; name: string }>>([]);
   const [dbtModels, setDbtModels] = useState<Array<{ unique_id: string; name: string; columns: string[] }>>([]);
@@ -193,9 +194,24 @@ export function AddMonitorDialog({ open, onOpenChange, projectId, onSaved, initi
   }, [implementation, dbtProjectPath, projectId]);
 
   const selectedDbtModel = dbtModels.find((m) => m.unique_id === dbtModelUid);
+  // Per-asset column lists, populated whenever an asset has been previewed
+  // at least once -- same cache ComponentConfigModal's upstream-column
+  // pickers already use (GET /assets/{id}/known-schemas). Lets enhanced
+  // checks get a real column picker too, not just dbt tests (which already
+  // had one, sourced from the dbt manifest instead).
+  const [knownSchemas, setKnownSchemas] = useState<Record<string, { columns: string[]; dtypes: Record<string, string> }>>({});
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    assetsApi.knownSchemas(projectId).then((s) => {
+      if (!cancelled) setKnownSchemas(s || {});
+    }).catch(() => { /* cache empty is fine -- falls back to free text */ });
+    return () => { cancelled = true; };
+  }, [open, projectId]);
+
   const columnCandidates = implementation === 'dbt_test'
     ? (selectedDbtModel?.columns ?? [])
-    : []; // enhanced checks: user types column name freely
+    : (knownSchemas[targetAsset]?.columns ?? []); // falls back to free text below when this asset has never been previewed
 
   const reset = () => {
     setStep('kind'); setName(''); setDescription(''); setCheckKind('freshness');
@@ -405,49 +421,46 @@ export function AddMonitorDialog({ open, onOpenChange, projectId, onSaved, initi
             {step === 'target' && (
               <div className="space-y-4">
                 <h3 className="text-sm font-semibold text-gray-900">Where does it run?</h3>
-                <div>
-                  <label className="text-[10px] uppercase tracking-wider text-gray-500 mb-1 block">Implementation</label>
-                  <div className="grid grid-cols-2 gap-2">
-                    {kindDef.implementations.map((impl) => (
-                      <button
-                        key={impl}
-                        type="button"
-                        onClick={() => setImplementation(impl)}
-                        className={`text-left p-2.5 border rounded transition ${
-                          implementation === impl
-                            ? 'border-primary bg-primary/5 ring-1 ring-primary/20'
-                            : 'border-gray-200 bg-white hover:border-gray-300'
-                        }`}
-                      >
-                        <div className="text-xs font-semibold text-gray-900 flex items-center gap-1.5">
-                          {impl === 'dbt_test' ? <Wand2 className="w-3.5 h-3.5" /> : <Sparkles className="w-3.5 h-3.5" />}
-                          {impl === 'dbt_test' ? 'dbt test' : 'Enhanced asset check'}
-                        </div>
-                        <div className="text-[10px] text-gray-500 mt-0.5">
-                          {impl === 'dbt_test'
-                            ? 'Writes to schema.yml under a dbt model.'
-                            : 'Writes a component instance yaml — works on any asset.'}
-                        </div>
-                      </button>
-                    ))}
-                  </div>
-                </div>
 
                 {implementation === 'enhanced_check' && (
                   <div>
                     <label className="text-[10px] uppercase tracking-wider text-gray-500 mb-1 block">Target asset key</label>
-                    <input
-                      list="mon-assets"
+                    <select
                       value={targetAsset}
                       onChange={(e) => setTargetAsset(e.target.value)}
-                      placeholder="e.g. jaffle_shop/customers"
-                      className="w-full px-3 py-2 text-sm font-mono border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
-                    />
-                    <datalist id="mon-assets">
-                      {assets.map((a) => <option key={a} value={a} />)}
-                    </datalist>
-                    <p className="text-[10px] text-gray-500 mt-0.5">Free text or pick from the datalist of known assets in this project.</p>
+                      className="w-full h-9 px-3 py-2 text-sm font-mono border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    >
+                      <option value="">Select an asset…</option>
+                      {assets.map((a) => <option key={a} value={a}>{a}</option>)}
+                    </select>
+                    {/* Enhanced asset checks are already the default,
+                        universal way to create a monitor -- works on any
+                        asset, no dbt project required. Making someone
+                        choose "which implementation" up front when most
+                        check kinds only ever support this one anyway was
+                        pure friction. dbt test stays available (several
+                        check kinds support both), just de-emphasized as a
+                        secondary option instead of an equal-weight choice. */}
+                    {kindDef.implementations.includes('dbt_test') && (
+                      <button
+                        type="button"
+                        onClick={() => setImplementation('dbt_test')}
+                        className="text-[10px] text-blue-600 hover:text-blue-800 mt-1.5 flex items-center gap-1"
+                      >
+                        <Wand2 className="w-3 h-3" /> Use a dbt generic test instead (writes to schema.yml)
+                      </button>
+                    )}
                   </div>
+                )}
+
+                {implementation === 'dbt_test' && (
+                  <button
+                    type="button"
+                    onClick={() => setImplementation('enhanced_check')}
+                    className="text-[10px] text-gray-500 hover:text-gray-700 flex items-center gap-1"
+                  >
+                    <Sparkles className="w-3 h-3" /> Use an enhanced asset check instead (works on any asset)
+                  </button>
                 )}
 
                 {implementation === 'dbt_test' && (
@@ -457,7 +470,7 @@ export function AddMonitorDialog({ open, onOpenChange, projectId, onSaved, initi
                       <select
                         value={dbtProjectPath}
                         onChange={(e) => setDbtProjectPath(e.target.value)}
-                        className="w-full px-3 py-2 text-sm border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
+                        className="w-full h-9 px-3 py-2 text-sm border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
                       >
                         <option value="">— pick a dbt project —</option>
                         {dbtProjects.map((p) => <option key={p.relative_path} value={p.relative_path}>{p.name} ({p.relative_path})</option>)}
@@ -469,7 +482,7 @@ export function AddMonitorDialog({ open, onOpenChange, projectId, onSaved, initi
                         <select
                           value={dbtModelUid}
                           onChange={(e) => setDbtModelUid(e.target.value)}
-                          className="w-full px-3 py-2 text-sm font-mono border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
+                          className="w-full h-9 px-3 py-2 text-sm font-mono border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
                         >
                           <option value="">— pick a model —</option>
                           {dbtModels.map((m) => <option key={m.unique_id} value={m.unique_id}>{m.name}</option>)}
@@ -532,7 +545,7 @@ export function AddMonitorDialog({ open, onOpenChange, projectId, onSaved, initi
                         <label className="text-[10px] uppercase tracking-wider text-gray-500 mb-1 block">Kind name</label>
                         <input value={advancedKindName} onChange={(e) => setAdvancedKindName(e.target.value)}
                           placeholder="e.g. distribution_drift"
-                          className="w-full px-3 py-2 text-sm font-mono border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                          className="w-full h-9 px-3 py-2 text-sm font-mono border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500" />
                         <p className="text-[10px] text-gray-500 mt-0.5">Exact kind name your enhanced-check component expects.</p>
                       </div>
                     )}
@@ -561,15 +574,50 @@ export function AddMonitorDialog({ open, onOpenChange, projectId, onSaved, initi
                 {kindDef.default_params === undefined && kindDef.requires_column && (
                   <div>
                     <label className="text-[10px] uppercase tracking-wider text-gray-500 mb-1 block">Column</label>
-                    {implementation === 'dbt_test' && columnCandidates.length > 0 ? (
+                    {columnCandidates.length > 0 ? (
                       <select value={column} onChange={(e) => setColumn(e.target.value)}
-                        className="w-full px-3 py-2 text-sm font-mono border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white">
+                        className="w-full h-9 px-3 py-2 text-sm font-mono border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white">
                         <option value="">— pick a column —</option>
                         {columnCandidates.map((c) => <option key={c} value={c}>{c}</option>)}
                       </select>
                     ) : (
-                      <input value={column} onChange={(e) => setColumn(e.target.value)} placeholder="column_name"
-                        className="w-full px-3 py-2 text-sm font-mono border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                      <div className="space-y-1">
+                        <input value={column} onChange={(e) => setColumn(e.target.value)} placeholder="column_name"
+                          className="w-full h-9 px-3 py-2 text-sm font-mono border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                        {/* Only offered for enhanced checks against a real,
+                            already-picked asset -- dbt_test's own column
+                            list comes from the manifest instead, and there's
+                            nothing to preview before a target is chosen. A
+                            real preview run (same one the Ingestions/asset
+                            detail pages use) records the observed schema
+                            into known-schemas, which is exactly what
+                            unlocks the dropdown above on the next render. */}
+                        {implementation === 'enhanced_check' && targetAsset && (
+                          <button
+                            type="button"
+                            disabled={generatingPreview}
+                            onClick={async () => {
+                              setGeneratingPreview(true);
+                              try {
+                                await assetsApi.previewData(projectId, targetAsset);
+                                const s = await assetsApi.knownSchemas(projectId);
+                                setKnownSchemas(s || {});
+                                if (!s?.[targetAsset]?.columns?.length) {
+                                  notify.error('Preview ran but returned no columns -- the asset may not produce tabular data.');
+                                }
+                              } catch (e: any) {
+                                notify.error(`Preview failed: ${e?.response?.data?.detail ?? e?.message ?? e}`);
+                              } finally {
+                                setGeneratingPreview(false);
+                              }
+                            }}
+                            className="text-[10px] text-blue-600 hover:text-blue-800 flex items-center gap-1 disabled:opacity-50"
+                          >
+                            {generatingPreview ? <Loader2 className="w-3 h-3 animate-spin" /> : <Play className="w-3 h-3" />}
+                            {generatingPreview ? 'Generating preview…' : 'Generate preview to pick a column'}
+                          </button>
+                        )}
+                      </div>
                     )}
                   </div>
                 )}
@@ -578,7 +626,7 @@ export function AddMonitorDialog({ open, onOpenChange, projectId, onSaved, initi
                   <div>
                     <label className="text-[10px] uppercase tracking-wider text-gray-500 mb-1 block">Max age (seconds)</label>
                     <input value={maxAgeSeconds} onChange={(e) => setMaxAgeSeconds(e.target.value)} placeholder="3600"
-                      className="w-full px-3 py-2 text-sm font-mono border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                      className="w-full h-9 px-3 py-2 text-sm font-mono border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500" />
                     <p className="text-[10px] text-gray-500 mt-0.5">Fail if the last materialization was more than this many seconds ago. Common: 3600 (1h), 86400 (24h).</p>
                   </div>
                 )}
@@ -588,17 +636,17 @@ export function AddMonitorDialog({ open, onOpenChange, projectId, onSaved, initi
                     <div>
                       <label className="text-[10px] uppercase tracking-wider text-gray-500 mb-1 block">Min rows</label>
                       <input value={minRowCount} onChange={(e) => setMinRowCount(e.target.value)} placeholder="—"
-                        className="w-full px-3 py-2 text-sm font-mono border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                        className="w-full h-9 px-3 py-2 text-sm font-mono border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500" />
                     </div>
                     <div>
                       <label className="text-[10px] uppercase tracking-wider text-gray-500 mb-1 block">Max rows</label>
                       <input value={maxRowCount} onChange={(e) => setMaxRowCount(e.target.value)} placeholder="—"
-                        className="w-full px-3 py-2 text-sm font-mono border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                        className="w-full h-9 px-3 py-2 text-sm font-mono border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500" />
                     </div>
                     <div>
                       <label className="text-[10px] uppercase tracking-wider text-gray-500 mb-1 block" title="Anomaly detection: fail when the row count is N standard deviations from a rolling mean.">Z-score alert</label>
                       <input value={rowZScore} onChange={(e) => setRowZScore(e.target.value)} placeholder="3.0"
-                        className="w-full px-3 py-2 text-sm font-mono border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                        className="w-full h-9 px-3 py-2 text-sm font-mono border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500" />
                     </div>
                     <p className="col-span-3 text-[10px] text-gray-500">Any subset works. Z-score is anomaly detection against recent runs.</p>
                   </div>
@@ -608,7 +656,7 @@ export function AddMonitorDialog({ open, onOpenChange, projectId, onSaved, initi
                   <div>
                     <label className="text-[10px] uppercase tracking-wider text-gray-500 mb-1 block">Max null ratio (0..1)</label>
                     <input value={maxNullRatio} onChange={(e) => setMaxNullRatio(e.target.value)} placeholder="0.05"
-                      className="w-full px-3 py-2 text-sm font-mono border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                      className="w-full h-9 px-3 py-2 text-sm font-mono border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500" />
                     <p className="text-[10px] text-gray-500 mt-0.5">0.05 = fail when more than 5% of rows have null in this column.</p>
                   </div>
                 )}
@@ -640,12 +688,12 @@ export function AddMonitorDialog({ open, onOpenChange, projectId, onSaved, initi
                     <div>
                       <label className="text-[10px] uppercase tracking-wider text-gray-500 mb-1 block">Min value</label>
                       <input value={minValue} onChange={(e) => setMinValue(e.target.value)} placeholder="0"
-                        className="w-full px-3 py-2 text-sm font-mono border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                        className="w-full h-9 px-3 py-2 text-sm font-mono border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500" />
                     </div>
                     <div>
                       <label className="text-[10px] uppercase tracking-wider text-gray-500 mb-1 block">Max value</label>
                       <input value={maxValue} onChange={(e) => setMaxValue(e.target.value)} placeholder="—"
-                        className="w-full px-3 py-2 text-sm font-mono border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                        className="w-full h-9 px-3 py-2 text-sm font-mono border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500" />
                     </div>
                   </div>
                 )}
@@ -710,11 +758,11 @@ export function AddMonitorDialog({ open, onOpenChange, projectId, onSaved, initi
                   </div>
                   {scheduleMode === 'cron' && (
                     <input value={scheduleCron} onChange={(e) => setScheduleCron(e.target.value)} placeholder="0 * * * *"
-                      className="w-full px-3 py-2 text-sm font-mono border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                      className="w-full h-9 px-3 py-2 text-sm font-mono border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500" />
                   )}
                   {scheduleMode === 'interval' && (
                     <input value={scheduleInterval} onChange={(e) => setScheduleInterval(e.target.value)} placeholder="60"
-                      className="w-full px-3 py-2 text-sm font-mono border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                      className="w-full h-9 px-3 py-2 text-sm font-mono border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500" />
                   )}
                 </div>
 
@@ -728,12 +776,12 @@ export function AddMonitorDialog({ open, onOpenChange, projectId, onSaved, initi
                   <div>
                     <label className="text-[10px] uppercase tracking-wider text-gray-500 mb-1 block">Name</label>
                     <input value={name} onChange={(e) => setName(e.target.value)} placeholder="check_customers_freshness"
-                      className="w-full px-3 py-2 text-sm font-mono border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                      className="w-full h-9 px-3 py-2 text-sm font-mono border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500" />
                   </div>
                   <div>
                     <label className="text-[10px] uppercase tracking-wider text-gray-500 mb-1 block">Severity</label>
                     <select value={severity} onChange={(e) => setSeverity(e.target.value as any)}
-                      className="w-full px-3 py-2 text-sm border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white">
+                      className="w-full h-9 px-3 py-2 text-sm border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white">
                       <option value="error">Error</option>
                       <option value="warn">Warn</option>
                       <option value="info">Info</option>
@@ -742,7 +790,7 @@ export function AddMonitorDialog({ open, onOpenChange, projectId, onSaved, initi
                   <div className="col-span-2">
                     <label className="text-[10px] uppercase tracking-wider text-gray-500 mb-1 block">Description (optional)</label>
                     <input value={description} onChange={(e) => setDescription(e.target.value)} placeholder="What this monitor protects against"
-                      className="w-full px-3 py-2 text-sm border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                      className="w-full h-9 px-3 py-2 text-sm border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500" />
                   </div>
                 </div>
                 <div className="p-3 bg-gray-50 border border-gray-200 rounded text-xs space-y-1">

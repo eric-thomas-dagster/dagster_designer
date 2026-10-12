@@ -41,7 +41,7 @@ function isDataFrameType(t: unknown): boolean {
 // was found on. Fields that don't match any pattern stay in the main,
 // ungrouped area -- this only tidies the common, recurring concerns, not
 // a component's own unique configuration.
-type GenericFieldGroupKey = 'metadata' | 'freshness' | 'partition' | 'retry' | 'preview';
+type GenericFieldGroupKey = 'metadata' | 'freshness' | 'partition' | 'retry' | 'preview' | 'dependencies';
 
 const GENERIC_FIELD_GROUPS: Array<{ key: GenericFieldGroupKey; label: string; test: (name: string) => boolean }> = [
   { key: 'freshness', label: 'Freshness policy', test: (n) => /^freshness_/.test(n) },
@@ -53,13 +53,69 @@ const GENERIC_FIELD_GROUPS: Array<{ key: GenericFieldGroupKey; label: string; te
     label: 'Metadata',
     test: (n) => ['description', 'group_name', 'owners', 'tags', 'asset_tags', 'kinds', 'column_lineage'].includes(n),
   },
+  // `deps` only -- NOT upstream_asset_key(s)/left_asset_key/etc, which are
+  // component-specific "main data source" fields with their own per-
+  // component semantics, always left prominent in the main area. Only
+  // reached when `deps` isn't already suppressed by commonFieldNames
+  // (i.e. new/factory components, where Post-processing's own
+  // Dependencies section isn't available yet) -- previously sat alone,
+  // ungrouped, next to e.g. partition/retry fields that DO get a labeled
+  // home.
+  { key: 'dependencies', label: 'Dependencies', test: (n) => n === 'deps' },
 ];
 
+// Matches `resource_key` plus every variant spelling the community
+// catalog actually uses for "this field references another installed
+// resource component by key" -- e.g. gong_calls_ingestion's
+// `resource_name`, plus `oauth_token_resource_key`/`auth_resource_key`/
+// `dbt_cloud_resource_key`/etc. Confirmed live across 1334 catalog
+// schemas: 137 fields are the exact name `resource_key` (already
+// special-cased below), but 16 ingestion components (gong, metronome,
+// salesloft, sigma, drift, monday, kustomer, vitally, totango, outreach,
+// gainsight, figment, churnzero, gorgias, sage_intacct, zocdoc) use
+// `resource_name` with the identical "Key of the XResource this asset
+// depends on for authentication" wording, and ~7 more use a
+// `*_resource_key` suffix -- all of these fell through to a plain text
+// input with no picker and no "create new resource" path before this.
+const RESOURCE_REFERENCE_FIELD_PATTERN = /(^|_)resource_(key|name)$/;
+// The catalog's OWN schema.json convention already has an explicit,
+// author-controlled signal for this -- `"ui:widget": "resource-picker"`
+// (confirmed present on every existing `resource_key` field's schema.json
+// entry) -- and the backend already forwards it into the schema this
+// component receives (see components.py's dg-schema backfill, which
+// copies `ui:widget` from schema.json whenever dg's own introspection
+// doesn't carry it). It just never used to be read here, which made it
+// dead weight despite making the full round trip from catalog authoring
+// intent to this component's props. Checking it FIRST means a component
+// author can opt a field into the picker explicitly, without needing its
+// name to match the convention at all -- the name pattern below is a
+// fallback for the (common, pre-existing) case where that metadata was
+// never set.
+function isResourceReferenceField(fieldName: string, fieldSchema?: any): boolean {
+  if (fieldSchema?.['ui:widget'] === 'resource-picker') return true;
+  return RESOURCE_REFERENCE_FIELD_PATTERN.test(fieldName);
+}
+
 function classifyGenericField(fieldName: string): GenericFieldGroupKey | null {
+  const lower = fieldName.toLowerCase();
   for (const group of GENERIC_FIELD_GROUPS) {
-    if (group.test(fieldName)) return group.key;
+    if (group.test(lower)) return group.key;
   }
   return null;
+}
+
+// snake_case/SCREAMING_CASE -> "Title Case" for any field whose label isn't
+// already special-cased (Data source, Destination resource) -- e.g.
+// `group_name` -> "Group Name". Applied as the generic fallback instead of
+// the raw field name verbatim, which is what `isUnifiedSource`/
+// `isDestinationResourceKey`'s hand-written labels were already doing for
+// just the two fields someone had gotten around to special-casing.
+function prettifyFieldName(name: string): string {
+  return name
+    .split(/[_\s]+/)
+    .filter(Boolean)
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
+    .join(' ');
 }
 
 // A component's single-asset identifier can be a plain string
@@ -147,7 +203,7 @@ export function ComponentConfigModal({
 }: ComponentConfigModalProps) {
   const isNew = !component;
   const type = component?.component_type || componentType || '';
-  const { currentProject, loadProject } = useProjectStore();
+  const { currentProject, loadProject, assetGenerationStatus } = useProjectStore();
   const { data: fetchedSchema } = useComponent(type, currentProject?.id);
   // An override with no actual field definitions (e.g. AddComponentModal
   // couldn't resolve a live schema right after installing a community
@@ -205,15 +261,23 @@ export function ComponentConfigModal({
   // hits the API instead of re-adding every existing edge every time.
   const [lineageDeps, setLineageDeps] = useState<string[]>([]);
   const [initialLineageDeps, setInitialLineageDeps] = useState<string[]>([]);
-  // Universal "Common fields" (group_name/owners/tags), backed by the same
-  // post_processing mechanism via asset_field_overrides -- see
-  // AssetFieldOverridesRequest. Unlike Dependencies this is a single "set"
-  // call (not an edge-by-edge add/remove diff), so only the current values
-  // + whether they changed at all need tracking.
+  // Universal "Common fields" (description/group_name/owners/tags/kinds),
+  // backed by the same post_processing mechanism via asset_field_overrides
+  // -- see AssetFieldOverridesRequest, which already supports all five of
+  // these. Widened from the original 3 (group_name/owners/tags) to match
+  // what that endpoint actually accepts -- a component's own `description`/
+  // `kinds` schema fields were falling through to the generic per-field
+  // loop instead of this unified section, the same redundant-split problem
+  // the group/owners/tags fields used to have before this section existed.
+  // Unlike Dependencies this is a single "set" call (not an edge-by-edge
+  // add/remove diff), so only the current values + whether they changed at
+  // all need tracking.
+  const [commonDescription, setCommonDescription] = useState('');
   const [commonGroupName, setCommonGroupName] = useState('');
   const [commonOwners, setCommonOwners] = useState('');
   const [commonTags, setCommonTags] = useState('');
-  const [initialCommonFields, setInitialCommonFields] = useState({ groupName: '', owners: '', tags: '' });
+  const [commonKinds, setCommonKinds] = useState('');
+  const [initialCommonFields, setInitialCommonFields] = useState({ description: '', groupName: '', owners: '', tags: '', kinds: '' });
   const [sqlMode, setSqlMode] = useState<'inline' | 'file'>('inline');
   const [instanceNameError, setInstanceNameError] = useState<string | null>(null);
   // Cache of {asset_key: {columns, dtypes}} for upstreams — powers the
@@ -340,7 +404,15 @@ export function ComponentConfigModal({
   // a resource type" is reliably spelled out across both the live
   // dg-sourced schema (whose `category` field is hardcoded to "custom",
   // not the real one) and the community catalog's naming convention.
-  const isResourceComponentType = /resource/i.test(type.split('.').pop() || '');
+  // Also matches IOManager/Io_Manager class names -- confirmed live
+  // against the catalog's own source that every one of its 33
+  // `*IOManagerComponent`s self-registers its OWN `resource_key` the
+  // exact same way a ResourceComponent does
+  // (`Definitions(resources={self.resource_key: ...})`), but none of
+  // their class names contain "resource" at all, so they fell through
+  // this check and got the same "pick existing / create new" picker
+  // treatment as a genuine reference field.
+  const isResourceComponentType = /resource|io.?manager/i.test(type.split('.').pop() || '');
 
   // Assets for dependency + selection dropdowns. When authoring for a
   // Dagster+ deployment that isn't the project's hydrated one (e.g.
@@ -378,13 +450,50 @@ export function ComponentConfigModal({
 
   // Field names the universal "Common fields" section owns when it's
   // shown -- suppresses the component's own schema-declared field of the
-  // same name so there's only ever one input for group_name/owners/tags,
-  // not two. Empty (so nothing is hidden) when Common fields itself isn't
-  // shown -- e.g. a brand-new component still needs its own native field,
-  // since there's nowhere else to set it yet.
+  // same name so there's only ever one input per concept, not two.
+  // Widened alongside Common fields itself to description/kinds (both
+  // already supported by setAssetFieldOverrides) and `asset_tags` (an
+  // alias several catalog components use instead of plain `tags` --
+  // suppressing both by the same mechanism normalizes that naming
+  // inconsistency onto one "Tags" input instead of exposing whichever
+  // name a given component happens to use). Empty (so nothing is hidden)
+  // when Common fields itself isn't shown -- e.g. a brand-new component
+  // still needs its own native fields, since there's nowhere else to set
+  // them yet (asset_field_overrides needs a real, already-existing asset
+  // key to target).
+  //
+  // Also includes `deps` -- Dagster's own generic `@asset(deps=[...])`
+  // parameter, which a component can declare on its own (692 of the
+  // catalog's ~900 components do) but which is EXACTLY what the
+  // Post-processing > Dependencies section below already does
+  // universally via custom_lineage, for any asset regardless of
+  // component (confirmed: `deps` is itself one of the fields Dagster's
+  // post_processing schema -- SharedAssetKwargs -- supports generically,
+  // same list freshness_policy/partitions_def are on). Without this, a
+  // component with its own `deps` field showed two separate, non-synced
+  // multi-selects for the same underlying concept. NOT the same as
+  // `upstream_asset_key(s)` -- that's a component-specific "main data
+  // source" field with its own per-component semantics, never suppressed
+  // here.
   const commonFieldNames: Set<string> = (!isNew && mode === 'local' && assetName)
-    ? new Set(['group_name', 'owners', 'tags'])
+    ? new Set(['description', 'group_name', 'owners', 'tags', 'asset_tags', 'kinds', 'deps'])
     : new Set();
+
+  // Case-insensitive "does this component's own schema already declare a
+  // property by this name" check -- shared by Translation's hideFields and
+  // the top-level Component Description field below, both of which need
+  // to defer to a real, already-shown source of the same value instead of
+  // offering a second input for it.
+  const schemaHasOwnField = (name: string): boolean => {
+    const lower = name.toLowerCase();
+    return Object.keys(componentSchema?.schema?.properties || {}).some((k) => k.toLowerCase() === lower);
+  };
+  // True whenever EITHER Post-processing > Metadata is shown (existing,
+  // non-factory assets) OR the component's own schema already has this
+  // field (new/factory components, where it renders in the Metadata GROUP
+  // instead) -- i.e. whenever some OTHER, authoritative input for this
+  // concept already exists elsewhere in the modal.
+  const hasRealDescriptionElsewhere = (!isNew && mode === 'local' && !!assetName) || schemaHasOwnField('description');
 
   // Resource keys already configured in this project (from any component
   // whose own attributes declare one, e.g. duckdb_resource/snowflake_resource
@@ -458,20 +567,24 @@ export function ComponentConfigModal({
       setLineageDeps(existingDeps);
       setInitialLineageDeps(existingDeps);
 
-      // Seed "Common fields" the same way -- group_name/owners/tags
-      // overrides keyed by this same real asset key.
+      // Seed "Common fields" the same way -- description/group_name/
+      // owners/tags/kinds overrides keyed by this same real asset key.
       const existingOverrides = existingAssetName
         ? (currentProject?.asset_field_overrides || {})[existingAssetName]
         : undefined;
+      const seededDescription = existingOverrides?.description || '';
       const seededGroupName = existingOverrides?.group_name || '';
       const seededOwners = (existingOverrides?.owners || []).join(', ');
       const seededTags = Object.entries(existingOverrides?.tags || {})
         .map(([k, v]) => `${k}=${v}`)
         .join(', ');
+      const seededKinds = (existingOverrides?.kinds || []).join(', ');
+      setCommonDescription(seededDescription);
       setCommonGroupName(seededGroupName);
       setCommonOwners(seededOwners);
       setCommonTags(seededTags);
-      setInitialCommonFields({ groupName: seededGroupName, owners: seededOwners, tags: seededTags });
+      setCommonKinds(seededKinds);
+      setInitialCommonFields({ description: seededDescription, groupName: seededGroupName, owners: seededOwners, tags: seededTags, kinds: seededKinds });
 
       // Initialize SQL mode based on existing value
       const sqlTemplate = component.attributes?.sql_template;
@@ -506,6 +619,20 @@ export function ComponentConfigModal({
   // Must calculate before using in hooks
   const hasSingleAssetField = componentSchema?.schema?.properties?.asset_name !== undefined;
   const isCommunityComponent = type.includes('.components.');
+  // Same type-name heuristic handleSave uses to set is_asset_factory on
+  // save -- computed here from `type` directly (not component?.is_asset_factory,
+  // which only exists on an already-saved instance) so this also works for
+  // a brand-new, not-yet-installed component. Gates the Advanced/Translation
+  // section below: `translation` only does anything for components that
+  // actually implement a dg translator (confirmed directly in Dagster's own
+  // source -- TranslatorResolvingInfo is only ever invoked by a wrapped
+  // DagsterXTranslator, which is specifically what dbt/fivetran/sling/dlt/
+  // airbyte-style multi-asset components use). A plain single-asset
+  // component's own code never reads a `translation:` block at all, so
+  // showing the section for one is pure dead UI -- not even optional, inert.
+  const likelyUsesTranslation = ['dbt', 'fivetran', 'sling', 'dlt', 'airbyte'].some(
+    (lib) => type.toLowerCase().includes(lib)
+  );
 
   // Auto-sync label with asset_name for single-asset community components
   useEffect(() => {
@@ -547,9 +674,48 @@ export function ComponentConfigModal({
     }
   }, [isNew, isCommunityComponent, hasSingleAssetField, componentSchema, type, label]);
 
-  // Early return after all hooks have been called
+  // Early return after all hooks have been called. Shows an actual dialog
+  // shell with a spinner instead of rendering nothing at all -- useComponent's
+  // GET /components/{type} can be genuinely slow for a component that was
+  // JUST installed (dg has to actually import the freshly-added package
+  // and run real schema introspection on a cold cache; see the fire-and-
+  // forget warmup kicked off by install-via-cli, which helps but doesn't
+  // guarantee this resolves before the modal needs to render -- especially
+  // right after creating a brand-new project, where the project's own
+  // .venv/dependency setup can still be settling). Confirmed live as a
+  // real complaint: picking a data source visibly installed quickly, then
+  // nothing happened on screen at all until the schema arrived, which read
+  // as the app being broken/stuck rather than just working on something.
   if (!componentSchema) {
-    return null;
+    // Both this fetch and a project's own initial asset-discovery pass
+    // (fired right after a brand-new project finishes installing
+    // dependencies) serialize against the same per-project lock, since
+    // they're both real `dg`/subprocess calls against the same shared
+    // on-disk state -- landing right behind that first, genuinely slow
+    // (cold interpreter, full component catalog) pass is the single most
+    // likely reason this specific wait is long, not just "a bit slow."
+    // Naming that directly, when we can detect it, beats a generic
+    // spinner someone has no way to interpret.
+    const stillSettingUp = assetGenerationStatus === 'generating';
+    return (
+      <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+        <div className="bg-white rounded-lg shadow-xl w-full max-w-sm p-6 flex flex-col items-center gap-3">
+          <Loader className="w-6 h-6 text-blue-600 animate-spin" />
+          <p className="text-sm text-gray-700 text-center">Loading component schema…</p>
+          <p className="text-xs text-gray-400 text-center">
+            {stillSettingUp
+              ? 'This project is still finishing its initial asset setup -- that happens once per project and can take a little while on a fresh one.'
+              : 'First-time setup for a newly installed component can take a few moments.'}
+          </p>
+          <button
+            onClick={onClose}
+            className="mt-2 px-3 py-1.5 text-xs text-gray-600 hover:bg-gray-100 rounded-md"
+          >
+            Cancel
+          </button>
+        </div>
+      </div>
+    );
   }
 
   const handleInstallAdapter = async (adapterType: string) => {
@@ -722,26 +888,34 @@ export function ComponentConfigModal({
   const applyCommonFieldsChanges = async () => {
     if (isNew || mode !== 'local' || !assetName || !currentProject) return;
     const unchanged =
+      commonDescription === initialCommonFields.description &&
       commonGroupName === initialCommonFields.groupName &&
       commonOwners === initialCommonFields.owners &&
-      commonTags === initialCommonFields.tags;
+      commonTags === initialCommonFields.tags &&
+      commonKinds === initialCommonFields.kinds;
     if (unchanged) return;
 
     try {
       await projectsApi.setAssetFieldOverrides(currentProject.id, assetName, {
+        description: commonDescription.trim() || null,
         group_name: commonGroupName.trim() || null,
         owners: commonOwners.trim() ? commonOwners.split(',').map((o) => o.trim()).filter(Boolean) : null,
         tags: commonTags.trim() ? parseTagsInput(commonTags) : null,
+        kinds: commonKinds.trim() ? commonKinds.split(',').map((k) => k.trim()).filter(Boolean) : null,
       });
 
       const { validateProjectOrRollback } = await import('@/lib/validateProjectOrRollback');
       const result = await validateProjectOrRollback(currentProject.id, async () => {
         await projectsApi.setAssetFieldOverrides(currentProject.id, assetName, {
+          description: initialCommonFields.description.trim() || null,
           group_name: initialCommonFields.groupName.trim() || null,
           owners: initialCommonFields.owners.trim()
             ? initialCommonFields.owners.split(',').map((o) => o.trim()).filter(Boolean)
             : null,
           tags: initialCommonFields.tags.trim() ? parseTagsInput(initialCommonFields.tags) : null,
+          kinds: initialCommonFields.kinds.trim()
+            ? initialCommonFields.kinds.split(',').map((k) => k.trim()).filter(Boolean)
+            : null,
         });
       });
       await loadProject(currentProject.id);
@@ -1009,6 +1183,40 @@ export function ComponentConfigModal({
     if (parts.length < 2 || parts.length > 12) return null;
     if (parts.some((p) => /\s/.test(p) || p.length > 24)) return null;
     return parts;
+  };
+
+  // Second description convention, confirmed live on a real partition_type
+  // field: "'daily' / 'weekly' / 'monthly' / ... / None" -- quoted values
+  // separated by slashes instead of commas-ending-in-"or", which
+  // inferEnumFromDescription doesn't match at all. A trailing bare `None`
+  // (no quotes) is common for "or leave unset" and isn't a real value, so
+  // it's dropped rather than offered as a dropdown option.
+  const inferEnumFromSlashList = (desc: string | undefined): string[] | null => {
+    if (!desc) return null;
+    const m = desc.match(/((?:'[\w-]+'\s*\/\s*){1,11}'[\w-]+'(?:\s*\/\s*None)?)/i);
+    if (!m) return null;
+    return m[1]
+      .split('/')
+      .map((s) => s.trim())
+      .filter((s) => s && s !== 'None')
+      .map((s) => s.replace(/^'|'$/g, ''));
+  };
+
+  // Some fields are only constrained in practice (and in the component's
+  // own runtime if/else), not in the declared JSON schema at all --
+  // `retry_policy_backoff` is confirmed in the real component source to be
+  // a bare `str` field (`retry_policy_backoff: str = Field(default=
+  // "exponential")`), with no Literal/enum, even though only "linear"/
+  // "exponential" mean anything (any other value silently falls back to
+  // linear: `dg.Backoff.EXPONENTIAL if self.retry_policy_backoff ==
+  // "exponential" else dg.Backoff.LINEAR`). Recognized by exact field
+  // name, same "pattern-match the name, not just the declared schema"
+  // approach the cron/column/date widgets below already use -- this isn't
+  // a universal mechanism (retry policy can't be, see the real AssetSpec/
+  // SharedAssetKwargs schema -- it has nowhere to live post-hoc), just a
+  // nicer widget for the exact fields components already choose to expose.
+  const KNOWN_FIELD_ENUM_VALUES: Record<string, string[]> = {
+    retry_policy_backoff: ['linear', 'exponential'],
   };
 
   // Resolve which widget to render for a given field. Explicit
@@ -1634,7 +1842,7 @@ export function ComponentConfigModal({
     // positioned AFTER that fallback, which is a plain string type and
     // so intercepted every resource_key field first, exactly the same
     // ordering mistake the `source` field special case had.
-    if (fieldName === 'resource_key' && fieldType !== 'object' && !isResourceComponentType) {
+    if (isResourceReferenceField(fieldName, fieldSchema) && fieldType !== 'object' && !isResourceComponentType) {
       return (
         <div className="space-y-1.5">
           <select
@@ -1819,8 +2027,10 @@ export function ComponentConfigModal({
     const declaredEnum: string[] | undefined = fieldSchema.enum && Array.isArray(fieldSchema.enum) && fieldSchema.enum.length > 0
       ? fieldSchema.enum
       : undefined;
-    const inferredEnum = declaredEnum ? null : inferEnumFromDescription(fieldSchema.description);
-    const enumValues = declaredEnum ?? inferredEnum;
+    const inferredEnum = declaredEnum ? null : (
+      inferEnumFromDescription(fieldSchema.description) ?? inferEnumFromSlashList(fieldSchema.description)
+    );
+    const enumValues = declaredEnum ?? inferredEnum ?? KNOWN_FIELD_ENUM_VALUES[fieldName];
     if (enumValues && enumValues.length > 0) {
       return (
         <select
@@ -2527,22 +2737,35 @@ export function ComponentConfigModal({
             </div>
           )}
 
-          {/* Component Description */}
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">
-              Description
-            </label>
-            <textarea
-              value={description}
-              onChange={(e) => setDescription(e.target.value)}
-              className="w-full px-3 py-2 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-              placeholder="Describe what this component does..."
-              rows={2}
-            />
-            <p className="text-xs text-gray-500 mt-1">
-              This description will be shown on the component node in the lineage graph
-            </p>
-          </div>
+          {/* Component Description -- a THIRD, independent description
+              mechanism (ComponentInstance.description, Designer's own
+              graph-node display label), distinct from both the schema's
+              own `description` property and Post-processing's. Confirmed
+              live as a genuine triplicate: ComponentNode.tsx's node display
+              already does `data.description || data.attributes?.description`,
+              i.e. it falls back to the schema/post-processing description
+              on its own whenever this one is empty -- so hiding this field
+              whenever a real description already exists elsewhere costs
+              nothing functionally, the node still shows a description, just
+              sourced from the one place that's now authoritative instead of
+              asking for the same text twice. */}
+          {!hasRealDescriptionElsewhere && (
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                Description
+              </label>
+              <textarea
+                value={description}
+                onChange={(e) => setDescription(e.target.value)}
+                className="w-full px-3 py-2 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                placeholder="Describe what this component does..."
+                rows={2}
+              />
+              <p className="text-xs text-gray-500 mt-1">
+                This description will be shown on the component node in the lineage graph
+              </p>
+            </div>
+          )}
 
           {/* Component schema description */}
           {componentSchema.description && (
@@ -2740,7 +2963,7 @@ export function ComponentConfigModal({
                 return (
                 <div key={fieldName}>
                   <label className="block text-sm font-medium text-gray-700 mb-1">
-                    {isUnifiedSource ? 'Data source' : isDestinationResourceKey ? 'Destination resource' : fieldName}
+                    {isUnifiedSource ? 'Data source' : isDestinationResourceKey ? 'Destination resource' : prettifyFieldName(fieldName)}
                     {componentSchema.schema?.required?.includes(fieldName) && (
                       <span className="text-red-500 ml-1">*</span>
                     )}
@@ -2763,23 +2986,25 @@ export function ComponentConfigModal({
               // concern shared across the catalog.
               const mainEntries: [string, any][] = [];
               const grouped: Record<GenericFieldGroupKey, [string, any][]> = {
-                metadata: [], freshness: [], partition: [], retry: [], preview: [],
+                metadata: [], freshness: [], partition: [], retry: [], preview: [], dependencies: [],
               };
               for (const [fieldName, fieldSchema] of Object.entries(properties) as [string, any][]) {
-                if (claimedFieldNames.has(fieldName) || commonFieldNames.has(fieldName)) continue;
+                // Case-insensitive -- commonFieldNames/claimedFieldNames are
+                // written as lowercase literals, but a community component's
+                // own schema is free to spell a field any way it likes
+                // (confirmed live as a real gap: a field spelled with
+                // different casing silently bypassed suppression and
+                // rendered a second, raw-labeled copy of something already
+                // shown properly-cased elsewhere).
+                const fieldNameLower = fieldName.toLowerCase();
+                if (claimedFieldNames.has(fieldName) || commonFieldNames.has(fieldNameLower)) continue;
                 const isSpecial = !!fieldSchema['x-dagster-destination-fields'] ||
                   (fieldName === 'source' && hasUnifiedSourcePicker) ||
-                  (fieldName === 'resource_key' && fieldSchema.type !== 'object' && !isResourceComponentType);
+                  (isResourceReferenceField(fieldName, fieldSchema) && fieldSchema.type !== 'object' && !isResourceComponentType);
                 const groupKey = isSpecial ? null : classifyGenericField(fieldName);
                 if (groupKey) grouped[groupKey].push([fieldName, fieldSchema]);
                 else mainEntries.push([fieldName, fieldSchema]);
               }
-
-              const hasValue = (fieldName: string) => {
-                const v = (formData as Record<string, any>)[fieldName];
-                return v !== undefined && v !== null && v !== '' && v !== false &&
-                  !(Array.isArray(v) && v.length === 0);
-              };
 
               return (
                 <>
@@ -2788,7 +3013,6 @@ export function ComponentConfigModal({
                     <details
                       key={g.key}
                       className="border border-gray-200 rounded-md"
-                      open={grouped[g.key].some(([fieldName]) => hasValue(fieldName))}
                     >
                       <summary className="cursor-pointer text-sm font-medium text-gray-700 hover:text-gray-900 select-none px-3 py-2 bg-gray-50 rounded-md">
                         {g.label}
@@ -2805,133 +3029,173 @@ export function ComponentConfigModal({
             )}
           </div>
 
-          {/* Common fields Section — universal, backed by post_processing
-              via asset_field_overrides, same mechanism as Dependencies
-              below. Suppresses the component's own schema field of the
+          {/* Post-processing Section — Metadata + Dependencies, merged
+              under one header because they're literally the SAME
+              underlying mechanism: both get merged into one
+              post_processing entry per target asset in the project's root
+              defs.yaml (see _write_post_processing_defs_yaml), applied
+              generically to ANY asset by key regardless of which
+              component produced it. Previously shown as two separate,
+              identically-gated sections with no indication they were
+              related -- labeling them as what they actually are (one
+              Dagster mechanism, two kinds of override) instead of two
+              unrelated-looking panels.
+
+              Metadata suppresses the component's own schema field of the
               same name (see commonFieldNames) so there's one input, not
               two, for whichever of these a component's own schema already
-              declares. Same existing-component-only gating as
-              Dependencies, for the same dangling-target reason. */}
-          {!isNew && mode === 'local' && assetName && (
-            <div className="border-t border-gray-200 pt-4 mt-4 space-y-3">
-              <h3 className="text-sm font-semibold text-gray-900">Common fields</h3>
-              <div>
-                <label className="block text-xs text-gray-500 mb-1">Group name</label>
-                <input
-                  type="text"
-                  value={commonGroupName}
-                  onChange={(e) => setCommonGroupName(e.target.value)}
-                  placeholder="my_group"
-                  className="w-full px-3 py-1.5 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-                />
-              </div>
-              <div>
-                <label className="block text-xs text-gray-500 mb-1">Owners (comma-separated)</label>
-                <input
-                  type="text"
-                  value={commonOwners}
-                  onChange={(e) => setCommonOwners(e.target.value)}
-                  placeholder="team:analytics, nelson@hooli.com"
-                  className="w-full px-3 py-1.5 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-                />
-              </div>
-              <div>
-                <label className="block text-xs text-gray-500 mb-1">Tags (key=value, comma-separated)</label>
-                <input
-                  type="text"
-                  value={commonTags}
-                  onChange={(e) => setCommonTags(e.target.value)}
-                  placeholder="tier=prod, team=analytics"
-                  className="w-full px-3 py-1.5 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-                />
-              </div>
-            </div>
-          )}
+              declares -- widened to all 5 fields asset_field_overrides
+              actually supports (description/group_name/owners/tags/kinds),
+              not just the original 3.
 
-          {/* Dependencies Section — universal, backed by custom lineage
-              (project.custom_lineage / add-custom-lineage / remove-custom-
-              lineage), not the component's own native upstream-key
-              attribute (upstream_asset_keys / left_asset_key / etc), which
-              only some component types even have and which means
-              something different per component. Only shown when editing
-              an EXISTING component: a brand-new one has no real asset key
-              yet for a custom lineage edge to target, and a dangling
+              Both only shown when editing an EXISTING component: a
+              brand-new one has no real asset key yet for either an
+              override or a custom-lineage edge to target, and a dangling
               target in the post_processing block this writes to crashes
-              loading of the entire project (confirmed directly), so this
-              field would otherwise let someone create one by accident. */}
+              loading of the entire project (confirmed directly). */}
           {!isNew && mode === 'local' && assetName && (
-            <div className="border-t border-gray-200 pt-4 mt-4">
-              <h3 className="text-sm font-semibold text-gray-900 mb-1">Dependencies</h3>
-              <p className="text-xs text-gray-500 mb-2">
-                Other assets this one depends on, beyond what this component's own fields declare.
-              </p>
-              <select
-                multiple
-                value={lineageDeps}
-                onChange={(e) => {
-                  const selected = Array.from(e.target.selectedOptions, (option) => option.value);
-                  setLineageDeps(selected);
-                }}
-                className="w-full px-3 py-2 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-                size={Math.min(6, Math.max(3, availableAssets.filter((a: string) => a !== assetName).length))}
-              >
-                {availableAssets.filter((a: string) => a !== assetName).map((assetKey: string) => (
-                  <option key={assetKey} value={assetKey}>
-                    {assetKey}
-                  </option>
-                ))}
-              </select>
-              <p className="text-xs text-gray-500 mt-1">
-                Hold Cmd/Ctrl to select multiple assets
-              </p>
-              {lineageDeps.length > 0 && (
-                <div className="flex flex-wrap gap-1 mt-2">
-                  {lineageDeps.map((dep) => (
-                    <span
-                      key={dep}
-                      className="inline-flex items-center gap-1 px-2 py-0.5 text-xs bg-blue-50 border border-blue-200 rounded text-blue-700"
-                    >
-                      {dep}
-                      <button
-                        type="button"
-                        onClick={() => setLineageDeps(lineageDeps.filter((d) => d !== dep))}
-                        className="hover:text-blue-900"
-                      >
-                        <X className="w-3 h-3" />
-                      </button>
-                    </span>
-                  ))}
+            <details className="border border-gray-200 rounded-md mt-4">
+              <summary className="cursor-pointer text-sm font-medium text-gray-700 hover:text-gray-900 select-none px-3 py-2 bg-gray-50 rounded-md">
+                Post-processing
+              </summary>
+              <div className="p-3 space-y-4">
+                <div className="space-y-3">
+                  <h4 className="text-xs font-semibold text-gray-600 uppercase tracking-wide">Metadata</h4>
+                  <div>
+                    <label className="block text-xs text-gray-500 mb-1">Description</label>
+                    <textarea
+                      value={commonDescription}
+                      onChange={(e) => setCommonDescription(e.target.value)}
+                      placeholder="What this asset is / does"
+                      rows={2}
+                      className="w-full px-3 py-1.5 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-gray-500 mb-1">Group name</label>
+                    <input
+                      type="text"
+                      value={commonGroupName}
+                      onChange={(e) => setCommonGroupName(e.target.value)}
+                      placeholder="my_group"
+                      className="w-full px-3 py-1.5 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-gray-500 mb-1">Owners (comma-separated)</label>
+                    <input
+                      type="text"
+                      value={commonOwners}
+                      onChange={(e) => setCommonOwners(e.target.value)}
+                      placeholder="team:analytics, nelson@hooli.com"
+                      className="w-full px-3 py-1.5 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-gray-500 mb-1">Tags (key=value, comma-separated)</label>
+                    <input
+                      type="text"
+                      value={commonTags}
+                      onChange={(e) => setCommonTags(e.target.value)}
+                      placeholder="tier=prod, team=analytics"
+                      className="w-full px-3 py-1.5 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-gray-500 mb-1">Kinds (comma-separated)</label>
+                    <input
+                      type="text"
+                      value={commonKinds}
+                      onChange={(e) => setCommonKinds(e.target.value)}
+                      placeholder="python, api"
+                      className="w-full px-3 py-1.5 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    />
+                  </div>
                 </div>
-              )}
-            </div>
+
+                <div className="border-t border-gray-100 pt-3 space-y-2">
+                  <h4 className="text-xs font-semibold text-gray-600 uppercase tracking-wide">Dependencies</h4>
+                  <p className="text-xs text-gray-500">
+                    Other assets this one depends on, beyond what this component's own fields declare.
+                  </p>
+                  <select
+                    multiple
+                    value={lineageDeps}
+                    onChange={(e) => {
+                      const selected = Array.from(e.target.selectedOptions, (option) => option.value);
+                      setLineageDeps(selected);
+                    }}
+                    className="w-full px-3 py-2 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    size={Math.min(6, Math.max(3, availableAssets.filter((a: string) => a !== assetName).length))}
+                  >
+                    {availableAssets.filter((a: string) => a !== assetName).map((assetKey: string) => (
+                      <option key={assetKey} value={assetKey}>
+                        {assetKey}
+                      </option>
+                    ))}
+                  </select>
+                  <p className="text-xs text-gray-500">
+                    Hold Cmd/Ctrl to select multiple assets
+                  </p>
+                  {lineageDeps.length > 0 && (
+                    <div className="flex flex-wrap gap-1">
+                      {lineageDeps.map((dep) => (
+                        <span
+                          key={dep}
+                          className="inline-flex items-center gap-1 px-2 py-0.5 text-xs bg-blue-50 border border-blue-200 rounded text-blue-700"
+                        >
+                          {dep}
+                          <button
+                            type="button"
+                            onClick={() => setLineageDeps(lineageDeps.filter((d) => d !== dep))}
+                            className="hover:text-blue-900"
+                          >
+                            <X className="w-3 h-3" />
+                          </button>
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+            </details>
           )}
 
-          {/* Translation Section — universal to all authoring
-              contexts (asset-key rewriting works whether the
-              component lands locally, in a sandbox, or as a cloud
-              draft to be promoted). Collapsed by default: this section
-              alone (its own fields + Advanced Options + Examples) was
-              taking as much vertical space as the component's own
-              actually-required fields, which read as "this dialog isn't
-              helpful" when what someone needed (e.g. a sink's fields_map)
-              was buried below an always-open, rarely-needed section. */}
-          <details className="border-t border-gray-200 pt-4 mt-4">
-            <summary className="cursor-pointer text-sm font-semibold text-gray-700 hover:text-gray-900 select-none">
-              Advanced: customize how this asset is generated (optional)
-            </summary>
-            <div className="mt-3">
-              <TranslationEditor value={translation} onChange={setTranslation} />
-            </div>
-
-            {/* Template variables hint */}
-            <div className="text-xs text-gray-500 bg-gray-50 border border-gray-200 rounded-md p-3 mt-3">
-              <strong>Tip:</strong> Use template variables like{' '}
-              <code className="bg-gray-200 px-1 rounded">{'{{ env.VAR_NAME }}'}</code> for
-              environment variables, or{' '}
-              <code className="bg-gray-200 px-1 rounded">{'{{ project_root }}/repo-name'}</code> to
-              reference cloned git repositories
-            </div>
-          </details>
+          {/* Translation Section — ONLY shown for components that actually
+              implement a dg translator (dbt/fivetran/sling/dlt/airbyte-style
+              multi-asset integrations). Confirmed directly in Dagster's own
+              source: a `translation:` block only ever gets read by
+              TranslatorResolvingInfo, which is exclusively invoked by a
+              wrapped DagsterXTranslator -- a plain single-asset component's
+              own code never looks at it at all. After the Metadata-overlap
+              fix above, Asset Key Pattern was the only field this section
+              had left for non-translator components, and it's genuinely
+              inert there (not just redundant) -- showing an "Advanced"
+              section whose one remaining field does nothing isn't progress
+              over the clutter it replaced. */}
+          {likelyUsesTranslation && (
+            <details className="border border-gray-200 rounded-md mt-4">
+              <summary className="cursor-pointer text-sm font-medium text-gray-700 hover:text-gray-900 select-none px-3 py-2 bg-gray-50 rounded-md">
+                Advanced: customize how this asset is generated (optional)
+              </summary>
+              <div className="p-3">
+                <TranslationEditor
+                  value={translation}
+                  onChange={setTranslation}
+                  // Hide whichever of these already have a home elsewhere --
+                  // either Post-processing > Metadata (existing, non-factory
+                  // assets), or the component's OWN schema field of the same
+                  // name (new/factory components, where that field renders in
+                  // the Metadata GROUP above instead -- see classifyGenericField).
+                  // Only fall through to showing it here when NEITHER applies,
+                  // i.e. this is genuinely the only place left to set it.
+                  hideFields={['description', 'group_name', 'owners', 'tags'].filter(
+                    (f) => (!isNew && mode === 'local' && !!assetName) || schemaHasOwnField(f)
+                  )}
+                />
+              </div>
+            </details>
+          )}
         </div>
 
         {/* Footer */}
