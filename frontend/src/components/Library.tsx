@@ -6,7 +6,18 @@ import { useProjectStore } from '@/hooks/useProject';
 
 type LibraryTab = 'components' | 'integrations';
 
-export function Library() {
+interface LibraryProps {
+  /** Forwarded to CommunityTemplates — called with the installed
+   *  component_type once "Install Component" succeeds, so the caller can
+   *  route it into the shared ComponentConfigModal flow (App.tsx's
+   *  handleAddComponentType) the same way ComponentPalette/AddDataDialog
+   *  already do. Optional: TemplateBuilder's Community tab renders
+   *  CommunityTemplates without this, which just skips the auto-configure
+   *  handoff. */
+  onComponentInstalled?: (componentType: string) => void;
+}
+
+export function Library({ onComponentInstalled }: LibraryProps = {}) {
   const { currentProject } = useProjectStore();
   const [tab, setTab] = useState<LibraryTab>('components');
 
@@ -42,7 +53,7 @@ export function Library() {
 
       {/* Body */}
       <div className="flex-1 min-h-0 overflow-hidden">
-        {tab === 'components' && <CommunityTemplates />}
+        {tab === 'components' && <CommunityTemplates onComponentInstalled={onComponentInstalled} />}
         {tab === 'integrations' && <IntegrationCatalog projectId={currentProject?.id} />}
       </div>
     </div>

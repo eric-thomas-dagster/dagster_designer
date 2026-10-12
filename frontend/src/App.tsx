@@ -1983,7 +1983,7 @@ function App() {
           {/* Library Tab Content (Components + Integrations) */}
           <Tabs.Content value="library" className="flex-1 overflow-hidden">
             <div className="h-full">
-              <Library />
+              <Library onComponentInstalled={handleAddComponentType} />
             </div>
           </Tabs.Content>
 

@@ -121,7 +121,15 @@ function VirtualComponentList({ components, rowHeight, onSelect }: VirtualCompon
   );
 }
 
-export function CommunityTemplates() {
+interface CommunityTemplatesProps {
+  /** Called with the installed component_type once "Install Component"
+   *  succeeds. Wired by Library.tsx to App.tsx's handleAddComponentType,
+   *  the same cloud-aware handoff ComponentPalette/AddDataDialog already
+   *  use to open the ComponentConfigModal right after install. */
+  onComponentInstalled?: (componentType: string) => void;
+}
+
+export function CommunityTemplates({ onComponentInstalled }: CommunityTemplatesProps = {}) {
   const { currentProject, loadProject } = useProjectStore();
   const queryClient = useQueryClient();
   const [searchQuery, setSearchQuery] = useState('');
@@ -156,34 +164,36 @@ export function CommunityTemplates() {
     enabled: !!selectedComponent,
   });
 
+  // Uses the official dagster-community-components-cli via install-via-cli
+  // (same endpoint ComponentPalette/AddDataDialog use) instead of the old
+  // `/templates/install/{id}` path, which installed with an empty config
+  // and returned no instance_name/files_created -- the success toast here
+  // used to render the literal string "Instance: undefined" because of it.
   const installMutation = useMutation({
     mutationFn: async (component: ComponentTemplate) => {
       if (!currentProject) throw new Error('No project selected');
 
-      const response = await fetch(`${API_BASE}/templates/install/${component.id}`, {
+      const response = await fetch(`${API_BASE}/templates/install-via-cli/${component.id}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          project_id: currentProject.id,
-          config: {}, // Empty config for now
-        }),
+        // template_only=true: install the template but don't drop a demo
+        // instance on the graph. onComponentInstalled opens the config
+        // modal right after; if the user cancels, the graph stays clean.
+        body: JSON.stringify({ project_id: currentProject.id, config: {}, template_only: true }),
       });
 
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({ detail: 'Unknown error' }));
-        throw new Error(errorData.detail || 'Failed to install component');
-      }
-
-      return response.json();
+      const body = await response.json().catch(() => ({} as any));
+      if (!response.ok) throw new Error(body.detail || 'Failed to install component');
+      return body as { component_type: string };
     },
-    onSuccess: (data) => {
-      notify.success(`Component installed successfully!\n\nComponent: ${data.component_type}\nInstance: ${data.instance_name}\n\nFiles:\n${data.files_created.join('\n')}`);
+    onSuccess: async (data) => {
+      notify.success('Component installed. Adding to graph…');
       setSelectedComponent(null);
-      // Invalidate installed components cache to refresh dropdowns
       if (currentProject) {
-        queryClient.invalidateQueries({ queryKey: ['installed-components', currentProject.id] });
-        loadProject(currentProject.id);
+        await queryClient.invalidateQueries({ queryKey: ['installed-components', currentProject.id] });
+        await loadProject(currentProject.id);
       }
+      onComponentInstalled?.(data.component_type);
     },
     onError: (error: Error) => {
       console.error('Installation error:', error);
