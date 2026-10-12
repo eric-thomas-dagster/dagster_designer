@@ -7,7 +7,7 @@ import {
 } from 'lucide-react';
 import { useProjectStore } from '@/hooks/useProject';
 import { notify } from './Notifications';
-import { API_BASE, designerLocApi, authoredApi, SANDBOX_LOCATION_NAME } from '@/services/api';
+import { API_BASE, designerLocApi, authoredApi, projectsApi, SANDBOX_LOCATION_NAME } from '@/services/api';
 import type { ConfigureAuthoringPayload } from './AddComponentModal';
 
 interface ManifestComponent {
@@ -131,7 +131,7 @@ function classify(comp: ManifestComponent): Group {
 export function AddDataDialog({ open, onOpenChange, onSourcePicked, onCloudSourcePicked }: AddDataDialogProps) {
   const [query, setQuery] = useState('');
   const [installingId, setInstallingId] = useState<string | null>(null);
-  const { currentProject } = useProjectStore();
+  const { currentProject, loadProject } = useProjectStore();
   const queryClient = useQueryClient();
   const isCloud = !!(currentProject as any)?.is_dagster_plus;
 
@@ -382,6 +382,32 @@ export function AddDataDialog({ open, onOpenChange, onSourcePicked, onCloudSourc
               })}
             </div>
           </div>
+
+          {/* How components install for THIS project -- a project-wide
+              choice (not per-pick), since it's really about the project's
+              own character, not something worth deciding every time
+              someone picks a source. See Project.component_install_mode's
+              own docstring for what each mode does. Not shown for cloud
+              projects -- they route installs through the sandbox entirely
+              (see onCloudSourcePicked above), which doesn't go through
+              install-via-cli at all. */}
+          {!isCloud && currentProject && (
+            <div className="px-6 py-2.5 border-t border-gray-100 flex items-center justify-between gap-3 bg-gray-50">
+              <label className="text-xs text-gray-500 flex-shrink-0">Install components as</label>
+              <select
+                value={currentProject.component_install_mode || 'as_package'}
+                onChange={async (e) => {
+                  await projectsApi.update(currentProject.id, { component_install_mode: e.target.value as any });
+                  await loadProject(currentProject.id);
+                }}
+                className="text-xs px-2 py-1 border border-gray-300 rounded bg-white"
+              >
+                <option value="as_package">Package reference (fast, not vendored)</option>
+                <option value="vendored_latest">Vendored source, always latest</option>
+                <option value="vendored_pinned">Vendored source, pinned once installed</option>
+              </select>
+            </div>
+          )}
         </Dialog.Content>
       </Dialog.Portal>
     </Dialog.Root>

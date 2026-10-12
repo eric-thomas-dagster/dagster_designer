@@ -132,6 +132,27 @@ class Project(BaseModel):
     # that's already on disk.
     dagster_plus_graph_hydrated_at: float | None = Field(None, description="Unix timestamp of the last successful Dagster+ graph hydrate")
 
+    # How community-catalog components get installed into this project --
+    # a project-wide choice, not a per-install one, since it's really a
+    # question about the project's own character ("I review/own this
+    # code" vs "I just want fast setup"), not something that makes sense
+    # to flip component-by-component.
+    #   "as_package" (default): reference
+    #     dagster_community_components.<X>Component directly (the
+    #     `--as-package` CLI mode) -- no vendored files, no per-component
+    #     dependency install; version tracks whatever the
+    #     dagster-community-components package itself is pinned to. Much
+    #     faster to install than the vendored modes (no file copy, no
+    #     per-component `uv add`) -- made the default per explicit user
+    #     request, after live-verifying the `--target-dir`-redirected
+    #     install path resolves correctly under `dg list defs`.
+    #   "vendored_latest": file-copy into the project, re-fetching current
+    #     upstream content on every (re-)install.
+    #   "vendored_pinned": file-copy once; never auto-re-fetch afterward --
+    #     frozen at whatever was installed until the user explicitly
+    #     updates it.
+    component_install_mode: str = Field("as_package", description="How community components install: as_package | vendored_latest | vendored_pinned")
+
 
 class ProjectCreate(BaseModel):
     """Request to create a new project."""
@@ -155,6 +176,7 @@ class ProjectUpdate(BaseModel):
     git_repo: str | None = None
     git_branch: str | None = None
     is_imported: bool | None = None
+    component_install_mode: str | None = None
 
 
 class ProjectSummary(BaseModel):

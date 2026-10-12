@@ -1085,6 +1085,94 @@ async def install_component_via_cli(
     if not project_dir.exists():
         raise HTTPException(status_code=404, detail=f"Project directory not found: {project_dir}")
 
+    install_mode = getattr(project, "component_install_mode", None) or "as_package"
+    as_package = install_mode == "as_package"
+    # Confirmed via live testing: --as-package's own default output path
+    # (<project_root>/components/<category>/<id>/defs.yaml) is NOT under
+    # the project's dg-configured defs root and is silently undiscovered
+    # by `dg list defs`. --target-dir redirects the stub defs.yaml to the
+    # same src/<root_module>/defs/<id>/ location file-copy mode already
+    # uses, which dg does discover -- confirmed live this resolves it.
+    root_module = project_service.get_project_root_module(project)
+
+    async def _already_installed_type() -> str | None:
+        """Returns the component's already-recorded type string if it's
+        already on disk for this project, else None. Vendored modes check
+        the per-component manifest.yaml this endpoint itself writes on
+        every real install; as_package mode has no vendored directory at
+        all, so it checks the stub defs.yaml's own `type:` field instead
+        (that stub carries component_type directly -- see the
+        defs.yaml-discovery block below, same convention either mode)."""
+        if as_package:
+            candidates = (
+                list(project_dir.glob(f"src/*/defs/{component_id}/defs.yaml"))
+                + list(project_dir.glob(f"*/defs/{component_id}/defs.yaml"))
+            )
+            for c in candidates:
+                try:
+                    parsed = yaml.safe_load(c.read_text()) or {}
+                    t = parsed.get("type")
+                    if isinstance(t, str) and t.startswith("dagster_community_components."):
+                        return t
+                except Exception:
+                    continue
+            return None
+        existing_dirs = (
+            list(project_dir.glob(f"src/*/components/{component_id}"))
+            + list(project_dir.glob(f"*/components/{component_id}"))
+        )
+        if not existing_dirs:
+            return None
+        manifest_path = existing_dirs[0] / "manifest.yaml"
+        if not manifest_path.exists():
+            return None
+        try:
+            return (yaml.safe_load(manifest_path.read_text()) or {}).get("component_type")
+        except Exception:
+            return None
+
+    # Skip the whole slow CLI round trip (uvx resolving its own
+    # environment, the CLI re-fetching from GitHub, a real `uv add` of the
+    # same already-satisfied dependencies) whenever re-running it wouldn't
+    # change anything real:
+    #  - "vendored_pinned": ALWAYS skip once installed, for any call shape
+    #    -- that's the whole point of pinning, it's frozen until the user
+    #    explicitly asks to update it (no such action exists yet; this is
+    #    step one).
+    #  - "as_package" (default) / "vendored_latest": skip only for a
+    #    template-only/no-attributes re-pick -- confirmed live as a real,
+    #    repeated-testing workflow (picking the same "Add data" source
+    #    several times in a row, closing the config modal without saving
+    #    each time, re-ran this full install every single time even though
+    #    nothing on disk needed to change). An actual instance-creating
+    #    call (real attributes supplied) still needs the full path below
+    #    for these two modes, since template-only's own cleanup further
+    #    down removes the stub defs.yaml this short-circuit has no safe
+    #    way to recreate from scratch without the CLI.
+    skip_eligible = install_mode == "vendored_pinned" or request.template_only or not request.attributes
+    if skip_eligible:
+        existing_type = await _already_installed_type()
+        if existing_type:
+            print(f"[CLI Install] {component_id} already installed ({install_mode}) for project {request.project_id}, skipping re-install")
+            missing_system_deps: list[str] = []
+            try:
+                import shutil as _sh2
+                manifest_entry = next(
+                    (c for c in (await fetch_manifest()).get("components", []) if c.get("id") == component_id),
+                    None,
+                )
+                brew_formulas = ((manifest_entry or {}).get("dependencies") or {}).get("brew") or []
+                missing_system_deps = [f for f in brew_formulas if _sh2.which(f) is None]
+            except Exception as e:
+                print(f"[CLI Install] Warning: could not check system dependencies: {e}")
+            return {
+                "success": True,
+                "component_id": component_id,
+                "component_type": existing_type,
+                "defs_yaml": None,
+                "missing_system_deps": missing_system_deps,
+            }
+
     def _build_cmd(refresh: bool) -> list[str]:
         cmd = [
             find_uv_binary("uvx"),
@@ -1094,6 +1182,8 @@ async def install_component_via_cli(
         if refresh:
             cmd.append("--refresh")
         cmd += ["add", component_id, "--auto-install", "--manager", "uv", "--force"]
+        if as_package:
+            cmd += ["--as-package", "--target-dir", f"src/{root_module}/defs/{component_id}"]
         return cmd
 
     def _run(refresh: bool):
@@ -1319,7 +1409,10 @@ async def install_component_via_cli(
             existing_attrs = {}
 
         allowed_keys: Optional[set] = None
-        # Resolve the schema.json under the installed component dir.
+        # Resolve the schema.json under the installed component dir. This
+        # only exists for vendored/file-copy installs -- as_package mode
+        # has no components/<id>/ directory at all (see the fallback
+        # below, which is what as_package actually needs).
         try:
             candidate_dirs = list(project_dir.glob(f"src/*/components/{component_id}/schema.json"))
             if candidate_dirs:
@@ -1330,6 +1423,44 @@ async def install_component_via_cli(
                     allowed_keys = set(props.keys())
         except Exception as e:
             print(f"[CLI Install] Warning: couldn't read schema.json for {component_id}: {e}")
+
+        # as_package mode has no vendored schema.json, so the glob above
+        # always comes up empty and allowed_keys silently stayed None --
+        # confirmed live this meant NEITHER the stub's own placeholder
+        # attributes NOR the caller's attributes were ever validated for
+        # as_package installs, letting the CLI's generic
+        # `asset_name: <id>  # TODO: ...` stub placeholder survive even
+        # for a component (e.g. PostgresResourceComponent) whose real
+        # schema has no asset_name field, which then fails
+        # "Extra inputs are not permitted" at `dg list defs` time. `dg`
+        # can introspect the real installed package directly regardless
+        # of install mode, so fall back to that.
+        if allowed_keys is None:
+            try:
+                from .components import _get_component_schema_via_dg
+                from ..services.asset_introspection_service import get_project_defs_lock
+                async with get_project_defs_lock(request.project_id):
+                    dg_schema = await _get_component_schema_via_dg(project, component_type)
+                if dg_schema and isinstance(dg_schema.schema, dict):
+                    props = dg_schema.schema.get("properties") or {}
+                    if isinstance(props, dict) and props:
+                        allowed_keys = set(props.keys())
+            except Exception as e:
+                print(f"[CLI Install] Warning: couldn't resolve schema via dg for {component_id}: {e}")
+
+        # The CLI's own stub defs.yaml can carry placeholder attributes that
+        # don't actually belong to this component's schema -- confirmed
+        # live with --as-package's generic stub template, which writes an
+        # `asset_name: <id>  # TODO: change to your asset name` placeholder
+        # into EVERY component's stub regardless of category, even ones
+        # (e.g. a resource component like PostgresResourceComponent) whose
+        # schema has no asset_name field at all. Left unfiltered, that
+        # placeholder survives the merge below (which only validates NEW
+        # request.attributes keys) and fails schema validation with
+        # "Extra inputs are not permitted" even though the caller supplied
+        # a fully valid, schema-matching attribute set.
+        if allowed_keys is not None:
+            existing_attrs = {k: v for k, v in existing_attrs.items() if k in allowed_keys}
 
         merged: dict = {**existing_attrs}
         dropped: list = []

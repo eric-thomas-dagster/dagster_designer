@@ -119,6 +119,12 @@ export interface Project {
   dagster_plus_region?: 'us' | 'eu';
   is_imported?: boolean;
   dagster_package_subdir?: string | null;
+  // How community-catalog components install into this project -- a
+  // project-wide choice (not per-install), since it's really about the
+  // project's own character (own/review the code vs. fast setup), not
+  // something that makes sense to flip component-by-component. See
+  // install_component_via_cli's own docstring for what each mode does.
+  component_install_mode?: 'vendored_latest' | 'vendored_pinned' | 'as_package';
 }
 
 export interface ProjectCreate {
