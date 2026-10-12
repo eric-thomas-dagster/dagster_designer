@@ -13,6 +13,7 @@ import { parseUpstreamAssetKeys } from '@/lib/upstreamAssetKeys';
 import { AGENTIC_PIPELINE_FAMILY } from '@/lib/agenticPipelineFamily';
 import { DOCUMENT_EXTRACTOR_FAMILY } from '@/lib/documentExtractorFamily';
 import { extractComponentId } from '@/lib/componentId';
+import { isFieldVisible as isFieldVisibleRule, labelFor as labelForRule } from '@/lib/fieldVisibility';
 
 // `x-dagster-io` type fields (inputs.type, outputs.type, accepts[]) are
 // freeform strings community component authors write by hand, not a
@@ -2944,7 +2945,18 @@ export function ComponentConfigModal({
               const hasUnifiedSourcePicker = !!properties.source && !!properties.upstream_asset_key;
               if (hasUnifiedSourcePicker) claimedFieldNames.add('upstream_asset_key');
 
+              // Thin local bindings over the extracted, unit-tested rules in
+              // @/lib/fieldVisibility -- not specific to bucket_url, any
+              // field can declare x-dagster-visible-when/x-dagster-label-by.
+              // bucket_url is the first real user: it's the final write
+              // target for destination=filesystem, but just a staging area
+              // for databricks/athena -- same field, different real meaning.
+              const isFieldVisible = (fieldSchema: any): boolean => isFieldVisibleRule(fieldSchema, formData);
+              const labelFor = (fieldName: string, fieldSchema: any): string =>
+                labelForRule(fieldSchema, formData, prettifyFieldName(fieldName));
+
               const renderGenericFieldEntry = (fieldName: string, fieldSchema: any) => {
+                if (!isFieldVisible(fieldSchema)) return null;
                 if (fieldSchema['x-dagster-destination-fields']) {
                   return (
                     <div key={fieldName}>
@@ -2963,7 +2975,7 @@ export function ComponentConfigModal({
                 return (
                 <div key={fieldName}>
                   <label className="block text-sm font-medium text-gray-700 mb-1">
-                    {isUnifiedSource ? 'Data source' : isDestinationResourceKey ? 'Destination resource' : prettifyFieldName(fieldName)}
+                    {isUnifiedSource ? 'Data source' : isDestinationResourceKey ? 'Destination resource' : labelFor(fieldName, fieldSchema)}
                     {componentSchema.schema?.required?.includes(fieldName) && (
                       <span className="text-red-500 ml-1">*</span>
                     )}
