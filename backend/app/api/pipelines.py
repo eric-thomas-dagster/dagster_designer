@@ -995,6 +995,39 @@ async def _run_job_launch_in_background(project_id: str, project_path: Path, job
             print("[launch_job] Hit the known local_defs_state race -- retrying once", flush=True)
             result = await _run_launch()
 
+        # A SEPARATE local_defs_state failure mode from the race above: git
+        # packfiles staged into .local_defs_state/<id>/ are read-only (mode
+        # 444), so once a staged copy exists, a later re-copy over it can't
+        # overwrite those files in place -- shutil.Error/PermissionError
+        # ("Permission denied") naming a path under local_defs_state.
+        # Confirmed live (see validate_project's identical fix). A bare
+        # retry does NOT fix this one (the stale read-only file is still
+        # there blocking the next attempt too) -- the stale subtree has to
+        # be deleted first.
+        if result.returncode != 0 and "local_defs_state" in result.stderr and (
+            "Permission denied" in result.stderr or "shutil.Error" in result.stderr
+        ):
+            import re as _re
+            import shutil as _shutil
+            # Extract via quote delimiters, not a path-segment regex -- see
+            # validate_project's identical fix for why (a space in this
+            # machine's own install path breaks a `[^\s]+`-per-segment
+            # pattern).
+            stale_dirs = set()
+            for _p in _re.findall(r"'([^']*\.local_defs_state[^']*)'", result.stderr):
+                _idx = _p.find(".local_defs_state/")
+                if _idx == -1:
+                    continue
+                _start = _idx + len(".local_defs_state/")
+                _seg = _p[_start:].split("/", 1)[0]
+                stale_dirs.add(_p[:_start] + _seg)
+            stale_dirs = sorted(stale_dirs)
+            if stale_dirs:
+                print(f"[launch_job] stale .local_defs_state cache detected -- clearing {stale_dirs} and retrying", flush=True)
+                for d in stale_dirs:
+                    _shutil.rmtree(d, ignore_errors=True)
+                result = await _run_launch()
+
         print(f"[launch_job] Return code: {result.returncode}")
         print(f"[launch_job] stdout: {result.stdout[:500]}")  # First 500 chars
         print(f"[launch_job] stderr: {result.stderr[:500]}")  # First 500 chars
