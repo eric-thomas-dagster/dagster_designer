@@ -777,7 +777,7 @@ export function DbtPanel({ onOpenFile }: DbtPanelProps) {
                         }}
                       >
                         <td className="px-4 py-2.5">
-                          <div className="font-mono text-gray-900">{m.name}</div>
+                          <div className="text-gray-900 font-medium">{m.name}</div>
                           <div className="text-[11px] text-gray-500 truncate max-w-[280px]" title={m.description ?? ''}>
                             {m.description || <span className="italic text-gray-400">no docs</span>}
                           </div>
@@ -1719,7 +1719,7 @@ function TestsView({
                 <div className="px-4 py-2.5 bg-gray-50/50 flex items-center gap-2 border-b border-gray-100">
                   <button
                     onClick={() => onOpenModel(model.unique_id)}
-                    className="font-mono text-sm font-semibold text-gray-900 hover:text-blue-600"
+                    className="text-sm font-semibold text-gray-900 hover:text-blue-600"
                   >
                     {model.name}
                   </button>
@@ -1901,7 +1901,7 @@ function ModelDetail({
         <div className="min-w-0">
           <div className="flex items-center gap-2 min-w-0">
             <FileCode className="w-4 h-4 text-orange-500 flex-shrink-0" />
-            <h3 className="font-mono text-sm font-semibold text-gray-900 truncate" title={model.name}>
+            <h3 className="text-sm font-semibold text-gray-900 truncate" title={model.name}>
               {model.name}
             </h3>
           </div>
@@ -2431,7 +2431,7 @@ function PreviewModal({
         <div className="flex items-center justify-between px-4 py-3 border-b border-gray-200">
           <div>
             <div className="text-sm font-semibold text-gray-900 flex items-center gap-1.5">
-              <Eye className="w-4 h-4 text-primary" /> Preview · <span className="font-mono">{model.name}</span>
+              <Eye className="w-4 h-4 text-primary" /> Preview · <span>{model.name}</span>
             </div>
             <div className="text-[11px] text-gray-500 mt-0.5">
               {preview?.success
