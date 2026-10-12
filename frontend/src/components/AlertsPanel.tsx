@@ -10,17 +10,6 @@ import { alertsApi, type AlertPolicy, type AlertPolicyType, type AlertsFile, typ
 import { notify, confirmDialog } from './Notifications';
 import { Notice } from './Notice';
 
-const CLOUD_ALERT_TEMPLATE = {
-  name: 'new_alert_policy',
-  description: '',
-  enabled: true,
-  event_types: ['ASSET_HEALTH_DEGRADED'],
-  notification_service: {
-    slack: { slack_workspace_name: '', slack_channel_name: '' },
-  },
-  alert_targets: [],
-};
-
 /**
  * Alert Policies surface -- lists local policies (parsed from the
  * project's YAML file), lets users create / edit / delete, and offers
@@ -36,12 +25,13 @@ export function AlertsPanel() {
   const [error, setError] = useState<string | null>(null);
   const [wizardMode, setWizardMode] = useState<{ mode: 'create' } | { mode: 'edit'; policy: AlertPolicy } | null>(null);
   const [syncOpen, setSyncOpen] = useState(false);
-  // Cloud alert editing -- a raw JSON document editor rather than a
-  // structured wizard (see CLOUD_ALERT_TEMPLATE's comment / CloudAlertPolicy
-  // docs): Dagster+'s document schema has union-shaped fields (alert_targets,
-  // notification_service) that Dagster+ itself validates server-side, so
-  // there's no need to re-implement that validation here just to offer a
-  // friendlier form.
+  // Raw JSON document editor -- still the path for EDITING an existing
+  // cloud policy (see CloudAlertPolicy docs: Dagster+'s document schema
+  // has union-shaped fields it validates server-side). Creating a new
+  // cloud policy now goes through the same step wizard local projects
+  // use instead (see handleCloudWizardSave) -- decoding an existing
+  // document back into a wizard draft is a separate piece not built yet,
+  // so editing stays on this raw editor for now.
   const [cloudEditorFor, setCloudEditorFor] = useState<{ isNew: boolean; text: string } | null>(null);
   const [cloudSaving, setCloudSaving] = useState(false);
   const [mutingId, setMutingId] = useState<string | null>(null);
@@ -130,6 +120,56 @@ export function AlertsPanel() {
     }
   };
 
+  // A cloud project's "New policy" AND "Edit" both use the SAME step
+  // wizard local projects use (previously cloud-only offered a raw JSON
+  // editor -- fine for tweaking an already-correct document, bad for
+  // authoring one from scratch). Editing decodes the existing document
+  // via decodeCloudDocument first (see handleCloudEditWizard below);
+  // "Edit as JSON" stays available as a fallback for anything the
+  // wizard's simplified model can't represent (flagged via
+  // extra_config.raw_document when decoding hits one of those).
+  const [decodingWizardFor, setDecodingWizardFor] = useState<string | null>(null);
+
+  const handleCloudWizardSave = async (policy: AlertPolicy) => {
+    if (!currentProject) return;
+    const isEdit = wizardMode?.mode === 'edit';
+    try {
+      const r = await alertsApi.saveCloudFromWizard(currentProject.id, policy);
+      setState(r);
+      setWizardMode(null);
+      notify.success(`Alert policy ${isEdit ? 'updated' : 'created'}: ${policy.name}`);
+    } catch (e: any) {
+      notify.error(e?.response?.data?.detail || e?.message || 'Failed to save policy.');
+    }
+  };
+
+  const handleCloudEditWizard = async (policy: CloudAlertPolicy) => {
+    if (!currentProject) return;
+    setDecodingWizardFor(policy.id);
+    try {
+      const decoded = await alertsApi.decodeCloudDocument(currentProject.id, policy.document ?? { name: policy.name });
+      // `raw_document` is only set when the decoder hit something the
+      // wizard's simplified model can't fully represent (custom
+      // selection syntax, scoping to specific code locations/jobs, an
+      // event type with no checkbox, etc.) -- saving through the wizard
+      // from here on would simplify it away rather than preserve it, so
+      // ask first instead of doing that silently.
+      if (decoded.extra_config?.raw_document) {
+        const ok = await confirmDialog(
+          `"${policy.name}" has settings the wizard doesn't support yet (custom scoping, selection syntax, or event types beyond the wizard's checkboxes). Editing here will simplify it down to what the wizard shows -- use "Edit as JSON" instead to keep everything as-is.`,
+          { title: 'Policy has advanced settings' },
+        );
+        if (!ok) return;
+      }
+      setWizardMode({ mode: 'edit', policy: decoded });
+      setDetailFor(null);
+    } catch (e: any) {
+      notify.error(e?.response?.data?.detail || e?.message || 'Failed to decode this policy for editing.');
+    } finally {
+      setDecodingWizardFor(null);
+    }
+  };
+
   const handleCloudDelete = async (policy: CloudAlertPolicy) => {
     if (!currentProject) return;
     const ok = await confirmDialog(`Delete alert policy "${policy.name}"? This deletes it from Dagster+ directly -- there's no undo.`, { title: 'Delete alert policy', destructive: true });
@@ -167,7 +207,7 @@ export function AlertsPanel() {
             <span className="text-sm text-gray-700 truncate">Live from Dagster+ — edits apply directly, no local file involved.</span>
           </div>
           <button
-            onClick={() => setCloudEditorFor({ isNew: true, text: JSON.stringify(CLOUD_ALERT_TEMPLATE, null, 2) })}
+            onClick={() => setWizardMode({ mode: 'create' })}
             className="flex-shrink-0 inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-primary-foreground bg-primary rounded-md hover:bg-accent"
           >
             <Plus className="w-4 h-4" />
@@ -250,9 +290,11 @@ export function AlertsPanel() {
               setCloudEditorFor({ isNew: false, text: JSON.stringify(detailFor.document ?? { name: detailFor.name }, null, 2) });
               setDetailFor(null);
             }}
+            onEditWizard={() => handleCloudEditWizard(detailFor)}
             onMute={(seconds) => handleCloudMute(detailFor, seconds)}
             onDelete={() => { setDetailFor(null); handleCloudDelete(detailFor); }}
             muting={mutingId === detailFor.id}
+            decoding={decodingWizardFor === detailFor.id}
           />
         )}
 
@@ -285,6 +327,15 @@ export function AlertsPanel() {
               </div>
             </div>
           </div>
+        )}
+
+        {wizardMode && (
+          <AlertWizard
+            initial={wizardMode.mode === 'edit' ? wizardMode.policy : null}
+            onClose={() => setWizardMode(null)}
+            onSave={handleCloudWizardSave}
+            isCloud
+          />
         )}
       </div>
     );
@@ -503,10 +554,15 @@ function notificationSummary(p: AlertPolicy): string {
 
 type WizardStep = 1 | 2 | 3 | 4;
 
-function AlertWizard({ initial, onClose, onSave }: {
+function AlertWizard({ initial, onClose, onSave, isCloud }: {
   initial: AlertPolicy | null;
   onClose: () => void;
   onSave: (p: AlertPolicy) => void;
+  // Cloud mode saves straight to Dagster+ via a document mutation, not a
+  // local YAML file -- Step4Review's preview needs to know this so it
+  // doesn't show a "YAML preview" for something that was never going to
+  // become YAML.
+  isCloud?: boolean;
 }) {
   const [step, setStep] = useState<WizardStep>(initial ? 2 : 1);
   const [draft, setDraft] = useState<AlertPolicy>(() => initial ? deepClone(initial) : blankPolicy('asset'));
@@ -546,7 +602,7 @@ function AlertWizard({ initial, onClose, onSave }: {
           {step === 1 && <Step1Type draft={draft} setDraft={setDraft} />}
           {step === 2 && <Step2Targets draft={draft} setDraft={setDraft} />}
           {step === 3 && <Step3Notifications draft={draft} setDraft={setDraft} />}
-          {step === 4 && <Step4Review draft={draft} setDraft={setDraft} />}
+          {step === 4 && <Step4Review draft={draft} setDraft={setDraft} isCloud={isCloud} />}
         </div>
 
         {/* Footer */}
@@ -986,13 +1042,17 @@ function Step3Notifications({ draft, setDraft }: { draft: AlertPolicy; setDraft:
 
 // ---------- Step 4: Details & review -----------------------------------
 
-function Step4Review({ draft, setDraft }: { draft: AlertPolicy; setDraft: (d: AlertPolicy) => void }) {
+function Step4Review({ draft, setDraft, isCloud }: { draft: AlertPolicy; setDraft: (d: AlertPolicy) => void; isCloud?: boolean }) {
   const { currentProject } = useProjectStore();
   const [yamlPreview, setYamlPreview] = useState<string>('');
   useEffect(() => {
-    if (!currentProject) return;
+    // `alertsApi.preview` renders what would be written to the project's
+    // local alert_policies.yaml -- meaningless for a cloud project, which
+    // saves straight to Dagster+ via a document mutation instead (see
+    // _policy_to_cloud_document on the backend).
+    if (!currentProject || isCloud) return;
     alertsApi.preview(currentProject.id, [draft]).then((r) => setYamlPreview(r.yaml)).catch(() => setYamlPreview(''));
-  }, [currentProject, draft]);
+  }, [currentProject, draft, isCloud]);
 
   return (
     <div className="space-y-4">
@@ -1020,20 +1080,27 @@ function Step4Review({ draft, setDraft }: { draft: AlertPolicy; setDraft: (d: Al
         <input type="checkbox" checked={draft.enabled !== false} onChange={(e) => setDraft({ ...draft, enabled: e.target.checked })} />
         Enabled
       </label>
-      <div>
-        <div className="flex items-center justify-between mb-1">
-          <label className="text-xs font-medium text-gray-700">YAML preview</label>
-          <button
-            onClick={() => { navigator.clipboard.writeText(yamlPreview); notify.success('YAML copied'); }}
-            className="inline-flex items-center gap-1 text-[11px] text-blue-700 hover:text-blue-900"
-          >
-            <Copy className="w-3 h-3" /> Copy
-          </button>
+      {isCloud ? (
+        <div className="p-3 bg-blue-50 border border-blue-200 rounded text-xs text-blue-900 flex items-start gap-2">
+          <Cloud className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" />
+          <div>Saving creates this policy directly in Dagster+ -- no local file involved.</div>
         </div>
-        <pre className="text-[11px] font-mono bg-gray-900 text-gray-100 rounded p-3 overflow-x-auto max-h-64 whitespace-pre">
-          {yamlPreview || '# generating preview…'}
-        </pre>
-      </div>
+      ) : (
+        <div>
+          <div className="flex items-center justify-between mb-1">
+            <label className="text-xs font-medium text-gray-700">YAML preview</label>
+            <button
+              onClick={() => { navigator.clipboard.writeText(yamlPreview); notify.success('YAML copied'); }}
+              className="inline-flex items-center gap-1 text-[11px] text-blue-700 hover:text-blue-900"
+            >
+              <Copy className="w-3 h-3" /> Copy
+            </button>
+          </div>
+          <pre className="text-[11px] font-mono bg-gray-900 text-gray-100 rounded p-3 overflow-x-auto max-h-64 whitespace-pre">
+            {yamlPreview || '# generating preview…'}
+          </pre>
+        </div>
+      )}
     </div>
   );
 }
@@ -1278,9 +1345,10 @@ function isTargetsValid(p: AlertPolicy): boolean {
 // Clicking a policy used to jump straight into the raw JSON editor --
 // technically complete but not a great "let me see what this alert does"
 // experience. This parses Dagster+'s document shape into a readable
-// summary; "Edit as JSON" drops into the same raw editor as before for
-// actually changing it (see CLOUD_ALERT_TEMPLATE's comment for why
-// editing itself stays JSON-based).
+// summary; "Edit" opens the same step wizard CREATE uses (via
+// handleCloudEditWizard's decode step), "Edit as JSON" stays as a
+// fallback for policies the wizard's simplified model can't fully
+// represent.
 
 const NOTIFICATION_SERVICE_META: Record<string, { icon: any; label: string }> = {
   slack: { icon: MessageSquare, label: 'Slack' },
@@ -1296,14 +1364,16 @@ function humanizeKey(e: string): string {
 }
 
 function CloudAlertDetailPanel({
-  policy, onClose, onEditJson, onMute, onDelete, muting,
+  policy, onClose, onEditJson, onEditWizard, onMute, onDelete, muting, decoding,
 }: {
   policy: CloudAlertPolicy;
   onClose: () => void;
   onEditJson: () => void;
+  onEditWizard: () => void;
   onMute: (seconds: number | null) => void;
   onDelete: () => void;
   muting: boolean;
+  decoding: boolean;
 }) {
   const doc = policy.document || {};
   const isMuted = !!policy.muted_until && policy.muted_until * 1000 > Date.now();
@@ -1402,10 +1472,18 @@ function CloudAlertDetailPanel({
           <button
             onClick={onEditJson}
             disabled={policy.is_code_backed}
-            title={policy.is_code_backed ? "Defined in code -- can't edit here" : undefined}
-            className="ml-auto inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium text-blue-700 bg-blue-50 border border-blue-200 rounded hover:bg-blue-100 disabled:opacity-40 disabled:cursor-not-allowed"
+            title={policy.is_code_backed ? "Defined in code -- can't edit here" : 'Edit the raw Dagster+ document directly'}
+            className="ml-auto inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium text-gray-700 border border-gray-200 rounded hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
           >
             <Code2 className="w-3.5 h-3.5" /> Edit as JSON
+          </button>
+          <button
+            onClick={onEditWizard}
+            disabled={policy.is_code_backed || decoding}
+            title={policy.is_code_backed ? "Defined in code -- can't edit here" : undefined}
+            className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium text-blue-700 bg-blue-50 border border-blue-200 rounded hover:bg-blue-100 disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            {decoding ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Edit3 className="w-3.5 h-3.5" />} Edit
           </button>
         </div>
       </div>

@@ -301,6 +301,358 @@ def _policy_to_yaml_dict(p: AlertPolicy) -> dict:
     return out
 
 
+#  Local wizard -> Dagster+ cloud document translation
+#
+# Confirmed empirically against a real Dagster+ org (create/read/delete
+# round trip per target type, dev deployment) plus the official docs
+# (https://dagster.io/docs/guides/observe/alerts/yaml-reference) --
+# NOT the same schema as `_policy_to_yaml_dict` above despite both
+# starting from the same AlertPolicy model: event names are a totally
+# different vocabulary (lowercase `materialization_failure` locally vs.
+# uppercase `ASSET_MATERIALIZATION_FAILURE` for Dagster+), and targets
+# are expressed as a {type_key: {...fields}} union member in a list
+# rather than nested under a field named after our own `type` enum.
+_ASSET_EVENT_TO_CLOUD = {
+    "materialization_success": "ASSET_MATERIALIZATION_SUCCESS",
+    "materialization_failure": "ASSET_MATERIALIZATION_FAILURE",
+    "asset_check_failed": "ASSET_CHECK_EXECUTION_FAILURE",
+    "asset_check_severity": "ASSET_CHECK_SEVERITY_WARN",
+    "freshness_slo_violation": "ASSET_FRESHNESS_FAIL",
+}
+_RUN_EVENT_TO_CLOUD = {
+    "run_success": "JOB_SUCCESS",
+    "run_failure": "JOB_FAILURE",
+    "run_time_limit_exceeded": "JOB_LONG_RUNNING",
+}
+# Cloud has no tick-success event at all (confirmed against the official
+# event-type reference) -- `tick_success` silently has nothing to map to.
+_AUTOMATION_EVENT_TO_CLOUD = {
+    "tick_failure": "TICK_FAILURE",
+}
+_COMPARISON_TO_CLOUD_OPERATOR = {
+    "gt": "GREATER_THAN",
+    "gte": "GREATER_THAN_OR_EQUAL",
+    "lt": "LESS_THAN",
+    "lte": "LESS_THAN_OR_EQUAL",
+}
+
+
+def _notification_service_to_cloud_dict(ns: NotificationService) -> dict:
+    """Mostly identical to the local YAML shape, with one confirmed
+    rename: Dagster+'s document wants `microsoft_teams: {webhook_url}`,
+    not the local model's `ms_teams: {ms_teams_webhook_url}` (confirmed
+    against the official docs -- the local model's own naming predates
+    or just diverged from Dagster+'s actual field name here). `webhook`
+    isn't a documented Dagster+ notification service at all, so it's
+    rejected explicitly rather than silently dropped."""
+    if ns.webhook is not None:
+        raise HTTPException(
+            status_code=400,
+            detail="Webhook notifications aren't supported for Dagster+ cloud alerts -- use email, Slack, Microsoft Teams, or PagerDuty.",
+        )
+    out: dict[str, Any] = {}
+    if ns.email:
+        out["email"] = {"email_addresses": ns.email.email_addresses}
+    if ns.slack:
+        out["slack"] = {k: v for k, v in {
+            "slack_channel_name": ns.slack.slack_channel_name,
+            "slack_workspace_name": ns.slack.slack_workspace_name,
+        }.items() if v is not None}
+    if ns.ms_teams:
+        out["microsoft_teams"] = {"webhook_url": ns.ms_teams.ms_teams_webhook_url}
+    if ns.pagerduty:
+        out["pagerduty"] = {"integration_key": ns.pagerduty.integration_key}
+    return out
+
+
+def _policy_to_cloud_document(p: AlertPolicy) -> dict:
+    """Build the document `createOrUpdateAlertPolicyFromDocument` expects
+    from the SAME typed AlertPolicy draft the local-YAML wizard already
+    builds -- lets the cloud wizard reuse that wizard's UI/steps as-is,
+    only swapping what happens on Save. v1 scope: every run/automation/
+    code-location target is left UNSCOPED (applies org-wide) -- Dagster+
+    accepts an explicit location_name/repo_name/job scoping too, but the
+    local model has nowhere to put that yet, and unscoped is a correct,
+    common, zero-extra-UI default (confirmed live these all accept an
+    empty/omitted scoping field)."""
+    event_types: list[str] = []
+    alert_targets: list[dict] = []
+
+    if p.type == "asset":
+        asset = p.asset or AssetPolicyConfig()
+        event_types = [_ASSET_EVENT_TO_CLOUD[e] for e in (asset.events or []) if e in _ASSET_EVENT_TO_CLOUD]
+        if asset.asset_group:
+            alert_targets.append({"asset_selection_target": {"asset_selection": f'group:"{asset.asset_group}"'}})
+        elif isinstance(asset.asset_selection, list):
+            for key in asset.asset_selection:
+                alert_targets.append({"asset_key_target": {"asset_key": str(key).split("/")}})
+        else:
+            selection = asset.asset_selection if isinstance(asset.asset_selection, str) else "*"
+            alert_targets.append({"asset_selection_target": {"asset_selection": selection}})
+
+    elif p.type == "run":
+        run = p.run or RunPolicyConfig()
+        tags = [{"key": k, "value": v} for k, v in (run.tags or {}).items()]
+        if "run_time_limit_exceeded" in (run.events or []) and run.time_limit_seconds:
+            # Compatible only with JOB_LONG_RUNNING -- confirmed live that
+            # mixing this target with JOB_FAILURE/JOB_SUCCESS in the same
+            # event_types list is rejected ("not compatible with event
+            # types"), so a policy combining both kinds of run events
+            # would need to be two separate cloud policies. Time-limit
+            # wins here since it has a hard-required threshold value.
+            event_types = ["JOB_LONG_RUNNING"]
+            alert_targets.append({"long_running_job_threshold_target": {
+                "threshold_seconds": run.time_limit_seconds,
+                **({"tags": tags} if tags else {}),
+            }})
+        else:
+            event_types = [_RUN_EVENT_TO_CLOUD[e] for e in (run.events or []) if e in _RUN_EVENT_TO_CLOUD and e != "run_time_limit_exceeded"]
+            alert_targets.append({"run_result_target": ({"tags": tags} if tags else {})})
+
+    elif p.type == "code_location":
+        event_types = ["CODE_LOCATION_ERROR"]
+        alert_targets.append({"code_location_target": {}})
+
+    elif p.type == "automation":
+        automation = p.automation or AutomationPolicyConfig()
+        event_types = [_AUTOMATION_EVENT_TO_CLOUD[e] for e in (automation.events or []) if e in _AUTOMATION_EVENT_TO_CLOUD]
+        if not event_types:
+            event_types = ["TICK_FAILURE"]
+        types: list[str] = []
+        if automation.include_schedules:
+            types.append("SCHEDULE")
+        if automation.include_sensors:
+            types.append("SENSOR")
+        alert_targets.append({"schedule_or_sensor_target": ({"types": types} if types else {})})
+
+    elif p.type == "agent_downtime":
+        event_types = ["AGENT_UNAVAILABLE"]
+        alert_targets = []
+
+    elif p.type == "insight_metric":
+        insight = p.insight_metric
+        if not insight:
+            raise HTTPException(status_code=400, detail="Insight metric policy is missing its metric config.")
+        event_types = ["INSIGHTS_CONSUMPTION_EXCEEDED"]
+        alert_targets.append({"insights_deployment_threshold_target": {
+            "metric_name": insight.metric,
+            "operator": _COMPARISON_TO_CLOUD_OPERATOR.get((insight.comparison or "gt").lower(), "GREATER_THAN"),
+            # Local model has no lookback-window field yet -- 1 day is
+            # Dagster+'s own UI default for a deployment-threshold alert.
+            "selection_period_days": 1,
+            "threshold": insight.threshold if insight.threshold is not None else 0,
+        }})
+
+    if not event_types:
+        raise HTTPException(status_code=400, detail="Select at least one event for this alert to fire on.")
+
+    doc: dict[str, Any] = {
+        "name": p.name,
+        "description": p.description or "",
+        "enabled": p.enabled,
+        "event_types": event_types,
+        "notification_service": _notification_service_to_cloud_dict(p.notification_service),
+        "alert_targets": alert_targets,
+    }
+    return doc
+
+
+# Inverse of the maps above -- used by `_cloud_document_to_policy` below.
+_ASSET_EVENT_FROM_CLOUD = {v: k for k, v in _ASSET_EVENT_TO_CLOUD.items()}
+_RUN_EVENT_FROM_CLOUD = {v: k for k, v in _RUN_EVENT_TO_CLOUD.items()}
+_AUTOMATION_EVENT_FROM_CLOUD = {v: k for k, v in _AUTOMATION_EVENT_TO_CLOUD.items()}
+_COMPARISON_FROM_CLOUD_OPERATOR = {v: k for k, v in _COMPARISON_TO_CLOUD_OPERATOR.items()}
+
+# Document target key -> our PolicyType bucket. Keyed by the document's
+# own snake_case target keys (NOT the GraphQL __typename strings
+# `_policies_from_graphql` above matches on -- that function decodes a
+# DIFFERENT query shape, the structured `alertPolicies` list, not this
+# `document` form).
+_CLOUD_TARGET_KEY_TO_POLICY_TYPE: dict[str, PolicyType] = {
+    "asset_key_target": "asset",
+    "asset_group_target": "asset",
+    "asset_selection_target": "asset",
+    "asset_selection_view_target": "asset",
+    "favorites_selection_view_target": "asset",
+    "run_result_target": "run",
+    "long_running_job_threshold_target": "run",
+    "code_location_target": "code_location",
+    "schedule_or_sensor_target": "automation",
+    "credit_limit_target": "insight_metric",
+    "insights_deployment_threshold_target": "insight_metric",
+    "insights_asset_group_threshold_target": "insight_metric",
+    "insights_asset_threshold_target": "insight_metric",
+    "insights_job_threshold_target": "insight_metric",
+    "metric_monitor_asset_selection_threshold_target": "insight_metric",
+    "metric_monitor_asset_selection_view_threshold_target": "insight_metric",
+    "metric_monitor_deployment_threshold_target": "insight_metric",
+    "metric_monitor_favorites_threshold_target": "insight_metric",
+}
+
+
+def _notification_service_from_cloud_dict(ns: dict) -> NotificationService:
+    out = NotificationService()
+    if "email" in ns:
+        out.email = NotificationEmail(email_addresses=(ns["email"] or {}).get("email_addresses") or [])
+    if "slack" in ns:
+        s = ns["slack"] or {}
+        out.slack = NotificationSlack(
+            slack_channel_name=s.get("slack_channel_name") or "",
+            slack_workspace_name=s.get("slack_workspace_name"),
+        )
+    if "microsoft_teams" in ns:
+        out.ms_teams = NotificationMSTeams(ms_teams_webhook_url=(ns["microsoft_teams"] or {}).get("webhook_url") or "")
+    if "pagerduty" in ns:
+        out.pagerduty = NotificationPagerDuty(integration_key=(ns["pagerduty"] or {}).get("integration_key") or "")
+    return out
+
+
+def _cloud_document_to_policy(doc: dict) -> AlertPolicy:
+    """Inverse of `_policy_to_cloud_document` -- decodes a Dagster+
+    document (as returned by `alertPoliciesAsDocumentOrError`, stored on
+    `CloudAlertPolicy.document`) back into the same typed AlertPolicy
+    model the wizard edits, so editing an existing cloud policy can reuse
+    the wizard instead of only the raw JSON editor.
+
+    Not every document is representable in the wizard's simplified model
+    (e.g. a hand-authored `asset_selection_target` with an arbitrary
+    selection string beyond '*'/a single group, or an event type with no
+    local checkbox like ASSET_HEALTH_DEGRADED or ASSET_TABLE_SCHEMA_CHANGE)
+    -- those are preserved verbatim in `extra_config['raw_document']` so a
+    re-save through `_policy_to_cloud_document` doesn't silently drop
+    them, and the raw JSON editor stays available as a fallback for
+    anyone who needs to see/edit them directly."""
+    targets = doc.get("alert_targets") or []
+    target_keys = [next(iter(t.keys()), None) for t in targets if isinstance(t, dict) and t]
+    cloud_events = [e for e in (doc.get("event_types") or []) if e]
+
+    policy_type: PolicyType = "run"
+    for tk in target_keys:
+        if tk in _CLOUD_TARGET_KEY_TO_POLICY_TYPE:
+            policy_type = _CLOUD_TARGET_KEY_TO_POLICY_TYPE[tk]
+            break
+    if "AGENT_UNAVAILABLE" in cloud_events:
+        policy_type = "agent_downtime"
+
+    asset_cfg = run_cfg = code_loc_cfg = auto_cfg = agent_cfg = insight_cfg = None
+    unrepresentable = False
+
+    if policy_type == "asset":
+        events = [_ASSET_EVENT_FROM_CLOUD[e] for e in cloud_events if e in _ASSET_EVENT_FROM_CLOUD]
+        unrepresentable = len(events) != len(cloud_events)
+        asset_group: str | None = None
+        asset_keys: list[str] = []
+        selection: str | None = None
+        for t in targets:
+            tk, tv = next(iter(t.items()), (None, {}))
+            if tk == "asset_key_target":
+                asset_keys.append("/".join(tv.get("asset_key") or []))
+            elif tk == "asset_selection_target":
+                sel = tv.get("asset_selection") or "*"
+                m = re.match(r'^group:"([^"]+)"$', sel)
+                if m:
+                    asset_group = m.group(1)
+                elif sel == "*":
+                    selection = "*"
+                else:
+                    selection = sel
+                    unrepresentable = True  # arbitrary selection syntax -- no UI for this yet
+            elif tk == "asset_group_target":
+                asset_group = tv.get("asset_group")
+                unrepresentable = True  # needs location_name/repo_name the wizard doesn't model
+            else:
+                unrepresentable = True
+        asset_cfg = AssetPolicyConfig(
+            asset_selection=asset_keys or selection or ("*" if not asset_group else None),
+            asset_group=asset_group,
+            events=events,
+        )
+
+    elif policy_type == "run":
+        events: list[str] = []
+        time_limit = None
+        for t in targets:
+            tk, tv = next(iter(t.items()), (None, {}))
+            if tk == "long_running_job_threshold_target":
+                time_limit = tv.get("threshold_seconds")
+                events.append("run_time_limit_exceeded")
+            elif tk == "run_result_target":
+                events.extend(_RUN_EVENT_FROM_CLOUD[e] for e in cloud_events if e in _RUN_EVENT_FROM_CLOUD)
+                if tv.get("jobs") or tv.get("location_names"):
+                    unrepresentable = True  # scoping the wizard doesn't model yet
+            else:
+                unrepresentable = True
+        run_cfg = RunPolicyConfig(events=events, time_limit_seconds=time_limit)
+
+    elif policy_type == "code_location":
+        for t in targets:
+            tv = next(iter(t.values()), {})
+            if tv.get("location_names"):
+                unrepresentable = True  # scoped to specific locations -- wizard always does org-wide
+        code_loc_cfg = CodeLocationPolicyConfig()
+
+    elif policy_type == "automation":
+        events = [_AUTOMATION_EVENT_FROM_CLOUD[e] for e in cloud_events if e in _AUTOMATION_EVENT_FROM_CLOUD]
+        unrepresentable = len(events) != len(cloud_events)
+        types: list[str] = []
+        for t in targets:
+            tv = next(iter(t.values()), {})
+            types = tv.get("types") or []
+            if tv.get("schedules_or_sensors") or tv.get("location_names"):
+                unrepresentable = True
+        auto_cfg = AutomationPolicyConfig(
+            events=events,
+            include_schedules="SCHEDULE" in types or not types,
+            include_sensors="SENSOR" in types or not types,
+        )
+
+    elif policy_type == "agent_downtime":
+        agent_cfg = AgentDowntimePolicyConfig()
+
+    elif policy_type == "insight_metric":
+        metric = ""
+        threshold = None
+        operator = None
+        for t in targets:
+            tk, tv = next(iter(t.items()), (None, {}))
+            if tk == "credit_limit_target":
+                metric = metric or "dagster_credits"
+            elif tv.get("metric_name"):
+                metric = tv.get("metric_name") or metric
+                threshold = tv.get("threshold")
+                operator = tv.get("operator")
+            else:
+                unrepresentable = True
+        insight_cfg = InsightMetricPolicyConfig(
+            metric=metric,
+            threshold=threshold,
+            comparison=_COMPARISON_FROM_CLOUD_OPERATOR.get(operator or "", "gt"),
+        )
+
+    extra: dict[str, Any] = {}
+    if unrepresentable:
+        # Full fidelity on re-save: _policy_to_cloud_document doesn't read
+        # this back (it only reads the typed fields above), but surfacing
+        # it lets the wizard warn the user that saving will simplify/lose
+        # some of this policy's configuration, rather than doing so silently.
+        extra["raw_document"] = doc
+
+    return AlertPolicy(
+        name=doc.get("name") or "",
+        description=doc.get("description") or None,
+        enabled=bool(doc.get("enabled", True)),
+        type=policy_type,
+        asset=asset_cfg,
+        run=run_cfg,
+        code_location=code_loc_cfg,
+        automation=auto_cfg,
+        agent_downtime=agent_cfg,
+        insight_metric=insight_cfg,
+        notification_service=_notification_service_from_cloud_dict(doc.get("notification_service") or {}),
+        extra_config=extra or None,
+    )
+
+
 def _policy_from_yaml_dict(d: dict) -> AlertPolicy:
     """Parse a policy from YAML. Absorbs unknown fields into
     extra_config so hand-edited YAML isn't dropped on round-trip."""
@@ -710,6 +1062,35 @@ async def save_cloud_alert(project_id: str, request: SaveCloudAlertRequest):
     project = _require_cloud_project(project_id)
     await _save_cloud_alert(project, request.document)
     return await _list_cloud_alerts(project)
+
+
+@router.post("/{project_id}/alerts/cloud/from-wizard", response_model=CloudAlertsFile)
+async def save_cloud_alert_from_wizard(project_id: str, policy: AlertPolicy):
+    """Create or update a Dagster+ alert policy from the SAME typed
+    AlertPolicy draft the local-YAML wizard already builds, instead of a
+    raw document -- lets the frontend reuse that wizard's steps/UI as-is
+    for cloud projects too, rather than only offering the raw JSON
+    editor. See `_policy_to_cloud_document` for the translation (event
+    names and target shape both differ from the local YAML schema)."""
+    project = _require_cloud_project(project_id)
+    document = _policy_to_cloud_document(policy)
+    await _save_cloud_alert(project, document)
+    return await _list_cloud_alerts(project)
+
+
+class DecodeCloudDocumentRequest(BaseModel):
+    document: dict[str, Any]
+
+
+@router.post("/{project_id}/alerts/cloud/decode", response_model=AlertPolicy)
+async def decode_cloud_alert_document(project_id: str, request: DecodeCloudDocumentRequest):
+    """Decode an existing Dagster+ alert policy document into the typed
+    AlertPolicy shape the wizard edits, so "Edit" on a cloud policy can
+    open the same step wizard CREATE now uses instead of only the raw
+    JSON editor. A pure transform -- doesn't touch Dagster+ or need
+    project_id to be a real cloud project -- kept under this prefix for
+    routing consistency with the other cloud alert endpoints."""
+    return _cloud_document_to_policy(request.document)
 
 
 @router.delete("/{project_id}/alerts/cloud/{name}", response_model=CloudAlertsFile)

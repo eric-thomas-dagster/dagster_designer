@@ -2107,6 +2107,21 @@ export const alertsApi = {
     const r = await api.post(`/projects/${projectId}/alerts/cloud`, { document });
     return r.data as CloudAlertsFile;
   },
+  // Lets the cloud alerts UI reuse the same wizard/AlertPolicy shape the
+  // local YAML editor already builds -- the backend does the translation
+  // into Dagster+'s document schema (different event-type vocabulary and
+  // target shape), instead of duplicating that translation here.
+  saveCloudFromWizard: async (projectId: string, policy: AlertPolicy): Promise<CloudAlertsFile> => {
+    const r = await api.post(`/projects/${projectId}/alerts/cloud/from-wizard`, policy);
+    return r.data as CloudAlertsFile;
+  },
+  // Decodes an existing Dagster+ document (CloudAlertPolicy.document) back
+  // into the typed AlertPolicy shape, so editing a cloud policy can open
+  // the same wizard CREATE uses instead of only the raw JSON editor.
+  decodeCloudDocument: async (projectId: string, document: Record<string, any>): Promise<AlertPolicy> => {
+    const r = await api.post(`/projects/${projectId}/alerts/cloud/decode`, { document });
+    return r.data as AlertPolicy;
+  },
   removeCloud: async (projectId: string, name: string): Promise<CloudAlertsFile> => {
     const r = await api.delete(`/projects/${projectId}/alerts/cloud/${encodeURIComponent(name)}`);
     return r.data as CloudAlertsFile;
