@@ -2404,6 +2404,8 @@ export interface BackfillRequest {
     start: string;
     end: string;
   } | null;
+  /** Several ranges -- one launch each, however many partitions they span. */
+  partition_ranges?: { start: string; end: string }[] | null;
   config?: Record<string, any> | null;
   tags?: Record<string, string> | null;
 }
@@ -2500,7 +2502,16 @@ export interface PartitionStatusResponse {
   missing: number;
   keys: PartitionKeyStatus[];
   truncated: boolean;
+  /** Contiguous runs of missing/failed partitions over the FULL key list. */
+  missing_runs?: PartitionRun[];
+  failed_runs?: PartitionRun[];
   supported: boolean;
+}
+
+export interface PartitionRun {
+  start: string;
+  end: string;
+  count: number;
 }
 
 export interface PartitionDetailResponse {

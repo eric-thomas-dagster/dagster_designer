@@ -1402,6 +1402,9 @@ export function ProjectManager() {
           }}
           projectId={currentProject.id}
           assetKey={materializeAllPicker.pickerAssetKey}
+          title={`Materialize all ${materializeAllPicker.allAssetKeys.length} assets`}
+          description="Partitioned assets share one partition definition -- pick the partition(s) to run them with. Unpartitioned assets run alongside."
+          launchLabel="Materialize all"
           onLaunch={handleMaterializeAllBackfill}
         />
       )}

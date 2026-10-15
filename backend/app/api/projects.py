@@ -3558,6 +3558,13 @@ class PartitionKeyStatus(BaseModel):
     status: str  # 'materialized' | 'failed' | 'materializing' | 'missing'
 
 
+class PartitionRun(BaseModel):
+    """A contiguous run of partition keys (by position in the full key list)."""
+    start: str
+    end: str
+    count: int
+
+
 class PartitionStatusResponse(BaseModel):
     asset_key: str
     is_partitioned: bool
@@ -3572,6 +3579,12 @@ class PartitionStatusResponse(BaseModel):
     # partitions (e.g. years of daily/hourly cadence).
     keys: list[PartitionKeyStatus] = []
     truncated: bool = False
+    # Missing/failed partitions compressed into contiguous runs over the FULL
+    # key list (not the capped `keys` above), so "backfill all missing" is
+    # exact even for hundreds of thousands of partitions -- each run is one
+    # `dg launch --partition-range`.
+    missing_runs: list[PartitionRun] = []
+    failed_runs: list[PartitionRun] = []
     # False for multi-dimensional partitions -- MultiPartitionStatuses
     # is a 2D matrix this endpoint doesn't attempt to flatten yet.
     supported: bool = True
@@ -3613,6 +3626,19 @@ def _partition_status_from_graphql(partition_keys: list[str], statuses: dict | N
     return key_status, False
 
 
+def _status_runs(partition_keys: list[str], key_status: list[str], wanted: str) -> list[PartitionRun]:
+    runs: list[PartitionRun] = []
+    run_start: int | None = None
+    for i, st in enumerate(key_status + [None]):  # sentinel closes a trailing run
+        if st == wanted:
+            if run_start is None:
+                run_start = i
+        elif run_start is not None:
+            runs.append(PartitionRun(start=partition_keys[run_start], end=partition_keys[i - 1], count=i - run_start))
+            run_start = None
+    return runs
+
+
 def _build_partition_status_response(asset_key: str, partition_keys: list[str], statuses: dict | None) -> PartitionStatusResponse:
     key_status, supported = _partition_status_from_graphql(partition_keys, statuses)
     truncated = len(partition_keys) > _PARTITION_KEYS_CAP
@@ -3631,6 +3657,8 @@ def _build_partition_status_response(asset_key: str, partition_keys: list[str], 
         missing=key_status.count("missing"),
         keys=[PartitionKeyStatus(key=k, status=s) for k, s in shown],
         truncated=truncated,
+        missing_runs=_status_runs(partition_keys, key_status, "missing"),
+        failed_runs=_status_runs(partition_keys, key_status, "failed"),
         supported=supported,
     )
 
@@ -4103,6 +4131,11 @@ class BackfillRequest(BaseModel):
         None,
         description="Partition range with 'start' and 'end' keys"
     )
+    partition_ranges: list[dict[str, str]] | None = Field(
+        None,
+        description="Several {'start','end'} ranges -- each becomes one `dg launch --partition-range` "
+        "(used together with partition_selection's single keys)"
+    )
     config: dict | None = None
     tags: dict[str, str] | None = None
 
@@ -4149,7 +4182,7 @@ async def launch_backfill(project_id: str, request: BackfillRequest, background_
     if not project_dir.exists():
         raise HTTPException(status_code=404, detail="Project directory not found")
 
-    partition_count = len(request.partition_selection) if request.partition_selection else 1
+    partition_count = len(_backfill_partition_args(request))
     background_tasks.add_task(_run_backfill_in_background, project_id, project_dir, request)
 
     return BackfillResponse(
@@ -4157,11 +4190,34 @@ async def launch_backfill(project_id: str, request: BackfillRequest, background_
         message=(
             "Backfill launched -- check the Runs page for progress."
             if partition_count == 1
-            else f"Backfill launched ({partition_count} partitions) -- check the Runs page for progress."
+            else f"Backfill launched ({partition_count} launches) -- check the Runs page for progress."
         ),
         stdout="",
         stderr="",
     )
+
+
+def _backfill_partition_args(request: BackfillRequest) -> list[list[str]]:
+    """One `dg launch` argument set per requested range / single key -- a
+    range is a single launch no matter how many partitions it spans, so
+    ranges are how huge selections stay tractable. [[]] = no partition flag."""
+    arg_sets: list[list[str]] = []
+    for r in request.partition_ranges or []:
+        start, end = r.get("start"), r.get("end")
+        if start and end and start != end:
+            arg_sets.append(["--partition-range", f"{start}...{end}"])
+        elif start:
+            arg_sets.append(["--partition", start])
+    if request.partition_range:
+        start = request.partition_range.get("start")
+        end = request.partition_range.get("end")
+        if start and end:
+            arg_sets.append(["--partition-range", f"{start}...{end}"])
+        elif start:
+            arg_sets.append(["--partition", start])
+    for p in request.partition_selection or []:
+        arg_sets.append(["--partition", p])
+    return arg_sets or [[]]
 
 
 async def _run_backfill_in_background(project_id: str, project_dir: Path, request: BackfillRequest) -> None:
@@ -4190,20 +4246,7 @@ async def _run_backfill_in_background(project_id: str, project_dir: Path, reques
     dg_path = str(venv_bin_path(project_dir / ".venv", "dg").absolute())
     assets_arg = ",".join(request.asset_keys) if request.asset_keys else None
 
-    partition_arg_sets: list[list[str]]
-    if request.partition_range:
-        start = request.partition_range.get("start")
-        end = request.partition_range.get("end")
-        if start and end:
-            partition_arg_sets = [["--partition-range", f"{start}...{end}"]]
-        elif start:
-            partition_arg_sets = [["--partition", start]]
-        else:
-            partition_arg_sets = [[]]
-    elif request.partition_selection:
-        partition_arg_sets = [["--partition", p] for p in request.partition_selection]
-    else:
-        partition_arg_sets = [[]]
+    partition_arg_sets = _backfill_partition_args(request)
 
     # Handle config and tags
     config_file = None
