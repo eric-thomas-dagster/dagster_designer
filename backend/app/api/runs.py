@@ -973,6 +973,18 @@ class LogEvent(BaseModel):
     level: str | None = None   # DEBUG / INFO / WARNING / ERROR / CRITICAL
     timestamp: float | None = None
     step_key: str | None = None
+    # 'failed' / 'warning' for a failed asset check (Dagster logs those at
+    # DEBUG; its UI colors them by result, so we surface the result too).
+    outcome: str | None = None
+
+
+def _cloud_check_outcome(type_name: str, message: str | None) -> str | None:
+    # The Dagster+ events query doesn't select the evaluation payload, but a
+    # failed check's message is always "Asset check '<name>' on '<asset>' did
+    # not pass." (no severity available here, so treated as a failure).
+    if type_name.startswith("AssetCheckEvaluation") and message and "did not pass" in message:
+        return "failed"
+    return None
 
 
 def _log_ts_to_seconds(raw: str | float | None) -> float | None:
@@ -1051,6 +1063,7 @@ async def get_run_logs(
             level=e.get("level"),
             timestamp=_log_ts_to_seconds(e.get("timestamp")),
             step_key=e.get("stepKey"),
+            outcome=_cloud_check_outcome(e.get("__typename") or "", e.get("message")),
         ))
     return RunLogsResponse(
         events=events,
@@ -1120,6 +1133,71 @@ class RunActionResponse(BaseModel):
     detail: str | None = None
 
 
+# Keeps references to in-flight local re-execution tasks so they aren't
+# garbage-collected before `dg launch` finishes.
+_local_reexec_tasks: set[asyncio.Task] = set()
+
+
+async def _reexecute_local(
+    project_id: str, project, run_id: str, strategy: str, step_keys: list[str] | None
+) -> RunActionResponse:
+    import time
+
+    from .projects import MaterializeRequest, materialize_assets
+
+    info = await _query_local(project, "reexecute_info", {"run_id": run_id})
+    if info.get("error"):
+        raise HTTPException(status_code=404, detail=info["error"])
+
+    asset_keys: list[str] = info.get("asset_keys") or []
+    if not asset_keys:
+        raise HTTPException(status_code=400, detail="This run has no recorded asset selection to re-execute.")
+
+    if step_keys:
+        # Steps are named after their asset (last path segment, "/" -> "_").
+        wanted = set(step_keys)
+        asset_keys = [k for k in asset_keys if k.replace("/", "_") in wanted or k.split("/")[-1] in wanted]
+        if not asset_keys:
+            raise HTTPException(status_code=400, detail="Couldn't map the selected steps to assets for re-execution.")
+    elif strategy == "FROM_FAILURE":
+        done = set(info.get("materialized") or [])
+        asset_keys = [k for k in asset_keys if k not in done]
+        if not asset_keys:
+            raise HTTPException(status_code=400, detail="Every asset in this run already materialized; nothing to retry.")
+
+    started = time.time()
+    req = MaterializeRequest(
+        asset_keys=asset_keys,
+        partition=info.get("partition"),
+        config=info.get("run_config") or None,
+    )
+    task = asyncio.create_task(materialize_assets(project_id, req))
+    _local_reexec_tasks.add(task)
+    task.add_done_callback(_local_reexec_tasks.discard)
+
+    # `dg launch` blocks until the run finishes; the UI wants the new run id
+    # right away, so poll the instance for the run it just created.
+    for _ in range(30):
+        if task.done():
+            break
+        await asyncio.sleep(1.5)
+        found = await _query_local(project, "latest_run_since", {"since": started - 1})
+        if found.get("run_id"):
+            return RunActionResponse(
+                success=True,
+                new_run_id=found["run_id"],
+                status=(found.get("status") or "").upper(),
+                detail=f"Launched re-execution ({strategy}) of {len(asset_keys)} asset(s).",
+            )
+    if task.done() and task.exception() is not None:
+        raise HTTPException(status_code=502, detail=f"Re-execution failed to launch: {task.exception()}")
+    found = await _query_local(project, "latest_run_since", {"since": started - 1})
+    if found.get("run_id"):
+        return RunActionResponse(success=True, new_run_id=found["run_id"], status=(found.get("status") or "").upper(),
+                                 detail=f"Launched re-execution ({strategy}).")
+    raise HTTPException(status_code=502, detail="Re-execution was started but no new run appeared; check the Runs page shortly.")
+
+
 @router.post("/{project_id}/runs/{run_id}/reexecute", response_model=RunActionResponse)
 async def reexecute_run(project_id: str, run_id: str, request: ReexecuteRequest):
     """Launch a new run derived from an existing one. Strategy controls
@@ -1133,6 +1211,13 @@ async def reexecute_run(project_id: str, run_id: str, request: ReexecuteRequest)
     strategy = (request.strategy or "ALL_STEPS").upper()
     if strategy not in ("ALL_STEPS", "FROM_FAILURE"):
         raise HTTPException(status_code=400, detail=f"Unknown strategy '{strategy}'. Use ALL_STEPS or FROM_FAILURE.")
+
+    # ---- Local path -------------------------------------------------
+    # `dg launch` runs carry no remote_job_origin, which GraphQL's
+    # launchPipelineReexecution requires (check.not_none on it -> "Expected
+    # non-None value: None"), so relaunch through `dg launch` instead.
+    if not getattr(project, "is_dagster_plus", False):
+        return await _reexecute_local(project_id, project, run_id, strategy, request.step_keys)
 
     params: dict[str, Any] = {
         "parentRunId": run_id,

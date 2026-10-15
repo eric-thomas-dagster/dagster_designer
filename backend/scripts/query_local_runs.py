@@ -278,12 +278,22 @@ def mode_run_logs(instance, args: dict) -> dict:
         level_name = entry.level if isinstance(entry.level, str) else (
             logging.getLevelName(entry.level) if entry.level is not None else None
         )
+        # Dagster logs a failed asset check at DEBUG, and its own UI colors
+        # the row by the check's result instead -- surface the same signal
+        # so the viewer can show a failed check as a failure.
+        outcome = None
+        if de is not None and de.event_type_value == "ASSET_CHECK_EVALUATION":
+            ev = de.event_specific_data
+            if ev is not None and getattr(ev, "passed", True) is False:
+                severity = str(getattr(getattr(ev, "severity", None), "value", getattr(ev, "severity", "")) or "")
+                outcome = "warning" if severity.upper() == "WARN" else "failed"
         events.append({
             "type_name": _event_type_label(de.event_type_value if de else None),
             "message": entry.user_message or (de.message if de else None),
             "level": level_name,
             "timestamp": entry.timestamp,
             "step_key": entry.step_key,
+            "outcome": outcome,
         })
     return {
         "events": events,
@@ -352,6 +362,56 @@ def mode_job_names(instance, args: dict) -> dict:
     return {"job_names": sorted(names)}
 
 
+def mode_reexecute_info(instance, args: dict) -> dict:
+    """What a local re-execute needs from the parent run. Runs launched by
+    `dg launch` are reconstructed in-process and carry no remote_job_origin,
+    so GraphQL's launchPipelineReexecution can't re-execute them (it does
+    check.not_none(parent_run.remote_job_origin)). Instead we hand the
+    parent's asset selection / partition / run config back to the caller to
+    relaunch via `dg launch`, plus which assets already materialized so
+    FROM_FAILURE can skip them."""
+    import yaml
+    from dagster import DagsterEventType
+
+    run_id = args["run_id"]
+    run = instance.get_run_by_id(run_id)
+    if run is None:
+        return {"error": f"Run {run_id} not found"}
+
+    selection = sorted("/".join(k.path) for k in (run.asset_selection or []))
+
+    materialized = set()
+    conn = instance.get_records_for_run(run_id, of_type=DagsterEventType.ASSET_MATERIALIZATION)
+    for rec in conn.records:
+        mat = rec.asset_materialization
+        if mat is not None and mat.asset_key is not None:
+            materialized.add("/".join(mat.asset_key.path))
+
+    config = run.run_config or {}
+    return {
+        "asset_keys": selection,
+        "materialized": sorted(materialized),
+        "partition": (run.tags or {}).get("dagster/partition"),
+        "run_config": config,
+        "run_config_yaml": yaml.dump(config) if config else None,
+    }
+
+
+def mode_latest_run_since(instance, args: dict) -> dict:
+    """Newest run created at/after `since` (epoch seconds), so a caller that
+    just kicked off a `dg launch` can find the id of the run it created."""
+    since = float(args["since"])
+    records = instance.get_run_records(limit=5)
+    best = None
+    for r in records:
+        created = r.create_timestamp.timestamp() if r.create_timestamp else 0
+        if created >= since and (best is None or created > best[0]):
+            best = (created, r.dagster_run)
+    if best is None:
+        return {"run_id": None}
+    return {"run_id": best[1].run_id, "status": best[1].status.value}
+
+
 MODES = {
     "list_runs": mode_list_runs,
     "run_detail": mode_run_detail,
@@ -361,6 +421,8 @@ MODES = {
     "tag_keys": mode_tag_keys,
     "tag_values": mode_tag_values,
     "job_names": mode_job_names,
+    "reexecute_info": mode_reexecute_info,
+    "latest_run_since": mode_latest_run_since,
 }
 
 
