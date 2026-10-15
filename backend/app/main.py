@@ -24,6 +24,13 @@ _sys.stderr.reconfigure(encoding="utf-8")
 # Missing files are OK — environment already-set values take precedence.
 import os as _os
 from pathlib import Path as _Path
+
+# Have every `uv` we shell out to (project creation, `uv sync`, component
+# installs) precompile .pyc files at install time. A project imports ~2,300
+# dagster_community_components modules to resolve its component registry; with
+# no .pyc on disk the first `dg list defs` compiles all of them (~7s extra,
+# measured 18s cold vs 11s warm). setdefault so a user's own setting wins.
+_os.environ.setdefault("UV_COMPILE_BYTECODE", "1")
 try:
     from dotenv import load_dotenv as _load_dotenv
     _here = _Path(__file__).resolve()

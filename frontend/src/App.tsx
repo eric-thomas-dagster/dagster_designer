@@ -179,7 +179,7 @@ function StatusStrip(props: StatusStripProps) {
       key: 'asset-gen',
       kind: 'progress',
       label: 'Generating assets',
-      detail: '30–180s for large projects',
+      detail: 'Usually 10–60s; larger projects can take a few minutes',
       dismissable: false,
     });
   } else if (props.assetGenerationStatus === 'success') {
