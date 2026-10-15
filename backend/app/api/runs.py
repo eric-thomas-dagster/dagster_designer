@@ -975,6 +975,18 @@ class LogEvent(BaseModel):
     step_key: str | None = None
 
 
+def _log_ts_to_seconds(raw: str | float | None) -> float | None:
+    """Dagster+ GraphQL returns MessageEvent.timestamp as epoch *millis* in a
+    string; the local instance read yields epoch *seconds*. Normalize the
+    cloud value to seconds so LogEvent.timestamp is uniform."""
+    if raw is None or raw == "":
+        return None
+    try:
+        return float(raw) / 1000.0
+    except (TypeError, ValueError):
+        return None
+
+
 class RunLogsResponse(BaseModel):
     events: list[LogEvent]
     cursor: str | None = None
@@ -1037,7 +1049,7 @@ async def get_run_logs(
             type_name=e.get("__typename") or "",
             message=e.get("message"),
             level=e.get("level"),
-            timestamp=e.get("timestamp"),
+            timestamp=_log_ts_to_seconds(e.get("timestamp")),
             step_key=e.get("stepKey"),
         ))
     return RunLogsResponse(

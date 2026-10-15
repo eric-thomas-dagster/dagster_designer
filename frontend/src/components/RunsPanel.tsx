@@ -775,7 +775,7 @@ function LogLine({ event }: { event: LogRow }) {
     : lvl === 'INFO' ? 'text-blue-700 dark:text-blue-300'
     : lvl === 'DEBUG' ? 'text-gray-500'
     : 'text-gray-500 dark:text-gray-400';
-  const ts = event.timestamp ? new Date(event.timestamp).toISOString().replace('T', ' ').slice(0, 19) : '';
+  const ts = event.timestamp ? new Date(event.timestamp * 1000).toISOString().replace('T', ' ').slice(0, 19) : '';
   return (
     <div className="px-3 py-0.5 hover:bg-gray-50 dark:hover:bg-gray-800/40 border-b border-gray-100 dark:border-gray-800/40 flex items-start gap-3">
       <span className="text-gray-500 tabular-nums flex-shrink-0">{ts}</span>
