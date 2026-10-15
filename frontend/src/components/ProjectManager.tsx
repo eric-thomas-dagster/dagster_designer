@@ -1,6 +1,7 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useProjectStore } from '@/hooks/useProject';
-import { codegenApi, projectsApi, filesApi, pipelinesApi, partitionsApi } from '@/services/api';
+import { codegenApi, projectsApi, filesApi, pipelinesApi, partitionsApi, type BackfillRequest } from '@/services/api';
+import { PartitionBackfill } from './PartitionBackfill';
 import { DbtCloudImportModal } from './DbtCloudImportModal';
 import { ConnectDagsterPlusDialog } from './ConnectDagsterPlusDialog';
 import { GitCommitDialog } from './GitCommitDialog';
@@ -55,6 +56,11 @@ export function ProjectManager() {
   const [isCreating, setIsCreating] = useState(false);
   const [isImporting, setIsImporting] = useState(false);
   const [isMaterializingAll, setIsMaterializingAll] = useState(false);
+  // "Materialize All" where every partitioned asset shares one partition
+  // definition: the picker is shown once, and a single launch covers every
+  // asset (partitioned or not) with the chosen partition(s).
+  const [materializeAllPicker, setMaterializeAllPicker] = useState<{ pickerAssetKey: string; allAssetKeys: string[] } | null>(null);
+  const launchedRef = useRef(false);
   const [, setMaterializeAllResult] = useState<{ success: boolean; message: string } | null>(null);
   const [showProjectMenu, setShowProjectMenu] = useState(false);
   const [showActionsMenu, setShowActionsMenu] = useState(false);
@@ -328,16 +334,60 @@ export function ProjectManager() {
       const runnable = allAssetKeys.filter((_, i) => !partitionChecks[i]);
 
       if (partitioned.length > 0) {
-        notify.error(
-          `${partitioned.join(', ')} ${partitioned.length === 1 ? 'is' : 'are'} partitioned -- ` +
-          `materialize ${partitioned.length === 1 ? 'it' : 'them'} from the Ingestions page's Backfill picker instead, which lets you choose a partition. Materializing the rest now.`
+        // Same rule Dagster itself applies: partitioned assets can only be
+        // launched together if they share one partitions definition. If
+        // they do, pick the partition once and launch everything with it.
+        const infos = await Promise.all(
+          partitioned.map((k) => partitionsApi.getPartitionInfo(currentProject.id, k).catch(() => null))
         );
+        const groups = new Map<string, string[]>();
+        partitioned.forEach((k, i) => {
+          const d = infos[i]?.partitions_def;
+          // Time-window defs are identified by type/start/cron/tz/format;
+          // static/dynamic ones (no start or cron) by their key list.
+          const sig = d
+            ? JSON.stringify([d.type, d.start_date, d.cron_schedule, d.timezone, d.date_format, d.start_date || d.cron_schedule ? null : d.partition_keys])
+            : `unknown:${k}`;
+          groups.set(sig, [...(groups.get(sig) || []), k]);
+        });
+        if (groups.size > 1) {
+          const desc = [...groups.values()].map((g) => g.join(', ')).join('  vs  ');
+          notify.error(
+            `Can't materialize everything at once: partitioned assets have different partition definitions (${desc}). ` +
+            `Materialize them separately from their own pages.`,
+            20000
+          );
+          setIsMaterializingAll(false);
+          return;
+        }
+        launchedRef.current = false;
+        setMaterializeAllPicker({ pickerAssetKey: partitioned[0], allAssetKeys });
+        return; // isMaterializingAll stays true until the picker finishes/cancels
       }
+      await runMaterializeAll(runnable);
+      return;
+    } catch (error: any) {
+      console.error('Materialize all failed:', error);
+      reportMaterializeError(error);
+    }
+    setIsMaterializingAll(false);
+  };
+
+  const reportMaterializeError = (error: any) => {
+    const detail = error?.response?.data?.detail;
+    const reason = (typeof detail === 'string' ? detail : detail?.message || detail?.error) || error?.message || 'unknown error';
+    setMaterializeAllResult({ success: false, message: `Failed to materialize assets: ${reason}` });
+    notify.error(`Failed to materialize assets: ${reason}`, 20000);
+  };
+
+  // Runs the non-partitioned remainder of "Materialize All" in one launch.
+  const runMaterializeAll = async (runnable: string[]) => {
+    if (!currentProject) return;
+    try {
       if (runnable.length === 0) {
-        setMaterializeAllResult({ success: false, message: 'Every asset in this project is partitioned -- nothing to materialize here.' });
+        setMaterializeAllResult({ success: true, message: 'Partitioned assets launched.' });
         return;
       }
-
       const result = await projectsApi.materialize(currentProject.id, runnable);
 
       setMaterializeAllResult({
@@ -350,18 +400,36 @@ export function ProjectManager() {
         notify.success(`${runnable.length} asset(s) materialized successfully!`);
       } else {
         console.error('Materialization failed:', result.stderr);
-        notify.error('Materialization failed. Check console for details.');
+        // A desktop app has no visible console -- show the tail of the
+        // actual error right in the toast instead of pointing at one.
+        const tail = (result.stderr || result.message || '')
+          .trim().split('\n').filter(Boolean).slice(-8).join('\n');
+        notify.error(`Materialization failed:\n${tail || 'no error output was returned'}`, 20000);
       }
-    } catch (error) {
+    } catch (error: any) {
       console.error('Materialize all failed:', error);
-      setMaterializeAllResult({
-        success: false,
-        message: 'Failed to materialize assets. Check console for details.',
-      });
-      notify.error('Failed to materialize assets. Check console for details.');
+      reportMaterializeError(error);
     } finally {
       setIsMaterializingAll(false);
     }
+  };
+
+  // Launches every asset in the project with the partition(s) picked once.
+  const handleMaterializeAllBackfill = async (request: BackfillRequest) => {
+    if (!currentProject || !materializeAllPicker) return;
+    const r = await partitionsApi.launchBackfill(currentProject.id, {
+      ...request,
+      asset_keys: materializeAllPicker.allAssetKeys,
+    });
+    if (!r.success) {
+      const tail = (r.stderr || r.message || '').trim().split('\n').filter(Boolean).slice(-8).join('\n');
+      notify.error(`Materialize All failed:\n${tail}`, 20000);
+      throw new Error(r.message || 'Backfill failed'); // keeps the picker open
+    }
+    notify.success(r.message || 'Materialize All launched -- check the Runs page for progress.');
+    launchedRef.current = true;
+    setMaterializeAllPicker(null);
+    setIsMaterializingAll(false);
   };
 
   const handleLaunchpadSubmit = async (config?: Record<string, any>, tags?: Record<string, string>) => {
@@ -1312,6 +1380,29 @@ export function ProjectManager() {
           projectId={currentProject.id}
           defaultMessage="Update from Dagster Designer"
           defaultRepoName={currentProject.name}
+        />
+      )}
+
+      {/* Materialize All: one partition picker when every partitioned asset
+          shares a partition definition. */}
+      {currentProject && materializeAllPicker && (
+        <PartitionBackfill
+          open
+          onOpenChange={(open) => {
+            if (open) return;
+            // Closing right after a successful launch is the normal finish;
+            // closing otherwise means the user cancelled.
+            if (launchedRef.current) {
+              launchedRef.current = false;
+              return;
+            }
+            setMaterializeAllPicker(null);
+            setIsMaterializingAll(false);
+            notify.info('Materialize All cancelled.');
+          }}
+          projectId={currentProject.id}
+          assetKey={materializeAllPicker.pickerAssetKey}
+          onLaunch={handleMaterializeAllBackfill}
         />
       )}
 

@@ -128,7 +128,11 @@ function syntheticComponentFromNode(node: GraphNode): ComponentInstance {
 }
 
 export function IngestionsPanel({ onAddDataSource, onAddCloudDataSource, onEditComponent, onOpenAsset, onOpenRun, onNewPrimitiveForAsset }: IngestionsPanelProps) {
-  const { currentProject } = useProjectStore();
+  const { currentProject, isLoading: projectLoading, assetGenerationStatus, dependencyInstallStatus } = useProjectStore();
+  // Components/graph nodes can still be landing while a project loads or
+  // its assets generate -- show a loading state instead of a premature
+  // "no ingestions" that then flips to a populated table.
+  const projectSettling = projectLoading || assetGenerationStatus === 'generating' || dependencyInstallStatus === 'installing';
   const isCloud = !!(currentProject as any)?.is_dagster_plus;
   // Assets the user explicitly tagged as ingestion sources (from the
   // asset detail page's "Mark as ingestion source" toggle) -- surfaces
@@ -956,7 +960,9 @@ export function IngestionsPanel({ onAddDataSource, onAddCloudDataSource, onEditC
             <span className="text-xs text-gray-500">{kpis.total} sources · {kpis.configured} configured · {kpis.unconfigured} needing config</span>
           </div>
           {kpis.total === 0 ? (
-            <div className="text-xs text-gray-400 py-4 text-center">No ingestion sources yet — click <strong>Add data</strong> to connect one.</div>
+            <div className="text-xs text-gray-400 py-4 text-center">
+              {projectSettling ? 'Loading…' : <>No ingestion sources yet — click <strong>Add data</strong> to connect one.</>}
+            </div>
           ) : (
             <>
               <div className="h-6 rounded overflow-hidden flex bg-gray-100">
@@ -1082,7 +1088,11 @@ export function IngestionsPanel({ onAddDataSource, onAddCloudDataSource, onEditC
               {filteredIngestions.length} of {ingestions.length}
             </div>
           </div>
-          {filteredIngestions.length === 0 ? (
+          {filteredIngestions.length === 0 && ingestions.length === 0 && projectSettling ? (
+            <div className="p-8 text-center text-sm text-gray-500 flex items-center justify-center gap-2">
+              <Loader2 className="w-4 h-4 animate-spin" /> Loading ingestions…
+            </div>
+          ) : filteredIngestions.length === 0 ? (
             <div className="p-8 text-center">
               <Download className="w-8 h-8 text-gray-300 mx-auto mb-3" />
               <p className="text-sm text-gray-600 mb-3">

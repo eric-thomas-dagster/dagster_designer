@@ -30,7 +30,10 @@ interface ActivatePanelProps {
  * KPIs, so this comes for free from existing infra.
  */
 export function ActivatePanel({ onAddActivationTarget, onEditComponent }: ActivatePanelProps) {
-  const { currentProject } = useProjectStore();
+  const { currentProject, isLoading: projectLoading, assetGenerationStatus, dependencyInstallStatus } = useProjectStore();
+  // Activations are derived from the project's assets, which can still be
+  // landing while it loads/generates -- don't flash a premature empty state.
+  const projectSettling = projectLoading || assetGenerationStatus === 'generating' || dependencyInstallStatus === 'installing';
   const [addOpen, setAddOpen] = useState(false);
   const [runningId, setRunningId] = useState<string | null>(null);
   const [window, setWindow] = useState<'24h' | '7d' | '30d'>('7d');
@@ -217,7 +220,11 @@ export function ActivatePanel({ onAddActivationTarget, onEditComponent }: Activa
             <span className="text-xs text-gray-400">{activations.length}</span>
           </div>
 
-          {activations.length === 0 ? (
+          {activations.length === 0 && projectSettling ? (
+            <div className="p-8 text-center text-sm text-gray-500 flex items-center justify-center gap-2">
+              <Loader2 className="w-4 h-4 animate-spin" /> Loading activations…
+            </div>
+          ) : activations.length === 0 ? (
             <div className="p-8 text-center">
               <Send className="w-8 h-8 text-gray-300 mx-auto mb-3" />
               <p className="text-sm text-gray-600 mb-3">You don't have any activation targets in this project yet.</p>

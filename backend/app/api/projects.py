@@ -2798,8 +2798,10 @@ async def materialize_assets(project_id: str, request: MaterializeRequest):
         )
 
         print(f"[materialize] Return code: {result.returncode}")
-        print(f"[materialize] stdout: {result.stdout[:500]}")  # First 500 chars
-        print(f"[materialize] stderr: {result.stderr[:500]}")  # First 500 chars
+        # Log the TAIL: dg prints a long dagster-instance preamble first, so
+        # a head-slice cut off the real error (confirmed live).
+        print(f"[materialize] stdout: {result.stdout[-4000:]}")
+        print(f"[materialize] stderr: {result.stderr[-4000:]}")
 
         success = result.returncode == 0
         message = "Materialization completed successfully" if success else "Materialization failed"

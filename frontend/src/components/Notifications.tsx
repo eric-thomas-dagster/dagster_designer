@@ -75,7 +75,7 @@ function pushToast(kind: ToastKind, message: unknown, durationMs = 4000) {
 
 export const notify = {
   success: (message: unknown) => pushToast('success', message),
-  error: (message: unknown) => pushToast('error', message, 6000),
+  error: (message: unknown, durationMs = 6000) => pushToast('error', message, durationMs),
   info: (message: unknown) => pushToast('info', message),
   warning: (message: unknown) => pushToast('warning', message, 5000),
 };

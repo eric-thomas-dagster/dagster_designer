@@ -604,16 +604,30 @@ function App() {
   useEffect(() => {
     if (!currentProject || (currentProject as any).is_dagster_plus) return;
     if (autoStartedProjectRef.current === currentProject.id) return;
-    autoStartedProjectRef.current = currentProject.id;
+    // Wait for dependency install and asset generation to finish first --
+    // `dg dev` loads the project's definitions, so starting it earlier
+    // just competes with `dg list defs` for CPU and loads a stale
+    // (pre-generation) code location. The effect re-runs when either
+    // status settles; the ref is only claimed once we actually proceed.
+    if (dependencyInstallStatus === 'installing' || assetGenerationStatus === 'generating') return;
     const projectId = currentProject.id;
 
     const timer = setTimeout(async () => {
+      // Claim the one-shot only when the timer actually fires, so a
+      // status change that cancels this timer doesn't burn the attempt.
+      autoStartedProjectRef.current = projectId;
       try {
         const status = await dagsterUIApi.getStatus(projectId);
         if (status.running) return;
         useProjectStore.setState({ devServerStartStatus: 'starting', devServerStartError: null });
         await dagsterUIApi.start(projectId);
         useProjectStore.setState({ devServerStartStatus: 'success' });
+        // Auto-dismiss like the other success messages in the strip.
+        setTimeout(() => {
+          if (useProjectStore.getState().devServerStartStatus === 'success') {
+            useProjectStore.setState({ devServerStartStatus: 'idle' });
+          }
+        }, 3000);
       } catch (e: any) {
         const detail = e?.response?.data?.detail;
         const message = typeof detail === 'string' ? detail : detail?.message || detail?.error || e?.message;
@@ -621,7 +635,7 @@ function App() {
       }
     }, 1500);
     return () => clearTimeout(timer);
-  }, [currentProject?.id]);
+  }, [currentProject?.id, dependencyInstallStatus, assetGenerationStatus]);
 
   // Fetch validation status globally (checks if project validates)
   // This is intentionally delayed to not block initial page load
