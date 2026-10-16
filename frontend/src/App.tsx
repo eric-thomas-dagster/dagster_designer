@@ -517,6 +517,27 @@ function App() {
   // like nothing was happening for the ~30-60s that can take.
   const isDagsterPlusProject = !!(currentProject as any)?.is_dagster_plus;
   const { status: sandboxStatus } = useDesignerLoc(currentProject?.id ?? null, isDagsterPlusProject);
+
+  // Come back to the window (after dinner, another app, sleep) and the
+  // per-asset run statuses can be hours stale -- they're derived from run
+  // history and only re-read on a project load. Refresh when the window
+  // becomes visible again, at most once a minute so alt-tabbing is cheap.
+  const lastStatusRefresh = useRef(Date.now());
+  useEffect(() => {
+    if (!currentProject?.id) return;
+    const id = currentProject.id;
+    const onVisible = () => {
+      if (document.hidden || Date.now() - lastStatusRefresh.current < 60_000) return;
+      lastStatusRefresh.current = Date.now();
+      useProjectStore.getState().loadProject(id, { silent: true });
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    window.addEventListener('focus', onVisible);
+    return () => {
+      document.removeEventListener('visibilitychange', onVisible);
+      window.removeEventListener('focus', onVisible);
+    };
+  }, [currentProject?.id]);
   const sandboxProvisioning =
     isDagsterPlusProject &&
     !!sandboxStatus?.status &&

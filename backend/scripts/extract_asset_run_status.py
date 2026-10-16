@@ -81,6 +81,14 @@ def main():
         print(json.dumps({"error": f"Failed to open instance at {dagster_home}: {e}"}))
         sys.exit(1)
 
+    # A run whose process died (app closed, sleep/wake, crash) is still
+    # STARTED in storage; close it out so it can't mask a real status.
+    try:
+        from scripts.query_local_runs import reconcile_dead_runs
+        reconcile_dead_runs(instance)
+    except Exception:
+        pass
+
     try:
         # Newest-first by default (confirmed live) -- the first match per
         # asset key below is therefore already the most recent one.

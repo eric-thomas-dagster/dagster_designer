@@ -80,11 +80,15 @@ export function RunsPanel({ initialRunId }: { initialRunId?: string } = {}) {
   }, [currentProject?.id, tagKey]);
   const limit = 25;
 
-  const load = async (c: string | null) => {
+  // `silent` = a background refresh: keep the current rows on screen (no
+  // spinner, no error flash) and just swap in fresh data.
+  const load = async (c: string | null, silent = false) => {
     if (!currentProject) return;
-    setLoading(true);
-    setError(null);
-    setWarning(null);
+    if (!silent) {
+      setLoading(true);
+      setError(null);
+      setWarning(null);
+    }
     try {
       const tags: Array<{ key: string; value: string }> = [];
       if (tagKey.trim()) tags.push({ key: tagKey.trim(), value: tagValue.trim() });
@@ -106,13 +110,50 @@ export function RunsPanel({ initialRunId }: { initialRunId?: string } = {}) {
       setRuns(r.runs);
       setSource(r.source);
       setNextCursor(r.next_cursor);
-      if (r.error) setWarning(r.error);
+      if (r.error && !silent) setWarning(r.error);
     } catch (e: any) {
-      setError(e?.response?.data?.detail || e?.message || 'Failed to load runs.');
+      if (!silent) setError(e?.response?.data?.detail || e?.message || 'Failed to load runs.');
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   };
+
+  // Live refresh. The list used to load only when a filter changed, so a run
+  // that finished (or was started elsewhere) stayed "running" on screen until
+  // you toggled a filter. Poll fast while something's in flight, slowly
+  // otherwise, and not at all while the tab is hidden or a run is open.
+  const IN_FLIGHT = ['STARTED', 'STARTING', 'QUEUED', 'CANCELING', 'NOT_STARTED'];
+  const hasInFlight = runs.some((r) => IN_FLIGHT.includes((r.status || '').toUpperCase()));
+  useEffect(() => {
+    if (!currentProject || selectedRunId) return;
+    const id = setInterval(() => {
+      if (!document.hidden) load(cursor, true);
+    }, hasInFlight ? 4000 : 15000);
+    return () => clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    currentProject?.id, selectedRunId, hasInFlight, cursor,
+    Array.from(statusFilter).sort().join(','),
+    jobFilter, codeLocation, tagKey, tagValue, dateFrom, dateTo,
+  ]);
+
+  // When a run we were watching reaches a terminal state, the asset colors on
+  // the graph / asset pages are stale (they're derived from run history and
+  // only re-read on a project load) -- reload so they match the run.
+  const prevInFlightIds = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    const nowInFlight = new Set(
+      runs.filter((r) => IN_FLIGHT.includes((r.status || '').toUpperCase())).map((r) => r.run_id),
+    );
+    const finished = Array.from(prevInFlightIds.current).some(
+      (id) => !nowInFlight.has(id) && runs.some((r) => r.run_id === id),
+    );
+    prevInFlightIds.current = nowInFlight;
+    if (finished && currentProject) {
+      useProjectStore.getState().loadProject(currentProject.id, { silent: true });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [runs]);
 
   useEffect(() => {
     // Reset cursor stack whenever filters change so we're back on page 1.

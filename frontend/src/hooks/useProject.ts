@@ -27,7 +27,8 @@ interface ProjectStore {
   devServerStartError: string | null;
 
   // Actions
-  loadProject: (id: string) => Promise<void>;
+  /** `silent` = background refresh of the SAME project: don't raise isLoading (no spinner/placeholder flash). */
+  loadProject: (id: string, opts?: { silent?: boolean }) => Promise<void>;
   loadProjects: () => Promise<void>;
   createProject: (name: string, description?: string, gitRepo?: string, gitBranch?: string) => Promise<Project>;
   importProject: (path: string) => Promise<Project>;
@@ -73,7 +74,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   devServerStartStatus: 'idle',
   devServerStartError: null,
 
-  loadProject: async (id: string) => {
+  loadProject: async (id: string, opts?: { silent?: boolean }) => {
     // Clear currentProject when switching to a different project so
     // the loading placeholder actually shows during the fetch.
     // Otherwise the UI keeps rendering the previous project's data
@@ -82,7 +83,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     const prev = get().currentProject;
     if (!prev || prev.id !== id) {
       set({ currentProject: null, isLoading: true, error: null });
-    } else {
+    } else if (!opts?.silent) {
       set({ isLoading: true, error: null });
     }
     try {

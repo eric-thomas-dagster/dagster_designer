@@ -38,7 +38,112 @@ def _event_type_label(event_type_value: str | None) -> str:
     return "".join(w.capitalize() for w in event_type_value.split("_")) + "Event"
 
 
+def _pid_alive(pid: int, since: float | None) -> bool:
+    """True if `pid` is a live process that plausibly IS the run's process.
+    `since` (the run's start/creation epoch) guards against PID reuse: a
+    process that started after the run did can't be the run's own."""
+    import os
+
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # The pid exists but belongs to another user (e.g. a root-owned system
+        # process that reused it) -- still subject to the start-time check below.
+        pass
+    if since is None:
+        return True
+    created = _process_start_time(pid)
+    # Unknown start time -> assume alive rather than wrongly failing a live run.
+    return created is None or created <= since + 5
+
+
+def _process_start_time(pid: int) -> float | None:
+    """Epoch start time of `pid`, or None if it can't be determined. psutil
+    isn't guaranteed to be in a project's venv, so fall back to `ps` (POSIX)."""
+    try:
+        import psutil
+
+        return psutil.Process(pid).create_time()
+    except Exception:
+        pass
+    try:
+        import os
+        import subprocess
+        import time
+
+        out = subprocess.run(
+            ["ps", "-o", "lstart=", "-p", str(pid)],
+            capture_output=True, text=True, timeout=5,
+            env={**os.environ, "LC_ALL": "C", "LANG": "C"},
+        ).stdout.strip()
+        return time.mktime(time.strptime(out, "%a %b %d %H:%M:%S %Y")) if out else None
+    except Exception:
+        return None
+
+
+def _run_process_pid(instance, run_id: str) -> int | None:
+    """The run process's PID, from the engine events Dagster logs when it starts
+    executing ("... parent process (pid: N)" / "Started process for run (pid: N)")."""
+    import re
+    from dagster import DagsterEventType
+
+    conn = instance.get_records_for_run(run_id, of_type=DagsterEventType.ENGINE_EVENT, limit=20, ascending=True)
+    for rec in conn.records:
+        entry = rec.event_log_entry
+        msg = (entry.dagster_event.message if entry.dagster_event else None) or entry.user_message or ""
+        m = re.search(r"pid[:=]\s*(\d+)", msg)
+        if m:
+            return int(m.group(1))
+    return None
+
+
+def reconcile_dead_runs(instance, dry_run: bool = False) -> list[dict]:
+    """Close out runs whose process is gone.
+
+    Runs Designer launches via `dg launch` execute inside that subprocess, with
+    no daemon watching them (run monitoring is off for a local instance), so if
+    the process dies -- app quit, sleep/wake, a crash, a restart -- the run
+    stays STARTED forever and the Runs page shows it as running indefinitely
+    (confirmed: runs from days ago still "running"). If the recorded process is
+    no longer alive, mark the run failed (or canceled, if it was CANCELING) so
+    the page and per-asset statuses stop reporting a ghost.
+    """
+    import time
+    from dagster._core.storage.dagster_run import DagsterRunStatus, RunsFilter
+
+    in_flight = [DagsterRunStatus.STARTED, DagsterRunStatus.STARTING, DagsterRunStatus.CANCELING]
+    fixed: list[dict] = []
+    for rec in instance.get_run_records(RunsFilter(statuses=in_flight), limit=50):
+        run = rec.dagster_run
+        started = rec.start_time or (rec.create_timestamp.timestamp() if rec.create_timestamp else None)
+        # Give a freshly launched run a moment to log its process id.
+        if started is not None and time.time() - started < 30:
+            continue
+        pid = _run_process_pid(instance, run.run_id)
+        if pid is None or _pid_alive(pid, started):
+            continue
+        entry = {"run_id": run.run_id, "was": run.status.value, "pid": pid}
+        if not dry_run:
+            msg = (
+                f"The run's process (pid {pid}) is no longer running -- it was interrupted "
+                f"(for example the app was closed or the machine slept) before the run could finish."
+            )
+            if run.status == DagsterRunStatus.CANCELING:
+                instance.report_run_canceled(run, message=msg)
+            else:
+                instance.report_run_failed(run, message=msg)
+        fixed.append(entry)
+    return fixed
+
+
+def mode_reconcile_runs(instance, args: dict) -> dict:
+    return {"reconciled": reconcile_dead_runs(instance, dry_run=bool(args.get("dry_run")))}
+
+
 def mode_list_runs(instance, args: dict) -> dict:
+    reconcile_dead_runs(instance)
     from datetime import datetime, timezone
     from dagster._core.storage.dagster_run import RunsFilter, DagsterRunStatus
 
@@ -94,6 +199,7 @@ def mode_list_runs(instance, args: dict) -> dict:
 
 
 def mode_run_detail(instance, args: dict) -> dict:
+    reconcile_dead_runs(instance)
     import yaml
     from dagster._core.storage.dagster_run import DagsterRunStatus
 
@@ -303,6 +409,7 @@ def mode_run_logs(instance, args: dict) -> dict:
 
 
 def mode_run_status(instance, args: dict) -> dict:
+    reconcile_dead_runs(instance)
     run = instance.get_run_by_id(args["run_id"])
     if run is None:
         return {"status": "UNKNOWN", "message": "Run not found"}
@@ -422,6 +529,7 @@ MODES = {
     "tag_values": mode_tag_values,
     "job_names": mode_job_names,
     "reexecute_info": mode_reexecute_info,
+    "reconcile_runs": mode_reconcile_runs,
     "latest_run_since": mode_latest_run_since,
 }
 
