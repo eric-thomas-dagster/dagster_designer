@@ -552,7 +552,9 @@ export function DataPreviewModal({
     // means "distinct combinations of the group columns" (SQL's GROUP BY
     // semantics) -- it used to silently do nothing unless an aggregation was
     // also added.
-    if (groupByColumns.length > 0 && gate()) {
+    // Aggregations with NO group-by columns are valid too: one row aggregating
+    // the whole table (SQL: SELECT MAX(x) FROM t) -- they used to be ignored.
+    if ((groupByColumns.length > 0 || Object.keys(aggregations).length > 0) && gate()) {
       // Key on the real values (JSON), not a '|'-joined string, so values that
       // contain '|' don't merge/split wrongly and group values keep their type.
       const groups = new Map<string, any[]>();
@@ -1064,8 +1066,8 @@ export function DataPreviewModal({
       op.into.split(',').map(s => s.trim()).filter(Boolean).forEach(pushDerived);
     });
 
-    if (groupByColumns.length > 0) {
-      // If grouping, show group columns + aggregated columns (none = distinct groups)
+    if (groupByColumns.length > 0 || Object.keys(aggregations).length > 0) {
+      // If grouping/aggregating, show group columns + aggregated columns (no aggregations = distinct groups)
       finalColumns = [...groupByColumns, ...Object.keys(aggregations)];
       // Apply renames to column names
       finalColumns = finalColumns.map(col => columnRenames[col] || col);
@@ -1592,11 +1594,13 @@ export function DataPreviewModal({
       steps.push({ id: 'fillna', icon: 'wand', label: 'Fill NA', detail: `with "${fillNAValue}"`, onRemove: () => setFillNAValue('') });
     }
     // 5. group by (+ optional aggregations; none = distinct groups)
-    if (groupByColumns.length > 0) {
+    if (groupByColumns.length > 0 || Object.keys(aggregations).length > 0) {
       const aggCount = Object.keys(aggregations).length;
       steps.push({
-        id: 'group', icon: 'group', label: 'Group by',
-        detail: aggCount > 0 ? `${groupByColumns.join(', ')} · ${aggCount} agg(s)` : `${groupByColumns.join(', ')} · distinct values`,
+        id: 'group', icon: 'group', label: groupByColumns.length > 0 ? 'Group by' : 'Aggregate',
+        detail: groupByColumns.length === 0
+          ? `${Object.entries(aggregations).map(([c, f]) => `${f}(${c})`).join(', ')} · whole table`
+          : aggCount > 0 ? `${groupByColumns.join(', ')} · ${aggCount} agg(s)` : `${groupByColumns.join(', ')} · distinct values`,
         onRemove: () => { setGroupByColumns([]); setAggregations({}); },
       });
     }
@@ -2323,7 +2327,9 @@ export function DataPreviewModal({
                                 </div>
                               )}
                               <p className="text-xs text-gray-500 mt-1">
-                                Select a column and aggregation function to add
+                                {Object.keys(aggregations).length > 0 && groupByColumns.length === 0
+                                  ? 'No group-by columns: these aggregate the whole table into a single row.'
+                                  : 'Select a column and aggregation function to add'}
                               </p>
                             </div>
                           </div>

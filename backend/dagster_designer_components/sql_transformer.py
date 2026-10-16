@@ -503,7 +503,8 @@ def _build_select_sql(cfg: dict[str, Any], dialect_name: str) -> str:
     # per-row projection ops below (calculated columns, string ops, window
     # functions, ...). Handled as its own simple, separate path rather than
     # threading a group_by flag through 300 lines of per-row logic.
-    if group_by_cols:
+    # Aggregations with no group_by are valid too: one row aggregating the whole table.
+    if group_by_cols or agg_functions:
         return _build_group_by_sql(cfg, group_by_cols, agg_functions, dialect_name)
 
     tbl = _from_clause(cfg)
@@ -978,7 +979,8 @@ def _build_group_by_sql(
         for c in sorted(cols_referenced):
             stmt = stmt.where(literal_column(f'"{c}"').isnot(None))
 
-    stmt = stmt.group_by(*[literal_column(f'"{c}"') for c in group_by_cols])
+    if group_by_cols:
+        stmt = stmt.group_by(*[literal_column(f'"{c}"') for c in group_by_cols])
 
     if cfg.get("sort_by"):
         sort_cols = _csv(cfg["sort_by"])
