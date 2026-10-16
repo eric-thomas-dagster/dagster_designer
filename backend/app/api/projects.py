@@ -6779,6 +6779,15 @@ async def list_monitors(project_id: str):
                 tags=list(node.get('tags') or []),
             ))
 
+    # Results Dagster itself recorded in this project's instance (every run, whichever
+    # way it was launched). dbt's run_results.json isn't updated by the Dagster dbt
+    # component and `dg dev` may not be running, so without this checks read "never run".
+    try:
+        from ..services.local_check_results import apply_local_check_results
+        await asyncio.to_thread(apply_local_check_results, root, monitors)
+    except Exception as _e:
+        print(f"[monitors] couldn't read check results from the instance: {_e}", flush=True)
+
     def _bucket(status: str | None) -> str:
         s = (status or '').lower()
         if s in ('pass', 'success'): return 'passing'
