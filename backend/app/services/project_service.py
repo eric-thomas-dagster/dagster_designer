@@ -2009,6 +2009,9 @@ class ProjectService:
         """
         project_dir = self._get_project_dir(project)
         output_lines = []
+        # import_project() calls this directly (the status entry is otherwise created by the async
+        # wrapper), and log() below writes into it -- importing a folder died with KeyError: <project id>.
+        _dependency_status.setdefault(project.id, {'status': 'installing', 'error': None, 'output': ''})
 
         def log(msg: str):
             """Log message to both console and output buffer"""

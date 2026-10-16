@@ -36,7 +36,7 @@ import { DataPreviewModal } from './DataPreviewModal';
 import { AssetIOPanel } from './AssetIOPanel';
 import { DagsterAIBar } from './DagsterAIBar';
 import { AddDataDialog } from './AddDataDialog';
-import { notify } from './Notifications';
+import { notify, confirmDialog } from './Notifications';
 import { AutoCoverageModal } from './AssetDetailPage';
 import { useGroupByCodeLocation } from '@/hooks/useGroupByCodeLocation';
 import { GroupByLocationToggle } from './GroupByLocationToggle';
@@ -486,6 +486,18 @@ interface GraphEditorProps {
   ribbonHost?: HTMLElement | null;
 }
 
+// O(1) node lookup for edge routing. A WeakMap keyed by the node array builds the index once per array;
+// `flowNodes.find(...)` per edge was O(nodes x edges) -- seconds of frozen UI at 30k assets.
+const _nodeIndexCache = new WeakMap<object, Map<string, any>>();
+function nodeById<T extends { id: string }>(nodes: T[], id: string): T | undefined {
+  let idx = _nodeIndexCache.get(nodes);
+  if (!idx) {
+    idx = new Map(nodes.map((n) => [n.id, n]));
+    _nodeIndexCache.set(nodes, idx);
+  }
+  return idx.get(id);
+}
+
 function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onViewModeChange, onOpenAssetDetail, ribbonHost }: GraphEditorProps) {
   const [addDataOpen, setAddDataOpen] = useState(false);
   // Group-collapse toggle -- folds assets by group_name into one node
@@ -515,6 +527,10 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
   const [tagFilter, setTagFilter] = useState<string>('all');
   const [ownerFilter, setOwnerFilter] = useState<string>('all');
   const [catalogSortColumn, setCatalogSortColumn] = useState<CatalogSortColumn | null>(null);
+  // The catalog is a plain <table>; at 30k assets rendering every row froze the page for ~55s
+  // (630k DOM nodes). Render the first CATALOG_PAGE rows and let the user reveal more.
+  const CATALOG_PAGE = 200;
+  const [catalogLimit, setCatalogLimit] = useState(CATALOG_PAGE);
   const [catalogSortDirection, setCatalogSortDirection] = useState<'asc' | 'desc'>('asc');
   const toggleCatalogSort = (col: CatalogSortColumn) => {
     const next = nextSortState(catalogSortColumn, catalogSortDirection, col);
@@ -1265,19 +1281,18 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
 
       // Mark edges as custom if they exist in custom_lineage
       // IMPORTANT: Also normalize edge source/target to replace slashes with underscores
+      // Set lookups, not .some() per edge: with 30k assets / 27k edges the nested scans froze the page for seconds.
+      const customLineagePairs = new Set<string>(
+        customLineage.map((cl: { source: string; target: string }) =>
+          `${cl.source.replace(/\//g, '_')}\u0000${cl.target.replace(/\//g, '_')}`
+        )
+      );
       const edgesWithCustom = currentProject.graph.edges.map((edge: GraphEdge) => {
         // Normalize source and target (replace / with _)
         const normalizedSource = edge.source.replace(/\//g, '_');
         const normalizedTarget = edge.target.replace(/\//g, '_');
 
-        const isCustomLineage = customLineage.some(
-          (cl: { source: string; target: string }) => {
-            // Convert asset keys to node IDs for comparison
-            const sourceNodeId = cl.source.replace(/\//g, '_');
-            const targetNodeId = cl.target.replace(/\//g, '_');
-            return sourceNodeId === normalizedSource && targetNodeId === normalizedTarget;
-          }
-        );
+        const isCustomLineage = customLineagePairs.has(`${normalizedSource}\u0000${normalizedTarget}`);
         return {
           ...edge,
           source: normalizedSource,
@@ -1287,15 +1302,15 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
       });
 
       // Add any custom lineage edges that don't exist yet
+      const existingEdgePairs = new Set<string>(edgesWithCustom.map((e: GraphEdge) => `${e.source}\u0000${e.target}`));
       customLineage.forEach((cl: { source: string; target: string }) => {
         // Convert asset keys to node IDs (replace / with _)
         const sourceNodeId = cl.source.replace(/\//g, '_');
         const targetNodeId = cl.target.replace(/\//g, '_');
 
-        const edgeExists = edgesWithCustom.some(
-          (e: GraphEdge) => e.source === sourceNodeId && e.target === targetNodeId
-        );
+        const edgeExists = existingEdgePairs.has(`${sourceNodeId}\u0000${targetNodeId}`);
         if (!edgeExists) {
+          existingEdgePairs.add(`${sourceNodeId}\u0000${targetNodeId}`);
           edgesWithCustom.push({
             id: `${sourceNodeId}_to_${targetNodeId}`,
             source: sourceNodeId,
@@ -1313,7 +1328,7 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
         if (!edgeMap.has(edge.id)) {
           edgeMap.set(edge.id, edge);
         } else {
-          console.log(`[GraphEditor] Removed duplicate edge: ${edge.id}`);
+          // (duplicate dropped silently -- logging each one is O(n) console spam at scale)
         }
       });
       const deduplicatedEdges = Array.from(edgeMap.values());
@@ -1324,13 +1339,13 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
       // Preserve selection state from current edges
       const currentSelectedEdgeIds = new Set(edges.filter(e => e.selected).map(e => e.id));
 
+      const flowNodeById = new Map(flowNodes.map(n => [n.id, n] as const));
       const flowEdges: Edge[] = deduplicatedEdges.map((edge: GraphEdge) => {
         const isCustom = edge.is_custom === true;
-        console.log(`[GraphEditor] Edge ${edge.id}: is_custom=${edge.is_custom}, source=${edge.source}, target=${edge.target}, will use type=${isCustom ? 'custom' : 'default'}`);
 
         // Calculate smart edge routing based on node positions
-        const sourceNode = flowNodes.find(n => n.id === edge.source);
-        const targetNode = flowNodes.find(n => n.id === edge.target);
+        const sourceNode = flowNodeById.get(edge.source);
+        const targetNode = flowNodeById.get(edge.target);
         const { sourceHandle, targetHandle } = calculateEdgeHandles(sourceNode, targetNode);
 
         return {
@@ -1718,8 +1733,8 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
 
           const flowEdges: Edge[] = updatedProject.graph.edges.map((edge: GraphEdge) => {
             // Calculate smart edge routing
-            const sourceNode = flowNodes.find(n => n.id === edge.source);
-            const targetNode = flowNodes.find(n => n.id === edge.target);
+            const sourceNode = nodeById(flowNodes, edge.source);
+            const targetNode = nodeById(flowNodes, edge.target);
             const { sourceHandle, targetHandle } = calculateEdgeHandles(sourceNode, targetNode);
 
             return {
@@ -2186,8 +2201,8 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
 
           const flowEdges: Edge[] = edgesWithCustom.map((edge: GraphEdge) => {
             // Calculate smart edge routing
-            const sourceNode = flowNodes.find(n => n.id === edge.source);
-            const targetNode = flowNodes.find(n => n.id === edge.target);
+            const sourceNode = nodeById(flowNodes, edge.source);
+            const targetNode = nodeById(flowNodes, edge.target);
             const { sourceHandle, targetHandle } = calculateEdgeHandles(sourceNode, targetNode);
 
             return {
@@ -2731,6 +2746,16 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
     // longest-path layering, same idea as the old flat one but scoped to
     // edges within this group only).
     const blocks: Record<string, { width: number; height: number; localPos: Map<string, { x: number; y: number }> }> = {};
+    // Bucket intra-group edges once. Scanning ALL edges for every expanded group was O(groups x edges)
+    // -- ~80M checks (tens of seconds) when "Expand all" is used on a 30k-asset graph.
+    const intraEdgesByGroup = new Map<string, Edge[]>();
+    for (const e of edges) {
+      const g = nodeToGroup.get(e.source);
+      if (g === undefined || g !== nodeToGroup.get(e.target) || e.source === e.target) continue;
+      let bucket = intraEdgesByGroup.get(g);
+      if (!bucket) intraEdgesByGroup.set(g, (bucket = []));
+      bucket.push(e);
+    }
     for (const [g, info] of Object.entries(groupInfo)) {
       if (!isGroupExpanded(g)) {
         blocks[g] = { width: GROUP_CARD_WIDTH, height: GROUP_CARD_FALLBACK_HEIGHT, localPos: new Map() };
@@ -2739,10 +2764,8 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
       const idsInGroup = new Set(info.assets.map((a) => a.id));
       const intraPreds: Record<string, string[]> = {};
       for (const a of info.assets) intraPreds[a.id] = [];
-      for (const e of edges) {
-        if (idsInGroup.has(e.source) && idsInGroup.has(e.target) && e.source !== e.target) {
-          intraPreds[e.target].push(e.source);
-        }
+      for (const e of intraEdgesByGroup.get(g) ?? []) {
+        if (idsInGroup.has(e.source) && idsInGroup.has(e.target)) intraPreds[e.target].push(e.source);
       }
       // Longest-path layer assignment via DFS with a cycle guard (matches
       // arrangeGroups' own approach below) rather than Kahn's algorithm --
@@ -3282,7 +3305,18 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
               {collapseToGroups && allGroups.length > 0 && (
                 <>
                   <button
-                    onClick={() => setExpandedGroups(new Set(allGroups))}
+                    onClick={async () => {
+                      // Mounting thousands of asset cards at once is slow on any machine; make it a choice.
+                      const assetTotal = nodes.filter((n) => n.data?.node_kind === 'asset').length;
+                      if (assetTotal > 3000) {
+                        const ok = await confirmDialog(
+                          `This project has ${assetTotal.toLocaleString()} assets. Expanding every group renders all of them and can freeze the graph for a long time. Expanding just the groups you need (click a group) is much faster.`,
+                          { title: 'Expand all groups?' },
+                        );
+                        if (!ok) return;
+                      }
+                      setExpandedGroups(new Set(allGroups));
+                    }}
                     disabled={expandedGroups.size === allGroups.length}
                     tabIndex={inGraph ? 0 : -1}
                     className="px-2 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-100 rounded disabled:opacity-40 disabled:hover:bg-transparent whitespace-nowrap"
@@ -3503,7 +3537,14 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
               <table className="w-full text-sm">
                 {headerRow}
                 <tbody>
-                  {catalogLocationGroups.map((group) => (
+                  {(() => {
+                    let budget = catalogLimit;
+                    return catalogLocationGroups.map((g) => {
+                      const rows = g.rows.slice(0, Math.max(0, budget));
+                      budget -= rows.length;
+                      return { ...g, shown: rows, total: g.rows.length };
+                    });
+                  })().map((group) => (
                     <React.Fragment key={group.location ?? '__flat__'}>
                       {group.location && (
                         <tr className="bg-gray-50">
@@ -3512,9 +3553,20 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
                           </td>
                         </tr>
                       )}
-                      {group.rows.map(renderRow)}
+                      {group.shown.map(renderRow)}
                     </React.Fragment>
                   ))}
+                  {primaryAssets.length > catalogLimit && (
+                    <tr>
+                      <td colSpan={11} className="px-4 py-3 text-center text-xs text-gray-600 bg-gray-50">
+                        Showing {catalogLimit.toLocaleString()} of {primaryAssets.length.toLocaleString()} assets{' · '}
+                        <button className="text-blue-600 hover:underline" onClick={() => setCatalogLimit((n) => n + 500)}>Show 500 more</button>
+                        {' · '}
+                        <button className="text-blue-600 hover:underline" onClick={() => setCatalogLimit(Number.MAX_SAFE_INTEGER)}>Show all</button>
+                        <span className="text-gray-400"> (search or filter to narrow the list)</span>
+                      </td>
+                    </tr>
+                  )}
                   {primaryAssets.length === 0 && (
                     <tr><td colSpan={11} className="px-4 py-8 text-center text-xs text-gray-500 italic">No assets match the current filters.</td></tr>
                   )}
@@ -3569,6 +3621,8 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
         nodesConnectable={true}
         elementsSelectable={true}
         selectNodesOnDrag={false}
+        // Only mount nodes/edges inside the viewport: expanding a 30k-asset graph otherwise mounts ~1M DOM nodes
+        onlyRenderVisibleElements
         minZoom={0.2}
         maxZoom={2}
         // A fast double-click on a group header/card (see the local
