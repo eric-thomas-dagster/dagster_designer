@@ -1198,6 +1198,34 @@ async def _reexecute_local(
     raise HTTPException(status_code=502, detail="Re-execution was started but no new run appeared; check the Runs page shortly.")
 
 
+class StartedRunRequest(BaseModel):
+    since: float                              # epoch seconds, when the launch was kicked off
+    asset_keys: list[str] | None = None       # what was requested ("+key"/"key+" prefixes allowed)
+
+
+class StartedRunResponse(BaseModel):
+    run_id: str | None = None
+    status: str | None = None
+    supported: bool = True
+
+
+@router.post("/{project_id}/runs/started-since", response_model=StartedRunResponse)
+async def run_started_since(project_id: str, req: StartedRunRequest):
+    """Which run did a launch that began at `since` create? Lets the UI link to the
+    run while `dg launch` is still blocking, so it can be watched live. Returns
+    run_id=null until the run record exists (loading the project's definitions comes
+    first, a few seconds)."""
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    if getattr(project, "is_dagster_plus", False):
+        return StartedRunResponse(supported=False)
+    # Selection syntax ("+orders", "orders+", "*orders") -> bare asset keys.
+    keys = [k.strip().strip("+*") for k in (req.asset_keys or [])]
+    data = await _query_local(project, "latest_run_since", {"since": req.since, "asset_keys": [k for k in keys if k]})
+    return StartedRunResponse(run_id=data.get("run_id"), status=(data.get("status") or None))
+
+
 @router.post("/{project_id}/runs/{run_id}/reexecute", response_model=RunActionResponse)
 async def reexecute_run(project_id: str, run_id: str, request: ReexecuteRequest):
     """Launch a new run derived from an existing one. Strategy controls

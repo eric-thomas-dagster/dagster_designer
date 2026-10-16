@@ -53,6 +53,7 @@ import { AssetDetailPage, type Tab as AssetDetailTab } from './components/AssetD
 import { AlertsPanel } from './components/AlertsPanel';
 import { RunsPanel } from './components/RunsPanel';
 import { AiFixPanel } from './components/AiFixPanel';
+import { registerRunOpener } from './lib/runLink';
 import { DataPreviewModal } from './components/DataPreviewModal';
 import { DagsterCloudChip } from './components/DagsterCloudChip';
 import { SandboxStatusPill, pillLabel as sandboxPillLabel } from './components/SandboxStatusPill';
@@ -374,6 +375,9 @@ function App() {
     setRunToOpen(runId);
     setActiveMainTab('runs');
   };
+  // Let the API layer open a run too (the "View run" action on the toast shown when
+  // a materialization starts) -- see lib/runLink.ts.
+  useEffect(() => registerRunOpener(handleOpenRun), []); // eslint-disable-line react-hooks/exhaustive-deps
   // Same idea, for jumping from an asset's checks list (Property Panel) to
   // that check's row in the Monitors tab instead of just opening its code.
   const [monitorToOpen, setMonitorToOpen] = useState<{ assetKey: string; checkName: string } | null>(null);

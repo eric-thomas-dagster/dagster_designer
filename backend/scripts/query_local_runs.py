@@ -504,19 +504,39 @@ def mode_reexecute_info(instance, args: dict) -> dict:
     }
 
 
+def pick_started_run(candidates: list[dict], since: float, wanted: set[str] | None = None) -> dict | None:
+    """Choose the run a just-clicked "Materialize" created. `dg launch` can't be
+    told a run id or tag, so correlate by time (created at/after `since`) and, when
+    several runs appeared, prefer the newest whose asset selection overlaps the
+    assets that were requested. Each candidate: {run_id, status, created, assets}."""
+    fresh = [c for c in candidates if c["created"] >= since]
+    if not fresh:
+        return None
+    if wanted:
+        overlapping = [c for c in fresh if c["assets"] & wanted]
+        if overlapping:
+            fresh = overlapping
+    return max(fresh, key=lambda c: c["created"])
+
+
 def mode_latest_run_since(instance, args: dict) -> dict:
-    """Newest run created at/after `since` (epoch seconds), so a caller that
-    just kicked off a `dg launch` can find the id of the run it created."""
+    """The run created at/after `since` (epoch seconds) -- used to find the run a
+    just-started `dg launch` created, while that launch is still blocking."""
     since = float(args["since"])
-    records = instance.get_run_records(limit=5)
-    best = None
-    for r in records:
-        created = r.create_timestamp.timestamp() if r.create_timestamp else 0
-        if created >= since and (best is None or created > best[0]):
-            best = (created, r.dagster_run)
+    wanted = {k for k in (args.get("asset_keys") or []) if k}
+    candidates = []
+    for r in instance.get_run_records(limit=20):
+        run = r.dagster_run
+        candidates.append({
+            "run_id": run.run_id,
+            "status": run.status.value,
+            "created": r.create_timestamp.timestamp() if r.create_timestamp else 0,
+            "assets": {"/".join(k.path) for k in (run.asset_selection or [])},
+        })
+    best = pick_started_run(candidates, since, wanted)
     if best is None:
         return {"run_id": None}
-    return {"run_id": best[1].run_id, "status": best[1].status.value}
+    return {"run_id": best["run_id"], "status": best["status"]}
 
 
 MODES = {

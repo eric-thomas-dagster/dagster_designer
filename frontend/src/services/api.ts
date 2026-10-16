@@ -1,4 +1,6 @@
 import axios from 'axios';
+import { notify } from '@/components/Notifications';
+import { openRun } from '@/lib/runLink';
 import type {
   Project,
   ProjectCreate,
@@ -18,6 +20,54 @@ const api = axios.create({
   },
   timeout: 600000, // 10 minute timeout for long operations (asset generation for large projects with 500+ assets)
 });
+
+/**
+ * While a launch is in flight, poll for the run it creates and surface a toast with a
+ * "View run" link (-> the live Runs page). The endpoint can only match by time and
+ * requested assets, so this is a convenience link, never something callers rely on.
+ * `stop()` is called when the launch settles: if the run was never found, one last
+ * lookup shows a "finished" link instead.
+ */
+function watchForStartedRun(projectId: string, assetKeys?: string[]) {
+  const since = Date.now() / 1000 - 1;
+  let stopped = false;
+  let shown = false;
+
+  const lookup = async (): Promise<{ run_id: string | null; status: string | null; supported: boolean } | null> => {
+    try {
+      return (await api.post(`/projects/${projectId}/runs/started-since`, { since, asset_keys: assetKeys ?? null }, { timeout: 30_000 })).data;
+    } catch {
+      return null; // never let the convenience link interfere with the launch itself
+    }
+  };
+  const show = (runId: string, status: string | null) => {
+    if (shown) return;
+    shown = true;
+    const done = status && ['SUCCESS', 'FAILURE', 'CANCELED'].includes(status);
+    const text = done ? `Run ${status!.toLowerCase()}` : 'Run started';
+    notify.info(text, { durationMs: 12_000, action: { label: 'View run', onClick: () => openRun(runId) } });
+  };
+
+  (async () => {
+    // The run record only exists once the project's definitions have loaded (a few seconds in).
+    for (let i = 0; i < 60 && !stopped && !shown; i++) {
+      await new Promise((r) => setTimeout(r, 2000));
+      if (stopped) break;
+      const r = await lookup();
+      if (r && !r.supported) return; // e.g. Dagster+ projects
+      if (r?.run_id) show(r.run_id, r.status);
+    }
+  })();
+
+  return {
+    stop: async () => {
+      stopped = true;
+      if (shown) return;
+      const r = await lookup();
+      if (r?.run_id) show(r.run_id, r.status);
+    },
+  };
+}
 
 // Components API
 export const componentsApi = {
@@ -119,11 +169,18 @@ export const projectsApi = {
     tags?: Record<string, string>,
     partition?: string
   ) => {
-    const response = await api.post<MaterializeResponse>(
-      `/projects/${projectId}/materialize`,
-      { asset_keys: assetKeys, config, tags, partition }
-    );
-    return response.data;
+    // `dg launch` blocks until the run finishes, so while it does, watch for the run
+    // it creates and offer a "View run" link right away (to follow it live).
+    const watcher = watchForStartedRun(projectId, assetKeys);
+    try {
+      const response = await api.post<MaterializeResponse>(
+        `/projects/${projectId}/materialize`,
+        { asset_keys: assetKeys, config, tags, partition }
+      );
+      return response.data;
+    } finally {
+      void watcher.stop();
+    }
   },
 
   regenerateAssets: async (projectId: string, recalculateLayout: boolean = false) => {

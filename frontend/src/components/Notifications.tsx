@@ -3,10 +3,22 @@ import { CheckCircle, AlertCircle, AlertTriangle, Info, X } from 'lucide-react';
 
 type ToastKind = 'success' | 'error' | 'info' | 'warning';
 
+export interface ToastAction {
+  label: string;
+  onClick: () => void;
+}
+
 interface Toast {
   id: number;
   kind: ToastKind;
   message: string;
+  action?: ToastAction;
+}
+
+export interface ToastOptions {
+  /** A link-style button shown on the toast (e.g. "View run"). Clicking it also dismisses the toast. */
+  action?: ToastAction;
+  durationMs?: number;
 }
 
 interface ConfirmRequest {
@@ -61,9 +73,9 @@ function toMessage(value: unknown): string {
   return String(value);
 }
 
-function pushToast(kind: ToastKind, message: unknown, durationMs = 4000) {
+function pushToast(kind: ToastKind, message: unknown, durationMs = 4000, action?: ToastAction) {
   const id = ++toastSeq;
-  toasts = [...toasts, { id, kind, message: toMessage(message) }];
+  toasts = [...toasts, { id, kind, message: toMessage(message), action }];
   emitToasts();
   if (durationMs > 0) {
     setTimeout(() => {
@@ -74,9 +86,9 @@ function pushToast(kind: ToastKind, message: unknown, durationMs = 4000) {
 }
 
 export const notify = {
-  success: (message: unknown) => pushToast('success', message),
+  success: (message: unknown, opts?: ToastOptions) => pushToast('success', message, opts?.durationMs ?? 4000, opts?.action),
   error: (message: unknown, durationMs = 6000) => pushToast('error', message, durationMs),
-  info: (message: unknown) => pushToast('info', message),
+  info: (message: unknown, opts?: ToastOptions) => pushToast('info', message, opts?.durationMs ?? 4000, opts?.action),
   warning: (message: unknown) => pushToast('warning', message, 5000),
 };
 
@@ -170,7 +182,17 @@ export function NotificationHost() {
               role="status"
             >
               <Icon className={`w-5 h-5 flex-shrink-0 mt-0.5 ${s.iconColor}`} />
-              <div className="flex-1 text-sm whitespace-pre-wrap break-words">{t.message}</div>
+              <div className="flex-1 text-sm whitespace-pre-wrap break-words">
+                {t.message}
+                {t.action && (
+                  <button
+                    onClick={() => { t.action?.onClick(); dismiss(t.id); }}
+                    className="block mt-1 text-sm font-medium text-primary hover:underline"
+                  >
+                    {t.action.label} →
+                  </button>
+                )}
+              </div>
               <button
                 onClick={() => dismiss(t.id)}
                 className="text-gray-400 hover:text-gray-600 flex-shrink-0"
