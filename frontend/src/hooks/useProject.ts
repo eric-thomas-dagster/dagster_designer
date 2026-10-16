@@ -42,7 +42,11 @@ interface ProjectStore {
   dismissDependencyInstallStatus: () => void;
   dismissDevServerStartStatus: () => void;
   pollDependencyStatus: (projectId: string) => Promise<void>;
+  /** Fetch stale/freshness/last-run status separately from the project and merge it in (in memory). */
+  refreshLiveStatus: (id: string) => Promise<void>;
 }
+
+const LIVE_STATUS_FIELDS = ['stale_status', 'freshness_status', 'last_run_status'] as const;
 
 // Module-scoped debounce timer for auto-saving graph changes (positions,
 // edges) back to the backend. Positions are UI state that must persist —
@@ -87,7 +91,20 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
       set({ isLoading: true, error: null });
     }
     try {
-      const project = await projectsApi.get(id);
+      // Local projects load without the live-status lookups (they were the slow part of every load) and get
+      // them right after, below. Dagster+ projects hydrate their graph server-side, so they load as before.
+      const prevForLive = get().currentProject;
+      const project = await projectsApi.get(id, { live: false });
+      if (!(project as any).is_dagster_plus && prevForLive?.id === id) {
+        // Background refresh of the same project: keep the last known live status until the new one lands
+        // (otherwise every refresh would blank the "last run" colouring for a moment).
+        const prevData = new Map(prevForLive.graph.nodes.map((n) => [n.id, n.data] as const));
+        for (const n of project.graph.nodes) {
+          const old = prevData.get(n.id) as any;
+          if (!old) continue;
+          for (const k of LIVE_STATUS_FIELDS) if (old[k] !== undefined && (n.data as any)[k] === undefined) (n.data as any)[k] = old[k];
+        }
+      }
       // For Dagster+ projects, the backend hydrates project.graph from a
       // live GraphQL call and swallows failures there (so a bad/slow
       // deployment doesn't 500 the whole project load) -- but that means
@@ -100,6 +117,8 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
         isLoading: false,
         error: cloudError ? `Couldn't load data from Dagster+: ${cloudError}` : null,
       });
+
+      if (!(project as any).is_dagster_plus) void get().refreshLiveStatus(id);
 
       // Sync dependency-install state from the backend so validation is
       // blocked correctly even after an app restart or project switch.
@@ -119,6 +138,26 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
       }
     } catch (error) {
       set({ error: 'Failed to load project', isLoading: false });
+    }
+  },
+
+  refreshLiveStatus: async (id: string) => {
+    try {
+      const statuses = await projectsApi.getLiveStatus(id);
+      const cur = get().currentProject;
+      if (!cur || cur.id !== id) return; // user moved on
+      let changed = false;
+      const nodes = cur.graph.nodes.map((n) => {
+        const st = statuses[(n.data as any)?.asset_key] ?? statuses[n.id];
+        if (!st) return n;
+        const data = n.data as any;
+        if (LIVE_STATUS_FIELDS.every((k) => st[k] === undefined || data[k] === st[k])) return n;
+        changed = true;
+        return { ...n, data: { ...n.data, ...st } };
+      });
+      if (changed) set({ currentProject: { ...cur, graph: { ...cur.graph, nodes } } });
+    } catch {
+      // Best effort -- no dev server / no runs yet just means no live colouring.
     }
   },
 

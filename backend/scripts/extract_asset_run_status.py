@@ -66,7 +66,9 @@ def main():
         sys.exit(1)
 
     dagster_home = sys.argv[1]
-    asset_keys = [k for k in sys.argv[2].split(",") if k]
+    # "-" = read the comma-separated keys from stdin: a 30k-asset project's keys overflow the OS argv limit.
+    raw_keys = sys.stdin.read() if sys.argv[2] == "-" else sys.argv[2]
+    asset_keys = [k.strip() for k in raw_keys.split(",") if k.strip()]
 
     try:
         from dagster import DagsterInstance, AssetKey

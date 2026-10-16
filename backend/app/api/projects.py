@@ -769,8 +769,39 @@ async def list_projects():
     return ProjectListResponse(projects=projects, total=len(projects))
 
 
+@router.get("/{project_id}/asset-live-status")
+async def get_asset_live_status(project_id: str):
+    """Live per-asset status (stale / freshness / last run) for a LOCAL project.
+
+    Split out of GET /projects/{id}: those lookups (a Dagster GraphQL query -- up to seconds for staleness --
+    plus a subprocess that reads run history) used to run before EVERY project load returned, even though the
+    stored project is a few KB. The UI now loads the project immediately (`live=false`) and merges this in
+    when it arrives."""
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    if project.is_dagster_plus:
+        return {"statuses": {}}
+    async def _safe(fn, label):
+        try:
+            await fn(project)
+        except Exception as e:
+            print(f"[local] {label} merge failed for {project.id}: {e}", flush=True)
+
+    # Independent sources writing different fields -- run them side by side, not one after the other.
+    await asyncio.gather(_safe(_merge_local_asset_status, "asset status"), _safe(_merge_local_last_run_status, "last-run-status"))
+    statuses: dict[str, dict] = {}
+    for node in (project.graph.nodes if project.graph else []):
+        if node.node_kind != "asset":
+            continue
+        d = {k: node.data[k] for k in ("stale_status", "freshness_status", "last_run_status") if node.data.get(k)}
+        if d:
+            statuses[node.data.get("asset_key") or node.id] = d
+    return {"statuses": statuses}
+
+
 @router.get("/{project_id}", response_model=Project)
-async def get_project(project_id: str):
+async def get_project(project_id: str, live: bool = True):
     """Get a project by ID.
 
     For Dagster+ (cloud) projects we hydrate `project.graph` from the
@@ -791,7 +822,7 @@ async def get_project(project_id: str):
             # but tell the frontend WHY so a stale/empty graph isn't silent.
             print(f"[dagster+] hydrate failed for {project.id}: {e}", flush=True)
             project.dagster_plus_last_error = str(e)
-    else:
+    elif live:
         try:
             await _merge_local_asset_status(project)
         except Exception as e:
@@ -1714,7 +1745,8 @@ async def _merge_local_last_run_status(project: Project) -> None:
         from ..core.uv_binary import project_subprocess_env
         result = await asyncio.to_thread(
             _sp.run,
-            [str(venv_python.absolute()), "-m", "scripts.extract_asset_run_status", str(dagster_home), ",".join(asset_keys)],
+            [str(venv_python.absolute()), "-m", "scripts.extract_asset_run_status", str(dagster_home), "-"],
+            input=",".join(asset_keys),  # via stdin: tens of thousands of keys overflow the OS argv limit
             cwd=Path.cwd(),  # backend dir -- same convention as materialize_assets' extract_run_metadata call
             env=project_subprocess_env(project_dir),
             capture_output=True,

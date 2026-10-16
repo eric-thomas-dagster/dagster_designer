@@ -192,9 +192,17 @@ export const projectsApi = {
     return response.data;
   },
 
-  get: async (id: string) => {
-    const response = await api.get<Project>(`/projects/${id}`);
+  get: async (id: string, opts?: { live?: boolean }) => {
+    // live=false skips the backend's per-load status lookups (a Dagster GraphQL query + a run-history
+    // subprocess: ~0.6-3s even for a tiny project). Pair with getLiveStatus().
+    const response = await api.get<Project>(`/projects/${id}`, opts?.live === false ? { params: { live: false } } : undefined);
     return response.data;
+  },
+
+  /** Stale / freshness / last-run status per asset key (local projects), fetched separately from the project. */
+  getLiveStatus: async (id: string): Promise<Record<string, Record<string, string>>> => {
+    const response = await api.get<{ statuses: Record<string, Record<string, string>> }>(`/projects/${id}/asset-live-status`);
+    return response.data.statuses || {};
   },
 
   create: async (data: ProjectCreate) => {
