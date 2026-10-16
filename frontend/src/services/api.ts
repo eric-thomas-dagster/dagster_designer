@@ -28,6 +28,9 @@ export interface BackfillStatus {
   launched: number;
   message: string | null;
   expanded_range: boolean;
+  engine?: 'dagster' | 'cli';
+  finished?: number | null;
+  failed_runs?: number | null;
 }
 
 /**
@@ -35,12 +38,22 @@ export interface BackfillStatus {
  * it in the background and used to only log the outcome, so a backfill that launched nothing still
  * looked like "Backfill launched". Module-level, so it keeps going if the panel that started it unmounts.
  */
-function watchBackfill(projectId: string, backfillId: string, launches: number) {
+function watchBackfill(projectId: string, backfillId: string, launches: number | null, engine: 'dagster' | 'cli') {
   const viewRuns = { label: 'View runs', onClick: () => openRunsList() };
-  notify.info(
-    launches > 1 ? `Backfill started: ${launches} launches. Runs appear one at a time.` : 'Backfill started.',
-    { durationMs: 10_000, action: viewRuns },
-  );
+  const runs = (n: number) => `${n} run${n === 1 ? '' : 's'}`;
+  if (engine === 'dagster') {
+    // A real Dagster backfill: the daemon picks it up on its next tick (~30s), then launches runs in
+    // parallel, upstream unpartitioned assets first.
+    notify.info(
+      `Backfill started${launches ? `: ${runs(launches)}` : ''}. Dagster launches them in parallel; the first appear within about 30 seconds.`,
+      { durationMs: 10_000, action: viewRuns },
+    );
+  } else {
+    notify.info(
+      launches && launches > 1 ? `Backfill started: ${launches} launches. Runs appear one at a time.` : 'Backfill started.',
+      { durationMs: 10_000, action: viewRuns },
+    );
+  }
   (async () => {
     let announcedExpansion = false;
     let errors = 0;
@@ -62,14 +75,18 @@ function watchBackfill(projectId: string, backfillId: string, launches: number) 
         );
       }
       if (st.state === 'failed') {
-        const done = st.launched ? ` after ${st.launched} run${st.launched === 1 ? '' : 's'}` : '';
+        const done = st.launched ? ` after launching ${runs(st.launched)}` : '';
         notify.error(`Backfill failed${done}: ${st.message ?? 'unknown error'}`, 20_000);
         return;
       }
       if (st.state === 'succeeded') {
-        notify.success(`Backfill finished: ${st.launched} run${st.launched === 1 ? '' : 's'} launched.`, { durationMs: 8_000, action: viewRuns });
+        notify.success(`Backfill finished: ${runs(st.launched)} ${engine === 'dagster' ? 'succeeded' : 'launched'}.`, { durationMs: 8_000, action: viewRuns });
         return;
       }
+    }
+    if (errors >= 5) {
+      // Don't go quiet: the user was told it started, so say we can no longer see how it's going.
+      notify.warning('Lost contact with the backfill\'s status (is the project\'s dev server still running?). Check the Runs page for progress.');
     }
   })();
 }
@@ -2528,6 +2545,8 @@ export interface BackfillResponse {
   /** Handle for getBackfillStatus: the launch runs in the background, so `success` only means accepted. */
   backfill_id?: string | null;
   launches?: number | null;
+  /** "dagster" = a real Dagster backfill (parallel, dependency-ordered); "cli" = one dg launch per partition. */
+  engine?: 'dagster' | 'cli' | null;
 }
 
 export const partitionsApi = {
@@ -2581,7 +2600,7 @@ export const partitionsApi = {
     // The launch itself runs in the background (one `dg launch` per partition), so "accepted" isn't
     // "worked". Say it started, with a link to the Runs page, then report how it really went.
     if (response.data.success && response.data.backfill_id) {
-      watchBackfill(projectId, response.data.backfill_id, response.data.launches ?? 1);
+      watchBackfill(projectId, response.data.backfill_id, response.data.launches ?? null, response.data.engine ?? 'cli');
     }
     return response.data;
   },

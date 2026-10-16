@@ -122,6 +122,10 @@ def test_endpoint_returns_a_backfill_id_and_the_status_route_reports_it(monkeypa
 
     async def noop(project_id, project_dir, request, backfill_id=None):
         started["id"] = backfill_id
+
+    async def no_dagster_backfill(*a, **k):
+        return None, None, "test: dev server not running"
+    monkeypatch.setattr(P, "_try_dagster_backfill", no_dagster_backfill)
     monkeypatch.setattr(P, "_run_backfill_in_background", noop)
     c = TestClient(app)
     r = c.post("/api/v1/projects/p/backfill", json={"asset_keys": ["a"], "partition_selection": ["x", "y"]}).json()

@@ -4272,15 +4272,21 @@ class BackfillResponse(BaseModel):
     # `success` here only means "accepted" -- this is how callers learn how it really went.
     backfill_id: str | None = None
     launches: int | None = None
+    # "dagster" = a real Dagster backfill on the project's running dev server (daemon launches the
+    # runs, in dependency order, in parallel); "cli" = one `dg launch` per partition, in sequence.
+    engine: str | None = None
 
 
 class BackfillStatus(BaseModel):
     backfill_id: str
     state: str                    # running | succeeded | failed
-    total: int                    # launches planned (grows when a range is expanded per partition)
-    launched: int                 # `dg launch` calls that created a run so far
+    total: int                    # runs planned (cli: grows when a range is expanded per partition)
+    launched: int                 # runs created so far
     message: str | None = None    # failure reason, or a short success note
-    expanded_range: bool = False  # True if a partition range had to be run partition by partition
+    expanded_range: bool = False  # True if a partition range had to be run partition by partition (cli)
+    engine: str = "cli"
+    finished: int | None = None   # runs that have reached a final state (dagster engine)
+    failed_runs: int | None = None
 
 
 # In-memory (a backfill is minutes long, within one app session); newest 50 kept.
@@ -4317,9 +4323,77 @@ async def _expand_partition_range(project_id: str, asset_keys: list[str], start:
     return None
 
 
+# backfill id -> {project_id, unpartitioned}: what the status route needs besides Dagster's own answer.
+_dagster_backfills: dict[str, dict] = {}
+
+
+async def _try_dagster_backfill(project, project_id: str, request: "BackfillRequest") -> tuple[str | None, int | None, str | None]:
+    """Start a real Dagster backfill on the project's running dev server.
+    Returns (backfill id, expected runs or None, None) on success, or (None, None, why_not) --
+    in which case the caller falls back to the one-`dg launch`-per-partition path."""
+    from ..services import dagster_backfill as dbf
+
+    if request.config:
+        return None, None, "run config is only supported on the CLI path"
+    health = await _run_dagster_graphql(project, dbf.DAEMON_HEALTH_QUERY, {})
+    if health is None:
+        return None, None, "the project's dev server isn't running"
+    if not dbf.backfill_daemon_healthy(health):
+        return None, None, "the dev server's backfill daemon isn't healthy"
+
+    keys = list(request.asset_keys or [])
+    partitioned: dict[str, bool] = {}
+    for ak in keys:
+        try:
+            info = await get_asset_partitions(project_id, ak)
+            partitioned[ak] = bool(info.is_partitioned)
+        except Exception:
+            partitioned[ak] = True  # let Dagster decide; a rejection just falls back
+    title = f"Designer backfill: {', '.join(keys)[:80]}"
+    params = dbf.build_launch_params(request, partitioned, title)
+    data = await _run_dagster_graphql(project, dbf.LAUNCH_MUTATION, {"p": params})
+    result = (data or {}).get("launchPartitionBackfill") or {}
+    if result.get("__typename") != "LaunchBackfillSuccess" or not result.get("backfillId"):
+        return None, None, result.get("message") or f"Dagster rejected the backfill ({result.get('__typename') or 'no response'})"
+
+    unpartitioned = sum(1 for ak in keys if not partitioned.get(ak, True))
+    _dagster_backfills[result["backfillId"]] = {"project_id": project_id, "unpartitioned": unpartitioned}
+    for old_id in list(_dagster_backfills)[:-50]:
+        _dagster_backfills.pop(old_id, None)
+
+    expected = None
+    ranges = dbf.partition_ranges(request)
+    if ranges:
+        total_keys: set[str] = set()
+        for r in ranges:
+            span = await _expand_partition_range(project_id, [k for k in keys if partitioned.get(k, True)], r["start"], r["end"])
+            if span is None:
+                total_keys = set()
+                break
+            total_keys.update(span)
+        expected = (len(total_keys) + unpartitioned) if total_keys else None
+    return result["backfillId"], expected, None
+
+
 @router.get("/{project_id}/backfills/{backfill_id}", response_model=BackfillStatus)
 async def get_backfill_status(project_id: str, backfill_id: str):
     """How a backfill launched via POST /backfill is going (it runs in the background)."""
+    from ..services import dagster_backfill as dbf
+
+    if backfill_id.startswith(dbf.ID_PREFIX):
+        dagster_id = backfill_id[len(dbf.ID_PREFIX):]
+        meta = _dagster_backfills.get(dagster_id)
+        project = project_service.get_project(project_id)
+        if not project:
+            raise HTTPException(status_code=404, detail="Project not found")
+        if not meta or meta["project_id"] != project_id:
+            raise HTTPException(status_code=404, detail="Backfill not found (it may be from an earlier app session)")
+        data = await _run_dagster_graphql(project, dbf.STATUS_QUERY, {"id": dagster_id})
+        if data is None:
+            raise HTTPException(status_code=502, detail="Can't reach the project's dev server to check on the backfill")
+        mapped = dbf.map_status(data.get("partitionBackfillOrError"), meta["unpartitioned"])
+        return BackfillStatus(backfill_id=backfill_id, engine="dagster", **mapped)
+
     job = _backfill_jobs.get(backfill_id)
     if not job or job["project_id"] != project_id:
         raise HTTPException(status_code=404, detail="Backfill not found (it may be from an earlier app session)")
@@ -4360,6 +4434,20 @@ async def launch_backfill(project_id: str, request: BackfillRequest, background_
     if not project_dir.exists():
         raise HTTPException(status_code=404, detail="Project directory not found")
 
+    # Preferred: a real Dagster backfill. Needs the project's dev server (webserver + daemon), which
+    # Designer auto-starts; if it isn't up (or Dagster rejects the request) fall through to the
+    # one-`dg launch`-per-partition path below, which needs nothing running.
+    try:
+        dagster_id, expected, why_not = await _try_dagster_backfill(project, project_id, request)
+    except Exception as e:  # never let the preferred path break the fallback
+        dagster_id, expected, why_not = None, None, f"unexpected error: {e}"
+    if dagster_id:
+        return BackfillResponse(
+            success=True, message="Backfill started.", stdout="", stderr="",
+            backfill_id=f"dagster:{dagster_id}", launches=expected, engine="dagster",
+        )
+    print(f"[backfill] project={project_id} not using a Dagster backfill: {why_not}; falling back to dg launch per partition", flush=True)
+
     partition_count = len(_backfill_partition_args(request))
     import uuid as _uuid
     backfill_id = _uuid.uuid4().hex[:12]
@@ -4373,6 +4461,7 @@ async def launch_backfill(project_id: str, request: BackfillRequest, background_
 
     return BackfillResponse(
         backfill_id=backfill_id,
+        engine="cli",
         launches=partition_count,
         success=True,
         message=(
