@@ -311,6 +311,22 @@ export function PropertyPanel({ nodeId, onConfigureComponent, onOpenFile, onNewP
         .finally(() => {
           setLoadingCommunityComponent(false);
         });
+    } else if ((node as any)?.data?.component_id && ((node as any)?.data?.component_type || sourceComponentId)) {
+      // A component instance that exists on disk (defs/<id>/defs.yaml) but isn't in project.components --
+      // e.g. an asset made by the transformer builder, whose type path is `dagster_community_components.X`
+      // (no ".components." segment). Without this the panel had NO source component, so it offered neither
+      // "Configure" nor "Delete Component Instance" for these assets.
+      const assetComponentId = (node as any).data.component_id;
+      const type = (node as any).data.component_type || sourceComponentId;
+      const displayName = (type.split('.').pop() || 'Component').replace(/Component$/, '').replace(/([a-z])([A-Z])/g, '$1 $2');
+      setSourceComponent({
+        id: assetComponentId,
+        component_type: type,
+        label: displayName,
+        attributes: (node as any).data.component_attributes || {},
+        is_asset_factory: false,
+      });
+      setLoadingCommunityComponent(false);
     } else {
       setSourceComponent(null);
       setLoadingCommunityComponent(false);
