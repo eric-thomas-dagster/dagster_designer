@@ -39,7 +39,7 @@ type Model = Awaited<ReturnType<typeof projectsApi.listDbtModels>>['models'][num
  * gracefully.
  */
 export function DbtPanel({ onOpenFile }: DbtPanelProps) {
-  const { currentProject } = useProjectStore();
+  const { currentProject, loadProject } = useProjectStore();
   // Dagster+ projects are read-only from the Dagster Designer side —
   // hide the "New model" / "Commit" / "Scaffold" affordances that
   // would otherwise 500 with a .venv-not-found error.
@@ -236,6 +236,19 @@ export function DbtPanel({ onOpenFile }: DbtPanelProps) {
     }
   };
 
+  // Creating/deleting a dbt model changes the asset graph, but this panel only re-reads the dbt project.
+  // Re-run asset discovery (dg re-parses the dbt project and refreshes its staged copy) and reload, so the
+  // Assets tab matches -- otherwise a deleted model stayed in the graph (and could still be materialized).
+  const syncAssetGraph = async () => {
+    if (!currentProject || isCloudProject) return;
+    try {
+      await projectsApi.regenerateAssets(currentProject.id, false);
+      await loadProject(currentProject.id, { silent: true });
+    } catch {
+      notify.warning('The dbt change was saved, but the asset graph could not be refreshed yet. Reopen the Assets tab to retry.');
+    }
+  };
+
   // Common delete helper — surfaces a confirm + refreshes on success.
   // Small wrapper so per-kind handlers stay readable.
   const guardedDelete = async (
@@ -312,6 +325,7 @@ export function DbtPanel({ onOpenFile }: DbtPanelProps) {
       // Clear drawer if it was pointing at this model.
       if (selectedUniqueId === m.unique_id) setSelectedUniqueId(null);
       refresh();
+      void syncAssetGraph();
     });
   };
 
@@ -1417,6 +1431,7 @@ export function DbtPanel({ onOpenFile }: DbtPanelProps) {
         onCreated={async (sqlPath) => {
           if (onOpenFile) onOpenFile(sqlPath);
           await refresh();
+          void syncAssetGraph();
         }}
       />
       {diffFor && data?.dbt_project_relative_path && (
