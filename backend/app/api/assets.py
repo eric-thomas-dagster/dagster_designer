@@ -1191,7 +1191,7 @@ async def preview_asset_data(
     # project's src/ importable.
     import os
     from ..core.uv_binary import project_subprocess_env
-    env = project_subprocess_env(project_dir)
+    env = project_subprocess_env(project_dir, fast_load=True)
     project_src_dir = project_dir / "src"
     if "PYTHONPATH" in env:
         env["PYTHONPATH"] = f"{project_src_dir}{os.pathsep}{env['PYTHONPATH']}"

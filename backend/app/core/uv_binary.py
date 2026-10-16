@@ -59,7 +59,7 @@ def venv_bin_path(venv_dir: Path, name: str) -> Path:
     return venv_dir / "bin" / name
 
 
-def project_subprocess_env(project_dir: Path) -> dict[str, str]:
+def project_subprocess_env(project_dir: Path, fast_load: bool = False) -> dict[str, str]:
     """A subprocess env for running a PROJECT's own dg/uv/dbt tooling.
 
     Points VIRTUAL_ENV/PATH at the PROJECT's own .venv -- not just drops
@@ -80,10 +80,23 @@ def project_subprocess_env(project_dir: Path) -> dict[str, str]:
     introspection's dg list defs, a component-schema inspect-component
     call), each of which had partially or fully skipped this -- one
     tested helper instead of re-deriving it per call site.
+
+    `fast_load=True` is for calls that BUILD definitions (`dg list defs`,
+    `dg launch`, ...) and don't need the component library advertised: when
+    the "Fast local loading" app setting is on, it tells
+    dagster-community-components to skip generating a schema for every one of
+    its ~1,400 component types (~5-6s per load). Only ever set in Designer's
+    own subprocess environment -- never written to project files -- so
+    deployed code locations keep advertising the full library. Needs
+    dagster-community-components >= 0.10.110; older versions ignore it.
     """
     venv_dir = project_dir / ".venv"
     bin_dir = venv_bin_path(venv_dir, "dg").parent
     env = os.environ.copy()
+    if fast_load:
+        from . import app_settings
+        if app_settings.get("fast_local_loading"):
+            env["DAGSTER_COMMUNITY_COMPONENTS_SKIP_LIBRARY_JSON"] = "1"
     env["VIRTUAL_ENV"] = str(venv_dir.resolve())
     env["PATH"] = f"{bin_dir}{os.pathsep}{env.get('PATH', '')}"
     env.pop("PYTHONHOME", None)

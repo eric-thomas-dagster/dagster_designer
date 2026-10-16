@@ -3616,3 +3616,14 @@ export const designerLocApi = {
 };
 
 export default api;
+// App-level settings (not per-project) -- see backend/app/core/app_settings.py
+export interface AppSettings {
+  fast_local_loading: boolean;
+}
+
+export const appSettingsApi = {
+  get: async (): Promise<AppSettings> => (await api.get('/app-settings')).data,
+  update: async (changes: Partial<AppSettings>): Promise<AppSettings> =>
+    (await api.put('/app-settings', changes)).data,
+};
+

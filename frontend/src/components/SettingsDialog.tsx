@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
-import { X, KeyRound, ExternalLink, CheckCircle2, FolderCog, Github } from 'lucide-react';
-import { aiApi, projectsApi, promotionApi, type AiProvidersStatus } from '@/services/api';
+import { X, KeyRound, ExternalLink, CheckCircle2, FolderCog, Github, Zap } from 'lucide-react';
+import { aiApi, appSettingsApi, projectsApi, promotionApi, type AiProvidersStatus } from '@/services/api';
 import { notify, confirmDialog } from './Notifications';
 import { isTauri, getProjectsDir, setProjectsDir, pickDirectory } from '@/services/tauri';
 import { useProjectStore } from '@/hooks/useProject';
@@ -185,6 +185,8 @@ function SettingsDialog({ onClose }: { onClose: () => void }) {
 
         {isTauri && <ProjectsFolderSection />}
 
+        <FastLoadingSection />
+
         <GitHubSection />
 
         <div className="flex justify-end gap-2 mt-6">
@@ -204,6 +206,59 @@ function SettingsDialog({ onClose }: { onClose: () => void }) {
           </button>
         </div>
       </div>
+    </div>
+  );
+}
+
+/** Local-only speed-up: tells Designer's own `dg` subprocesses to skip building
+ * the full component-library schema (~1,400 component types) on every
+ * definitions load. Applied to Designer's local subprocess environment only --
+ * nothing is written to project files -- so Dagster+ deployments still
+ * advertise the whole library. */
+function FastLoadingSection() {
+  const [enabled, setEnabled] = useState<boolean | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    appSettingsApi.get().then((s) => setEnabled(s.fast_local_loading)).catch(() => setEnabled(true));
+  }, []);
+
+  const toggle = async (next: boolean) => {
+    setSaving(true);
+    try {
+      const s = await appSettingsApi.update({ fast_local_loading: next });
+      setEnabled(s.fast_local_loading);
+    } catch (e: any) {
+      notify.error(e?.response?.data?.detail || e?.message || 'Failed to update the setting.');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="mt-6 pt-4 border-t border-gray-200">
+      <div className="flex items-center gap-2 mb-1">
+        <Zap className="w-4 h-4 text-primary" />
+        <h3 className="text-sm font-semibold text-gray-900">Fast local loading</h3>
+      </div>
+      <label className="flex items-start gap-2 text-sm text-gray-700 cursor-pointer">
+        <input
+          type="checkbox"
+          className="mt-0.5"
+          checked={enabled ?? true}
+          disabled={enabled === null || saving}
+          onChange={(e) => toggle(e.target.checked)}
+        />
+        <span>
+          Load projects faster on this machine
+          <span className="block text-xs text-gray-500 mt-0.5">
+            Skips building the full component-library catalog each time Designer loads a project's
+            definitions (about half the time on small projects). Only affects Designer's local
+            processes: Dagster+ deployments are unchanged and still list every component. Needs
+            dagster-community-components 0.10.110 or newer; older projects are unaffected.
+          </span>
+        </span>
+      </label>
     </div>
   );
 }

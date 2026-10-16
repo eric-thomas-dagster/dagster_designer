@@ -2445,7 +2445,7 @@ async def validate_project(project_id: str):
         # applied to materialize_assets below; this was the one call site
         # that still leaked the ambient env.
         from ..core.uv_binary import project_subprocess_env
-        env = project_subprocess_env(project_dir.absolute())
+        env = project_subprocess_env(project_dir.absolute(), fast_load=True)
 
         result = None
         for attempt in range(2):
@@ -2762,7 +2762,7 @@ async def materialize_assets(project_id: str, request: MaterializeRequest):
         # Set up environment to use project's venv (use absolute paths)
         from ..core.uv_binary import project_subprocess_env
         project_path_abs = project_path.absolute()
-        env = project_subprocess_env(project_path_abs)
+        env = project_subprocess_env(project_path_abs, fast_load=True)
 
         # Pin a persistent, project-scoped Dagster instance directory so
         # run/event history survives past this one subprocess. Without
@@ -3919,7 +3919,7 @@ async def get_asset_partitions(project_id: str, asset_key: str):
         # project's src/ importable.
         import os
         from ..core.uv_binary import project_subprocess_env
-        env = project_subprocess_env(project_dir)
+        env = project_subprocess_env(project_dir, fast_load=True)
         project_src_dir = project_dir / "src"
         if "PYTHONPATH" in env:
             env["PYTHONPATH"] = f"{project_src_dir}{os.pathsep}{env['PYTHONPATH']}"
@@ -4039,7 +4039,7 @@ async def get_asset_config_schema(project_id: str, asset_key: str):
         # project's src/ importable.
         import os
         from ..core.uv_binary import project_subprocess_env
-        env = project_subprocess_env(project_dir)
+        env = project_subprocess_env(project_dir, fast_load=True)
         project_src_dir = project_dir / "src"
         if "PYTHONPATH" in env:
             env["PYTHONPATH"] = f"{project_src_dir}{os.pathsep}{env['PYTHONPATH']}"
@@ -4283,7 +4283,7 @@ async def _run_backfill_in_background(project_id: str, project_dir: Path, reques
         # sets up for the same reason assets there need it.
         from ..core.uv_binary import project_subprocess_env
         project_dir_abs = project_dir.absolute()
-        env = project_subprocess_env(project_dir_abs)
+        env = project_subprocess_env(project_dir_abs, fast_load=True)
         dagster_home = project_dir_abs / ".designer_dagster_home"
         dagster_home.mkdir(exist_ok=True)
         env["DAGSTER_HOME"] = str(dagster_home)

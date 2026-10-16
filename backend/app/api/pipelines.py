@@ -934,7 +934,7 @@ async def _run_job_launch_in_background(project_id: str, project_path: Path, job
         # Set up environment to use project's venv (use absolute paths)
         from ..core.uv_binary import project_subprocess_env
         project_path_abs = project_path.absolute()
-        env = project_subprocess_env(project_path_abs)
+        env = project_subprocess_env(project_path_abs, fast_load=True)
 
         # Same DAGSTER_HOME pinning materialize_assets/launch_backfill use
         # for their own `dg launch` calls -- without it, this job's run

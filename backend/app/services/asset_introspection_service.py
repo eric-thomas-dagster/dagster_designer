@@ -367,7 +367,7 @@ class AssetIntrospectionService:
                 # why VIRTUAL_ENV/PATH must point at the PROJECT's own venv
                 # rather than just being dropped.
                 from ..core.uv_binary import project_subprocess_env
-                run_env = project_subprocess_env(project_dir.absolute())
+                run_env = project_subprocess_env(project_dir.absolute(), fast_load=True)
                 print(f"[Asset Introspection] Running dg list defs for project {project.id}...", flush=True)
                 result = subprocess.run(
                     [str(dg_path.resolve()), "list", "defs", "--json"],
@@ -486,7 +486,7 @@ class AssetIntrospectionService:
                 # immediately instead of actually introspecting anything.
                 # See core.uv_binary.project_subprocess_env's docstring.
                 from ..core.uv_binary import project_subprocess_env
-                run_env = project_subprocess_env(project_dir.absolute())
+                run_env = project_subprocess_env(project_dir.absolute(), fast_load=True)
                 proc = await asyncio.create_subprocess_exec(
                     dg_cmd, "list", "defs", "--json",
                     stdout=asyncio.subprocess.PIPE,
