@@ -548,29 +548,30 @@ export function DataPreviewModal({
       });
     }
 
-    // 5. Group by and aggregate
-    if (groupByColumns.length > 0 && Object.keys(aggregations).length > 0 && gate()) {
-      const groups: Record<string, any[]> = {};
-
-      // Group rows
+    // 5. Group by (and aggregate). Group-by with NO aggregations is valid and
+    // means "distinct combinations of the group columns" (SQL's GROUP BY
+    // semantics) -- it used to silently do nothing unless an aggregation was
+    // also added.
+    if (groupByColumns.length > 0 && gate()) {
+      // Key on the real values (JSON), not a '|'-joined string, so values that
+      // contain '|' don't merge/split wrongly and group values keep their type.
+      const groups = new Map<string, any[]>();
       result.forEach(row => {
-        const groupKey = groupByColumns.map(col => row[col]).join('|');
-        if (!groups[groupKey]) {
-          groups[groupKey] = [];
-        }
-        groups[groupKey].push(row);
+        const groupKey = JSON.stringify(groupByColumns.map(col => row[col]));
+        const bucket = groups.get(groupKey);
+        if (bucket) bucket.push(row);
+        else groups.set(groupKey, [row]);
       });
 
-      // Aggregate
-      result = Object.entries(groups).map(([groupKey, rows]) => {
+      result = Array.from(groups.values()).map(rows => {
         const newRow: any = {};
 
-        // Add group by columns
-        groupByColumns.forEach((col, idx) => {
-          newRow[col] = groupKey.split('|')[idx];
+        // Group by columns
+        groupByColumns.forEach(col => {
+          newRow[col] = rows[0][col];
         });
 
-        // Add aggregated columns
+        // Aggregated columns
         Object.entries(aggregations).forEach(([col, func]) => {
           const values = rows.map(r => Number(r[col])).filter(v => !isNaN(v));
 
@@ -589,6 +590,12 @@ export function DataPreviewModal({
               break;
             case 'max':
               newRow[col] = values.length > 0 ? Math.max(...values) : null;
+              break;
+            case 'first':
+              newRow[col] = rows[0][col];
+              break;
+            case 'last':
+              newRow[col] = rows[rows.length - 1][col];
               break;
             default:
               newRow[col] = null;
@@ -1057,8 +1064,8 @@ export function DataPreviewModal({
       op.into.split(',').map(s => s.trim()).filter(Boolean).forEach(pushDerived);
     });
 
-    if (groupByColumns.length > 0 && Object.keys(aggregations).length > 0) {
-      // If grouping, show group columns + aggregated columns
+    if (groupByColumns.length > 0) {
+      // If grouping, show group columns + aggregated columns (none = distinct groups)
       finalColumns = [...groupByColumns, ...Object.keys(aggregations)];
       // Apply renames to column names
       finalColumns = finalColumns.map(col => columnRenames[col] || col);
@@ -1554,11 +1561,12 @@ export function DataPreviewModal({
     if (fillNAValue) {
       steps.push({ id: 'fillna', icon: 'wand', label: 'Fill NA', detail: `with "${fillNAValue}"`, onRemove: () => setFillNAValue('') });
     }
-    // 5. group by + aggregate (needs both to activate as a step)
-    if (groupByColumns.length > 0 && Object.keys(aggregations).length > 0) {
+    // 5. group by (+ optional aggregations; none = distinct groups)
+    if (groupByColumns.length > 0) {
+      const aggCount = Object.keys(aggregations).length;
       steps.push({
         id: 'group', icon: 'group', label: 'Group by',
-        detail: `${groupByColumns.join(', ')} · ${Object.keys(aggregations).length} agg(s)`,
+        detail: aggCount > 0 ? `${groupByColumns.join(', ')} · ${aggCount} agg(s)` : `${groupByColumns.join(', ')} · distinct values`,
         onRemove: () => { setGroupByColumns([]); setAggregations({}); },
       });
     }
@@ -2181,6 +2189,12 @@ export function DataPreviewModal({
                               onChange={setGroupByColumns}
                               placeholder="pick columns to group by…"
                             />
+                            {groupByColumns.length > 0 && Object.keys(aggregations).length === 0 && (
+                              <p className="text-xs text-gray-500 mt-1">
+                                No aggregations yet: this returns each distinct combination of the group columns. Add
+                                one below (e.g. count) to summarize the other columns.
+                              </p>
+                            )}
                           </div>
                           <div>
                             <label className="text-xs text-gray-600 mb-1 block">Aggregations:</label>
