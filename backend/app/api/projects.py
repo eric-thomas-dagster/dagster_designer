@@ -1867,7 +1867,14 @@ async def scaffold_dagster_cloud_config(project_id: str) -> DagsterCloudConfig:
     if path.exists():
         return await get_dagster_cloud_config(project_id)
 
-    module = project.directory_name or project.name.lower().replace(" ", "_").replace("-", "_")
+    # The real importable module (pyproject root_module), NOT the folder-name slug: they
+    # differ for quickstart/imported projects, and a code location pointing at a module
+    # that doesn't exist fails to import on Dagster+.
+    module = (
+        project_service.get_project_root_module(project)
+        or project.directory_name
+        or project.name.lower().replace(" ", "_").replace("-", "_")
+    )
     doc = {
         "locations": [
             {
@@ -3072,7 +3079,7 @@ async def add_custom_lineage(project_id: str, request: CustomLineageRequest):
                 print(f"[Custom Lineage] Component '{request.target}' not in project.components list, updating YAML directly...", flush=True)
                 try:
                     project_dir = project_service._get_project_dir(updated_project)
-                    module_name = updated_project.directory_name.replace("-", "_")
+                    module_name = project_service.get_project_root_module(updated_project)
 
                     # Try both flat and src layouts
                     flat_defs_dir = project_dir / module_name / "defs" / request.target
@@ -7090,7 +7097,7 @@ async def add_monitor(project_id: str, request: AddMonitorRequest):
             ),
         )
 
-    module_name = (project.directory_name or '').replace('-', '_')
+    module_name = project_service.get_project_root_module(project) or ''
     doc: dict[str, Any] = {
         'type': f'{module_name}.dagster_designer_components.EnhancedAssetCheckComponent',
         'attributes': attributes,

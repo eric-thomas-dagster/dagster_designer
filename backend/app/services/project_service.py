@@ -667,6 +667,10 @@ class ProjectService:
             _project_json_cache[project_id] = (mtime, data)
 
         project = Project(**data)
+        try:
+            project.root_module = self.get_project_root_module(project)
+        except Exception:
+            project.root_module = project.directory_name
 
         # Enrich with partition configs from component files
         self._enrich_with_partition_configs(project)

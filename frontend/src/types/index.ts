@@ -115,6 +115,8 @@ export interface Project {
   asset_field_overrides?: Record<string, { description?: string | null; group_name?: string | null; owners?: string[] | null; tags?: Record<string, string> | null; kinds?: string[] | null }>;
   asset_post_processing_rules?: Array<{ target: string; group_name?: string | null; owners?: string[] | null; tags?: Record<string, string> | null }>;
   directory_name?: string;
+  /** Real importable Python module (pyproject root_module). Use this -- not directory_name -- to build src/<module>/... paths. */
+  root_module?: string | null;
   manual_ingestion_asset_keys?: string[];
   dagster_plus_region?: 'us' | 'eu';
   is_imported?: boolean;

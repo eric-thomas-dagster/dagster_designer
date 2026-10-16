@@ -14,6 +14,7 @@ fields (asset_name/site/api_key, all required) and nothing on the rest
 installed schema.json, which isn't affected (it's read straight off disk,
 never through `dg`'s own schema introspection).
 """
+import asyncio
 import json
 from unittest.mock import patch
 
@@ -134,7 +135,7 @@ def test_backfills_descriptions_dg_dropped_for_defaulted_fields(isolated_project
     )
 
     with patch("app.api.components.subprocess.run", return_value=fake_result):
-        schema = _get_component_schema_via_dg(project, component_type)
+        schema = asyncio.run(_get_component_schema_via_dg(project, component_type))
 
     assert schema is not None
     props = schema.schema["properties"]
@@ -160,7 +161,7 @@ def test_does_not_overwrite_a_description_dg_actually_provided(isolated_projects
     )
 
     with patch("app.api.components.subprocess.run", return_value=fake_result):
-        schema = _get_component_schema_via_dg(project, component_type)
+        schema = asyncio.run(_get_component_schema_via_dg(project, component_type))
 
     assert schema.schema["properties"]["resources"]["description"] == "live dg description wins"
 
@@ -178,7 +179,7 @@ def test_backfill_is_a_no_op_when_no_schema_json_installed(isolated_projects_dir
     )
 
     with patch("app.api.components.subprocess.run", return_value=fake_result):
-        schema = _get_component_schema_via_dg(project, "dagster_dbt.DbtProjectComponent")
+        schema = asyncio.run(_get_component_schema_via_dg(project, "dagster_dbt.DbtProjectComponent"))
 
     assert schema is not None
     assert "description" not in schema.schema["properties"]["some_field"]
@@ -214,7 +215,7 @@ def test_backfills_enum_and_ui_widget_schema_json_only_carries(isolated_projects
     )
 
     with patch("app.api.components.subprocess.run", return_value=fake_result):
-        schema = _get_component_schema_via_dg(project, component_type)
+        schema = asyncio.run(_get_component_schema_via_dg(project, component_type))
 
     dest = schema.schema["properties"]["destination"]
     assert dest["description"] == "dlt destination identifier."
@@ -248,6 +249,6 @@ def test_backfills_structured_destination_credential_fields(isolated_projects_di
     )
 
     with patch("app.api.components.subprocess.run", return_value=fake_result):
-        schema = _get_component_schema_via_dg(project, component_type)
+        schema = asyncio.run(_get_component_schema_via_dg(project, component_type))
 
     assert schema.schema["properties"]["destination_credentials_url"]["x-dagster-destination-fields"] == xdf

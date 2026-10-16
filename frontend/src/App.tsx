@@ -2556,7 +2556,7 @@ function App() {
                               <button
                                 onClick={() => {
                                   setShowValidationDialog(false);
-                                  const path = `src/${currentProject?.directory_name || ''}/defs/${cid}/defs.yaml`;
+                                  const path = `src/${currentProject?.root_module || currentProject?.directory_name || ''}/defs/${cid}/defs.yaml`;
                                   handleOpenFile(path);
                                 }}
                                 className="text-xs text-primary hover:underline font-medium"

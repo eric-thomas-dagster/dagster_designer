@@ -76,6 +76,12 @@ class Project(BaseModel):
     name: str = Field(..., description="Project name")
     description: str | None = Field(None, description="Project description")
     directory_name: str | None = Field(None, description="Directory name for the project (sanitized for Python identifiers)")
+    # The project's real importable module (pyproject [tool.dg.project].root_module). Equals
+    # directory_name for a project Designer scaffolded, but NOT for a quickstart/imported one
+    # (e.g. "synthetic_commerce" vs "project_<id>_synthetic_commerce"), so anything that
+    # builds src/<module>/... paths or `<module>.definitions` must use this, never
+    # directory_name. Recomputed on every get_project(); not authoritative when stored.
+    root_module: str | None = Field(None, description="Real importable Python module name (from pyproject.toml)")
     graph: PipelineGraph = Field(default_factory=PipelineGraph, description="Pipeline graph (assets and 1:1 components)")
     components: list[ComponentInstance] = Field(default_factory=list, description="Component instances (particularly asset factories)")
     custom_lineage: list[CustomLineageEdge] = Field(default_factory=list, description="Custom lineage edges drawn by user")

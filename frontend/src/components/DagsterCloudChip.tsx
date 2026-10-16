@@ -77,7 +77,8 @@ export function DagsterCloudChip({ projectId }: DagsterCloudChipProps) {
       // would produce — location_name = project module, code_source
       // module_name = "<module>.definitions", build directory = ".".
       // If no project is loaded yet, fall back to a blank row.
-      const mod = currentProject?.directory_name || '';
+      // The real module (pyproject root_module), not the folder-name slug -- they differ for quickstart/imported projects.
+      const mod = currentProject?.root_module || currentProject?.directory_name || '';
       setEditing([{
         location_name: mod,
         module_name: mod ? `${mod}.definitions` : null,
