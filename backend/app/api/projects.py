@@ -3980,6 +3980,11 @@ async def get_partitions_summary(project_id: str):
     now = _time.time()
     assets: dict[str, PartitionInfoResponse] = {}
     for key, info in payload["assets"].items():
+        # Only PARTITIONED assets are reported: at 100k assets the "not partitioned" entries were ~11MB of
+        # noise, and every consumer already reads a missing key as "not partitioned". The single-asset
+        # endpoint answers the same way for a key absent from a fresh summary (see get_asset_partitions).
+        if not info.get("is_partitioned"):
+            continue
         full = {"asset_key": key, **info}
         assets[key] = PartitionInfoResponse(**full)
         _partition_info_cache[(project_id, key)] = (now, full)
@@ -4027,6 +4032,11 @@ async def get_asset_partitions(project_id: str, asset_key: str):
     cached = _partition_info_cache.get(cache_key)
     if cached and (_time.time() - cached[0]) < _PARTITION_INFO_CACHE_TTL_SECONDS:
         return PartitionInfoResponse(**cached[1])
+    # A fresh whole-project summary lists only partitioned assets: absence means "not partitioned" (and
+    # saves a full project load per asset).
+    summary = _partition_summary_cache.get(project_id)
+    if summary and (_time.time() - summary[0]) < _PARTITION_INFO_CACHE_TTL_SECONDS and asset_key not in summary[1]:
+        return PartitionInfoResponse(asset_key=asset_key, is_partitioned=False, partitions_def=None)
 
     # Get the project module name
     project_module = project_service.get_project_root_module(project)
