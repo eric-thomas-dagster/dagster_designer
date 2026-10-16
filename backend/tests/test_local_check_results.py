@@ -215,3 +215,21 @@ def test_history_endpoint_reads_the_instance_without_dg_dev(project, monkeypatch
     body = r.json()
     assert [e["run_id"] for e in body["events"]] == ["run-1"] and body["events"][0]["status"] == "pass"
     assert any(m["label"] == "rows" for m in body["numeric_metrics"])   # feeds the chart
+
+
+def test_apply_to_asset_nodes_fills_checks_tab_rows(tmp_path):
+    import sqlite3
+    from types import SimpleNamespace
+    from app.services.local_check_results import apply_to_asset_nodes
+
+    d = tmp_path / ".designer_dagster_home" / "history" / "runs"
+    d.mkdir(parents=True)
+    c = sqlite3.connect(d / "index.db")
+    c.execute("create table asset_check_executions (id integer primary key, asset_key text, check_name text, execution_status text, create_timestamp text, run_id text, evaluation_event text)")
+    c.execute("insert into asset_check_executions values (1,'[\"customers\"]','nn','SUCCEEDED','2026-10-16 14:00:00','r1',null)")
+    c.commit(); c.close()
+    node = SimpleNamespace(data={"asset_key": "customers", "checks": [{"name": "nn"}, {"name": "other"}]})
+    assert apply_to_asset_nodes(tmp_path, [node]) == 1
+    assert node.data["checks"][0]["last_status"] == "pass"
+    assert node.data["checks"][0]["last_run_at"] == "2026-10-16T14:00:00Z"
+    assert "last_status" not in node.data["checks"][1]

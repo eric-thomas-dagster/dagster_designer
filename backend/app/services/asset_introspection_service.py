@@ -1180,6 +1180,14 @@ class AssetIntrospectionService:
                     )
                     edges.append(edge)
 
+        # `dg list defs` knows a check exists, not whether it ran -- fill last status/time
+        # from the results Dagster recorded in this project's own instance.
+        try:
+            from .local_check_results import apply_to_asset_nodes
+            apply_to_asset_nodes(self._get_project_dir(project), nodes)
+        except Exception as e:
+            print(f"[Asset Introspection] couldn't read check results: {e}", flush=True)
+
         return nodes, edges
 
     def _find_python_asset_file(self, project_dir: Path, asset_name: str) -> Path | None:

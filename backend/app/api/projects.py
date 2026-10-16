@@ -7006,6 +7006,12 @@ async def list_monitors(project_id: str):
                 continue
             by_id.setdefault(mid, []).append(st)
         for m in monitors:
+            # Results read from the project's own Dagster instance (above) are the real history;
+            # this log only fills monitors the instance knows nothing about. Overwriting
+            # unconditionally erased the trend (it showed "no runs") for every check whose
+            # history lived in the instance rather than in this log.
+            if m.recent_statuses:
+                continue
             statuses = by_id.get(m.id) or []
             # Keep only the tail (already chronological — newest last).
             m.recent_statuses = statuses[-20:]

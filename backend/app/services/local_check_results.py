@@ -81,6 +81,28 @@ def read_latest_check_results(project_dir: Path) -> dict[tuple[str, str], dict]:
     return out
 
 
+def apply_to_asset_nodes(project_dir: Path, nodes: Iterable[Any]) -> int:
+    """Fill last_status / last_run_at on each asset node's `checks` (the rows on the asset
+    detail page's Checks tab) from the instance. Nodes come from `dg list defs`, which knows
+    a check exists but not whether it ever ran. Returns how many checks were set."""
+    results = read_latest_check_results(project_dir)
+    if not results:
+        return 0
+    applied = 0
+    for node in nodes:
+        data = getattr(node, "data", None) or {}
+        asset_key = data.get("asset_key")
+        for check in data.get("checks") or []:
+            r = results.get((asset_key, check.get("name")))
+            if not r:
+                continue
+            if _newer(r.get("last_run_at"), check.get("last_run_at")):
+                check["last_status"] = r["status"]
+                check["last_run_at"] = r["last_run_at"]
+            applied += 1
+    return applied
+
+
 def _dbt_test_name(unique_id: str) -> str | None:
     """'test.<project>.<test name>[.<hash>]' -> '<test name>' (how dagster-dbt names the
     check). Generic tests (not_null, unique, ...) carry a trailing hash; singular tests
