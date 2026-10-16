@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useMemo } from 'react';
-import { useQuery, useMutation } from '@tanstack/react-query';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import Editor from '@monaco-editor/react';
 import {
   Folder,
@@ -190,6 +190,8 @@ export function CodeEditor({ projectId, fileToOpen, onFileOpened }: CodeEditorPr
   const [quickOpenOpen, setQuickOpenOpen] = useState(false);
   const [quickOpenQuery, setQuickOpenQuery] = useState('');
   const [quickOpenIndex, setQuickOpenIndex] = useState(0);
+  const queryClient = useQueryClient();
+  const revalidateTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const quickOpenInputRef = useRef<HTMLInputElement | null>(null);
   const { currentProject } = useProjectStore();
   const providersRegisteredRef = useRef(false);
@@ -377,6 +379,17 @@ export function CodeEditor({ projectId, fileToOpen, onFileOpened }: CodeEditorPr
         prev.map((f) => (f.path === variables.filePath ? { ...f, isDirty: false } : f))
       );
       refetchFileTree();
+      // The project's validation status is polled once a minute, so a freshly
+      // saved edit (say, a bad value) wouldn't surface -- or clear -- the
+      // validation banner for up to a minute. Re-check shortly after saving
+      // (debounced, so a burst of saves is one re-check). The backend drops its
+      // cached validation when the file is written.
+      if (!/^(data|\.venv|venv|logs)\//.test(variables.filePath)) {
+        if (revalidateTimer.current) clearTimeout(revalidateTimer.current);
+        revalidateTimer.current = setTimeout(() => {
+          queryClient.invalidateQueries({ queryKey: ['validation-status', variables.projectId] });
+        }, 1200);
+      }
     },
   });
 

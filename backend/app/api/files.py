@@ -89,6 +89,17 @@ async def read_file(project_id: str, file_path: str):
         raise HTTPException(status_code=500, detail=f"Failed to read file: {str(e)}")
 
 
+def _invalidate_if_definition_file(project_id: str, file_path: str) -> None:
+    """A saved/deleted source file can change whether the project validates, so
+    forget cached validation/definitions -- otherwise 'Retry validation' right
+    after an edit could return the stale pre-edit result."""
+    from ..services.asset_introspection_service import (
+        invalidate_project_caches, is_definition_affecting_path,
+    )
+    if is_definition_affecting_path(file_path):
+        invalidate_project_caches(project_id)
+
+
 @router.post("/write/{project_id}/{file_path:path}")
 async def write_file(project_id: str, file_path: str, request: WriteFileRequest):
     """
@@ -106,6 +117,7 @@ async def write_file(project_id: str, file_path: str, request: WriteFileRequest)
     """
     try:
         result = file_service.write_file(project_id, file_path, request.content)
+        _invalidate_if_definition_file(project_id, file_path)
         return result
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
@@ -129,6 +141,7 @@ async def delete_file(project_id: str, file_path: str):
     """
     try:
         result = file_service.delete_file(project_id, file_path)
+        _invalidate_if_definition_file(project_id, file_path)
         return result
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))

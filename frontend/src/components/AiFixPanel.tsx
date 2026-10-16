@@ -291,6 +291,12 @@ export function AiFixPanel({ projectId, errorText, onKept }: Props) {
                 </button>
               </>
             )}
+            {/* After an explanation (or a failed/undone fix), the natural next step is to let it try. */}
+            {(mode === 'explain' || reverted || (mode === 'fix' && !snapshotId)) && (
+              <button onClick={() => setPhase('confirm')} className="px-3 py-1.5 font-medium text-white bg-primary rounded hover:opacity-90">
+                {mode === 'fix' ? 'Try fixing again…' : 'Fix it…'}
+              </button>
+            )}
             {(!snapshotId || reverted) && (
               <button onClick={() => { setPhase('idle'); setText(''); setError(null); }} className="px-3 py-1.5 font-medium border border-gray-300 rounded hover:bg-gray-100">
                 Start over

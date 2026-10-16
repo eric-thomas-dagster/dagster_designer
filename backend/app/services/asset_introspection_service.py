@@ -151,6 +151,33 @@ _last_run_result: Dict[str, Tuple[float, bool, str | None]] = {}
 LAST_RUN_RESULT_TTL_SECONDS = 8
 
 
+# Paths whose changes can't affect whether the project's definitions load.
+_NON_DEFINITION_PREFIXES = ("data/", ".venv/", "venv/", ".designer_dagster_home/", "logs/", "node_modules/", ".git/")
+
+
+def is_definition_affecting_path(rel_path: str) -> bool:
+    """True if editing this project-relative file could change what `dg list defs`
+    sees (source, YAML, pyproject, dbt files...), as opposed to data/venv/cache files."""
+    p = rel_path.replace("\\", "/")
+    if p.startswith("./"):
+        p = p[2:]
+    return not (p.startswith(_NON_DEFINITION_PREFIXES) or "/__pycache__/" in f"/{p}" or p.endswith(".pyc"))
+
+
+def invalidate_project_caches(project_id: str) -> None:
+    """Drop every cached view of a project's definitions/validation so the next
+    read re-runs `dg list defs`. Call after anything on disk changes -- a file
+    saved in the code editor, an AI fix being kept or undone, etc. Without this a
+    just-edited project kept reporting its OLD validation result for up to a minute."""
+    _assets_cache.pop(project_id, None)
+    _last_run_result.pop(project_id, None)
+    try:
+        from ..api.primitives import _definitions_cache
+        _definitions_cache.pop(project_id, None)
+    except Exception:
+        pass
+
+
 def record_last_run_result(project_id: str, valid: bool, error: str | None) -> None:
     _last_run_result[project_id] = (time.time(), valid, error)
 

@@ -13,7 +13,7 @@ from pydantic import BaseModel
 from ..core.uv_binary import env_with_bundled_uv_on_path, project_subprocess_env
 from ..services import ai_fix_service as svc
 from ..services import dagster_ai_service
-from ..services.asset_introspection_service import asset_introspection_service
+from ..services.asset_introspection_service import asset_introspection_service, invalidate_project_caches
 from ..services.project_service import project_service
 
 router = APIRouter(tags=["ai-fix"])
@@ -122,7 +122,7 @@ async def ai_fix_result(project_id: str, snapshot_id: str) -> AiFixResult:
     project, project_dir = _local_project(project_id)
     _snapshot_or_404(project_id, snapshot_id)
     changes = svc.diff_snapshot(project_id, project_dir, snapshot_id)
-    asset_introspection_service.clear_cache(project_id)
+    invalidate_project_caches(project_id)
     ok, error = await asset_introspection_service.validate_project_defs_async(project)
     return AiFixResult(changes=[ChangedFile(**c) for c in changes], valid=bool(ok), validation_error=error)
 
@@ -132,7 +132,7 @@ async def ai_fix_undo(project_id: str, snapshot_id: str):
     project, project_dir = _local_project(project_id)
     _snapshot_or_404(project_id, snapshot_id)
     touched = svc.restore_snapshot(project_id, project_dir, snapshot_id)
-    asset_introspection_service.clear_cache(project_id)
+    invalidate_project_caches(project_id)
     return {"restored": touched}
 
 
@@ -143,5 +143,5 @@ async def ai_fix_keep(project_id: str, snapshot_id: str):
     project, project_dir = _local_project(project_id)
     _snapshot_or_404(project_id, snapshot_id)
     svc.discard_snapshot(project_id, snapshot_id)
-    asset_introspection_service.clear_cache(project_id)
+    invalidate_project_caches(project_id)
     return {"kept": True}
