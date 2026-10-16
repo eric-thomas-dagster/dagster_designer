@@ -500,7 +500,7 @@ async def _clone_and_setup_dbt_project(
             component_id = f"dbt_{dbt_project_name.replace('-', '_').replace(' ', '_').lower()}"
             component = {
                 "id": component_id,
-                "component_type": f"{project.directory_name}.dagster_designer_components.DbtProjectWithTranslatorComponent",
+                "component_type": f"{project_service.get_project_root_module(project)}.dagster_designer_components.DbtProjectWithTranslatorComponent",
                 "label": dbt_project_name,
                 "attributes": {
                     "project": relative_path

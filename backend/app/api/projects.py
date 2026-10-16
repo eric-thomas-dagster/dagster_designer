@@ -6961,7 +6961,7 @@ async def add_monitor(project_id: str, request: AddMonitorRequest):
     if not is_cloud:
         if not project.directory_name:
             raise HTTPException(status_code=500, detail="Project has no directory_name — cannot locate defs dir.")
-        defs_root = root / 'src' / project.directory_name / 'defs' / 'monitors' / name
+        defs_root = root / 'src' / project_service.get_project_root_module(project) / 'defs' / 'monitors' / name
         if defs_root.exists():
             raise HTTPException(status_code=409, detail=f"Monitor '{name}' already exists at defs/monitors/{name}. Pick a different name.")
         defs_root.mkdir(parents=True, exist_ok=True)
@@ -8674,7 +8674,7 @@ async def delete_monitor(project_id: str, request: DeleteMonitorRequest):
         # Sanitize — no path traversal.
         if not candidate_name.replace('_', '').replace('-', '').isalnum():
             raise HTTPException(status_code=400, detail=f"Cannot infer safe monitor directory name from '{request.monitor_id}'.")
-        target = (root / 'src' / project.directory_name / 'defs' / 'monitors' / candidate_name).resolve()
+        target = (root / 'src' / project_service.get_project_root_module(project) / 'defs' / 'monitors' / candidate_name).resolve()
         if not str(target).startswith(str((root / 'src').resolve())):
             raise HTTPException(status_code=400, detail="Invalid target path.")
         if not target.exists():

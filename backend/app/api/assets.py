@@ -1586,7 +1586,7 @@ async def create_sql_source_transformer(project_id: str, request: CreateSqlSourc
         raise HTTPException(status_code=404, detail="Project directory not found")
 
     component_id = request.newAssetName.replace('-', '_').replace(' ', '_').lower()
-    src_dir = project_dir / "src" / project.directory_name
+    src_dir = project_dir / "src" / project_service.get_project_root_module(project)
     defs_dir = src_dir / "defs" / component_id
     defs_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1601,7 +1601,7 @@ async def create_sql_source_transformer(project_id: str, request: CreateSqlSourc
         sql_attrs["connection_url_env_var"] = request.connectionUrlEnvVar
     sql_attrs.update(_translate_transform_config_to_sql_attrs(request.transformConfig))
 
-    transformer_component_type = f"{project.directory_name}.dagster_designer_components.SqlTransformerComponent"
+    transformer_component_type = f"{project_service.get_project_root_module(project)}.dagster_designer_components.SqlTransformerComponent"
 
     with open(defs_dir / "defs.yaml", "w") as f:
         yaml.dump({"type": transformer_component_type, "attributes": sql_attrs}, f, default_flow_style=False, sort_keys=False)
@@ -1639,6 +1639,40 @@ async def create_sql_source_transformer(project_id: str, request: CreateSqlSourc
     return updated_project if updated_project else project
 
 
+def _dataframe_transformer_upstream_attrs(attributes: dict) -> dict:
+    """Rewrite a single upstream given as `upstream_asset_keys: "a"` (the SQL
+    transformer's convention) into the community DataFrameTransformerComponent's
+    `upstream_asset_key: "a"`; comma-separated values become a real list."""
+    attrs = dict(attributes)
+    raw = attrs.pop("upstream_asset_keys", None)
+    if raw is None or raw == "":
+        return attrs
+    keys = [k.strip() for k in str(raw).split(",") if k.strip()] if isinstance(raw, str) else list(raw)
+    if len(keys) == 1:
+        attrs["upstream_asset_key"] = keys[0]
+    elif keys:
+        attrs["upstream_asset_keys"] = keys
+    return attrs
+
+
+async def _community_package_importable(project_dir: Path) -> bool:
+    """True if the project's own venv can import dagster_community_components."""
+    from ..core.uv_binary import venv_bin_path
+
+    py = venv_bin_path(project_dir / ".venv", "python")
+    if not py.exists():
+        return False
+    try:
+        r = await asyncio.to_thread(
+            subprocess.run,
+            [str(py), "-c", "import importlib.util,sys; sys.exit(0 if importlib.util.find_spec('dagster_community_components') else 1)"],
+            capture_output=True, timeout=30,
+        )
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
 @router.post("/{project_id}/create-transformer")
 async def create_transformer_asset(project_id: str, request: CreateTransformerRequest):
     """Create a new transformer asset that applies transformations to a source asset.
@@ -1670,7 +1704,7 @@ async def create_transformer_asset(project_id: str, request: CreateTransformerRe
     component_id = request.newAssetName.replace('-', '_').replace(' ', '_').lower()
 
     # Create component directory structure in the correct location
-    src_dir = project_dir / "src" / project.directory_name
+    src_dir = project_dir / "src" / project_service.get_project_root_module(project)
     defs_dir = src_dir / "defs" / component_id
     defs_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1865,16 +1899,32 @@ async def create_transformer_asset(project_id: str, request: CreateTransformerRe
             print(f"[Create Transformer] Auto-detected resource_key='{inferred_resource_key}' from upstream {request.sourceAssetKey}", flush=True)
 
         attributes = sql_attrs
-        transformer_component_type = f"{project.directory_name}.dagster_designer_components.SqlTransformerComponent"
+        transformer_component_type = f"{project_service.get_project_root_module(project)}.dagster_designer_components.SqlTransformerComponent"
         print(f"[Create Transformer] Using SqlTransformerComponent for warehouse upstream {request.sourceAssetKey}", flush=True)
     else:
-        transformer_component_type = f"{project.directory_name}.components.dataframe_transformer.DataFrameTransformerComponent"
+        # In the default "as_package" mode (see Project.component_install_mode),
+        # reference the component straight from the dagster-community-components
+        # package -- nothing to vendor, and no CLI-scaffolded example instance
+        # that can break the whole project's definitions load. Only fall back to
+        # a vendored copy for the vendored modes, or if the package isn't there.
+        install_mode = getattr(project, "component_install_mode", None) or "as_package"
+        use_package = install_mode == "as_package" and await _community_package_importable(project_dir)
+        # The community DataFrameTransformerComponent takes a single upstream as
+        # `upstream_asset_key` (str); `upstream_asset_keys` is a LIST there (since
+        # FIELD_CONVENTIONS alignment). Designer's own SqlTransformerComponent
+        # keeps a comma-separated `upstream_asset_keys`, so only rename here.
+        attributes = _dataframe_transformer_upstream_attrs(attributes)
+        if use_package:
+            transformer_component_type = "dagster_community_components.DataFrameTransformerComponent"
+            print("[Create Transformer] Using DataFrameTransformerComponent from the dagster-community-components package", flush=True)
+        else:
+            transformer_component_type = f"{project_service.get_project_root_module(project)}.components.dataframe_transformer.DataFrameTransformerComponent"
         # DataFrameTransformerComponent is a community template. If the user
         # hasn't installed it yet, the defs.yaml we're about to write will
         # reference a module that doesn't exist and Dagster's next reload
         # will error. Install it via the CLI on demand.
         dft_dir = src_dir / "components" / "dataframe_transformer"
-        if not dft_dir.exists():
+        if not use_package and not dft_dir.exists():
             print(f"[Create Transformer] dataframe_transformer template not installed; auto-installing via CLI…", flush=True)
             import subprocess
             try:
@@ -1938,7 +1988,7 @@ async def create_transformer_asset(project_id: str, request: CreateTransformerRe
     }
 
     print(f"[Create Transformer] About to write YAML with attributes: {attributes}", flush=True)
-    print(f"[Create Transformer] upstream_asset_keys value: '{attributes.get('upstream_asset_keys')}'", flush=True)
+    print(f"[Create Transformer] upstream: {attributes.get('upstream_asset_key') or attributes.get('upstream_asset_keys')!r}", flush=True)
 
     with open(defs_dir / "defs.yaml", "w") as f:
         yaml.dump(defs_yaml, f, default_flow_style=False, sort_keys=False)
@@ -2098,7 +2148,7 @@ async def create_join_asset(project_id: str, request: CreateJoinRequest):
         raise HTTPException(status_code=400, detail="Set either `on`, or both `leftOn` and `rightOn` (not both styles).")
 
     component_id = request.newAssetName.replace('-', '_').replace(' ', '_').lower()
-    src_dir = project_dir / "src" / project.directory_name
+    src_dir = project_dir / "src" / project_service.get_project_root_module(project)
     defs_dir = src_dir / "defs" / component_id
     defs_dir.mkdir(parents=True, exist_ok=True)
 
@@ -2142,7 +2192,7 @@ async def create_join_asset(project_id: str, request: CreateJoinRequest):
         if request.keepColumns:
             attributes["keep_only_columns"] = ",".join(request.keepColumns)
 
-        join_component_type = f"{project.directory_name}.dagster_designer_components.SqlJoinComponent"
+        join_component_type = f"{project_service.get_project_root_module(project)}.dagster_designer_components.SqlJoinComponent"
         # SqlJoinComponent is first-party, not a community template -- make
         # sure the project's copy is current (same defensive re-sync
         # _generate_definitions_with_asset_customizations already does)
@@ -2170,7 +2220,7 @@ async def create_join_asset(project_id: str, request: CreateJoinRequest):
         if request.keepColumns:
             attributes["keep_only_columns"] = request.keepColumns
 
-        join_component_type = f"{project.directory_name}.components.dataframe_join.DataframeJoin"
+        join_component_type = f"{project_service.get_project_root_module(project)}.components.dataframe_join.DataframeJoin"
 
         # dataframe_join is a community template -- install on demand the same
         # way create_transformer_asset does for dataframe_transformer.
