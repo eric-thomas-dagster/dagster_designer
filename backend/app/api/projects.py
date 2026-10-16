@@ -2,6 +2,7 @@
 
 import sys
 import json
+import re
 import asyncio
 import subprocess
 from pathlib import Path
@@ -2412,7 +2413,12 @@ async def validate_project(project_id: str):
                 "details": None,
             }
         else:
-            return {"valid": False, "error": recent_error, "details": {"validation_error": recent_error}}
+            return {
+                "valid": False,
+                "error": _validation_headline(recent_error),
+                "failing_components": _extract_failing_components((recent_error or "").splitlines()),
+                "details": {"validation_error": recent_error},
+            }
 
     try:
         # Run dg list defs to validate the project. Off the event loop --
@@ -2598,28 +2604,12 @@ async def validate_project(project_id: str):
             #   File ".../defs/dbt-1c633f9a/defs.yaml", line 1
             #   Error loading component in defs/orders_csv:
             # We collect unique component_ids so the frontend can show them.
-            failing_components: list[str] = []
-            _seen: set[str] = set()
-            _patterns = [
-                _re.compile(r"defs[/\\]([^/\\]+)[/\\]defs\.ya?ml"),
-                _re.compile(r"defs[/\\]([^/\\]+):"),
-                _re.compile(r"component_id[:\s]+['\"]?([\w\-]+)['\"]?"),
-            ]
-            for line in error_lines:
-                for pat in _patterns:
-                    for m in pat.finditer(line):
-                        cid = m.group(1)
-                        # Skip obvious false-positives from framework paths.
-                        if cid in {"__init__", "yaml"}:
-                            continue
-                        if cid not in _seen:
-                            _seen.add(cid)
-                            failing_components.append(cid)
+            failing_components = _extract_failing_components(error_lines)
 
             record_last_run_result(project_id, False, validation_error or "Project validation failed. Component definitions have errors.")
             return {
                 "valid": False,
-                "error": "Project validation failed. Component definitions have errors.",
+                "error": _VALIDATION_HEADLINE,
                 "failing_components": failing_components,
                 "details": {
                     "stderr": result.stderr,  # Full error output
@@ -2641,6 +2631,38 @@ async def validate_project(project_id: str):
             "error": f"Validation error: {str(e)}",
             "details": None
         }
+
+
+_VALIDATION_HEADLINE = "Project validation failed. Component definitions have errors."
+_FAILING_COMPONENT_PATTERNS = [
+    re.compile(r"defs[/\\]([^/\\]+)[/\\]defs\.ya?ml"),
+    re.compile(r"defs[/\\]([^/\\]+):"),
+    re.compile(r"component_id[:\s]+['\"]?([\w\-]+)['\"]?"),
+]
+
+
+def _validation_headline(error: str | None) -> str:
+    """The one-line summary shown at the top of the validation dialog. The full
+    text belongs in details.validation_error (rendered as the formatted "Error
+    Details" block) -- never in the headline, or it prints twice."""
+    err = (error or "").strip()
+    if err and "\n" not in err and len(err) <= 200:
+        return err  # already a short, specific message (e.g. "timed out after 180 seconds")
+    return _VALIDATION_HEADLINE
+
+
+def _extract_failing_components(error_lines: list[str]) -> list[str]:
+    """Component ids mentioned in dg's error output, in first-seen order."""
+    found: list[str] = []
+    for line in error_lines:
+        for pat in _FAILING_COMPONENT_PATTERNS:
+            for m in pat.finditer(line):
+                cid = m.group(1)
+                if cid in {"__init__", "yaml"}:  # framework false positives
+                    continue
+                if cid not in found:
+                    found.append(cid)
+    return found
 
 
 class MaterializeRequest(BaseModel):

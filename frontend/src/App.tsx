@@ -2426,7 +2426,22 @@ function App() {
                 </div>
               ) : (
                 <div>
-                  <p className="text-red-700 mb-4 font-medium">{validationResult.error}</p>
+                  {/* One-line headline only. The full text lives in the formatted "Error Details"
+                      / "Full Error Output" blocks below, so a long `error` must never print twice up here. */}
+                  {(() => {
+                    const full: string = String(validationResult.error ?? '');
+                    const firstLine = full.split('\n').find((l) => l.trim()) ?? '';
+                    const headline = firstLine.length > 200 ? `${firstLine.slice(0, 200)}…` : firstLine;
+                    const hasFormattedDetails = !!(validationResult.details?.validation_error || validationResult.details?.stderr);
+                    return (
+                      <>
+                        <p className="text-red-700 mb-4 font-medium">{headline}</p>
+                        {full.trim() !== headline && !hasFormattedDetails && (
+                          <pre className="mb-4 bg-red-50 text-red-900 p-4 rounded-lg overflow-x-auto text-xs border border-red-200 whitespace-pre-wrap">{full}</pre>
+                        )}
+                      </>
+                    );
+                  })()}
 
                   {currentProject && !(currentProject as any).is_dagster_plus && (
                     <AiFixPanel
