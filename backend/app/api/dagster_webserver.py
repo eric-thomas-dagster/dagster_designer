@@ -11,7 +11,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from ..core.config import settings
-from ..core.uv_binary import find_uv_binary, venv_bin_path
+from ..core.uv_binary import env_with_bundled_uv_on_path, find_uv_binary, project_subprocess_env, venv_bin_path
 
 router = APIRouter(prefix="/dagster-ui", tags=["dagster-ui"])
 
@@ -113,6 +113,122 @@ def check_dagster_webserver(port: int | None = None, project_path: Path | None =
         except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
             pass
     return False, None, None
+
+
+def _dev_server_env(project_path: Path) -> dict[str, str]:
+    """The environment a project's `dg dev` must run in.
+
+    Everything the dev server launches -- the daemon, and through it every run a backfill,
+    schedule or sensor creates -- inherits this. It used to be the backend's raw environment, which
+    lacks what Designer gives its own launches: the project's VIRTUAL_ENV/PATH and
+    DESIGNER_PROJECT_DATA_DIR. Without that variable a dbt profile falls back to a relative
+    '../../data', which is wrong inside dbt's staged project copy, so every dbt run launched by the
+    daemon failed with 'Cannot open file .../.local_defs_state/data/<db>.duckdb'. DAGSTER_HOME is
+    pinned to the project's own instance so runs land where Designer's Runs page reads them.
+    Not fast_load: the dev server must advertise the whole component library."""
+    env = env_with_bundled_uv_on_path(project_subprocess_env(project_path.absolute()))
+    dagster_home = project_path.absolute() / ".designer_dagster_home"
+    dagster_home.mkdir(exist_ok=True)
+    env["DAGSTER_HOME"] = str(dagster_home)
+    return env
+
+
+def _trim_logs_for_project(project_id: str) -> None:
+    path = _project_path_for_id(project_id)
+    if path is not None:
+        trim_dev_server_log(_dev_server_log_path(path))
+
+
+def _dev_server_log_path(project_path: Path) -> Path:
+    return project_path.absolute() / ".designer_dagster_home" / "dg-dev.log"
+
+
+def _spawn_dev_server(cmd: list[str], cwd: str, env: dict[str, str], log_path: Path) -> "subprocess.Popen":
+    """Start a dev server whose output goes to a LOG FILE, never an undrained pipe.
+
+    It used to be stdout=PIPE read only until the 'Serving...' line, then never again. Everything the
+    webserver, daemon and run workers logged afterwards piled into the 64 KB pipe buffer; once it
+    filled, the next process to write blocked forever -- a run worker froze after logging a dbt failure,
+    so the run never finished and its backfill waited on it indefinitely (stack sample: main thread
+    stuck in write()). The same stall eventually hits sensors, schedules and backfills on any
+    long-lived dev server. A file also survives a backend restart (these start in their own session
+    on purpose) -- a drain thread or a pipe would not -- and doubles as a log users can read."""
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    if log_path.exists():
+        try:
+            log_path.replace(log_path.with_name(log_path.name + ".1"))  # keep the previous session's log
+        except OSError:
+            pass
+    # Append mode (O_APPEND): the child keeps writing at the real end of file even after the backend
+    # trims it in place (see trim_dev_server_log), instead of at a stale offset leaving a sparse file.
+    log_file = open(log_path, "ab")
+    try:
+        return subprocess.Popen(
+            cmd, cwd=cwd, env=env,
+            stdin=subprocess.DEVNULL, stdout=log_file, stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+    finally:
+        log_file.close()  # the child holds its own descriptor
+
+
+DEV_LOG_MAX_BYTES = 40 * 1024 * 1024
+DEV_LOG_KEEP_BYTES = 8 * 1024 * 1024
+
+
+def trim_dev_server_log(log_path: Path, max_bytes: int = DEV_LOG_MAX_BYTES, keep_bytes: int = DEV_LOG_KEEP_BYTES) -> bool:
+    """Cap a long-lived dev server's log. Every run process re-prints the component library's import
+    warnings (a 2-minute backfill produced ~315 KB), so an app left open for days would otherwise fill
+    the disk. Keeps the most recent `keep_bytes`, in place -- the server holds the file open, so this
+    truncates and rewrites rather than rotating. Returns True if it trimmed. Never raises."""
+    try:
+        if log_path.stat().st_size <= max_bytes:
+            return False
+        with open(log_path, "rb") as f:
+            f.seek(-keep_bytes, 2)
+            f.readline()  # drop the partial line we landed in
+            tail = f.read()
+        with open(log_path, "r+b") as f:
+            f.truncate(0)
+            f.write(b"[... older output trimmed by Designer ...]\n" + tail)
+        return True
+    except OSError:
+        return False
+
+
+def _wait_for_dev_server_startup(
+    process: "subprocess.Popen", log_path: Path, requested_port: int, cmd: list[str],
+    timeout: float = 30.0, poll: float = 0.1,
+) -> tuple[int, list[str]]:
+    """Follow the dev server's log until it reports its port, exits, or times out.
+    Returns (port, startup_log lines). Raises HTTPException(500) if it exits first."""
+    actual_port = requested_port
+    startup_log: list[str] = []
+    deadline = time.time() + timeout
+    with open(log_path, "r", errors="replace") as f:
+        while time.time() < deadline:
+            line = f.readline()
+            if line:
+                startup_log.append(line.rstrip())
+                match = re.search(r'Serving.*?(?:http://|on)\s*(?:\S+:)?(\d+)', line, re.IGNORECASE)
+                if match:
+                    return int(match.group(1)), startup_log
+                continue
+            if process.poll() is not None:
+                startup_log.extend(l.rstrip() for l in f.read().splitlines())  # whatever it wrote last
+                error_msg = f"Dagster process exited unexpectedly with code {process.returncode}"
+                raise HTTPException(
+                    status_code=500,
+                    detail={
+                        "message": error_msg,
+                        "error": error_msg,
+                        "command": " ".join(cmd),
+                        "startup_log": startup_log[-50:],
+                        "returncode": process.returncode,
+                    },
+                )
+            time.sleep(poll)
+    return actual_port, startup_log
 
 
 def find_all_designer_dev_servers() -> list[tuple[int, int, str]]:
@@ -294,6 +410,7 @@ async def get_dagster_ui_status(project_id: str) -> DagsterUIStatus:
     Returns:
         Status of the Dagster UI
     """
+    _trim_logs_for_project(project_id)
     # Check cache first
     if project_id in _project_ports:
         cached_port, cached_pid = _project_ports[project_id]
@@ -486,89 +603,13 @@ async def start_dagster_ui(project_id: str):
                 # Fall back to dagster dev via uv run
                 cmd = [uv_bin, "run", "dagster", "dev", "-p", str(port), "-h", "0.0.0.0"]
 
-            # Same DAGSTER_HOME pinning materialize_assets/launch_backfill
-            # use for their OWN `dg launch` subprocess calls -- without it,
-            # THIS dev server (the one the status bar's "Dev Server" button
-            # actually starts, and the one the Runs page's live GraphQL
-            # queries) reads whatever Dagster's own default instance
-            # location happens to be, not the project-scoped
-            # .designer_dagster_home those other runs were recorded into.
-            # Confirmed live: a run launched via materialize/backfill was
-            # visible when `dg dev` was started with DAGSTER_HOME pinned
-            # by hand, and invisible via this exact code path, since it
-            # never set the variable at all -- two different instances,
-            # same project, neither one wrong on its own, just disagreeing
-            # about where "the" instance lives.
-            import os
-            env = {**os.environ}
-            dagster_home = project_path.absolute() / ".designer_dagster_home"
-            dagster_home.mkdir(exist_ok=True)
-            env["DAGSTER_HOME"] = str(dagster_home)
+            log_path = _dev_server_log_path(project_path)
+            process = _spawn_dev_server(cmd, str(project_path), _dev_server_env(project_path), log_path)
 
-            process = subprocess.Popen(
-                cmd,
-                cwd=str(project_path),
-                env=env,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                start_new_session=True,
-                text=True,
-                bufsize=1,
+            # Wait (off the event loop -- a blocking poll) for dg dev to report its port.
+            actual_port, startup_log = await asyncio.to_thread(
+                _wait_for_dev_server_startup, process, log_path, port, cmd
             )
-
-            # Wait for dg dev to output the port (usually happens within a few seconds)
-            # Parse output like: "Serving Dagster UI on http://0.0.0.0:3001"
-            def _wait_for_startup() -> tuple[int, list[str]]:
-                """Blocks on process.stdout.readline() until the dev
-                server reports its port, exits, or times out. Run off
-                the event loop (asyncio.to_thread below) -- this is a
-                genuinely blocking call on a long-lived subprocess pipe,
-                and without offloading it, ONE project's dev-server
-                start freezes the entire backend (every other open
-                project's requests) for however long this takes, not
-                just this request.
-                """
-                actual_port = port  # Default to what was requested
-                start_time = time.time()
-                timeout = 30  # Wait up to 30 seconds for startup
-                startup_log: list[str] = []  # Capture startup output
-
-                while time.time() - start_time < timeout:
-                    line = process.stdout.readline()
-                    if not line:
-                        # Check if process is still running
-                        if process.poll() is not None:
-                            # Process exited - capture any remaining output
-                            remaining_output = process.stdout.read()
-                            if remaining_output:
-                                startup_log.append(remaining_output)
-
-                            error_msg = f"Dagster process exited unexpectedly with code {process.returncode}"
-                            raise HTTPException(
-                                status_code=500,
-                                detail={
-                                    "message": error_msg,
-                                    "error": error_msg,
-                                    "command": " ".join(cmd),
-                                    "startup_log": startup_log[-50:],  # Last 50 lines
-                                    "returncode": process.returncode,
-                                }
-                            )
-                        time.sleep(0.1)
-                        continue
-
-                    # Capture the line for logging
-                    startup_log.append(line.rstrip())
-
-                    # Look for the serving message
-                    match = re.search(r'Serving.*?(?:http://|on)\s*(?:\S+:)?(\d+)', line, re.IGNORECASE)
-                    if match:
-                        actual_port = int(match.group(1))
-                        break
-
-                return actual_port, startup_log
-
-            actual_port, startup_log = await asyncio.to_thread(_wait_for_startup)
 
             # Cache the port and PID for this project
             _project_ports[project_id] = (actual_port, process.pid)
@@ -580,6 +621,7 @@ async def start_dagster_ui(project_id: str):
                 "pid": process.pid,
                 "command": " ".join(cmd),
                 "startup_log": startup_log[-20:],  # Return last 20 lines
+                "log_file": str(log_path),
             }
 
         except HTTPException:

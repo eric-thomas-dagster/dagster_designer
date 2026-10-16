@@ -45,7 +45,7 @@ function watchBackfill(projectId: string, backfillId: string, launches: number |
     // A real Dagster backfill: the daemon picks it up on its next tick (~30s), then launches runs in
     // parallel, upstream unpartitioned assets first.
     notify.info(
-      `Backfill started${launches ? `: ${runs(launches)}` : ''}. Dagster launches them in parallel; the first appear within about 30 seconds.`,
+      `Backfill started${launches ? `: up to ${runs(launches)}` : ''}. Dagster launches them in parallel; the first appear within about 30 seconds.`,
       { durationMs: 10_000, action: viewRuns },
     );
   } else {
