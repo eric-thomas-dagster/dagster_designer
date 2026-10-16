@@ -2385,14 +2385,28 @@ async def validate_project(project_id: str):
 
     # Check if asset introspection/generation is currently in progress
     # Don't validate while assets are being generated as it may fail or timeout
-    from ..services.asset_introspection_service import asset_introspection_service, get_recent_run_result, record_last_run_result
+    from ..services.asset_introspection_service import (
+        asset_introspection_service, get_project_defs_lock, get_recent_run_result, record_last_run_result,
+    )
     if asset_introspection_service._is_running(project_id):
-        return {
-            "valid": None,
-            "pending": True,
-            "message": "Asset generation is in progress. Validation will be available once assets are generated.",
-            "details": None
-        }
+        # A `dg list defs` is already running for this project -- very often the
+        # background re-check that fires right after a file save. Don't bounce the
+        # caller with "pending" (the dialog then showed an empty failure): wait for
+        # it to finish, then fall through, where its just-recorded result is reused
+        # (see the recent-result check below). Only a genuinely long run -- e.g. the
+        # initial asset generation after project creation -- still reports pending.
+        async def _wait_until_idle():
+            async with get_project_defs_lock(project_id):
+                pass
+        try:
+            await asyncio.wait_for(_wait_until_idle(), timeout=90)
+        except asyncio.TimeoutError:
+            return {
+                "valid": None,
+                "pending": True,
+                "message": "Asset generation is in progress. Validation will be available once assets are generated.",
+                "details": None
+            }
 
     # A `dg list defs` just ran for this exact project a moment ago --
     # most commonly regenerate-assets called right before this endpoint by

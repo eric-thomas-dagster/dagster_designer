@@ -779,6 +779,23 @@ function App() {
     }
   };
 
+  // A "pending" validation (valid === null) isn't an answer yet -- retry on its own
+  // every 3s (up to ~2 min) so the dialog resolves to a real pass/fail.
+  const pendingValidationRetries = useRef(0);
+  useEffect(() => {
+    if (!showValidationDialog || !validationResult || validationResult.valid != null) {
+      pendingValidationRetries.current = 0;
+      return;
+    }
+    if (isValidating || pendingValidationRetries.current >= 40) return;
+    const t = setTimeout(() => {
+      pendingValidationRetries.current += 1;
+      handleViewValidationDetails();
+    }, 3000);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showValidationDialog, validationResult, isValidating]);
+
   // Handler to navigate to code tab and open a file
   const handleOpenFile = (filePath: string) => {
     setActiveMainTab('code');
@@ -2396,7 +2413,7 @@ function App() {
           <div className="bg-white rounded-lg shadow-xl w-full max-w-3xl max-h-[80vh] flex flex-col">
             <div className="flex items-center justify-between p-6 border-b">
               <h2 className="text-lg font-semibold">
-                {validationResult.valid ? 'Validation successful' : 'Validation failed'}
+                {validationResult.valid ? 'Validation successful' : validationResult.valid == null ? 'Validation in progress' : 'Validation failed'}
               </h2>
               <button onClick={() => setShowValidationDialog(false)}>
                 <X className="w-5 h-5 text-gray-400 hover:text-gray-600" />
@@ -2404,7 +2421,19 @@ function App() {
             </div>
 
             <div className="flex-1 overflow-y-auto p-6">
-              {validationResult.valid ? (
+              {validationResult.valid == null ? (
+                // `valid: null` = not a result yet (a check or asset generation is still
+                // running). Never present it as a failure, and never offer Delete buttons.
+                <div className="flex items-start gap-3 text-gray-700">
+                  <Loader2 className="w-5 h-5 animate-spin mt-0.5 flex-shrink-0" />
+                  <div>
+                    <p className="font-medium">Checking your project…</p>
+                    <p className="text-sm text-gray-500 mt-1">
+                      {validationResult.message || 'Validation will finish in a moment.'} This updates automatically.
+                    </p>
+                  </div>
+                </div>
+              ) : validationResult.valid ? (
                 <div>
                   <p className="text-green-700 mb-4">{validationResult.message}</p>
                   {validationResult.details?.stdout && (
