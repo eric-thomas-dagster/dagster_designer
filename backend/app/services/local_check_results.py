@@ -138,3 +138,133 @@ def apply_local_check_results(project_dir: Path, monitors: Iterable[Any]) -> int
             m.recent_statuses = list(r["recent"])
         applied += 1
     return applied
+
+
+# --------------------------------------------------------------------------------------
+# Per-monitor run history (the detail page)
+# --------------------------------------------------------------------------------------
+
+# Serialized (serdes) metadata entry class -> (frontend type, field holding the value).
+# Mirrors dagster_plus_client._METADATA_TYPE_MAP, which describes the GraphQL shape of the
+# same entries; the stored evaluation uses Dagster's storage names instead.
+_SERDES_METADATA = {
+    "FloatMetadataEntryData": ("float", "value"),
+    "IntMetadataEntryData": ("int", "value"),
+    "TextMetadataEntryData": ("text", "text"),
+    "MarkdownMetadataEntryData": ("markdown", "md_str"),
+    "UrlMetadataEntryData": ("url", "url"),
+    "PathMetadataEntryData": ("path", "path"),
+    "JsonMetadataEntryData": ("json", "data"),
+    "BoolMetadataEntryData": ("bool", "value"),
+    "TimestampMetadataEntryData": ("timestamp", "value"),
+}
+_LOW_PRIORITY_NUMERIC_LABELS = {"Execution Duration"}  # same preference as the cloud path
+
+_HISTORY_QUERY = """
+SELECT asset_key, check_name, execution_status, create_timestamp, run_id, evaluation_event
+FROM asset_check_executions
+WHERE check_name = ? AND execution_status IN ('SUCCEEDED', 'FAILED', 'EXECUTION_FAILED')
+ORDER BY id DESC
+LIMIT ?
+"""
+
+
+def _metadata_entries(metadata: dict | None) -> list[dict]:
+    """{label: serdes entry} -> [{label, description, type, value}] (the cloud/frontend shape)."""
+    out: list[dict] = []
+    for label, entry in (metadata or {}).items():
+        entry = entry if isinstance(entry, dict) else {}
+        mapped = _SERDES_METADATA.get(entry.get("__class__", ""))
+        etype, value = "other", None
+        if mapped:
+            etype, value = mapped[0], entry.get(mapped[1])
+            if etype == "json" and value is not None and not isinstance(value, str):
+                value = json.dumps(value)
+        out.append({"label": label, "description": entry.get("description"), "type": etype, "value": value})
+    return out
+
+
+def _parse_evaluation(raw: str | None) -> dict:
+    """Pull description / message / metadata out of a stored AssetCheckEvaluation event."""
+    if not raw:
+        return {}
+    try:
+        ev = json.loads(raw)
+        de = ev.get("dagster_event") or {}
+        data = de.get("event_specific_data") or {}
+        return {
+            "description": data.get("description"),
+            "message": de.get("message"),
+            "metadata": _metadata_entries(data.get("metadata")),
+            "timestamp": ev.get("timestamp"),
+        }
+    except (ValueError, AttributeError, TypeError):
+        return {}
+
+
+def _history_identity(monitor_id: str) -> tuple[str | None, str] | None:
+    """(asset_key or None, check_name) for a monitor id: a dbt test id carries only the
+    test name; native/enhanced ids are '<asset>::<check>' or '<asset>:<check>'."""
+    name = _dbt_test_name(monitor_id)
+    if name:
+        return None, name
+    for sep in ("::", ":"):
+        if sep in monitor_id:
+            asset_key, check_name = monitor_id.rsplit(sep, 1)
+            return asset_key, check_name
+    return None
+
+
+def read_check_history(project_dir: Path, monitor_id: str, limit: int = 200) -> list[dict]:
+    """Every completed run of one check, oldest first, in the event shape the monitor detail
+    page renders (same as the Dagster+ path). Empty if the project has no recorded results.
+    Never raises."""
+    ident = _history_identity(monitor_id)
+    db = project_dir / ".designer_dagster_home" / "history" / "runs" / "index.db"
+    if not ident or not db.exists():
+        return []
+    asset_key, check_name = ident
+    try:
+        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=5)
+        try:
+            # Over-fetch when filtering by asset in Python (the stored key is JSON text).
+            rows = conn.execute(_HISTORY_QUERY, (check_name, max(1, min(limit, 500)) * (3 if asset_key else 1))).fetchall()
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return []
+
+    events: list[dict] = []
+    for stored_key, _name, status, created, run_id, evaluation in rows:
+        if asset_key and _asset_key_to_path(stored_key) != asset_key:
+            continue
+        mapped = _STATUS.get(status)
+        if not mapped:
+            continue
+        if mapped == "fail" and evaluation and "AssetCheckSeverity.WARN" in str(evaluation):
+            mapped = "warn"
+        info = _parse_evaluation(evaluation)
+        ts = None
+        if isinstance(info.get("timestamp"), (int, float)):
+            ts = datetime.fromtimestamp(info["timestamp"], tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        event: dict = {
+            "ts": ts or _iso(created) or "",
+            "monitor_id": monitor_id,
+            "kind": "asset_check",
+            "status": mapped,
+            "message": info.get("description") or info.get("message"),
+            "run_id": run_id,
+            "metadata": info.get("metadata") or [],
+        }
+        numeric = [e for e in event["metadata"] if e["type"] in ("float", "int") and e["value"] is not None]
+        chosen = next((e for e in numeric if e["label"] not in _LOW_PRIORITY_NUMERIC_LABELS), None) or (numeric[0] if numeric else None)
+        if chosen:
+            event["value"], event["value_label"] = float(chosen["value"]), chosen["label"]
+        failed_rows = next((e for e in numeric if e["label"].endswith("failed_row_count")), None)
+        if failed_rows:
+            event["failures"] = int(failed_rows["value"])
+        events.append(event)
+        if len(events) >= limit:
+            break
+    events.reverse()  # rows came newest-first; the page expects chronological
+    return events

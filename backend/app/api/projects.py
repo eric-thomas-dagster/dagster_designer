@@ -8908,21 +8908,20 @@ async def get_monitor_history(project_id: str, monitor_id: str, limit: int = 200
     if project.is_dagster_plus:
         # Cloud: authoritative source is Dagster+ GraphQL.
         events = await _asset_check_history(project, monitor_id, limit)
-    elif "::" in monitor_id:
-        # Local asset-check monitor -- try `dg dev` GraphQL first so we
-        # get the same rich metadata (numeric values, timestamps,
-        # descriptions) as cloud. Fall back to the local jsonl history
-        # if `dg dev` isn't running or has no data yet.
-        events = await _asset_check_history(project, monitor_id, limit)
-        if not events:
-            root = project_service._get_project_dir(project)
-            events = read_events(root, monitor_id=monitor_id, limit=limit)
     else:
-        # Local dbt test / enhanced check -- history lives in jsonl.
-        # (Native asset checks always have "::" in monitor_id and are
-        # already handled by the `elif` above.)
+        # Local: Dagster has recorded every run of every check (dbt tests included -- dagster-dbt
+        # emits them as asset checks) in the project's own instance, with status, message, run id
+        # and typed metadata. Read that first: it needs neither `dg dev` nor dbt's run_results.json,
+        # so history shows after any run however it was launched. Only if the instance has nothing
+        # for this monitor fall back to the older sources (`dg dev` GraphQL for '::' ids, then the
+        # jsonl snapshots).
         root = project_service._get_project_dir(project)
-        events = read_events(root, monitor_id=monitor_id, limit=limit)
+        from ..services.local_check_results import read_check_history
+        events = await asyncio.to_thread(read_check_history, root, monitor_id, limit)
+        if not events and "::" in monitor_id:
+            events = await _asset_check_history(project, monitor_id, limit)
+        if not events:
+            events = read_events(root, monitor_id=monitor_id, limit=limit)
     points = [MonitorHistoryPoint(**{k: v for k, v in e.items() if k in MonitorHistoryPoint.model_fields}) for e in events]
 
     # Collect every numeric metadata entry across all events, keyed by

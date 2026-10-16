@@ -118,3 +118,100 @@ def test_apply_keeps_a_monitors_own_newer_result(project):
 def test_apply_with_no_results_changes_nothing(tmp_path):
     m = mon("a:c", label="c", targets=["a"])
     assert apply_local_check_results(tmp_path, [m]) == 0 and m.last_status is None
+
+
+# ------------------------------------------------------------------------------------
+# Per-monitor run history (monitor detail page)
+# ------------------------------------------------------------------------------------
+import json
+
+from app.services.local_check_results import read_check_history
+
+
+def evaluation(description=None, metadata=None, severity="ERROR", ts=1781000000.5, message="Asset check passed."):
+    return json.dumps({
+        "__class__": "EventLogEntry", "timestamp": ts,
+        "dagster_event": {
+            "message": message,
+            "event_specific_data": {
+                "__class__": "AssetCheckEvaluation", "description": description,
+                "metadata": metadata or {}, "severity": {"__enum__": f"AssetCheckSeverity.{severity}"},
+            },
+        },
+    })
+
+
+def test_history_is_chronological_with_run_ids_and_typed_metadata(project):
+    meta = {
+        "Execution Duration": {"__class__": "FloatMetadataEntryData", "value": 0.0075},
+        "dagster_dbt/failed_row_count": {"__class__": "IntMetadataEntryData", "value": 3},
+        "note": {"__class__": "TextMetadataEntryData", "text": "hello"},
+        "weird": {"__class__": "TableMetadataEntryData"},
+    }
+    add(project, '["orders"]', "chk", "FAILED", ts="2026-10-16 10:00:00", run="run-old",
+        event=evaluation(metadata=meta, description="3 rows failed"))
+    add(project, '["orders"]', "chk", "SUCCEEDED", ts="2026-10-16 11:00:00", run="run-new",
+        event=evaluation(metadata={"dagster_dbt/failed_row_count": {"__class__": "IntMetadataEntryData", "value": 0}}))
+    ev = read_check_history(project, "orders::chk")
+    assert [e["run_id"] for e in ev] == ["run-old", "run-new"]            # oldest first
+    assert [e["status"] for e in ev] == ["fail", "pass"]
+    old = ev[0]
+    assert old["message"] == "3 rows failed" and old["kind"] == "asset_check" and old["monitor_id"] == "orders::chk"
+    by_label = {m["label"]: m for m in old["metadata"]}
+    assert by_label["note"]["type"] == "text" and by_label["note"]["value"] == "hello"
+    assert by_label["Execution Duration"]["type"] == "float" and by_label["weird"]["type"] == "other"
+    # chart value prefers a domain metric over Execution Duration; failures comes from failed_row_count
+    assert old["value"] == 3.0 and old["value_label"] == "dagster_dbt/failed_row_count" and old["failures"] == 3
+    assert ev[1]["failures"] == 0
+
+
+def test_history_falls_back_to_the_dagster_message_and_row_time(project):
+    add(project, '["a"]', "c", "SUCCEEDED", ts="2026-10-16 09:00:00", event=evaluation(description=None, message="passed!", ts=None))
+    e = read_check_history(project, "a:c")[0]
+    assert e["message"] == "passed!" and e["ts"] == "2026-10-16T09:00:00Z"
+
+
+def test_history_finds_dbt_tests_by_name_and_both_id_shapes_by_asset(project):
+    add(project, '["orders"]', "unique_orders_id", "SUCCEEDED", run="r1")
+    add(project, '["other"]', "shared", "SUCCEEDED", run="r-other")
+    add(project, '["orders"]', "shared", "FAILED", run="r-orders")
+    assert [e["run_id"] for e in read_check_history(project, "test.shop.unique_orders_id.hash")] == ["r1"]
+    assert [e["run_id"] for e in read_check_history(project, "orders:shared")] == ["r-orders"]    # asset-scoped
+    assert [e["run_id"] for e in read_check_history(project, "other::shared")] == ["r-other"]
+
+
+def test_history_limit_keeps_the_most_recent_and_warn_severity_is_a_warning(project):
+    for i in range(5):
+        add(project, '["a"]', "c", "SUCCEEDED", ts=f"2026-10-16 10:0{i}:00", run=f"r{i}")
+    assert [e["run_id"] for e in read_check_history(project, "a::c", limit=2)] == ["r3", "r4"]
+    add(project, '["a"]', "w", "FAILED", event=evaluation(severity="WARN"))
+    assert read_check_history(project, "a::w")[0]["status"] == "warn"
+
+
+def test_history_is_empty_for_unknown_monitors_and_missing_instances(tmp_path, project):
+    assert read_check_history(project, "a::nothing") == []
+    assert read_check_history(project, "no-separator-here") == []
+    assert read_check_history(tmp_path / "nope", "a::c") == []
+
+
+def test_history_endpoint_reads_the_instance_without_dg_dev(project, monkeypatch):
+    """GET /monitors/history for a local project used to need `dg dev` GraphQL (and only for
+    '::' ids) or dbt snapshots, so the detail page showed no run history after a normal run."""
+    from fastapi.testclient import TestClient
+    from app.api import projects as projects_api
+    from app.main import app
+
+    add(project, '["orders"]', "chk", "SUCCEEDED", run="run-1",
+        event=evaluation(metadata={"rows": {"__class__": "IntMetadataEntryData", "value": 42}}))
+    monkeypatch.setattr(projects_api.project_service, "get_project", lambda pid: SimpleNamespace(id=pid, is_dagster_plus=False))
+    monkeypatch.setattr(projects_api.project_service, "_get_project_dir", lambda p: project)
+
+    async def no_dev_server(*a, **k):  # dg dev is NOT running
+        raise AssertionError("must not need dg dev when the instance has the data")
+    monkeypatch.setattr(projects_api, "_asset_check_history", no_dev_server)
+
+    r = TestClient(app).get("/api/v1/projects/p/monitors/history", params={"monitor_id": "orders:chk"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert [e["run_id"] for e in body["events"]] == ["run-1"] and body["events"][0]["status"] == "pass"
+    assert any(m["label"] == "rows" for m in body["numeric_metrics"])   # feeds the chart
