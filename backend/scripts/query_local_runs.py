@@ -99,6 +99,31 @@ def _run_process_pid(instance, run_id: str) -> int | None:
     return None
 
 
+# A run younger than this (since it STARTED) is never judged dead.
+_DEAD_RUN_GRACE_SECONDS = 30
+
+
+def run_process_is_gone(status: str, start_time: float | None, pid: int | None, now: float | None = None) -> bool:
+    """True only if a run that really started has a recorded process that is no longer running.
+
+    Deliberately conservative -- a wrong 'yes' fails a healthy run (24 of 34 runs in one real backfill
+    were failed this way):
+      * Only STARTED / CANCELING runs. A queued or STARTING run has not got a worker to lose yet.
+      * `start_time` must exist. The first version fell back to the run's CREATION time when it was
+        empty; but a backfill's runs wait in the queue, so by the time their process existed it had been
+        created 30+ seconds earlier, the 'is this pid newer than the run?' reuse check read the brand-new
+        process as an unrelated later one, and the run was failed 2 seconds after it started.
+      * `start_time` -- written after the worker booted, so the real process is always older than it --
+        is the only reference for the pid-reuse check."""
+    import time
+
+    if status not in ("STARTED", "CANCELING") or start_time is None or pid is None:
+        return False
+    if (now if now is not None else time.time()) - start_time < _DEAD_RUN_GRACE_SECONDS:
+        return False
+    return not _pid_alive(pid, start_time)
+
+
 def reconcile_dead_runs(instance, dry_run: bool = False) -> list[dict]:
     """Close out runs whose process is gone.
 
@@ -110,19 +135,16 @@ def reconcile_dead_runs(instance, dry_run: bool = False) -> list[dict]:
     no longer alive, mark the run failed (or canceled, if it was CANCELING) so
     the page and per-asset statuses stop reporting a ghost.
     """
-    import time
     from dagster._core.storage.dagster_run import DagsterRunStatus, RunsFilter
 
-    in_flight = [DagsterRunStatus.STARTED, DagsterRunStatus.STARTING, DagsterRunStatus.CANCELING]
+    in_flight = [DagsterRunStatus.STARTED, DagsterRunStatus.CANCELING]
     fixed: list[dict] = []
     for rec in instance.get_run_records(RunsFilter(statuses=in_flight), limit=50):
         run = rec.dagster_run
-        started = rec.start_time or (rec.create_timestamp.timestamp() if rec.create_timestamp else None)
-        # Give a freshly launched run a moment to log its process id.
-        if started is not None and time.time() - started < 30:
+        if rec.start_time is None:  # never started -- see run_process_is_gone
             continue
         pid = _run_process_pid(instance, run.run_id)
-        if pid is None or _pid_alive(pid, started):
+        if not run_process_is_gone(run.status.value, rec.start_time, pid):
             continue
         entry = {"run_id": run.run_id, "was": run.status.value, "pid": pid}
         if not dry_run:
