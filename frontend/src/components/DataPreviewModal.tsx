@@ -3723,7 +3723,7 @@ export function DataPreviewModal({
                   </div>
 
                   {/* Save as New Asset - Sticky Bottom */}
-                  <div className="mt-auto pt-4 border-t-2 border-gray-300 bg-gradient-to-b from-gray-50 to-white">
+                  <div className="mt-auto pt-4 border-t-2 border-gray-300 bg-white">
                     <div className="space-y-3">
                       <h3 className="text-sm font-semibold text-gray-900 flex items-center">
                         <Save className="w-4 h-4 mr-2 text-green-600" />
