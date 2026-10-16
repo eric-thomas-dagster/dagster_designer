@@ -748,10 +748,8 @@ export function IngestionsPanel({ onAddDataSource, onAddCloudDataSource, onEditC
     if (!currentProject) return;
     try {
       const r = await partitionsApi.launchBackfill(currentProject.id, request);
-      const targetKey = (request.asset_keys && request.asset_keys[0]) || 'asset';
-      if (r.success) {
-        notify.success(`Backfill launched for ${targetKey}.`);
-      } else {
+      // Progress and the real outcome are reported by partitionsApi.launchBackfill itself.
+      if (!r.success) {
         notify.error(`Backfill failed: ${r.message}`);
       }
       // Refresh the event log so the newly-launched runs show up in

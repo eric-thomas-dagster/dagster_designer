@@ -4268,6 +4268,62 @@ class BackfillResponse(BaseModel):
     message: str
     stdout: str
     stderr: str
+    # Handle for GET /backfills/{backfill_id}: the launch itself runs in the background, so
+    # `success` here only means "accepted" -- this is how callers learn how it really went.
+    backfill_id: str | None = None
+    launches: int | None = None
+
+
+class BackfillStatus(BaseModel):
+    backfill_id: str
+    state: str                    # running | succeeded | failed
+    total: int                    # launches planned (grows when a range is expanded per partition)
+    launched: int                 # `dg launch` calls that created a run so far
+    message: str | None = None    # failure reason, or a short success note
+    expanded_range: bool = False  # True if a partition range had to be run partition by partition
+
+
+# In-memory (a backfill is minutes long, within one app session); newest 50 kept.
+_backfill_jobs: dict[str, dict] = {}
+
+
+def _backfill_job_update(backfill_id: str | None, **fields) -> None:
+    if not backfill_id or backfill_id not in _backfill_jobs:
+        return
+    _backfill_jobs[backfill_id].update(fields)
+
+
+def _needs_single_run_policy(stderr: str | None) -> bool:
+    """`dg launch --partition-range` only works when EVERY selected asset has a
+    BackfillPolicy.single_run(); otherwise it raises this CheckError before creating a run."""
+    return "BackfillPolicy.single_run()" in (stderr or "") or "require all selected assets to have a BackfillPolicy" in (stderr or "")
+
+
+async def _expand_partition_range(project_id: str, asset_keys: list[str], start: str, end: str) -> list[str] | None:
+    """The individual partition keys from `start` to `end` inclusive, from the asset's own
+    partitions definition (cached from the partition picker). None if they can't be determined
+    -- including when the definition is too large for show_partitions to list in full."""
+    for ak in asset_keys:
+        try:
+            info = await get_asset_partitions(project_id, ak)
+        except Exception:
+            continue
+        pdef = info.partitions_def or {}
+        keys = pdef.get("partition_keys") or []
+        if pdef.get("partition_count") and pdef["partition_count"] != len(keys):
+            continue  # sampled (first/last 100) -- can't expand safely
+        if start in keys and end in keys and keys.index(start) <= keys.index(end):
+            return keys[keys.index(start): keys.index(end) + 1]
+    return None
+
+
+@router.get("/{project_id}/backfills/{backfill_id}", response_model=BackfillStatus)
+async def get_backfill_status(project_id: str, backfill_id: str):
+    """How a backfill launched via POST /backfill is going (it runs in the background)."""
+    job = _backfill_jobs.get(backfill_id)
+    if not job or job["project_id"] != project_id:
+        raise HTTPException(status_code=404, detail="Backfill not found (it may be from an earlier app session)")
+    return BackfillStatus(backfill_id=backfill_id, **{k: v for k, v in job.items() if k in BackfillStatus.model_fields and k != "backfill_id"})
 
 
 @router.post("/{project_id}/backfill", response_model=BackfillResponse)
@@ -4305,9 +4361,19 @@ async def launch_backfill(project_id: str, request: BackfillRequest, background_
         raise HTTPException(status_code=404, detail="Project directory not found")
 
     partition_count = len(_backfill_partition_args(request))
-    background_tasks.add_task(_run_backfill_in_background, project_id, project_dir, request)
+    import uuid as _uuid
+    backfill_id = _uuid.uuid4().hex[:12]
+    _backfill_jobs[backfill_id] = {
+        "project_id": project_id, "state": "running", "total": partition_count,
+        "launched": 0, "message": None, "expanded_range": False,
+    }
+    for old_id in list(_backfill_jobs)[:-50]:
+        _backfill_jobs.pop(old_id, None)
+    background_tasks.add_task(_run_backfill_in_background, project_id, project_dir, request, backfill_id)
 
     return BackfillResponse(
+        backfill_id=backfill_id,
+        launches=partition_count,
         success=True,
         message=(
             "Backfill launched -- check the Runs page for progress."
@@ -4342,7 +4408,7 @@ def _backfill_partition_args(request: BackfillRequest) -> list[list[str]]:
     return arg_sets or [[]]
 
 
-async def _run_backfill_in_background(project_id: str, project_dir: Path, request: BackfillRequest) -> None:
+async def _run_backfill_in_background(project_id: str, project_dir: Path, request: BackfillRequest, backfill_id: str | None = None) -> None:
     """The actual backfill work -- see launch_backfill's own docstring for
     why this runs as a BackgroundTask instead of being awaited inline."""
     import time
@@ -4413,7 +4479,9 @@ async def _run_backfill_in_background(project_id: str, project_dir: Path, reques
         all_stdout: list[str] = []
         all_stderr: list[str] = []
         failed = False
-        for partition_args in partition_arg_sets:
+        queue = list(partition_arg_sets)
+        while queue:
+            partition_args = queue.pop(0)
             cmd = [dg_path, "launch"]
             if assets_arg:
                 cmd.extend(["--assets", assets_arg])
@@ -4430,11 +4498,23 @@ async def _run_backfill_in_background(project_id: str, project_dir: Path, reques
                 text=True,
                 timeout=300,  # 5 minute timeout per partition
             )
+            if result.returncode != 0 and "--partition-range" in partition_args and _needs_single_run_policy(result.stderr):
+                # A range is ONE launch only for assets with a single-run backfill policy (this one
+                # has none). Run it partition by partition instead, as a multi-select already does,
+                # rather than failing before any run exists.
+                start, _, end = partition_args[partition_args.index("--partition-range") + 1].partition("...")
+                keys = await _expand_partition_range(project_id, request.asset_keys or [], start, end)
+                if keys:
+                    print(f"[backfill] {assets_arg}: no single-run backfill policy; expanding {start}...{end} into {len(keys)} launches", flush=True)
+                    queue = [["--partition", k] for k in keys] + queue
+                    _backfill_job_update(backfill_id, total=len(all_stdout) + len(queue), expanded_range=True)
+                    continue
             all_stdout.append(result.stdout)
             all_stderr.append(result.stderr)
             if result.returncode != 0:
                 failed = True
                 break  # stop at the first failure rather than launching the rest
+            _backfill_job_update(backfill_id, launched=len(all_stdout))
 
         success = not failed
         combined_stdout = "\n".join(all_stdout)
@@ -4513,11 +4593,14 @@ async def _run_backfill_in_background(project_id: str, project_dir: Path, reques
             print(f"[backfill] Warning: Failed to record ingestion event: {_log_e}")
 
         print(f"[backfill] project={project_id} success={success} message={message!r}", flush=True)
+        _backfill_job_update(backfill_id, state="succeeded" if success else "failed", message=message)
 
     except subprocess.TimeoutExpired:
         print(f"[backfill] project={project_id} timed out after 5 minutes on one partition", flush=True)
+        _backfill_job_update(backfill_id, state="failed", message="A partition's launch took longer than 5 minutes and was stopped.")
     except Exception as e:
         print(f"[backfill] project={project_id} error launching backfill: {e}", flush=True)
+        _backfill_job_update(backfill_id, state="failed", message=str(e)[:500])
     finally:
         # Clean up temporary config file
         if config_file and config_file.exists():

@@ -1,6 +1,6 @@
 import axios from 'axios';
 import { notify } from '@/components/Notifications';
-import { openRun } from '@/lib/runLink';
+import { openRun, openRunsList } from '@/lib/runLink';
 import type {
   Project,
   ProjectCreate,
@@ -20,6 +20,59 @@ const api = axios.create({
   },
   timeout: 600000, // 10 minute timeout for long operations (asset generation for large projects with 500+ assets)
 });
+
+export interface BackfillStatus {
+  backfill_id: string;
+  state: 'running' | 'succeeded' | 'failed';
+  total: number;
+  launched: number;
+  message: string | null;
+  expanded_range: boolean;
+}
+
+/**
+ * Announce a backfill, then follow it to the end so a failure is never silent: the backend launches
+ * it in the background and used to only log the outcome, so a backfill that launched nothing still
+ * looked like "Backfill launched". Module-level, so it keeps going if the panel that started it unmounts.
+ */
+function watchBackfill(projectId: string, backfillId: string, launches: number) {
+  const viewRuns = { label: 'View runs', onClick: () => openRunsList() };
+  notify.info(
+    launches > 1 ? `Backfill started: ${launches} launches. Runs appear one at a time.` : 'Backfill started.',
+    { durationMs: 10_000, action: viewRuns },
+  );
+  (async () => {
+    let announcedExpansion = false;
+    let errors = 0;
+    for (let i = 0; i < 1200 && errors < 5; i++) { // ~1h at 3s
+      await new Promise((r) => setTimeout(r, 3000));
+      let st: BackfillStatus;
+      try {
+        st = (await api.get<BackfillStatus>(`/projects/${projectId}/backfills/${backfillId}`, { timeout: 30_000 })).data;
+        errors = 0;
+      } catch {
+        errors += 1; // 404 = from a previous app session; anything else: give up quietly after a few tries
+        continue;
+      }
+      if (st.expanded_range && !announcedExpansion) {
+        announcedExpansion = true;
+        notify.info(
+          `This asset has no single-run backfill policy, so its ${st.total} partitions run one at a time.`,
+          { durationMs: 8_000, action: viewRuns },
+        );
+      }
+      if (st.state === 'failed') {
+        const done = st.launched ? ` after ${st.launched} run${st.launched === 1 ? '' : 's'}` : '';
+        notify.error(`Backfill failed${done}: ${st.message ?? 'unknown error'}`, 20_000);
+        return;
+      }
+      if (st.state === 'succeeded') {
+        notify.success(`Backfill finished: ${st.launched} run${st.launched === 1 ? '' : 's'} launched.`, { durationMs: 8_000, action: viewRuns });
+        return;
+      }
+    }
+  })();
+}
 
 /**
  * While a launch is in flight, poll for the run it creates and surface a toast with a
@@ -2472,6 +2525,9 @@ export interface BackfillResponse {
   message: string;
   stdout: string;
   stderr: string;
+  /** Handle for getBackfillStatus: the launch runs in the background, so `success` only means accepted. */
+  backfill_id?: string | null;
+  launches?: number | null;
 }
 
 export const partitionsApi = {
@@ -2522,8 +2578,16 @@ export const partitionsApi = {
       `/projects/${projectId}/backfill`,
       request
     );
+    // The launch itself runs in the background (one `dg launch` per partition), so "accepted" isn't
+    // "worked". Say it started, with a link to the Runs page, then report how it really went.
+    if (response.data.success && response.data.backfill_id) {
+      watchBackfill(projectId, response.data.backfill_id, response.data.launches ?? 1);
+    }
     return response.data;
   },
+
+  getBackfillStatus: async (projectId: string, backfillId: string): Promise<BackfillStatus> =>
+    (await api.get<BackfillStatus>(`/projects/${projectId}/backfills/${backfillId}`)).data,
 
   /** Per-partition materialization status matrix -- works for both local
    *  (queries the project's own `dagster dev`) and Dagster+ (cloud). */

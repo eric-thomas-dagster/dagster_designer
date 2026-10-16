@@ -789,8 +789,8 @@ export function PartitionsTab({
           assetKey={assetKey}
           onLaunch={async (request: BackfillRequest) => {
             const r = await partitionsApi.launchBackfill(projectId, request);
-            if (r.success) notify.success(`Backfill launched for ${assetKey}.`);
-            else notify.error(`Backfill failed: ${r.message}`);
+            // Progress and the real outcome are reported by partitionsApi.launchBackfill itself.
+            if (!r.success) notify.error(`Backfill failed: ${r.message}`);
           }}
         />
       )}
