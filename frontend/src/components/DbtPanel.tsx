@@ -4,7 +4,8 @@ import { FileCode, Play, Loader2, CheckCircle2, XCircle, AlertTriangle, TestTube
 import { projectsApi } from '@/services/api';
 import { classifyStatus } from '@/lib/status';
 import { useProjectStore } from '@/hooks/useProject';
-import { notify } from './Notifications';
+import { notify, confirmDialog } from './Notifications';
+import { downstreamAssetLabels, summarizeNames } from '@/lib/dependents';
 import { SimpleMarkdown } from './SimpleMarkdown';
 import { AddDbtModelDialog } from './AddDbtModelDialog';
 import { GitCommitDialog } from './GitCommitDialog';
@@ -314,19 +315,47 @@ export function DbtPanel({ onOpenFile }: DbtPanelProps) {
     });
   };
 
-  const handleDeleteModel = (m: Model) => {
+  const handleDeleteModel = async (m: Model) => {
     if (!currentProject || !data?.dbt_project_relative_path) return;
-    const msg = `model ${m.name} (removes ${m.relative_sql_path ?? 'the sql file'} and strips the schema.yml block)`;
-    guardedDelete(msg, async () => {
-      await projectsApi.deleteDbtModel(currentProject.id, {
+    const what = `model ${m.name} (removes ${m.relative_sql_path ?? 'the sql file'} and strips the schema.yml block)`;
+
+    // Deleting a model something else uses breaks the whole project (dbt can't parse a dangling ref(), and
+    // downstream Dagster assets lose their upstream) -- find who depends on it and say so before deleting.
+    let dbtDependents: string[] = [];
+    try {
+      const r = await projectsApi.dbtModelDependents(currentProject.id, {
         dbt_relative_path: data.dbt_project_relative_path,
         model_unique_id: m.unique_id,
       });
+      dbtDependents = r.dependents.map((d) => `${d.name}${d.kind === 'exposure' ? ' (exposure)' : ''}`);
+    } catch {
+      // can't tell -- the server also refuses without force, so we still find out below
+    }
+    const assetDependents = downstreamAssetLabels(currentProject, m.name).filter((n) => !dbtDependents.includes(n));
+    const dependents = [...dbtDependents, ...assetDependents];
+
+    const ok = await confirmDialog(
+      dependents.length > 0
+        ? `"${m.name}" is used by ${dependents.length} other item${dependents.length === 1 ? '' : 's'}: ${summarizeNames(dependents)}.\n\nDeleting it will break ${dependents.length === 1 ? 'that' : 'those'} until you fix or remove ${dependents.length === 1 ? 'it' : 'them'}, and the project may fail to load.\n\nThis removes ${m.relative_sql_path ?? 'the sql file'} and strips the schema.yml block.`
+        : `Remove ${what}? This edits the yaml on disk.`,
+      { title: dependents.length > 0 ? 'Delete a model other things depend on?' : 'Delete model', destructive: true },
+    );
+    if (!ok) return;
+    try {
+      await projectsApi.deleteDbtModel(currentProject.id, {
+        dbt_relative_path: data.dbt_project_relative_path,
+        model_unique_id: m.unique_id,
+        force: dependents.length > 0,
+      });
+      notify.success(`Removed ${what}`);
       // Clear drawer if it was pointing at this model.
       if (selectedUniqueId === m.unique_id) setSelectedUniqueId(null);
       refresh();
       void syncAssetGraph();
-    });
+    } catch (e: any) {
+      const detail = e?.response?.data?.detail;
+      notify.error((typeof detail === 'string' ? detail : detail?.message) || e?.message || `Failed to remove ${what}.`);
+    }
   };
 
   // Delete a test by unique_id — backend removes it from schema.yml

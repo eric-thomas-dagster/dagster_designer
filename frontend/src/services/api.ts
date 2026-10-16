@@ -1015,9 +1015,18 @@ export const projectsApi = {
     return response.data as any;
   },
 
+  /** dbt models / exposures that directly depend on a model (tests excluded). */
+  dbtModelDependents: async (
+    projectId: string,
+    body: { dbt_relative_path: string; model_unique_id: string },
+  ): Promise<{ dependents: Array<{ name: string; kind: string; unique_id: string }> }> => {
+    const response = await api.post(`/projects/${projectId}/dbt-model/dependents`, body);
+    return response.data as any;
+  },
+
   deleteDbtModel: async (
     projectId: string,
-    body: { dbt_relative_path: string; model_unique_id: string; delete_schema_entry?: boolean },
+    body: { dbt_relative_path: string; model_unique_id: string; delete_schema_entry?: boolean; force?: boolean },
   ): Promise<{ success: boolean; deleted_sql: string | null; schema_yml_updated: string | null; detail: string | null }> => {
     const response = await api.post(`/projects/${projectId}/dbt-model/delete`, body);
     return response.data as any;

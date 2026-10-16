@@ -9,6 +9,7 @@ import { PartitionBackfill } from './PartitionBackfill';
 import { PartitionConfig } from './PartitionConfig';
 import { DataPreviewModal } from './DataPreviewModal';
 import { notify, confirmDialog } from './Notifications';
+import { downstreamAssetLabels, summarizeNames } from '@/lib/dependents';
 import { assetsApi, projectsApi, primitivesApi, partitionsApi, templatesApi, API_BASE, type BackfillRequest } from '@/services/api';
 import type { ComponentInstance } from '@/types';
 import { InlineAttributesForm } from './InlineAttributesForm';
@@ -1879,9 +1880,14 @@ export function PropertyPanel({ nodeId, onConfigureComponent, onOpenFile, onNewP
                       // Use the component_id from node.data, which contains the actual folder name
                       const componentId = node.data.component_id;
                       if (!componentId) return;
+                      // Warn when other assets build on this one: removing it leaves them with a missing
+                      // upstream and can stop the whole project from loading.
+                      const dependents = downstreamAssetLabels(currentProject, nodeId);
                       const confirmed = await confirmDialog(
-                        `Are you sure you want to delete "${node.data.asset_key || node.data.label}"?\n\nThis will permanently remove the component instance and all its configuration.`,
-                        { title: 'Delete component instance', destructive: true }
+                        dependents.length > 0
+                          ? `"${node.data.asset_key || node.data.label}" is used by ${dependents.length} other asset${dependents.length === 1 ? '' : 's'}: ${summarizeNames(dependents)}.\n\nDeleting it will break ${dependents.length === 1 ? 'that asset' : 'those assets'} (their upstream will be missing) and the project may fail to load until you fix ${dependents.length === 1 ? 'it' : 'them'}.\n\nThis permanently removes the component instance and all its configuration.`
+                          : `Are you sure you want to delete "${node.data.asset_key || node.data.label}"?\n\nThis will permanently remove the component instance and all its configuration.`,
+                        { title: dependents.length > 0 ? 'Delete an asset others depend on?' : 'Delete component instance', destructive: true }
                       );
 
                       if (!confirmed) return;

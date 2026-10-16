@@ -20,7 +20,7 @@ import {
   PanelLeft,
   PanelLeftClose,
 } from 'lucide-react';
-import { filesApi, type FileTreeNode } from '@/services/api';
+import { filesApi, projectsApi, type FileTreeNode } from '@/services/api';
 import { Terminal } from './Terminal';
 import { DagsterExpertPanel } from './DagsterExpertPanel';
 import { notify, confirmDialog } from './Notifications';
@@ -192,6 +192,7 @@ export function CodeEditor({ projectId, fileToOpen, onFileOpened }: CodeEditorPr
   const [quickOpenIndex, setQuickOpenIndex] = useState(0);
   const queryClient = useQueryClient();
   const revalidateTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const graphSyncTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const quickOpenInputRef = useRef<HTMLInputElement | null>(null);
   const { currentProject } = useProjectStore();
   const providersRegisteredRef = useRef(false);
@@ -389,6 +390,25 @@ export function CodeEditor({ projectId, fileToOpen, onFileOpened }: CodeEditorPr
         revalidateTimer.current = setTimeout(() => {
           queryClient.invalidateQueries({ queryKey: ['validation-status', variables.projectId] });
         }, 1200);
+      }
+      // The re-check above only refreshes the validation banner. A saved change to a component/dbt file can
+      // also add, remove or rewire assets, so refresh the asset graph too -- later and debounced, since
+      // discovery re-loads the whole project. Skipped for very large projects, where one reload is costly.
+      if (/(^|\/)defs\//.test(variables.filePath) || /\.(sql|ya?ml)$/.test(variables.filePath)) {
+        if (!/^(data|\.venv|venv|logs|target)\//.test(variables.filePath)) {
+          if (graphSyncTimer.current) clearTimeout(graphSyncTimer.current);
+          graphSyncTimer.current = setTimeout(async () => {
+            const proj = useProjectStore.getState().currentProject;
+            if (!proj || proj.id !== variables.projectId || (proj as any).is_dagster_plus) return;
+            if (proj.graph.nodes.length > 2000) return;
+            try {
+              await projectsApi.regenerateAssets(proj.id, false);
+              await useProjectStore.getState().loadProject(proj.id, { silent: true });
+            } catch {
+              // best effort: the next explicit refresh will pick the change up
+            }
+          }, 4000);
+        }
       }
     },
   });

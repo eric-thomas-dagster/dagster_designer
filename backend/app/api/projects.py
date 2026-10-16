@@ -6433,6 +6433,37 @@ class DeleteDbtModelRequest(BaseModel):
     dbt_relative_path: str
     model_unique_id: str
     delete_schema_entry: bool = True   # also strip the model's block from schema.yml
+    force: bool = False                # delete even if other models/exposures depend on it
+
+
+def dbt_model_dependents(manifest: dict, unique_id: str) -> list[dict]:
+    """Models, snapshots, seeds-free consumers and exposures that depend on `unique_id`, direct only.
+    Tests are excluded: they belong to the model and go away with it. Deleting a model something else
+    `ref()`s makes dbt fail to parse the whole project, so callers must warn first."""
+    out: list[dict] = []
+    nodes = manifest.get('nodes') or {}
+    exposures = manifest.get('exposures') or {}
+    for child_id in (manifest.get('child_map') or {}).get(unique_id, []):
+        child = nodes.get(child_id) or exposures.get(child_id)
+        if not child:
+            continue
+        rt = child.get('resource_type')
+        if rt in ('model', 'snapshot', 'exposure'):
+            out.append({'name': child.get('name') or child_id, 'kind': rt, 'unique_id': child_id})
+    return out
+
+
+class DbtModelDependentsRequest(BaseModel):
+    dbt_relative_path: str
+    model_unique_id: str
+
+
+@router.post('/{project_id}/dbt-model/dependents')
+async def get_dbt_model_dependents(project_id: str, request: DbtModelDependentsRequest):
+    project = project_service.get_project(project_id)
+    dbt_root = _resolve_dbt_root_for_write(project, request.dbt_relative_path)
+    manifest = _load_dbt_artifact(dbt_root / 'target' / 'manifest.json')
+    return {'dependents': dbt_model_dependents(manifest, request.model_unique_id)}
 
 
 class DeleteDbtModelResponse(BaseModel):
@@ -6457,6 +6488,13 @@ async def delete_dbt_model(project_id: str, request: DeleteDbtModelRequest):
     rt = node.get('resource_type')
     if rt not in ('model', 'seed', 'snapshot'):
         raise HTTPException(status_code=400, detail=f"Cannot delete resource_type={rt} — only models/seeds/snapshots.")
+
+    dependents = dbt_model_dependents(manifest, request.model_unique_id)
+    if dependents and not request.force:
+        raise HTTPException(status_code=409, detail={
+            'message': f"{node.get('name')} is used by: {', '.join(d['name'] for d in dependents)}. Deleting it would break them.",
+            'dependents': dependents,
+        })
 
     sql_rel = node.get('original_file_path')
     deleted_sql: str | None = None
