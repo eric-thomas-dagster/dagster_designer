@@ -3637,4 +3637,28 @@ export const appSettingsApi = {
     (await api.put('/app-settings', changes)).data,
 };
 
+// "Explain / Fix with Claude Code" for failing validation -- see AiFixPanel.tsx
+export interface AiFixStatus {
+  claude_found: boolean;
+  skill_installed: boolean;
+  can_run: boolean;
+  reason: string | null;
+}
+export interface AiFixResult {
+  changes: Array<{ path: string; status: 'modified' | 'added' | 'deleted'; diff: string }>;
+  valid: boolean;
+  validation_error: string | null;
+}
+
+export const aiFixApi = {
+  status: async (): Promise<AiFixStatus> => (await api.get('/ai-fix/status')).data,
+  installSkill: async () => (await api.post('/ai/dagster-expert/install')).data,
+  result: async (projectId: string, snapshotId: string): Promise<AiFixResult> =>
+    (await api.get(`/projects/${projectId}/ai-fix/${snapshotId}/result`, { timeout: 300_000 })).data,
+  undo: async (projectId: string, snapshotId: string): Promise<{ restored: string[] }> =>
+    (await api.post(`/projects/${projectId}/ai-fix/${snapshotId}/undo`)).data,
+  keep: async (projectId: string, snapshotId: string) =>
+    (await api.post(`/projects/${projectId}/ai-fix/${snapshotId}/keep`)).data,
+};
+
 export default api;

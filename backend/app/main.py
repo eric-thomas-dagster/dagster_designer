@@ -51,7 +51,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .core.config import settings
 from .services.telemetry_service import log_designer_action, telemetry_uploader
-from .api import components, projects, git, codegen, dagster, files, templates, primitives, dagster_webserver, dbt_adapters, integrations, env_vars, pipelines, templates_registry, dbt_cloud, assets, dependencies, pipeline_templates, genie, alerts, runs, designer_loc, drafts, authored, promotion, preview, app_settings
+from .api import components, projects, git, codegen, dagster, files, templates, primitives, dagster_webserver, dbt_adapters, integrations, env_vars, pipelines, templates_registry, dbt_cloud, assets, dependencies, pipeline_templates, genie, alerts, runs, designer_loc, drafts, authored, promotion, preview, app_settings, ai_fix
 
 # Create FastAPI app
 app = FastAPI(
@@ -95,6 +95,7 @@ app.include_router(drafts.router, prefix=settings.api_prefix)  # New: Draft comp
 app.include_router(authored.router, prefix=settings.api_prefix)  # New: Locations + component types for authoring
 app.include_router(promotion.router, prefix=settings.api_prefix)  # New: Promotion config (GitHub token + repo mappings)
 app.include_router(app_settings.router, prefix=settings.api_prefix)
+app.include_router(ai_fix.router, prefix=settings.api_prefix)
 app.include_router(preview.router, prefix=settings.api_prefix)  # New: Preview (git-backed sandbox worktree for M6)
 
 

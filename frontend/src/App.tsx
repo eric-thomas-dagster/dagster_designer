@@ -52,6 +52,7 @@ import { DagsterStartupModal } from './components/DagsterStartupModal';
 import { AssetDetailPage, type Tab as AssetDetailTab } from './components/AssetDetailPage';
 import { AlertsPanel } from './components/AlertsPanel';
 import { RunsPanel } from './components/RunsPanel';
+import { AiFixPanel } from './components/AiFixPanel';
 import { DataPreviewModal } from './components/DataPreviewModal';
 import { DagsterCloudChip } from './components/DagsterCloudChip';
 import { SandboxStatusPill, pillLabel as sandboxPillLabel } from './components/SandboxStatusPill';
@@ -2426,6 +2427,21 @@ function App() {
               ) : (
                 <div>
                   <p className="text-red-700 mb-4 font-medium">{validationResult.error}</p>
+
+                  {currentProject && !(currentProject as any).is_dagster_plus && (
+                    <AiFixPanel
+                      projectId={currentProject.id}
+                      errorText={[
+                        validationResult.error,
+                        validationResult.details?.validation_error,
+                        validationResult.details?.stderr,
+                      ].filter(Boolean).join('\n\n')}
+                      onKept={async () => {
+                        await useProjectStore.getState().loadProject(currentProject.id, { silent: true });
+                        await handleViewValidationDetails();
+                      }}
+                    />
+                  )}
 
                   {(!validationResult.failing_components || validationResult.failing_components.length === 0) &&
                     currentProject && currentProject.components && currentProject.components.length > 0 && (

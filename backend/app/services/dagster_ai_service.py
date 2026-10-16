@@ -151,7 +151,27 @@ def _select_reference_context(question: str, budget_chars: int = _REFERENCE_CHAR
 
 
 def find_claude_cli() -> str | None:
-    return shutil.which(CLAUDE_BIN_NAME)
+    """Locate the Claude Code CLI. `shutil.which` alone isn't enough: a
+    GUI-launched app (the packaged desktop build) inherits a minimal PATH that
+    doesn't include where Claude Code installs itself (~/.local/bin, ~/.claude/
+    local, npm/homebrew prefixes), so it would report "not installed" for a
+    user who has it working fine in their terminal."""
+    found = shutil.which(CLAUDE_BIN_NAME)
+    if found:
+        return found
+    home = os.path.expanduser("~")
+    for d in (
+        os.path.join(home, ".local", "bin"),
+        os.path.join(home, ".claude", "local"),
+        os.path.join(home, ".npm-global", "bin"),
+        os.path.join(home, ".bun", "bin"),
+        "/opt/homebrew/bin",
+        "/usr/local/bin",
+    ):
+        candidate = os.path.join(d, CLAUDE_BIN_NAME)
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return None
 
 
 async def _run(cmd: list[str], timeout: float = 30.0) -> tuple[int, str, str]:
