@@ -14,6 +14,8 @@ interface MultiColumnSelectProps {
   /** Hide the existing-columns checkbox list. Use with allowFreeText for
    *  "new columns only" pickers like Split's into. */
   hideExistingColumns?: boolean;
+  /** Called after the dropdown closes (e.g. to move focus to the next control). */
+  onClose?: () => void;
 }
 
 /**
@@ -35,6 +37,7 @@ export function MultiColumnSelect({
   preserveOrder = true,
   excludeColumns = [],
   hideExistingColumns = false,
+  onClose,
 }: MultiColumnSelectProps) {
   const [open, setOpen] = useState(false);
   const [freeText, setFreeText] = useState('');
@@ -43,6 +46,14 @@ export function MultiColumnSelect({
   const inputRef = useRef<HTMLInputElement | null>(null);
 
   const openDropdown = useCallback(() => setOpen(true), []);
+
+  // Fire onClose on the open -> closed transition only (not on first render).
+  const wasOpen = useRef(false);
+  useEffect(() => {
+    if (wasOpen.current && !open) onClose?.();
+    wasOpen.current = open;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
 
   const closeDropdown = useCallback(() => {
     setOpen(false);

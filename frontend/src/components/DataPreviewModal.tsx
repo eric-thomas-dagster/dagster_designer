@@ -1398,6 +1398,36 @@ export function DataPreviewModal({
     setExpandedSections(newExpanded);
   };
 
+  // Recipe step -> the accordion section holding its controls, so a step can be
+  // edited (not just deleted). Steps with no dedicated section (rename, string
+  // ops) get no Edit button.
+  const sectionForStep = (stepId: string): string | null => {
+    const base = stepId.replace(/-\d+$/, '').replace(/^calc-.*/, 'calc');
+    const map: Record<string, string> = {
+      filter: 'filters',
+      dedupe: 'rows', dropna: 'rows', fillna: 'rows', limit: 'rows',
+      group: 'aggregate', sort: 'sorting',
+      dropcols: 'columns', colselect: 'columns',
+      replace: 'replace', split: 'split', case: 'caseWhen', concat: 'concat',
+      date: 'dateExtract', substr: 'substring', num: 'numeric', bin: 'bin',
+      'dedupe-subset': 'dedupeSubset', cumsum: 'cumsum', fill: 'fillDir',
+      count: 'countMatch', window: 'window', calc: 'calculated',
+      pivot: 'reshape', unpivot: 'reshape', sample: 'sample',
+    };
+    return map[base] ?? null;
+  };
+
+  const revealSection = (sectionId: string) => {
+    setExpandedSections((prev) => new Set(prev).add(sectionId));
+    // Wait a frame so the section has rendered open before scrolling/focusing.
+    requestAnimationFrame(() => {
+      document.getElementById(`section-${sectionId}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      if (sectionId === 'aggregate') {
+        setTimeout(() => document.getElementById('agg-column-select')?.focus(), 250);
+      }
+    });
+  };
+
   const handleSaveAsNewAsset = async () => {
     if (!newAssetName.trim()) {
       notify.error('Please enter a name for the new asset');
@@ -1713,7 +1743,10 @@ export function DataPreviewModal({
     if (limitRows !== null && limitRows > 0) {
       steps.push({ id: 'limit', icon: 'play', label: 'Limit', detail: `${limitRows} rows`, onRemove: () => setLimitRows(null) });
     }
-    return steps;
+    return steps.map((st) => {
+      const sec = sectionForStep(st.id);
+      return sec ? { ...st, onEdit: () => revealSection(sec) } : st;
+    });
   }, [filters, dropDuplicates, dropNA, fillNAValue, groupByColumns, aggregations, sortColumns, sortAscending, columnRenames, replaceOps, splitOps, caseWhenOps, concatOps, dateExtractOps, substringOps, numericOps, countMatchOps, windowOps, stringOperations, calculatedColumns, columnsToDrop, pivotConfig, unpivotConfig, sampleConfig, limitRows, binOps, dedupeSubset, cumsumOps, fillDirectionOps, selectedColumns, data]);
 
   return (
@@ -1878,7 +1911,7 @@ export function DataPreviewModal({
 
                 <div className="space-y-2 flex-1">
                   {/* Accordion Section: Column Selection */}
-                  <div className="border border-gray-200 rounded-lg bg-white overflow-hidden">
+                  <div id="section-columns" className="border border-gray-200 rounded-lg bg-white overflow-hidden">
                     <button
                       onClick={() => toggleSection('columns')}
                       className="w-full px-4 py-3 flex items-center justify-between hover:bg-gray-50 transition-colors"
@@ -1944,7 +1977,7 @@ export function DataPreviewModal({
                   </div>
 
                   {/* Accordion Section: Filters */}
-                  <div className="border border-gray-200 rounded-lg bg-white overflow-hidden">
+                  <div id="section-filters" className="border border-gray-200 rounded-lg bg-white overflow-hidden">
                     <button
                       onClick={() => toggleSection('filters')}
                       className="w-full px-4 py-3 flex items-center justify-between hover:bg-gray-50 transition-colors"
@@ -2044,7 +2077,7 @@ export function DataPreviewModal({
                   </div>
 
                   {/* Accordion Section: Row Operations */}
-                  <div className="border border-gray-200 rounded-lg bg-white overflow-hidden">
+                  <div id="section-rows" className="border border-gray-200 rounded-lg bg-white overflow-hidden">
                     <button
                       onClick={() => toggleSection('rows')}
                       className="w-full px-4 py-3 flex items-center justify-between hover:bg-gray-50 transition-colors"
@@ -2113,7 +2146,7 @@ export function DataPreviewModal({
                   </div>
 
                   {/* Accordion Section: Sorting */}
-                  <div className="border border-gray-200 rounded-lg bg-white overflow-hidden">
+                  <div id="section-sorting" className="border border-gray-200 rounded-lg bg-white overflow-hidden">
                     <button
                       onClick={() => toggleSection('sorting')}
                       className="w-full px-4 py-3 flex items-center justify-between hover:bg-gray-50 transition-colors"
@@ -2163,7 +2196,7 @@ export function DataPreviewModal({
                   </div>
 
                   {/* Accordion Section: Group & Aggregate */}
-                  <div className="border border-gray-200 rounded-lg bg-white overflow-hidden">
+                  <div id="section-aggregate" className="border border-gray-200 rounded-lg bg-white overflow-hidden">
                     <button
                       onClick={() => toggleSection('aggregate')}
                       className="w-full px-4 py-3 flex items-center justify-between hover:bg-gray-50 transition-colors"
@@ -2188,6 +2221,12 @@ export function DataPreviewModal({
                               value={groupByColumns}
                               onChange={setGroupByColumns}
                               placeholder="pick columns to group by…"
+                              onClose={() => {
+                                // Natural next step after choosing group columns: pick an aggregation.
+                                if (groupByColumns.length > 0 && Object.keys(aggregations).length === 0) {
+                                  setTimeout(() => document.getElementById('agg-column-select')?.focus(), 50);
+                                }
+                              }}
                             />
                             {groupByColumns.length > 0 && Object.keys(aggregations).length === 0 && (
                               <p className="text-xs text-gray-500 mt-1">
@@ -2202,6 +2241,7 @@ export function DataPreviewModal({
                               {/* Aggregation Builder */}
                               <div className="flex gap-2">
                                 <select
+                                  id="agg-column-select"
                                   value={newAggColumn}
                                   onChange={(e) => setNewAggColumn(e.target.value)}
                                   className="flex-1 text-xs border border-gray-300 rounded px-2 py-1.5"
@@ -2293,7 +2333,7 @@ export function DataPreviewModal({
                   </div>
 
                   {/* Accordion Section: Calculated Columns */}
-                  <div className="border border-gray-200 rounded-lg bg-white overflow-hidden">
+                  <div id="section-calculated" className="border border-gray-200 rounded-lg bg-white overflow-hidden">
                     <button
                       onClick={() => toggleSection('calculated')}
                       className="w-full px-4 py-3 flex items-center justify-between hover:bg-gray-50 transition-colors"
@@ -2379,7 +2419,7 @@ export function DataPreviewModal({
                   </div>
 
                   {/* Accordion Section: Replace */}
-                  <div className="border border-gray-200 rounded-lg bg-white overflow-hidden">
+                  <div id="section-replace" className="border border-gray-200 rounded-lg bg-white overflow-hidden">
                     <button
                       onClick={() => toggleSection('replace')}
                       className="w-full px-4 py-3 flex items-center justify-between hover:bg-gray-50 transition-colors"
@@ -2449,7 +2489,7 @@ export function DataPreviewModal({
                   </div>
 
                   {/* Accordion Section: Split */}
-                  <div className="border border-gray-200 rounded-lg bg-white overflow-hidden">
+                  <div id="section-split" className="border border-gray-200 rounded-lg bg-white overflow-hidden">
                     <button
                       onClick={() => toggleSection('split')}
                       className="w-full px-4 py-3 flex items-center justify-between hover:bg-gray-50 transition-colors"
@@ -2524,7 +2564,7 @@ export function DataPreviewModal({
                   </div>
 
                   {/* Accordion Section: Window / Ranking */}
-                  <div className="border border-gray-200 rounded-lg bg-white overflow-hidden">
+                  <div id="section-window" className="border border-gray-200 rounded-lg bg-white overflow-hidden">
                     <button
                       onClick={() => toggleSection('window')}
                       className="w-full px-4 py-3 flex items-center justify-between hover:bg-gray-50 transition-colors"
@@ -2619,7 +2659,7 @@ export function DataPreviewModal({
                   </div>
 
                   {/* Accordion Section: Count Matching */}
-                  <div className="border border-gray-200 rounded-lg bg-white overflow-hidden">
+                  <div id="section-countMatch" className="border border-gray-200 rounded-lg bg-white overflow-hidden">
                     <button
                       onClick={() => toggleSection('countMatch')}
                       className="w-full px-4 py-3 flex items-center justify-between hover:bg-gray-50 transition-colors"
@@ -2718,7 +2758,7 @@ export function DataPreviewModal({
                   </div>
 
                   {/* Accordion Section: Case-When */}
-                  <div className="border border-gray-200 rounded-lg bg-white overflow-hidden">
+                  <div id="section-caseWhen" className="border border-gray-200 rounded-lg bg-white overflow-hidden">
                     <button
                       onClick={() => toggleSection('caseWhen')}
                       className="w-full px-4 py-3 flex items-center justify-between hover:bg-gray-50 transition-colors"
@@ -2841,7 +2881,7 @@ export function DataPreviewModal({
                   </div>
 
                   {/* Accordion Section: Concat Columns */}
-                  <div className="border border-gray-200 rounded-lg bg-white overflow-hidden">
+                  <div id="section-concat" className="border border-gray-200 rounded-lg bg-white overflow-hidden">
                     <button
                       onClick={() => toggleSection('concat')}
                       className="w-full px-4 py-3 flex items-center justify-between hover:bg-gray-50 transition-colors"
@@ -2910,7 +2950,7 @@ export function DataPreviewModal({
                   </div>
 
                   {/* Accordion Section: Date Extract */}
-                  <div className="border border-gray-200 rounded-lg bg-white overflow-hidden">
+                  <div id="section-dateExtract" className="border border-gray-200 rounded-lg bg-white overflow-hidden">
                     <button
                       onClick={() => toggleSection('dateExtract')}
                       className="w-full px-4 py-3 flex items-center justify-between hover:bg-gray-50 transition-colors"
@@ -2982,7 +3022,7 @@ export function DataPreviewModal({
                   </div>
 
                   {/* Accordion Section: Substring */}
-                  <div className="border border-gray-200 rounded-lg bg-white overflow-hidden">
+                  <div id="section-substring" className="border border-gray-200 rounded-lg bg-white overflow-hidden">
                     <button
                       onClick={() => toggleSection('substring')}
                       className="w-full px-4 py-3 flex items-center justify-between hover:bg-gray-50 transition-colors"
@@ -3061,7 +3101,7 @@ export function DataPreviewModal({
                   </div>
 
                   {/* Accordion Section: Numeric Ops */}
-                  <div className="border border-gray-200 rounded-lg bg-white overflow-hidden">
+                  <div id="section-numeric" className="border border-gray-200 rounded-lg bg-white overflow-hidden">
                     <button
                       onClick={() => toggleSection('numeric')}
                       className="w-full px-4 py-3 flex items-center justify-between hover:bg-gray-50 transition-colors"
@@ -3139,7 +3179,7 @@ export function DataPreviewModal({
                   </div>
 
                   {/* Accordion Section: Sample */}
-                  <div className="border border-gray-200 rounded-lg bg-white overflow-hidden">
+                  <div id="section-sample" className="border border-gray-200 rounded-lg bg-white overflow-hidden">
                     <button
                       onClick={() => toggleSection('sample')}
                       className="w-full px-4 py-3 flex items-center justify-between hover:bg-gray-50 transition-colors"
@@ -3223,7 +3263,7 @@ export function DataPreviewModal({
                   </div>
 
                   {/* Accordion Section: Bin / Bucket */}
-                  <div className="border border-gray-200 rounded-lg bg-white overflow-hidden">
+                  <div id="section-bin" className="border border-gray-200 rounded-lg bg-white overflow-hidden">
                     <button
                       onClick={() => toggleSection('bin')}
                       className="w-full px-4 py-3 flex items-center justify-between hover:bg-gray-50 transition-colors"
@@ -3298,7 +3338,7 @@ export function DataPreviewModal({
                   </div>
 
                   {/* Accordion Section: Dedupe with subset */}
-                  <div className="border border-gray-200 rounded-lg bg-white overflow-hidden">
+                  <div id="section-dedupeSubset" className="border border-gray-200 rounded-lg bg-white overflow-hidden">
                     <button
                       onClick={() => toggleSection('dedupeSubset')}
                       className="w-full px-4 py-3 flex items-center justify-between hover:bg-gray-50 transition-colors"
@@ -3362,7 +3402,7 @@ export function DataPreviewModal({
                   </div>
 
                   {/* Accordion Section: Cumulative sum */}
-                  <div className="border border-gray-200 rounded-lg bg-white overflow-hidden">
+                  <div id="section-cumsum" className="border border-gray-200 rounded-lg bg-white overflow-hidden">
                     <button
                       onClick={() => toggleSection('cumsum')}
                       className="w-full px-4 py-3 flex items-center justify-between hover:bg-gray-50 transition-colors"
@@ -3445,7 +3485,7 @@ export function DataPreviewModal({
                   </div>
 
                   {/* Accordion Section: Fill forward/backward */}
-                  <div className="border border-gray-200 rounded-lg bg-white overflow-hidden">
+                  <div id="section-fillDir" className="border border-gray-200 rounded-lg bg-white overflow-hidden">
                     <button
                       onClick={() => toggleSection('fillDir')}
                       className="w-full px-4 py-3 flex items-center justify-between hover:bg-gray-50 transition-colors"
@@ -3530,7 +3570,7 @@ export function DataPreviewModal({
                   </div>
 
                   {/* Accordion Section: Advanced Reshaping */}
-                  <div className="border border-gray-200 rounded-lg bg-white overflow-hidden">
+                  <div id="section-reshape" className="border border-gray-200 rounded-lg bg-white overflow-hidden">
                     <button
                       onClick={() => toggleSection('reshape')}
                       className="w-full px-4 py-3 flex items-center justify-between hover:bg-gray-50 transition-colors"

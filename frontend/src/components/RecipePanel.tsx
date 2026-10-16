@@ -1,4 +1,4 @@
-import { Filter, ArrowDownUp, SortAsc, Sigma, Trash2, RotateCw, Wand2, Group, Calculator, Columns3, Package, PackageOpen, Play, X, PanelRight, PanelRightClose } from 'lucide-react';
+import { Filter, ArrowDownUp, SortAsc, Sigma, Trash2, RotateCw, Wand2, Group, Calculator, Columns3, Package, PackageOpen, Play, X, PanelRight, PanelRightClose, Pencil } from 'lucide-react';
 
 /**
  * Right-side "recipe" panel — shows every op currently applied to the
@@ -15,6 +15,8 @@ export interface RecipeStep {
   icon: 'filter' | 'sort' | 'rank' | 'sigma' | 'rotate' | 'wand' | 'group' | 'calc' | 'cols' | 'package' | 'packageOpen' | 'play' | 'arrows';
   label: string;
   detail?: string;
+  /** Jump to this step's controls on the left so it can be changed. */
+  onEdit?: () => void;
   onRemove: () => void;
 }
 
@@ -135,6 +137,16 @@ export function RecipePanel({ steps, onClearAll, previewAtStep = null, onSelectS
                   </div>
                 )}
               </div>
+              {step.onEdit && (
+                <button
+                  onClick={(e) => { e.stopPropagation(); step.onEdit?.(); }}
+                  className="opacity-0 group-hover:opacity-100 p-0.5 text-gray-400 hover:text-primary hover:bg-primary/10 rounded flex-shrink-0"
+                  title="Edit step"
+                  aria-label="Edit step"
+                >
+                  <Pencil className="w-3.5 h-3.5" />
+                </button>
+              )}
               <button
                 onClick={(e) => { e.stopPropagation(); step.onRemove(); }}
                 className="opacity-0 group-hover:opacity-100 p-0.5 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded flex-shrink-0"
