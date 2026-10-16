@@ -239,6 +239,18 @@ def validate_component_config(component_dir: Path, attributes: dict) -> tuple[di
             # For optional fields without defaults, skip None values
             continue
 
+        # An optional enum field left on the blank "Select..." option arrives as '' -- treat it as unset
+        # (writing `field: ''` would fail the component's Literal[...] validation on load).
+        if value == '' and prop.get('enum') and key not in required_fields:
+            continue
+
+        # Enum fields: reject values outside the declared options with a clear message
+        if prop.get('enum') and value != '' and value not in [e for e in prop['enum'] if e is not None]:
+            validation_errors.append(
+                f"Field '{key}' must be one of {[e for e in prop['enum'] if e is not None]}, got: '{value}'"
+            )
+            continue
+
         # Handle required fields that are empty strings
         if value == '' and key in required_fields:
             validation_errors.append(f"Required field '{key}' cannot be empty")
