@@ -4812,7 +4812,10 @@ def _find_dbt_projects(project_root: Path) -> list[DbtProjectSummary]:
     out: list[DbtProjectSummary] = []
     if not project_root.exists():
         return out
-    skip_parts = {'.venv', 'venv', 'node_modules', '.git', 'target', 'dbt_packages', '__pycache__'}
+    # `.local_defs_state` holds Dagster's STAGED COPY of each dbt project (state-backed component) -- listing it
+    # showed every dbt project twice once its component had built.
+    skip_parts = {'.venv', 'venv', 'node_modules', '.git', 'target', 'dbt_packages', '__pycache__',
+                  '.local_defs_state', '.designer_dagster_home'}
     for p in project_root.rglob('dbt_project.yml'):
         if any(part in skip_parts for part in p.parts):
             continue
