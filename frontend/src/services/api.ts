@@ -2442,6 +2442,17 @@ export const partitionsApi = {
     }
   },
 
+  /** Partition info for every asset from ONE project load -- per-asset
+   *  getPartitionInfo calls each pay a full (7-30s) load, serialized. Also
+   *  warms the backend's per-asset cache, so follow-up getPartitionInfo
+   *  calls are instant. */
+  getPartitionSummary: async (projectId: string): Promise<Record<string, PartitionInfoResponse>> => {
+    const response = await api.get<{ assets: Record<string, PartitionInfoResponse> }>(
+      `/projects/${projectId}/partitions-summary`
+    );
+    return response.data.assets;
+  },
+
   getConfigSchema: async (projectId: string, assetKey: string): Promise<ConfigSchemaResponse> => {
     const response = await api.get<ConfigSchemaResponse>(
       `/projects/${projectId}/assets/${encodeURIComponent(assetKey)}/config-schema`
@@ -3615,7 +3626,6 @@ export const designerLocApi = {
   },
 };
 
-export default api;
 // App-level settings (not per-project) -- see backend/app/core/app_settings.py
 export interface AppSettings {
   fast_local_loading: boolean;
@@ -3627,3 +3637,4 @@ export const appSettingsApi = {
     (await api.put('/app-settings', changes)).data,
 };
 
+export default api;

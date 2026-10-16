@@ -74,7 +74,7 @@ def serialize_partition_def(partitions_def):
 def main():
     if len(sys.argv) != 3:
         print(json.dumps({
-            "error": "Usage: python -m scripts.show_partitions <project_module> <asset_key>"
+            "error": "Usage: python -m scripts.show_partitions <project_module> <asset_key | --all>"
         }))
         sys.exit(1)
 
@@ -93,6 +93,34 @@ def main():
         # fix in preview_asset.py for how this was confirmed live.
         if callable(defs):
             defs = defs()
+
+        if asset_key == "--all":
+            # Batch mode: the expensive part is importing/loading the whole
+            # project, so do it ONCE and report every asset -- callers that
+            # need to know which assets are partitioned (Materialize All)
+            # used to pay one full project load per asset.
+            assets: dict = {}
+            for assets_def in (getattr(defs, "assets", None) or []):
+                keys = list(assets_def.keys) if hasattr(assets_def, "keys") else (
+                    [assets_def.key] if hasattr(assets_def, "key") else []
+                )
+                pd = getattr(assets_def, "partitions_def", None)
+                for k in keys:
+                    assets["/".join(k.path)] = {
+                        "is_partitioned": pd is not None,
+                        "partitions_def": serialize_partition_def(pd) if pd is not None else None,
+                    }
+            if hasattr(defs, "get_all_asset_specs"):
+                for spec in defs.get_all_asset_specs():
+                    key = "/".join(spec.key.path)
+                    if key not in assets:
+                        pd = getattr(spec, "partitions_def", None)
+                        assets[key] = {
+                            "is_partitioned": pd is not None,
+                            "partitions_def": serialize_partition_def(pd) if pd is not None else None,
+                        }
+            print(json.dumps({"assets": assets}))
+            return
 
         # Get the asset - iterate through asset definitions
         from dagster import AssetKey

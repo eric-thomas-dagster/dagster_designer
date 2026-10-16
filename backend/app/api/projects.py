@@ -3868,6 +3868,75 @@ _partition_info_cache: dict[tuple[str, str], tuple[float, dict]] = {}
 _PARTITION_INFO_CACHE_TTL_SECONDS = 300
 
 
+class PartitionSummaryResponse(BaseModel):
+    assets: dict[str, PartitionInfoResponse]
+
+
+@router.get("/{project_id}/partitions-summary", response_model=PartitionSummaryResponse)
+async def get_partitions_summary(project_id: str):
+    """Partition info for EVERY asset from one project load.
+
+    `/assets/{key}/partitions` starts a Python process that loads the whole
+    project (7-30s) per asset, serialized behind the project's defs lock --
+    so asking about N assets cost N full loads. This loads once and also
+    fills that endpoint's per-asset cache, so follow-up single-asset calls
+    (e.g. the partition picker) are instant.
+    """
+    import time as _time
+    import os
+
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    project_dir = project_service._get_project_dir(project)
+    if not project_dir.exists():
+        raise HTTPException(status_code=404, detail="Project directory not found")
+
+    cached = _partition_summary_cache.get(project_id)
+    if cached and (_time.time() - cached[0]) < _PARTITION_INFO_CACHE_TTL_SECONDS:
+        return PartitionSummaryResponse(assets=cached[1])
+
+    from ..core.uv_binary import project_subprocess_env
+    from ..services.asset_introspection_service import get_project_defs_lock
+    env = project_subprocess_env(project_dir, fast_load=True)
+    src = str(project_dir / "src")
+    env["PYTHONPATH"] = f"{src}{os.pathsep}{env['PYTHONPATH']}" if "PYTHONPATH" in env else src
+    project_python = project_service._get_project_python_path(project)
+    project_module = project_service.get_project_root_module(project)
+
+    try:
+        async with get_project_defs_lock(project_id):
+            result = await asyncio.to_thread(
+                subprocess.run,
+                [str(project_python), "-m", "scripts.show_partitions", project_module, "--all"],
+                cwd=Path.cwd(), env=env, capture_output=True, text=True, timeout=120,
+            )
+    except subprocess.TimeoutExpired:
+        raise HTTPException(status_code=504, detail="Timed out loading partition info")
+    if result.returncode != 0:
+        raise HTTPException(status_code=500, detail=f"Failed to get partition info: {(result.stderr or result.stdout)[-500:]}")
+
+    payload = None
+    for line in result.stdout.strip().split("\n"):
+        if line.strip().startswith("{"):
+            payload = json.loads(result.stdout.strip()[result.stdout.strip().index(line):])
+            break
+    if payload is None or "assets" not in payload:
+        raise HTTPException(status_code=500, detail=f"No JSON found in output: {result.stdout[:200]}")
+
+    now = _time.time()
+    assets: dict[str, PartitionInfoResponse] = {}
+    for key, info in payload["assets"].items():
+        full = {"asset_key": key, **info}
+        assets[key] = PartitionInfoResponse(**full)
+        _partition_info_cache[(project_id, key)] = (now, full)
+    _partition_summary_cache[project_id] = (now, assets)
+    return PartitionSummaryResponse(assets=assets)
+
+
+_partition_summary_cache: dict[str, tuple[float, dict]] = {}
+
+
 @router.get("/{project_id}/assets/{asset_key:path}/partitions", response_model=PartitionInfoResponse)
 async def get_asset_partitions(project_id: str, asset_key: str):
     """Get partition definition for an asset.

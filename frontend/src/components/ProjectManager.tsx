@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { useProjectStore } from '@/hooks/useProject';
-import { codegenApi, projectsApi, filesApi, pipelinesApi, partitionsApi, type BackfillRequest } from '@/services/api';
+import { codegenApi, projectsApi, filesApi, pipelinesApi, partitionsApi, type BackfillRequest, type PartitionInfoResponse } from '@/services/api';
 import { PartitionBackfill } from './PartitionBackfill';
 import { DbtCloudImportModal } from './DbtCloudImportModal';
 import { ConnectDagsterPlusDialog } from './ConnectDagsterPlusDialog';
@@ -327,22 +327,28 @@ export function ProjectManager() {
       const allAssetKeys = currentProject.graph.nodes
         .filter((n) => n.node_kind === 'asset')
         .map((n) => (n.data as any)?.asset_key || n.id);
-      const partitionChecks = await Promise.all(
-        allAssetKeys.map((k) => partitionsApi.isPartitioned(currentProject.id, k).catch(() => false))
-      );
-      const partitioned = allAssetKeys.filter((_, i) => partitionChecks[i]);
-      const runnable = allAssetKeys.filter((_, i) => !partitionChecks[i]);
+      // One project load answers for every asset (the old per-asset calls
+      // each paid a full 7-30s load, serialized). If this is slow -- a cold
+      // cache -- say what we're doing rather than looking frozen.
+      const slowHint = setTimeout(() => notify.info('Checking which assets are partitioned…'), 800);
+      let summary: Record<string, PartitionInfoResponse>;
+      try {
+        summary = await partitionsApi.getPartitionSummary(currentProject.id);
+      } catch {
+        summary = {}; // can't tell -- treat as unpartitioned, like before
+      } finally {
+        clearTimeout(slowHint);
+      }
+      const partitioned = allAssetKeys.filter((k) => summary[k]?.is_partitioned);
+      const runnable = allAssetKeys.filter((k) => !summary[k]?.is_partitioned);
 
       if (partitioned.length > 0) {
         // Same rule Dagster itself applies: partitioned assets can only be
         // launched together if they share one partitions definition. If
         // they do, pick the partition once and launch everything with it.
-        const infos = await Promise.all(
-          partitioned.map((k) => partitionsApi.getPartitionInfo(currentProject.id, k).catch(() => null))
-        );
         const groups = new Map<string, string[]>();
-        partitioned.forEach((k, i) => {
-          const d = infos[i]?.partitions_def;
+        partitioned.forEach((k) => {
+          const d = summary[k]?.partitions_def;
           // Time-window defs are identified by type/start/cron/tz/format;
           // static/dynamic ones (no start or cron) by their key list.
           const sig = d
@@ -748,7 +754,15 @@ export function ProjectManager() {
         {currentProject && (
           <div className="relative">
             <button
-              onClick={() => setShowActionsMenu(!showActionsMenu)}
+              onClick={() => {
+                // Opening the menu is the moment Materialize All becomes
+                // likely -- start the (one-time, ~7s+) partition lookup now
+                // so it's already cached by the time it's clicked.
+                if (!showActionsMenu && currentProject && !(currentProject as any).is_dagster_plus) {
+                  partitionsApi.getPartitionSummary(currentProject.id).catch(() => {});
+                }
+                setShowActionsMenu(!showActionsMenu);
+              }}
               className="flex items-center space-x-1 px-3 py-1.5 text-sm bg-white border border-gray-300 text-gray-700 rounded-md hover:bg-gray-50"
             >
               <MoreVertical className="w-4 h-4" />

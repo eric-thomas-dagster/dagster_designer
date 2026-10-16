@@ -607,6 +607,16 @@ interface LogRow {
   level: string | null;
   timestamp: number | null;
   step_key: string | null;
+  /** Failed asset checks are logged at DEBUG; this carries the real result. */
+  outcome?: 'failed' | 'warning' | null;
+}
+
+// Dagster's own UI colors a failed asset check by its result, not its (DEBUG)
+// log level -- do the same so a failed check reads as a failure here too.
+function effectiveLevel(e: LogRow): string {
+  if (e.outcome === 'failed') return 'ERROR';
+  if (e.outcome === 'warning') return 'WARNING';
+  return (e.level || '').toUpperCase();
 }
 
 function RunLogsTab({ runId, runStatus, initialStepFilter = 'all' }: { runId: string; runStatus: string; initialStepFilter?: string }) {
@@ -685,7 +695,7 @@ function RunLogsTab({ runId, runStatus, initialStepFilter = 'all' }: { runId: st
   }, [events]);
 
   const filtered = useMemo(() => events.filter((e) => {
-    if (levelFilter !== 'all' && (e.level || '').toUpperCase() !== levelFilter.toUpperCase()) return false;
+    if (levelFilter !== 'all' && effectiveLevel(e) !== levelFilter.toUpperCase()) return false;
     if (stepFilter !== 'all') {
       // Retry attempts carry a synthetic `#attempt-N` suffix on their
       // step_key so the DAG shows them as separate nodes. Actual log
@@ -768,7 +778,7 @@ function RunLogsTab({ runId, runStatus, initialStepFilter = 'all' }: { runId: st
 }
 
 function LogLine({ event }: { event: LogRow }) {
-  const lvl = (event.level || '').toUpperCase();
+  const lvl = effectiveLevel(event);
   const levelStyle =
     lvl === 'ERROR' || lvl === 'CRITICAL' ? 'text-rose-700 dark:text-rose-400'
     : lvl === 'WARNING' ? 'text-amber-700 dark:text-amber-400'
@@ -779,7 +789,7 @@ function LogLine({ event }: { event: LogRow }) {
   return (
     <div className="px-3 py-0.5 hover:bg-gray-50 dark:hover:bg-gray-800/40 border-b border-gray-100 dark:border-gray-800/40 flex items-start gap-3">
       <span className="text-gray-500 tabular-nums flex-shrink-0">{ts}</span>
-      {event.level && <span className={`${levelStyle} font-semibold w-14 flex-shrink-0 uppercase`}>{lvl}</span>}
+      {lvl && <span className={`${levelStyle} font-semibold w-14 flex-shrink-0 uppercase`}>{lvl}</span>}
       {event.step_key && <span className="text-indigo-700 dark:text-indigo-300 flex-shrink-0 truncate max-w-[160px]" title={event.step_key}>{event.step_key}</span>}
       <span className="text-gray-500 flex-shrink-0 uppercase text-[9px] tracking-wider w-40 truncate" title={event.type_name}>{event.type_name.replace(/Event$/, '')}</span>
       <span className="flex-1 whitespace-pre-wrap break-all text-gray-800 dark:text-gray-200">{event.message || <span className="text-gray-500 italic">(no message)</span>}</span>
