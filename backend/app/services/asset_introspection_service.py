@@ -178,6 +178,24 @@ def invalidate_project_caches(project_id: str) -> None:
         pass
 
 
+# Delays before re-running `dg list defs` after a TRANSIENT failure (see below).
+TRANSIENT_RETRY_DELAYS = (2.0, 4.0, 6.0)
+
+
+def is_transient_state_race(output: str | None) -> bool:
+    """True if a failed `dg list defs` hit a known, self-healing race rather than a real
+    error in the project. Dagster's dbt component stages a copy of the dbt project under
+    defs/.local_defs_state and refreshes it (delete + re-copy) whenever a process loads the
+    code location. The auto-started `dg dev` does that on every file save, so a `dg list defs`
+    that runs at the same moment can find files missing mid-refresh (FileNotFoundError on
+    .local_defs_state, or DagsterDbtProjectYmlFileNotFoundError). Moments later it works,
+    but the user was shown 'Project validation failed' in between. Real errors never match."""
+    s = output or ""
+    if "DagsterDbtProjectYmlFileNotFoundError" in s:
+        return True
+    return ".local_defs_state" in s and ("FileNotFoundError" in s or "No such file or directory" in s)
+
+
 def record_last_run_result(project_id: str, valid: bool, error: str | None) -> None:
     _last_run_result[project_id] = (time.time(), valid, error)
 
@@ -514,27 +532,38 @@ class AssetIntrospectionService:
                 # See core.uv_binary.project_subprocess_env's docstring.
                 from ..core.uv_binary import project_subprocess_env
                 run_env = project_subprocess_env(project_dir.absolute(), fast_load=True)
-                proc = await asyncio.create_subprocess_exec(
-                    dg_cmd, "list", "defs", "--json",
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                    cwd=str(work_dir.resolve()),
-                    env=run_env,
-                )
-
-                # Wait for completion with timeout
-                try:
-                    stdout, stderr = await asyncio.wait_for(
-                        proc.communicate(),
-                        timeout=180.0  # 180 second timeout for massive dbt projects
+                for attempt in range(len(TRANSIENT_RETRY_DELAYS) + 1):
+                    proc = await asyncio.create_subprocess_exec(
+                        dg_cmd, "list", "defs", "--json",
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                        cwd=str(work_dir.resolve()),
+                        env=run_env,
                     )
-                except asyncio.TimeoutError:
-                    proc.kill()
-                    await proc.wait()
-                    error_msg = "dg list defs timed out after 180 seconds"
-                    print(f"❌ {error_msg}", flush=True)
-                    record_last_run_result(project.id, False, error_msg)
-                    raise RuntimeError(error_msg)
+
+                    # Wait for completion with timeout
+                    try:
+                        stdout, stderr = await asyncio.wait_for(
+                            proc.communicate(),
+                            timeout=180.0  # 180 second timeout for massive dbt projects
+                        )
+                    except asyncio.TimeoutError:
+                        proc.kill()
+                        await proc.wait()
+                        error_msg = "dg list defs timed out after 180 seconds"
+                        print(f"❌ {error_msg}", flush=True)
+                        record_last_run_result(project.id, False, error_msg)
+                        raise RuntimeError(error_msg)
+                    if (
+                        proc.returncode != 0
+                        and attempt < len(TRANSIENT_RETRY_DELAYS)
+                        and is_transient_state_race(stderr.decode(errors="replace") + stdout.decode(errors="replace"))
+                    ):
+                        delay = TRANSIENT_RETRY_DELAYS[attempt]
+                        print(f"[Asset Introspection] dg list defs hit a transient dbt-state race for project {project.id}; retrying in {delay:.0f}s", flush=True)
+                        await asyncio.sleep(delay)
+                        continue
+                    break
 
                 if proc.returncode != 0:
                     error_msg = f"dg list defs failed with return code {proc.returncode}"

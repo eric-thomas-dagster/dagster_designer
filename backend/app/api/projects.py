@@ -2475,7 +2475,9 @@ async def validate_project(project_id: str):
         env = project_subprocess_env(project_dir.absolute(), fast_load=True)
 
         result = None
-        for attempt in range(2):
+        from ..services.asset_introspection_service import TRANSIENT_RETRY_DELAYS, is_transient_state_race
+        attempt = 0
+        while True:
             result = await asyncio.to_thread(
                 subprocess.run,
                 [str(venv_dg.absolute()), "list", "defs"],
@@ -2485,7 +2487,14 @@ async def validate_project(project_id: str):
                 timeout=180,  # 180 seconds for massive dbt projects
                 env=env,
             )
-            if result.returncode == 0 or attempt == 1:
+            if result.returncode == 0:
+                break
+            # One retry for any failure (first-run costs, antivirus scans...); the known dbt
+            # state-refresh race (dg dev reloading on a file save) gets up to three more, with
+            # growing delays, since it clears on its own within seconds.
+            transient = is_transient_state_race((result.stderr or "") + (result.stdout or ""))
+            max_retries = len(TRANSIENT_RETRY_DELAYS) if transient else 1
+            if attempt >= max_retries:
                 break
             if asset_introspection_service._is_running(project_id):
                 return {
@@ -2494,7 +2503,8 @@ async def validate_project(project_id: str):
                     "message": "Asset generation is in progress. Validation will be available once assets are generated.",
                     "details": None
                 }
-            await asyncio.sleep(2)
+            await asyncio.sleep(TRANSIENT_RETRY_DELAYS[min(attempt, len(TRANSIENT_RETRY_DELAYS) - 1)] if transient else 2)
+            attempt += 1
 
         # If return code is 0, project is valid (even if there are warnings in stderr)
         if result.returncode == 0:
