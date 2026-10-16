@@ -183,7 +183,32 @@ def find_all_designer_dev_servers() -> list[tuple[int, int, str]]:
                 found.append((pid, listening_port, root_cwd))
             except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
                 continue
+    # Orphans: the front `dg dev` process is gone but its children (daemon, webserver, code
+    # server) were re-parented to init. They're never reachable from a root above, yet a
+    # surviving daemon keeps heartbeating, so the NEXT dev server's daemons see "Another daemon is
+    # still sending heartbeats... multiple daemon processes" -- and backfills/schedules/sensors
+    # on that instance fail or never run. Only ppid==1 processes count, so a live one-shot
+    # `dg list defs` (whose transient code server has a live parent) is never touched.
+    for proc in psutil.process_iter(['pid', 'ppid', 'cmdline']):
+        try:
+            if proc.info['pid'] in seen_pids or proc.info.get('ppid') != 1:
+                continue
+            cmdline_str = ' '.join(proc.info.get('cmdline') or [])
+            if not _is_dev_server_child_cmdline(cmdline_str) or projects_root not in cmdline_str:
+                continue
+            found.append((proc.info['pid'], 0, projects_root))
+            seen_pids.add(proc.info['pid'])
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            continue
     return found
+
+
+# Long-lived children of a `dg dev` that outlive it if it's killed alone.
+_DEV_SERVER_CHILD_MARKERS = ("dagster._daemon run", "dagster_webserver", "dagster code-server start", "dagster api grpc")
+
+
+def _is_dev_server_child_cmdline(cmdline_str: str) -> bool:
+    return any(marker in cmdline_str for marker in _DEV_SERVER_CHILD_MARKERS)
 
 
 def kill_all_designer_dev_servers() -> list[dict]:
