@@ -50,6 +50,19 @@ ATTRIBUTE_ALIAS_MAP = {
 }
 
 
+def coerce_alias_value(target_key: str, value):
+    """Reshape a value being moved to an aliased key. The singular/plural upstream aliases differ in
+    SHAPE, not just name: an AI plan's `upstream_asset_keys: ['generated_orders']` landed on
+    `upstream_asset_key` (a string field) as a list, which failed validation and took the whole
+    project down. Returns (value, ok); ok is False when the value can't be expressed in the target
+    (a multi-element list for a single-key field)."""
+    if target_key.endswith('_keys'):
+        return ([value] if isinstance(value, str) else value), True
+    if target_key.endswith('_key') and isinstance(value, (list, tuple)):
+        return (value[0], True) if len(value) == 1 else (value, False)
+    return value, True
+
+
 def detect_project_structure(project_dir: Path, project_name_sanitized: str):
     """
     Detect the actual project structure and return paths to key directories.
@@ -1487,6 +1500,10 @@ async def install_component_via_cli(
             # Try aliasing.
             aliased = ATTRIBUTE_ALIAS_MAP.get(k)
             if aliased and aliased in allowed_keys:
+                v, shape_ok = coerce_alias_value(aliased, v)
+                if not shape_ok:
+                    dropped.append(k)
+                    continue
                 merged[aliased] = v
                 print(f"[CLI Install] Aliased attribute '{k}' → '{aliased}' for {component_id}")
                 continue

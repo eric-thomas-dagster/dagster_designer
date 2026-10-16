@@ -194,7 +194,7 @@ export function DagsterAIBar() {
     }
     setApplying(true);
     try {
-      const { installed, failed, warnings } = await applyGeniePicks(
+      const { installed, failed, warnings, rolledBack } = await applyGeniePicks(
         currentProject.id,
         plan.picks,
         resolveComponentIdFromCurrentProject,
@@ -208,7 +208,9 @@ export function DagsterAIBar() {
       await queryClient.invalidateQueries({ queryKey: ['definitions', currentProject.id] });
       await queryClient.invalidateQueries({ queryKey: ['installed-resources', currentProject.id] });
 
-      if (failed === 0) {
+      if (rolledBack) {
+        notify.error(`Dagster AI's changes were undone because the project no longer loaded with them:\n\n${rolledBack}`);
+      } else if (failed === 0) {
         notify.success(`Dagster AI added ${installed} asset${installed === 1 ? '' : 's'} to the graph.`);
       } else if (installed === 0) {
         notify.error(`Dagster AI could not install any of the ${plan.picks.length} proposed picks.`);

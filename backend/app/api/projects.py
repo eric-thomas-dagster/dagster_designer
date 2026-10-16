@@ -4327,6 +4327,32 @@ async def _expand_partition_range(project_id: str, asset_keys: list[str], start:
 _dagster_backfills: dict[str, dict] = {}
 
 
+async def _reload_dev_server_locations(project: Project, timeout_s: float = 120.0) -> None:
+    """Reload every code location on the project's local dev server and wait until they are LOADED
+    (a reload re-runs the project's definitions build, which can take a while with dbt)."""
+    from ..services import dagster_backfill as dbf
+    from .dagster_webserver import resolve_local_graphql_port
+    import time
+
+    url = f"http://127.0.0.1:{resolve_local_graphql_port(project.id)}/graphql"
+
+    async def gql(client, q, v=None):
+        r = await client.post(url, json={"query": q, "variables": v or {}})
+        try:
+            return r.json().get("data") or {}
+        except ValueError:
+            return {}
+
+    async with httpx.AsyncClient(timeout=timeout_s) as client:
+        for name in dbf.location_names(await gql(client, dbf.LOCATIONS_QUERY)):
+            await gql(client, dbf.RELOAD_MUTATION, {"n": name})
+        deadline = time.time() + timeout_s
+        while time.time() < deadline:
+            if dbf.locations_loaded(await gql(client, dbf.LOCATIONS_QUERY)):
+                return
+            await asyncio.sleep(1.0)
+
+
 async def _try_dagster_backfill(project, project_id: str, request: "BackfillRequest") -> tuple[str | None, int | None, str | None]:
     """Start a real Dagster backfill on the project's running dev server.
     Returns (backfill id, expected runs or None, None) on success, or (None, None, why_not) --
@@ -4342,6 +4368,16 @@ async def _try_dagster_backfill(project, project_id: str, request: "BackfillRequ
         return None, None, "the dev server's backfill daemon isn't healthy"
 
     keys = list(request.asset_keys or [])
+    # The dev server only knows the assets that existed when it loaded the project. Anything added
+    # since (a component the user just created) makes the launch mutation die with
+    # `KeyError: AssetKey([...])`; reload the code location first so it matches the project.
+    stale = dbf.missing_asset_keys(keys, await _run_dagster_graphql(project, dbf.ASSET_KEYS_QUERY, {}))
+    if stale:
+        print(f"[backfill] dev server doesn't know {stale}; reloading its code location(s)", flush=True)
+        await _reload_dev_server_locations(project)
+        stale = dbf.missing_asset_keys(keys, await _run_dagster_graphql(project, dbf.ASSET_KEYS_QUERY, {}))
+        if stale:
+            return None, None, f"the dev server doesn't have {', '.join(stale)} even after reloading (does the project load?)"
     partitioned: dict[str, bool] = {}
     for ak in keys:
         try:

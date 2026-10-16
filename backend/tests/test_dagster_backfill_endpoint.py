@@ -39,8 +39,15 @@ def env(monkeypatch):
         for marker, answer in state.script.items():
             if marker in query:
                 return answer
+        if "assetNodes" in query:   # by default the server knows every asset a test mentions
+            return {"assetNodes": [{"assetKey": {"path": [k]}} for k in ("raw_orders", "raw_customers", "a", "b")]}
         return None
     monkeypatch.setattr(P, "_run_dagster_graphql", fake_graphql)
+
+    async def fake_reload(project, timeout_s=120.0):
+        state.reloaded = True
+    state.reloaded = False
+    monkeypatch.setattr(P, "_reload_dev_server_locations", fake_reload)
     P._backfill_jobs.clear(); P._dagster_backfills.clear()
     return state
 
@@ -107,3 +114,18 @@ def test_dagster_status_errors_are_distinguishable(env):
     assert env.client.get(f"/api/v1/projects/p/backfills/{bid}").status_code == 502
     assert env.client.get("/api/v1/projects/p/backfills/dagster:unknown").status_code == 404
     assert env.client.get(f"/api/v1/projects/other/backfills/{bid}").status_code == 404
+
+
+def test_reloads_the_dev_server_when_it_does_not_know_an_asset_yet(env):
+    # The server was started before `with_phone` was added: launching would die with KeyError.
+    env.script = {"daemonHealth": HEALTHY, "launchPartitionBackfill": SUCCESS,
+                  "assetNodes": {"assetNodes": [{"assetKey": {"path": ["raw_orders"]}}]}}
+    r = post(env, asset_keys=["raw_orders", "with_phone"], partition_selection=["2026-09-02"])
+    # still unknown after the (fake) reload -> falls back, with a reason instead of a bare failure
+    assert env.reloaded and r["engine"] != "dagster"
+
+
+def test_no_reload_when_every_asset_is_known(env):
+    env.script = {"daemonHealth": HEALTHY, "launchPartitionBackfill": SUCCESS}
+    r = post(env, partition_selection=["2026-09-02"])
+    assert r["engine"] == "dagster" and not env.reloaded

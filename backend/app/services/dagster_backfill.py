@@ -46,7 +46,41 @@ query($id: String!) {
 }
 """
 
+ASSET_KEYS_QUERY = "{ assetNodes { assetKey { path } } }"
+
+LOCATIONS_QUERY = "{ workspaceOrError { __typename ... on Workspace { locationEntries { name loadStatus } } } }"
+
+RELOAD_MUTATION = """
+mutation($n: String!) {
+  reloadRepositoryLocation(repositoryLocationName: $n) {
+    __typename
+    ... on WorkspaceLocationEntry { loadStatus }
+    ... on PythonError { message }
+    ... on RepositoryLocationNotFound { message }
+    ... on UnauthorizedError { message }
+  }
+}
+"""
+
 ID_PREFIX = "dagster:"
+
+
+def missing_asset_keys(requested: list[str], data: dict | None) -> list[str]:
+    """Requested asset keys ('a/b', selection syntax allowed) that the running server's
+    `assetNodes` result doesn't contain. A server started before an asset was added doesn't
+    know it, and launching a backfill that includes it fails with `KeyError: AssetKey([...])`."""
+    known = {tuple(n["assetKey"]["path"]) for n in ((data or {}).get("assetNodes") or [])}
+    return [k for k in requested if tuple(asset_path(k)) not in known]
+
+
+def location_names(data: dict | None) -> list[str]:
+    entries = (((data or {}).get("workspaceOrError") or {}).get("locationEntries")) or []
+    return [e["name"] for e in entries if e.get("name")]
+
+
+def locations_loaded(data: dict | None) -> bool:
+    entries = (((data or {}).get("workspaceOrError") or {}).get("locationEntries")) or []
+    return bool(entries) and all(e.get("loadStatus") == "LOADED" for e in entries)
 
 _TERMINAL_RUN = {"SUCCESS", "FAILURE", "CANCELED"}
 

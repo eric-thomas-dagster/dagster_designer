@@ -96,3 +96,14 @@ def test_canceled_and_unknown():
     s = db.map_status({"__typename": "BackfillNotFoundError", "message": "No backfill"})
     assert s["state"] == "failed" and s["message"] == "No backfill"
     assert db.map_status(None)["state"] == "failed"
+
+
+def test_missing_asset_keys_and_locations():
+    from app.services import dagster_backfill as dbf
+    data = {"assetNodes": [{"assetKey": {"path": ["raw_orders"]}}, {"assetKey": {"path": ["a", "b"]}}]}
+    assert dbf.missing_asset_keys(["raw_orders", "a/b", "+with_phone*"], data) == ["+with_phone*"]
+    assert dbf.missing_asset_keys(["x"], None) == ["x"]
+    ws = {"workspaceOrError": {"locationEntries": [{"name": "loc", "loadStatus": "LOADED"}]}}
+    assert dbf.location_names(ws) == ["loc"] and dbf.locations_loaded(ws)
+    ws["workspaceOrError"]["locationEntries"][0]["loadStatus"] = "LOADING"
+    assert not dbf.locations_loaded(ws) and not dbf.locations_loaded(None)
