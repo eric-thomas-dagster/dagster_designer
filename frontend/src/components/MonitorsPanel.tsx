@@ -748,14 +748,11 @@ function StatusPill({ monitor }: { monitor: Monitor }) {
     : b === 'warn' ? 'bg-amber-50 text-amber-700 border-amber-200'
     : 'bg-gray-100 text-gray-700 border-gray-200';
   return (
-    <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 text-[11px] rounded border ${tone}`}>
+    <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 text-[11px] rounded border whitespace-nowrap ${tone}`}>
       <StatusIcon status={b} />
       {s}
       {monitor.last_run_failures != null && monitor.last_run_failures > 0 && (
         <span className="text-[10px] font-medium">· {monitor.last_run_failures} failed</span>
-      )}
-      {monitor.duration_ms != null && (
-        <span className="text-[10px] opacity-70">· {(monitor.duration_ms / 1000).toFixed(1)}s</span>
       )}
     </span>
   );
