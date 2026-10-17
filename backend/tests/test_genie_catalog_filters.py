@@ -75,3 +75,15 @@ class TestAgentsPipelinesComponentIds:
         # catalog this scope exists to avoid).
         comps = [_component("mongodb_reader", category="source", tags=["source", "mongodb", "reader"])]
         assert agents_pipelines_component_ids(comps) == set()
+
+
+class TestAgenticPipelineAlwaysInThePool:
+    def test_included_even_with_the_real_manifests_empty_tags(self):
+        # The real manifest gives agentic_pipeline tags=[] and an id with no `_agent` suffix -- it used to be silently
+        # left out of the Agent Builder's pool, so the planner split reviewers into separate agents instead.
+        comps = [_component("agentic_pipeline", category="ai", tags=[]), _component("rag_pipeline", category="ai", tags=["rag"])]
+        assert agents_pipelines_component_ids(comps) == {"agentic_pipeline"}
+
+    def test_per_row_llm_components_the_prompt_recommends_are_available(self):
+        comps = [_component(i, category="ai") for i in ("litellm_inference_asset", "openai_llm", "openrouter_llm", "groq_llm")]
+        assert agents_pipelines_component_ids(comps) == {"litellm_inference_asset", "openai_llm", "openrouter_llm"}

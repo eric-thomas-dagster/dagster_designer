@@ -213,3 +213,33 @@ class TestNormalizeJsonOps:
         other = json.dumps([{"column": "email", "keep": ["x", "y"]}])      # `keep` isn't a string-valued key in the example
         assert _normalize_json_ops(self.DESC, other) == other
         assert _normalize_json_ops(self.DESC, "not json") == "not json"
+
+
+class TestNormalizePipelineConfig:
+    ATTRS = {"outputs": {"type": "object"}, "steps": {"type": "array"}}
+
+    def _pick(self, config):
+        from app.services.genie_service import GeniePick
+        return GeniePick(component_type="agentic_pipeline", asset_name="pr", upstream_asset_names=[], config=config, action="add", reason="r")
+
+    def test_outputs_list_is_wrapped_not_dropped(self):
+        from app.services.genie_service import _normalize_pipeline_config
+        p = self._pick({"outputs": ["a", "b"]})
+        _normalize_pipeline_config(p, self.ATTRS)
+        assert p.config["outputs"] == {"assets": ["a", "b"]}
+
+    def test_correct_outputs_are_left_alone(self):
+        from app.services.genie_service import _normalize_pipeline_config
+        p = self._pick({"outputs": {"assets": ["a"]}})
+        assert _normalize_pipeline_config(p, self.ATTRS) == [] and p.config["outputs"] == {"assets": ["a"]}
+
+    def test_invented_github_tool_name_is_replaced_only_for_the_github_server(self):
+        from app.services.genie_service import _normalize_pipeline_config
+        gh = {"id": "f", "op": "mcp_call", "mcp_tool_name": "get_pull_request_diff",
+              "server": {"name": "github", "type": "stdio", "command": ["npx", "-y", "@modelcontextprotocol/server-github"]}}
+        other = {"id": "g", "op": "mcp_call", "mcp_tool_name": "get_pull_request_diff",
+                 "server": {"name": "x", "type": "stdio", "command": ["npx", "some-other-server"]}}
+        p = self._pick({"steps": [gh, other]})
+        notes = _normalize_pipeline_config(p, self.ATTRS)
+        assert gh["mcp_tool_name"] == "get_pull_request_files" and other["mcp_tool_name"] == "get_pull_request_diff"
+        assert len(notes) == 1 and "get_pull_request_files" in notes[0]

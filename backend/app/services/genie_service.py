@@ -129,7 +129,14 @@ def agents_pipelines_component_ids(components: list[dict[str, Any]]) -> set[str]
     source_ids = {"dataframe_from_csv", "dataframe_from_sql", "database_query", "synthetic_data_generator"} & {
         c["id"] for c in components if c.get("id")
     }
-    return agent_ids | source_ids
+    # The whole-agentic-pipeline-in-one-YAML component carries no `agent` tag and no `_agent` suffix, so the rules above
+    # silently left it OUT of this pool -- the Agent Builder could not pick the one component built for exactly this
+    # (several reviewers + a combiner as steps of ONE pipeline) and fell back to five separate agents. Always include it,
+    # plus the per-row LLM components the planner prompt tells it to reach for when a task is "for every row".
+    always = {"agentic_pipeline", "litellm_inference_asset", "openai_llm", "openrouter_llm"} & {
+        c["id"] for c in components if c.get("id")
+    }
+    return agent_ids | source_ids | always
 
 
 # Registry of scoped-planning entry points -- each maps a `scope` string
@@ -334,7 +341,7 @@ def _pip_available(pkg: str) -> bool:
 
 
 # Always shown to the planner at full detail (see _keyword_prefilter).
-_ALWAYS_OFFERED_COMPONENT_IDS = ("dataframe_transformer",)
+_ALWAYS_OFFERED_COMPONENT_IDS = ("dataframe_transformer", "agentic_pipeline")
 
 
 def _keyword_prefilter(
@@ -882,6 +889,29 @@ SYSTEM_PROMPT = (
     "  needs agentic_pipeline-only machinery (MCP "
     "  tools, routing between specialists, multi-agent debate) that "
     "  doesn't apply per-row.\n"
+    "- PREFER `agentic_pipeline` FOR ANYTHING AGENTIC (critical): when the request is built "
+    "  from LLM / agent steps -- several reviewers or specialists, routing, debate, "
+    "  critique/revise, summarising or combining several outputs, an agent loop "
+    "  with tools, fetching data through an MCP server -- build ALL of it as ONE "
+    "  `agentic_pipeline` pick: each reviewer/step is an entry in `config.steps` "
+    "  (`llm_call`, `synthesize`, `route`, `debate`, `tool_use_loop`, ...), a data "
+    "  fetch from an MCP server (GitHub, Slack, a database...) is an `mcp_call` "
+    "  step, and fan-in is a `synthesize` step reading the others via `inputs`. "
+    "  Do NOT split these into separate `openai_agent` / `llm_agent` / per-step "
+    "  picks. Use OTHER components only to fill gaps the pipeline can't cover: "
+    "  loading or reshaping tabular data upstream of it, writing results to a sink, "
+    "  schedules/sensors. Example -- \"review a pull request with a security, a style "
+    "  and a test reviewer, then combine\": ONE pick, steps = [mcp_call (GitHub "
+    "  `get_pull_request_files`) -> three llm_call reviewers each reading it via "
+    "  `inputs` -> synthesize combining them], `outputs.assets` listing all five.\n"
+    "- GITHUB MCP SERVER FACTS: the common stdio server is `server: {name: github, type: "
+    "  stdio, command: [npx, -y, \"@modelcontextprotocol/server-github\"]}` (it reads "
+    "  GITHUB_PERSONAL_ACCESS_TOKEN from the environment -- never put a token in the "
+    "  config). To read a pull request use tool `get_pull_request_files` "
+    "  (`owner`, `repo`, `pull_number`): it returns every changed file WITH its patch, "
+    "  i.e. the real diff. There is NO `get_pull_request_diff` tool on it -- a "
+    "  `mcp_tool_name` that the server doesn't have fails at run time. Other tools: "
+    "  `get_pull_request`, `get_pull_request_comments`, `get_pull_request_reviews`.\n"
     "- WHOLE-PIPELINE COMPONENTS (critical): if a catalog entry lists "
     "  `produces: [...multi_asset...]`, that component emits N first-class "
     "  Dagster assets from a SINGLE instance via its own `steps:` list "
@@ -3030,6 +3060,38 @@ async def _detect_schema_issues(picks: list[GeniePick], components_by_id: dict[s
     return issues
 
 
+# Tool names models invent for the npm GitHub MCP server, and the real tool that does the job.
+_GITHUB_MCP_TOOL_FIXES = {
+    "get_pull_request_diff": "get_pull_request_files",
+    "get_pr_diff": "get_pull_request_files",
+    "get_diff": "get_pull_request_files",
+    "get_pull_request_patch": "get_pull_request_files",
+    "pull_request_diff": "get_pull_request_files",
+}
+
+
+def _normalize_pipeline_config(pick: "GeniePick", attrs: dict[str, Any]) -> list[str]:
+    """Two mistakes models keep making in an agentic_pipeline config, both deterministic to fix:
+    * `outputs` written as a bare list of step ids; the component wants `{assets: [...]}` (a list there used to be
+      dropped as wrong-typed, leaving a pipeline that emits no assets);
+    * an invented tool name for the GitHub MCP server (`get_pull_request_diff`); it has `get_pull_request_files`."""
+    notes: list[str] = []
+    cfg = pick.config
+    out = cfg.get("outputs")
+    if isinstance(out, list) and isinstance(attrs.get("outputs"), dict) and attrs["outputs"].get("type") == "object":
+        cfg["outputs"] = {"assets": out}
+        notes.append(f"ℹ Wrapped outputs on '{pick.asset_name}' as {{assets: [...]}}.")
+    for step in cfg.get("steps") or []:
+        if not isinstance(step, dict) or step.get("op") != "mcp_call":
+            continue
+        cmd = " ".join(map(str, (step.get("server") or {}).get("command") or []))
+        fixed = _GITHUB_MCP_TOOL_FIXES.get(str(step.get("mcp_tool_name")))
+        if fixed and "server-github" in cmd:
+            notes.append(f"ℹ Step '{step.get('id')}': the GitHub MCP server has no `{step['mcp_tool_name']}` tool; using `{fixed}`.")
+            step["mcp_tool_name"] = fixed
+    return notes
+
+
 def _normalize_json_ops(description: str, text: str) -> str:
     """For a JSON-text field whose documented example writes a value as a comma-separated string (`"into":
     "first_name,last_name"`), turn a list written there instead (`"into": ["first_name", "last_name"]`) into that string.
@@ -3085,6 +3147,7 @@ async def _sanitize_pick_configs(picks: list[GeniePick], components_by_id: dict[
             continue
         attrs = schema.get("attributes") or {}
         removed: list[str] = []
+        notes.extend(_normalize_pipeline_config(p, attrs))
         for field in list(p.config.keys()):
             if field not in attrs:
                 # Unknown names are handled (renamed/aliased) elsewhere; only a type clash is unsafe to keep.
