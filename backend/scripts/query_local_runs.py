@@ -28,6 +28,31 @@ import warnings
 warnings.filterwarnings('ignore')
 
 
+_FAILURE_EVENTS = {"STEP_FAILURE", "RUN_FAILURE", "ASSET_FAILED_TO_MATERIALIZE"}
+
+
+def failure_detail(de, max_chars: int = 800) -> str:
+    """The REASON a step/run failed. Dagster's failure events read just 'Execution of step "x" failed.' -- the actual
+    error (e.g. `ModuleNotFoundError: No module named 'mcp'`) lives on the event's `error` and its `cause` chain, which
+    this viewer used to drop, leaving a failed run with no explanation. Returns '' when there is nothing to add."""
+    if de is None or getattr(de, "event_type_value", None) not in _FAILURE_EVENTS:
+        return ""
+    err = getattr(getattr(de, "event_specific_data", None), "error", None)
+    parts: list[str] = []
+    depth = 0
+    while err is not None and depth < 6:
+        msg = (getattr(err, "message", "") or "").strip()
+        lines = [l for l in msg.splitlines() if l.strip()]
+        if lines:
+            # the first line names the error class; for a wrapper ("Error occurred while executing op ...") it's boilerplate,
+            # but still cheap -- the cause below carries the specific reason
+            parts.append(lines[-1].strip() if len(lines) > 1 and lines[0].startswith("dagster._core.errors.") else lines[0].strip())
+        err = getattr(err, "cause", None)
+        depth += 1
+    text = " <- ".join(dict.fromkeys(parts))  # drop repeats, keep order: outermost first, root cause last
+    return text[:max_chars]
+
+
 def _event_type_label(event_type_value: str | None) -> str:
     """'STEP_SUCCESS' -> 'StepSuccessEvent', matching the GraphQL
     __typename convention closely enough for display (the frontend only
@@ -415,9 +440,13 @@ def mode_run_logs(instance, args: dict) -> dict:
             if ev is not None and getattr(ev, "passed", True) is False:
                 severity = str(getattr(getattr(ev, "severity", None), "value", getattr(ev, "severity", "")) or "")
                 outcome = "warning" if severity.upper() == "WARN" else "failed"
+        message = entry.user_message or (de.message if de else None)
+        detail = failure_detail(de)
+        if detail:
+            message = f"{message}\n{detail}" if message else detail
         events.append({
             "type_name": _event_type_label(de.event_type_value if de else None),
-            "message": entry.user_message or (de.message if de else None),
+            "message": message,
             "level": level_name,
             "timestamp": entry.timestamp,
             "step_key": entry.step_key,

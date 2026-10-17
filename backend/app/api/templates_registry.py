@@ -50,6 +50,16 @@ ATTRIBUTE_ALIAS_MAP = {
 }
 
 
+def package_requirements_path(project_dir: Path, component_id: str) -> Path | None:
+    """The requirements.txt a community component ships inside the installed dagster_community_components package."""
+    for pattern in (".venv/lib/python*/site-packages", ".venv/Lib/site-packages"):
+        for sp in project_dir.glob(pattern):
+            hits = sorted((sp / "dagster_community_components" / "assets").glob(f"*/{component_id}/requirements.txt"))
+            if hits:
+                return hits[0]
+    return None
+
+
 def coerce_alias_value(target_key: str, value):
     """Reshape a value being moved to an aliased key. The singular/plural upstream aliases differ in
     SHAPE, not just name: an AI plan's `upstream_asset_keys: ['generated_orders']` landed on
@@ -1429,6 +1439,12 @@ async def _install_component_via_cli_locked(
                 if candidate.exists():
                     req_path = candidate
                     break
+            if req_path is None:
+                # `--as-package` copies nothing into the project, so there is no components/<id>/ to read -- but the
+                # package carries each component's own requirements.txt. Without this the dependencies of a
+                # package-mode install were never installed at all: an agentic_pipeline run failed with
+                # "No module named 'mcp'" (and would have with litellm), though its install "succeeded".
+                req_path = package_requirements_path(project_dir, component_id)
             if req_path:
                 reqs: list[str] = []
                 for line in req_path.read_text().splitlines():
