@@ -89,11 +89,23 @@ export interface GraphEdge {
   sourceHandle?: string | null;
   targetHandle?: string | null;
   is_custom?: boolean;
+  /** Large-project mode only: the group each end belongs to (an end whose group isn't loaded is drawn as that group). */
+  source_group?: string | null;
+  target_group?: string | null;
+}
+
+/** Summary of a very large project served in pieces (see backend services/graph_index.py). */
+export interface LazyGraphInfo {
+  total_assets: number;
+  groups: Array<{ name: string; count: number; kinds: string[]; has_checks: number; code_locations: string[] }>;
+  group_edges: Array<{ source: string; target: string; count: number }>;
 }
 
 export interface PipelineGraph {
   nodes: GraphNode[];
   edges: GraphEdge[];
+  /** Present only for a large project: nodes/edges then hold just the groups loaded so far. */
+  lazy?: LazyGraphInfo | null;
   viewport?: {
     x: number;
     y: number;

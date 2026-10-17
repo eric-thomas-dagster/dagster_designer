@@ -2,6 +2,8 @@ import axios from 'axios';
 import { notify } from '@/components/Notifications';
 import { openRun, openRunsList } from '@/lib/runLink';
 import type {
+  GraphEdge,
+  GraphNode,
   Project,
   ProjectCreate,
 } from '@/types';
@@ -195,10 +197,30 @@ export const projectsApi = {
     return response.data;
   },
 
-  get: async (id: string, opts?: { live?: boolean }) => {
+  get: async (id: string, opts?: { live?: boolean; lazy?: boolean }) => {
     // live=false skips the backend's per-load status lookups (a Dagster GraphQL query + a run-history
     // subprocess: ~0.6-3s even for a tiny project). Pair with getLiveStatus().
-    const response = await api.get<Project>(`/projects/${id}`, opts?.live === false ? { params: { live: false } } : undefined);
+    // lazy=true lets the server answer a very large project with a group summary instead of every asset
+    // (`graph.lazy`); load a group's assets with graphGroup() when it is opened.
+    const params: Record<string, boolean> = {};
+    if (opts?.live === false) params.live = false;
+    if (opts?.lazy) params.lazy = true;
+    const response = await api.get<Project>(`/projects/${id}`, Object.keys(params).length ? { params } : undefined);
+    return response.data;
+  },
+
+  /** One group's assets (in full) plus every edge touching it -- large projects only. */
+  graphGroup: async (id: string, group: string): Promise<{ group: string; nodes: GraphNode[]; edges: GraphEdge[] }> => {
+    const response = await api.get(`/projects/${id}/graph/groups/${encodeURIComponent(group)}`);
+    return response.data;
+  },
+
+  /** Page through a large project's assets by text / group / kind. */
+  graphSearch: async (
+    id: string,
+    params: { q?: string; group?: string; kind?: string; offset?: number; limit?: number },
+  ): Promise<{ total: number; offset: number; rows: Array<{ id: string; asset_key: string; group_name: string; kinds: string[]; description: string; owners: string[]; tags: string[]; checks: number; deps: number }> }> => {
+    const response = await api.get(`/projects/${id}/graph-search`, { params });
     return response.data;
   },
 

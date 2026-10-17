@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { Project, GraphNode, GraphEdge, ComponentInstance } from '@/types';
+import type { Project, GraphNode, GraphEdge, ComponentInstance, PipelineGraph } from '@/types';
 import { projectsApi } from '@/services/api';
 import api from '@/services/api';
 import { useUnsavedChangesStore } from '@/hooks/useUnsavedChanges';
@@ -45,9 +45,45 @@ interface ProjectStore {
   pollDependencyStatus: (projectId: string) => Promise<void>;
   /** Fetch stale/freshness/last-run status separately from the project and merge it in (in memory). */
   refreshLiveStatus: (id: string) => Promise<void>;
+  /** Large projects only: the loaded groups' assets/edges, keyed by group name (`__extra__` = locally drawn edges). */
+  lazySlices: Record<string, LazySlice>;
+  /** Fetch a group's assets and add them to the graph. Resolves once they are in `currentProject.graph`. */
+  loadLazyGroup: (group: string) => Promise<void>;
+  /** Drop a group's assets from the graph again (frees memory; the group stays as a collapsed card). */
+  unloadLazyGroup: (group: string) => void;
+}
+
+type LazySlice = { nodes: GraphNode[]; edges: GraphEdge[] };
+
+/** Node data as the server last gave it to us, minus live-status fields -- lets a large-project save send only
+ *  the nodes that really changed (a position-only edit in group view must not rewrite a 30k-asset project). */
+const _lazyBaseline = new Map<string, string>();
+const _EPHEMERAL = ['last_run_status', 'stale_status', 'freshness_status', 'lens'];
+function stableNodeData(n: GraphNode): string {
+  const d: Record<string, unknown> = { ...(n.data || {}) };
+  for (const f of _EPHEMERAL) delete d[f];
+  return JSON.stringify(d);
+}
+function rememberBaseline(nodes: GraphNode[]) {
+  for (const n of nodes) _lazyBaseline.set(n.id, stableNodeData(n));
+}
+
+/** Base graph from the server (no assets) + the slices loaded so far = the graph the UI works with. */
+function composeLazyGraph(base: PipelineGraph, slices: Record<string, LazySlice>): PipelineGraph {
+  const nodes = [...base.nodes.filter((n) => n.node_kind !== 'asset')];
+  const seenNodes = new Set(nodes.map((n) => n.id));
+  const edges: GraphEdge[] = [];
+  const seenEdges = new Set<string>();
+  for (const slice of Object.values(slices)) {
+    for (const n of slice.nodes) if (!seenNodes.has(n.id)) { seenNodes.add(n.id); nodes.push(n); }
+    for (const e of slice.edges) if (!seenEdges.has(e.id)) { seenEdges.add(e.id); edges.push(e); }
+  }
+  return { ...base, nodes, edges };
 }
 
 const LIVE_STATUS_FIELDS = ['stale_status', 'freshness_status', 'last_run_status'] as const;
+/** Matches the server's default (DESIGNER_LAZY_THRESHOLD): above this many assets a project is served in pieces. */
+const LAZY_ASSET_THRESHOLD = 5000;
 
 // Module-scoped debounce timer for auto-saving graph changes (positions,
 // edges) back to the backend. Positions are UI state that must persist —
@@ -78,6 +114,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   dependencyInstallOutput: '',
   devServerStartStatus: 'idle',
   devServerStartError: null,
+  lazySlices: {},
 
   loadProject: async (id: string, opts?: { silent?: boolean }) => {
     // Clear currentProject when switching to a different project so
@@ -87,7 +124,8 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     // especially confusing right after a fresh Dagster+ connect.
     const prev = get().currentProject;
     if (!prev || prev.id !== id) {
-      set({ currentProject: null, isLoading: true, error: null });
+      _lazyBaseline.clear();
+      set({ currentProject: null, isLoading: true, error: null, lazySlices: {} });
     } else if (!opts?.silent) {
       set({ isLoading: true, error: null });
     }
@@ -95,7 +133,17 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
       // Local projects load without the live-status lookups (they were the slow part of every load) and get
       // them right after, below. Dagster+ projects hydrate their graph server-side, so they load as before.
       const prevForLive = get().currentProject;
-      const project = await projectsApi.get(id, { live: false });
+      let project = await projectsApi.get(id, { live: false, lazy: true });
+      let keptSlices: Record<string, LazySlice> = {};
+      if (project.graph.lazy) {
+        // Very large project: re-load the groups that were open so a background refresh doesn't collapse them.
+        const open = prevForLive?.id === id ? Object.keys(get().lazySlices).filter((g) => g !== '__extra__') : [];
+        const fetched = await Promise.all(open.map((g) => projectsApi.graphGroup(id, g).catch(() => null)));
+        open.forEach((g, i) => { const f = fetched[i]; if (f) { keptSlices[g] = { nodes: f.nodes, edges: f.edges }; rememberBaseline(f.nodes); } });
+        const extra = prevForLive?.id === id ? get().lazySlices['__extra__'] : undefined;
+        if (extra) keptSlices['__extra__'] = extra;
+        project = { ...project, graph: composeLazyGraph(project.graph, keptSlices) };
+      }
       if (!(project as any).is_dagster_plus && prevForLive?.id === id) {
         // Background refresh of the same project: keep the last known live status until the new one lands
         // (otherwise every refresh would blank the "last run" colouring for a moment).
@@ -115,6 +163,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
       const cloudError = (project as any).is_dagster_plus && (project as any).dagster_plus_last_error;
       set({
         currentProject: project,
+        lazySlices: keptSlices,
         isLoading: false,
         error: cloudError ? `Couldn't load data from Dagster+: ${cloudError}` : null,
       });
@@ -140,6 +189,25 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     } catch (error) {
       set({ error: 'Failed to load project', isLoading: false });
     }
+  },
+
+  loadLazyGroup: async (group: string) => {
+    const cur = get().currentProject;
+    if (!cur || !cur.graph.lazy || get().lazySlices[group]) return;
+    const slice = await projectsApi.graphGroup(cur.id, group);
+    rememberBaseline(slice.nodes);
+    const now = get().currentProject;
+    if (!now || now.id !== cur.id) return; // user moved on
+    const lazySlices = { ...get().lazySlices, [group]: { nodes: slice.nodes, edges: slice.edges } };
+    set({ lazySlices, currentProject: { ...now, graph: composeLazyGraph(now.graph, lazySlices) } });
+    void get().refreshLiveStatus(cur.id);
+  },
+
+  unloadLazyGroup: (group: string) => {
+    const now = get().currentProject;
+    if (!now || !now.graph.lazy || !get().lazySlices[group]) return;
+    const { [group]: _gone, ...lazySlices } = get().lazySlices;
+    set({ lazySlices, currentProject: { ...now, graph: composeLazyGraph(now.graph, lazySlices) } });
   },
 
   refreshLiveStatus: async (id: string) => {
@@ -258,12 +326,26 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
       _graphBeforeBurst = currentProject.graph as { nodes: GraphNode[]; edges: GraphEdge[] };
     }
 
-    // Update local state immediately.
+    // Update local state immediately. (`...currentProject.graph` keeps `lazy` for a large project: the server
+    // must keep treating this as a partial view, never as the whole graph.)
     const updatedProject = {
       ...currentProject,
-      graph: { nodes, edges },
+      graph: { ...currentProject.graph, nodes, edges },
     };
-    set({ currentProject: updatedProject });
+    let lazySlices = get().lazySlices;
+    if (currentProject.graph.lazy) {
+      // Fold the edit (a dragged node, a drawn edge) back into the loaded slices so a later re-compose keeps it.
+      const byId = new Map(nodes.map((n) => [n.id, n] as const));
+      lazySlices = Object.fromEntries(
+        Object.entries(lazySlices)
+          .filter(([g]) => g !== '__extra__')
+          .map(([g, sl]) => [g, { nodes: sl.nodes.map((n) => byId.get(n.id) ?? n), edges: sl.edges }]),
+      );
+      const known = new Set(Object.values(lazySlices).flatMap((sl) => sl.edges.map((e) => e.id)));
+      const extra = edges.filter((e) => !known.has(e.id));
+      if (extra.length > 0) lazySlices['__extra__'] = { nodes: [], edges: extra };
+    }
+    set({ currentProject: updatedProject, lazySlices });
 
     // Debounced auto-save to backend so node positions, custom edges, etc.
     // survive reloads. Coalesces rapid consecutive edits (e.g. drag events,
@@ -296,14 +378,41 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
         // fields before the LOCAL optimistic update above also erased
         // them from the live UI the moment the debounce fired, which is
         // the opposite of what we want.
+        let lazyChanged: GraphNode[] | null = null;
+        let lazyPartial: any = null;
+        if (latest.graph.lazy) {
+          // Large project: send ONLY what changed -- nodes whose data differs from what the server gave us, and
+          // edges drawn locally. A position-only drag (group view recomputes positions anyway) sends nothing.
+          const changed = latest.graph.nodes.filter((n) => {
+            const base = _lazyBaseline.get(n.id);
+            return base !== undefined && stableNodeData(n) !== base;
+          });
+          const extraEdges = get().lazySlices['__extra__']?.edges ?? [];
+          if (changed.length === 0 && extraEdges.length === 0) {
+            _graphBeforeBurst = null;
+            return;
+          }
+          lazyChanged = changed;
+          lazyPartial = {
+            nodes: changed.map((n) => {
+              const { last_run_status, stale_status, freshness_status, lens, ...restData } = (n.data || {}) as any;
+              return { ...n, data: restData };
+            }),
+            edges: extraEdges,
+            lazy: latest.graph.lazy,
+          };
+        }
         const sanitizedGraph = {
           nodes: latest.graph.nodes.map((n) => {
             const { last_run_status, stale_status, freshness_status, lens, ...restData } = (n.data || {}) as any;
             return { ...n, data: restData };
           }),
           edges: latest.graph.edges,
+          // Tells the server this is only the loaded part of a large graph, so it merges instead of replacing.
+          ...(latest.graph.lazy ? { lazy: latest.graph.lazy } : {}),
         };
-        await projectsApi.update(latest.id, { graph: sanitizedGraph });
+        await projectsApi.update(latest.id, { graph: (lazyPartial ?? sanitizedGraph) as any });
+        if (lazyChanged) rememberBaseline(lazyChanged);
 
         // A partition_config/freshness_policy/custom-lineage edit buried in
         // this graph write can break the whole project's load just like
@@ -365,6 +474,12 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
 
   setCurrentProject: (project: Project) => {
     dbg('[useProject] setCurrentProject called');
+    // Endpoints that return the whole project (update, regenerate, delete...) send every asset. For a very large
+    // project, don't install that into the UI -- fetch it in pieces instead.
+    if (!project.graph.lazy && project.graph.nodes.filter((n) => n.node_kind === 'asset').length > LAZY_ASSET_THRESHOLD) {
+      void get().loadProject(project.id, { silent: true });
+      return;
+    }
     set({ currentProject: project });
   },
 

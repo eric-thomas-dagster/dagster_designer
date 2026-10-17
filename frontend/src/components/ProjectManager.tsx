@@ -309,6 +309,11 @@ export function ProjectManager() {
   };
 
   const handleMaterializeAll = async () => {
+    if (currentProject?.graph?.lazy) {
+      // A large project only has the opened groups in the browser -- "all" would silently mean "the loaded few".
+      notify.info(`This project has ${currentProject.graph.lazy.total_assets.toLocaleString()} assets and is loaded group by group, so Materialize All is turned off. Open a group and select the assets to run, or start a backfill for them.`);
+      return;
+    }
     if (!currentProject) return;
 
     setIsMaterializingAll(true);

@@ -769,6 +769,68 @@ async def list_projects():
     return ProjectListResponse(projects=projects, total=len(projects))
 
 
+def _project_file_version(project_id: str):
+    """Changes whenever the stored project changes -- keys the large-project graph index cache."""
+    try:
+        st = project_service._get_project_file(project_id).stat()
+        return (st.st_mtime_ns, st.st_size)
+    except OSError:
+        return None
+
+
+def _graph_index_for(project_id: str):
+    from ..services import graph_index
+    raw = project_service.get_raw_project_json(project_id)
+    if raw is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+    version, data = raw
+    from ..models.graph import PipelineGraph
+    return graph_index.get_index(project_id, version, lambda: PipelineGraph(**(data.get("graph") or {})))
+
+
+def _lazy_project_view(project_id: str):
+    """The project with its graph replaced by a group summary, if it is large enough to be served in pieces;
+    None otherwise (the caller then takes the normal path). Works from the stored JSON directly so a 100k-asset
+    project never has its graph turned into 100k pydantic nodes just to be thrown away."""
+    from ..services import graph_index
+    from ..models.graph import PipelineGraph
+    raw = project_service.get_raw_project_json(project_id)
+    if raw is None:
+        return None
+    version, data = raw
+    if data.get("is_dagster_plus"):
+        return None
+    graph_dict = data.get("graph") or {}
+    if graph_index.count_assets_raw(project_id, version, graph_dict) <= graph_index.LAZY_THRESHOLD:
+        return None
+    idx = graph_index.get_index(project_id, version, lambda: PipelineGraph(**graph_dict))
+    project = Project(**{**data, "graph": {"nodes": [], "edges": []}})
+    try:
+        project.root_module = project_service.get_project_root_module(project)
+    except Exception:
+        project.root_module = project.directory_name
+    project.graph = graph_index.lazy_graph(idx)
+    return project
+
+
+@router.get("/{project_id}/graph/groups/{group:path}")
+async def get_graph_group(project_id: str, group: str):
+    """One group's assets (in full) and every edge touching it -- what the UI loads when a group is expanded in
+    a large project that is served in pieces."""
+    from ..services import graph_index
+    idx = await asyncio.to_thread(_graph_index_for, project_id)
+    return graph_index.group_slice(idx, group)
+
+
+@router.get("/{project_id}/graph-search")
+async def search_graph_assets(project_id: str, q: str = "", group: str | None = None, kind: str | None = None,
+                              offset: int = 0, limit: int = 100):
+    """Page through a large project's assets by text / group / kind (the Catalog and asset search)."""
+    from ..services import graph_index
+    idx = await asyncio.to_thread(_graph_index_for, project_id)
+    return graph_index.search_assets(idx, q=q, group=group, kind=kind, offset=max(0, offset), limit=max(1, min(limit, 500)))
+
+
 @router.get("/{project_id}/asset-live-status")
 async def get_asset_live_status(project_id: str):
     """Live per-asset status (stale / freshness / last run) for a LOCAL project.
@@ -801,13 +863,19 @@ async def get_asset_live_status(project_id: str):
 
 
 @router.get("/{project_id}", response_model=Project)
-async def get_project(project_id: str, live: bool = True):
+async def get_project(project_id: str, live: bool = True, lazy: bool = False):
     """Get a project by ID.
 
     For Dagster+ (cloud) projects we hydrate `project.graph` from the
     live GraphQL API before returning — so every existing frontend
     panel that reads project.graph (Assets tab, lineage, etc.) works
     against cloud data without needing a cloud-specific UI."""
+    if lazy:
+        # Very large project: answer with the group summary without ever materializing the whole graph.
+        view = await asyncio.to_thread(_lazy_project_view, project_id)
+        if view is not None:
+            return view
+
     project = project_service.get_project(project_id)
 
     if not project:

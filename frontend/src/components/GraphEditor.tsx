@@ -37,6 +37,7 @@ import { AssetIOPanel } from './AssetIOPanel';
 import { DagsterAIBar } from './DagsterAIBar';
 import { AddDataDialog } from './AddDataDialog';
 import { notify, confirmDialog } from './Notifications';
+import { LazyCatalog } from './LazyCatalog';
 import { AutoCoverageModal } from './AssetDetailPage';
 import { useGroupByCodeLocation } from '@/hooks/useGroupByCodeLocation';
 import { GroupByLocationToggle } from './GroupByLocationToggle';
@@ -47,7 +48,7 @@ import { useProjectStore } from '@/hooks/useProject';
 import { useIsDarkMode } from '@/hooks/useIsDarkMode';
 import { projectsApi, componentsApi, partitionsApi, API_BASE } from '@/services/api';
 import { Play, Plus, Layers, CheckCircle, Group, Ungroup } from 'lucide-react';
-import type { GraphNode, GraphEdge, ComponentSchema } from '@/types';
+import type { GraphNode, GraphEdge, ComponentSchema, LazyGraphInfo } from '@/types';
 import { dbg } from '@/lib/debug';
 
 // Node for the "collapse to groups" mode. Fixed width (so edges hit
@@ -505,6 +506,9 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
   // per group, edges aggregated. Auto-on for large cloud graphs
   // (>60 assets) so users see manageable structure by default.
   const [collapseToGroups, setCollapseToGroups] = useState(false);
+  // Very large project: the server sent a group summary and only the groups opened so far are loaded (see
+  // services/graph_index.py). The graph then works at group level; assets arrive when a group is expanded.
+  const lazyRef = useRef<LazyGraphInfo | null>(null);
   // Lineage filters — apply to both graph + catalog views. Kept
   // client-side so filtering is instant on large clouds without
   // roundtripping the whole graph. Declared up here (rather than down
@@ -659,7 +663,16 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
   // Stable callbacks so memoized GroupNode / AssetNode instances aren't
   // forced to re-render each time `groupedView` recomputes (the memo
   // creates fresh closures otherwise, defeating React.memo).
-  const handleExpandGroup = useCallback((g: string) => {
+  const handleExpandGroup = useCallback(async (g: string) => {
+    if (lazyRef.current) {
+      // Large project: this group's assets aren't loaded yet -- fetch them before showing the group open.
+      try {
+        await useProjectStore.getState().loadLazyGroup(g);
+      } catch (e: any) {
+        notify.error(`Couldn't load the assets in "${g}": ${e?.response?.data?.detail || e?.message || e}`);
+        return;
+      }
+    }
     setExpandedGroups(prev => {
       if (prev.has(g)) return prev;
       const next = new Set(prev);
@@ -668,6 +681,7 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
     });
   }, []);
   const handleCollapseGroup = useCallback((g: string) => {
+    if (lazyRef.current) useProjectStore.getState().unloadLazyGroup(g); // free the group's assets again
     setExpandedGroups(prev => {
       if (!prev.has(g)) return prev;
       const next = new Set(prev);
@@ -701,6 +715,11 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
   // assets with connections grouped into their own sections.
   const [showAllInGraph, setShowAllInGraph] = useState(false);
   const { currentProject, updateGraph, setCurrentProject, isLoading, loadProject } = useProjectStore();
+  const lazyInfo = currentProject?.graph?.lazy ?? null;
+  lazyRef.current = lazyInfo;
+  useEffect(() => {
+    if (lazyInfo && !collapseToGroups) setCollapseToGroups(true);
+  }, [lazyInfo, collapseToGroups]);
   // Read-only whenever the project is a Dagster+ connection.
   const readOnlyMode = !!(currentProject as any)?.is_dagster_plus;
   const [nodes, setNodes, onNodesChangeRaw] = useNodesState([]);
@@ -1355,7 +1374,7 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
           target: edge.target,
           sourceHandle: sourceHandle,
           targetHandle: targetHandle,
-          data: { is_custom: isCustom },
+          data: { is_custom: isCustom, source_group: edge.source_group, target_group: edge.target_group },
           type: isCustom ? 'custom' : 'default',
           style: isCustom ? { strokeDasharray: '5,5', stroke: '#f59e0b', strokeWidth: 2 } : {},
           selected: currentSelectedEdgeIds.has(edge.id), // Preserve selection
@@ -2507,12 +2526,12 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
   // Available group / kind options across ALL assets — power the
   // dropdowns and stay stable as filters narrow the visible set.
   const allGroups = React.useMemo(() => {
-    const s = new Set<string>();
+    const s = new Set<string>(lazyInfo ? lazyInfo.groups.map((g) => g.name) : []);
     for (const n of nodes) {
       if (n.data?.node_kind === 'asset' && n.data?.group_name) s.add(n.data.group_name);
     }
     return Array.from(s).sort();
-  }, [nodes]);
+  }, [nodes, lazyInfo]);
   // Collapsing a single group from the FLAT view (collapseToGroups=false,
   // the default a project opens in -- every group already shown expanded)
   // is a different operation from handleCollapseGroup above, which only
@@ -2656,7 +2675,7 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
   const groupedView = React.useMemo(() => {
     if (!collapseToGroups) return null;
     const assets = perAssetDisplay.filter((n) => n.data?.node_kind === 'asset');
-    if (assets.length === 0) return null;
+    if (assets.length === 0 && !lazyInfo) return null;
     const groupOf = (n: Node): string => (n.data?.group_name || 'ungrouped');
     const nodeToGroup = new Map<string, string>();
     for (const n of assets) nodeToGroup.set(n.id, groupOf(n));
@@ -2664,7 +2683,7 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
     // Group summaries -- collected for every group so the aggregated
     // node knows its member count / kinds even after some groups get
     // expanded individually.
-    const groupInfo: Record<string, { assets: Node[]; kinds: Set<string>; hasChecks: number; codeLocations: Set<string> }> = {};
+    const groupInfo: Record<string, { assets: Node[]; kinds: Set<string>; hasChecks: number; codeLocations: Set<string>; count?: number }> = {};
     for (const n of assets) {
       const g = groupOf(n);
       const info = groupInfo[g] ||= { assets: [], kinds: new Set(), hasChecks: 0, codeLocations: new Set() };
@@ -2672,6 +2691,15 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
       for (const k of (n.data?.kinds || [])) info.kinds.add(k);
       if ((n.data?.checks || []).length > 0) info.hasChecks += 1;
       if (n.data?.code_location) info.codeLocations.add(n.data.code_location);
+    }
+
+    // Large project: every group the server knows about gets a card, whether or not its assets are loaded.
+    // (Loaded groups already have their entry above, built from the real assets.)
+    if (lazyInfo) {
+      for (const lg of lazyInfo.groups) {
+        if (groupInfo[lg.name]) continue;
+        groupInfo[lg.name] = { assets: [], kinds: new Set(lg.kinds), hasChecks: lg.has_checks, codeLocations: new Set(lg.code_locations), count: lg.count };
+      }
     }
 
     // idToOutputId: each individual asset maps to either its own id
@@ -2689,12 +2717,21 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
     // assets it stays direct. Between one expanded + one collapsed
     // it becomes an asset→group or group→asset edge, which just works.
     const seen = new Map<string, number>();
+    // An edge end that isn't loaded (large project) is drawn as the collapsed card of the group it belongs to.
+    const outputFor = (id: string, group?: string | null) => idToOutputId.get(id) ?? (group ? `__group__::${group}` : undefined);
     for (const e of edges) {
-      const s = idToOutputId.get(e.source);
-      const t = idToOutputId.get(e.target);
+      const s = outputFor(e.source, (e.data as any)?.source_group);
+      const t = outputFor(e.target, (e.data as any)?.target_group);
       if (!s || !t || s === t) continue;
       const k = `${s}||${t}`;
       seen.set(k, (seen.get(k) || 0) + 1);
+    }
+    if (lazyInfo) {
+      // Group-to-group edges where NEITHER side is open have no loaded edge to aggregate: the server's counts stand in.
+      for (const ge of lazyInfo.group_edges) {
+        if (isGroupExpanded(ge.source) || isGroupExpanded(ge.target)) continue;
+        seen.set(`__group__::${ge.source}||__group__::${ge.target}`, ge.count);
+      }
     }
 
     // Two-level layout: each GROUP is laid out as its own cohesive block
@@ -2812,10 +2849,13 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
     const groupNames = Object.keys(groupInfo);
     const groupPreds: Record<string, Set<string>> = Object.fromEntries(groupNames.map((g) => [g, new Set<string>()]));
     for (const e of edges) {
-      const sg = nodeToGroup.get(e.source);
-      const tg = nodeToGroup.get(e.target);
-      if (!sg || !tg || sg === tg) continue;
+      const sg = nodeToGroup.get(e.source) ?? (e.data as any)?.source_group;
+      const tg = nodeToGroup.get(e.target) ?? (e.data as any)?.target_group;
+      if (!sg || !tg || sg === tg || !groupPreds[tg]) continue;
       groupPreds[tg].add(sg);
+    }
+    if (lazyInfo) {
+      for (const ge of lazyInfo.group_edges) if (groupPreds[ge.target] && ge.source !== ge.target) groupPreds[ge.target].add(ge.source);
     }
     // Same DFS-with-cycle-guard longest path as the intra-group layering
     // above. This one matters even more: the underlying ASSET graph is
@@ -2849,19 +2889,24 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
     // Column X = cumulative max block width of preceding columns + gap,
     // so a column holding a deep, wide expanded group pushes everything
     // after it over rather than clipping it.
-    const colX: Record<number, number> = {};
-    let cumX = 0;
+    // A dependency layer with very many groups (hundreds of unconnected pipelines all land in layer 0) used to
+    // become ONE column thousands of cards tall. Split such a layer into several side-by-side columns, roughly
+    // square, keeping the layers' left-to-right order -- so a wide catalog reads as a grid, not a ribbon.
+    const columns: string[][] = [];
     for (const L of sortedLayerKeys) {
-      colX[L] = cumX;
-      cumX += Math.max(...groupsByLayer[L].map((g) => blocks[g].width)) + GROUP_H_GAP;
+      const gs = groupsByLayer[L];
+      const perColumn = Math.max(20, Math.ceil(Math.sqrt(gs.length * 1.5)));
+      for (let i = 0; i < gs.length; i += perColumn) columns.push(gs.slice(i, i + perColumn));
     }
     const groupOrigin: Record<string, { x: number; y: number }> = {};
-    for (const L of sortedLayerKeys) {
+    let cumX = 0;
+    for (const colGroups of columns) {
       let y = 0;
-      for (const g of groupsByLayer[L]) {
-        groupOrigin[g] = { x: colX[L], y };
+      for (const g of colGroups) {
+        groupOrigin[g] = { x: cumX, y };
         y += blocks[g].height + GROUP_V_GAP;
       }
+      cumX += Math.max(...colGroups.map((g) => blocks[g].width)) + GROUP_H_GAP;
     }
     // Step 3: absolute positions = block origin + local offset.
     const posById: Record<string, { x: number; y: number }> = {};
@@ -2891,7 +2936,7 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
         data: {
           label: g,
           group_name: g,
-          assetCount: info.assets.length,
+          assetCount: info.count ?? info.assets.length,
           kinds: Array.from(info.kinds),
           withChecks: info.hasChecks,
           // Dagster proper shows the code location under a group's name
@@ -2953,7 +2998,7 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
     });
 
     return { nodes: outNodes, edges: outEdges };
-  }, [collapseToGroups, expandedGroups, perAssetDisplay, edges, handleExpandGroup, handleCollapseGroup]);
+  }, [collapseToGroups, expandedGroups, perAssetDisplay, edges, handleExpandGroup, handleCollapseGroup, lazyInfo]);
 
   const baseDisplayNodes = groupedView ? groupedView.nodes : perAssetDisplay;
   const displayEdges = groupedView ? groupedView.edges : edges;
@@ -3097,7 +3142,9 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
             <input
               value={assetSearch}
               onChange={(e) => setAssetSearch(e.target.value)}
-              placeholder="Search assets..."
+              placeholder={lazyInfo ? 'Search assets (Enter)...' : 'Search assets...'}
+              title={lazyInfo ? 'This project is loaded group by group: press Enter to search every asset in the Catalog' : undefined}
+              onKeyDown={(e) => { if (lazyInfo && e.key === 'Enter') setViewMode('catalog'); }}
               className="w-full pl-7 pr-2 py-1 text-xs border border-gray-300 rounded"
             />
           </div>
@@ -3318,15 +3365,18 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
                       }
                       setExpandedGroups(new Set(allGroups));
                     }}
-                    disabled={expandedGroups.size === allGroups.length}
+                    disabled={expandedGroups.size === allGroups.length || !!lazyInfo}
                     tabIndex={inGraph ? 0 : -1}
                     className="px-2 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-100 rounded disabled:opacity-40 disabled:hover:bg-transparent whitespace-nowrap"
-                    title="Expand every group at once"
+                    title={lazyInfo ? `This project has ${lazyInfo.total_assets.toLocaleString()} assets and is loaded group by group -- click a group to open it` : 'Expand every group at once'}
                   >
                     Expand all
                   </button>
                   <button
-                    onClick={() => setExpandedGroups(new Set())}
+                    onClick={() => {
+                      if (lazyRef.current) for (const g of expandedGroups) useProjectStore.getState().unloadLazyGroup(g);
+                      setExpandedGroups(new Set());
+                    }}
                     disabled={expandedGroups.size === 0}
                     tabIndex={inGraph ? 0 : -1}
                     className="px-2 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-100 rounded disabled:opacity-40 disabled:hover:bg-transparent whitespace-nowrap"
@@ -3345,7 +3395,22 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
       {/* Catalog view — searchable/filterable table of the same
           filtered asset set. Uses the filters + search from the
           ribbon so state is shared with the graph view. */}
-      {viewMode === 'catalog' && (() => {
+      {viewMode === 'catalog' && lazyInfo && currentProject && (
+        <LazyCatalog
+          projectId={currentProject.id}
+          groups={lazyInfo.groups.map((g) => g.name)}
+          totalAssets={lazyInfo.total_assets}
+          initialQuery={assetSearch}
+          onOpenAsset={async (row) => {
+            // The asset's group must be loaded for the detail view to find it.
+            await useProjectStore.getState().loadLazyGroup(row.group_name);
+            onNodeSelect(row.id);
+            onOpenAssetDetail?.(row.id);
+          }}
+        />
+      )}
+
+      {viewMode === 'catalog' && !lazyInfo && (() => {
         // Catalog shows EVERYTHING (subject only to search/group/kind
         // filters). Connection-scrape assets always land in their own
         // sections at the bottom, never mingled with the primary list.

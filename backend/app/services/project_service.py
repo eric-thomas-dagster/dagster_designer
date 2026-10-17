@@ -650,6 +650,22 @@ class ProjectService:
 
         return project
 
+    def get_raw_project_json(self, project_id: str):
+        """(version, stored JSON dict) for a project, from the same mtime cache get_project uses -- or None."""
+        project_file = self._get_project_file(project_id)
+        if not project_file.exists():
+            return None
+        st = project_file.stat()
+        mtime = st.st_mtime
+        cached = _project_json_cache.get(project_id)
+        if cached is not None and cached[0] == mtime:
+            data = cached[1]
+        else:
+            with open(project_file, "r") as f:
+                data = json.load(f)
+            _project_json_cache[project_id] = (mtime, data)
+        return (st.st_mtime_ns, st.st_size), data
+
     def get_project(self, project_id: str) -> Project | None:
         """Get a project by ID."""
         project_file = self._get_project_file(project_id)
@@ -759,6 +775,10 @@ class ProjectService:
             print(f"[update_project] Graph has {len(update_data['graph'].get('nodes', []))} nodes", flush=True)
         sys.stdout.flush()
 
+        # Set when a partial graph (large project) was merged: only those nodes need follow-up processing below --
+        # looping every node of a 30k-asset graph per save blocked the server for minutes.
+        lazy_touched_ids: set[str] | None = None
+
         # Convert dicts to proper Pydantic models before setting
         for field, value in update_data.items():
             if field == "components" and isinstance(value, list):
@@ -792,6 +812,22 @@ class ProjectService:
                 for _node in reconstructed_graph.nodes:
                     for _f in _ephemeral_node_fields:
                         _node.data.pop(_f, None)
+                # Safety net: a client that sends far fewer assets than are stored -- without saying it holds a
+                # partial view -- is almost certainly one (a code path unaware of large-project mode). Never let that
+                # shrink a big graph; merge instead. (Removing assets goes through the component-delete endpoints.)
+                from .graph_index import LAZY_THRESHOLD
+                _stored_assets = sum(1 for _n in project.graph.nodes if _n.node_kind == "asset")
+                _incoming_assets = sum(1 for _n in reconstructed_graph.nodes if _n.node_kind == "asset")
+                if (reconstructed_graph.lazy is None and _stored_assets > LAZY_THRESHOLD
+                        and _incoming_assets < _stored_assets * 0.5):
+                    print(f"[update_project] graph update carries {_incoming_assets} of {_stored_assets} assets; merging, not replacing", flush=True)
+                    reconstructed_graph.lazy = {}
+                if reconstructed_graph.lazy is not None:
+                    # The client only holds part of a very large graph (see services/graph_index.py): merge what it
+                    # sent into the stored graph rather than replacing it, which would drop every unloaded asset.
+                    from .graph_index import merge_lazy_update
+                    lazy_touched_ids = {n.id for n in reconstructed_graph.nodes}
+                    reconstructed_graph = merge_lazy_update(project.graph, reconstructed_graph)
                 setattr(project, field, reconstructed_graph)
                 print(f"[update_project] Reconstructed graph with {len(reconstructed_graph.nodes)} nodes", flush=True)
             elif field == "custom_lineage" and isinstance(value, list):
@@ -843,8 +879,9 @@ class ProjectService:
             sys.stdout.flush()
 
             # Process ALL nodes to handle both additions and removals of partition configs
-            print(f"[update_project] Processing partition configs for {len(project.graph.nodes)} node(s)...", flush=True)
-            for node in project.graph.nodes:
+            nodes_to_process = [n for n in project.graph.nodes if lazy_touched_ids is None or n.id in lazy_touched_ids]
+            print(f"[update_project] Processing partition configs for {len(nodes_to_process)} node(s)...", flush=True)
+            for node in nodes_to_process:
                 # Skip nodes without data
                 if not node.data:
                     continue
@@ -873,7 +910,7 @@ class ProjectService:
 
             # Apply freshness policies from node data
             nodes_with_freshness_policies = []
-            for node in project.graph.nodes:
+            for node in nodes_to_process:
                 if node.data and node.data.get("freshness_policy"):
                     nodes_with_freshness_policies.append(node)
                     print(f"[update_project] Found freshness policy on node: {node.id}", flush=True)

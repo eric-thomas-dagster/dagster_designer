@@ -81,13 +81,19 @@ def api(base: str, method: str, path: str, body: dict | None = None, timeout: fl
         return e.code, None, time.time() - t
 
 
-def main() -> int:
+def run(lazy: bool) -> int:
+    """One full pass. `lazy` lowers the large-project threshold so the fixture is served in pieces, exercising
+    the group-by-group path (graph summary, group slices, server-side catalog search)."""
+    failures.clear()
+    print(f"\n===== {'LARGE-PROJECT (lazy)' if lazy else 'NORMAL'} mode =====")
     work = Path(tempfile.mkdtemp(prefix="designer-smoke-"))
     (work / "data").mkdir()
     (work / "projects").mkdir()
     api_port, ui_port = free_port(), free_port()
     base = f"http://127.0.0.1:{api_port}/api/v1"
     env = {**os.environ, "DATA_DIR": str(work / "data"), "PROJECTS_DIR": str(work / "projects")}
+    if lazy:
+        env["DESIGNER_LAZY_THRESHOLD"] = "2"
     procs: list[subprocess.Popen] = []
     try:
         print(f"work dir {work}; api :{api_port}, ui :{ui_port}")
@@ -124,6 +130,15 @@ def main() -> int:
         check(code == 200, "partitions summary answers")
         code, monitors, _ = api(base, "GET", f"/projects/{pid}/monitors")
         check(code == 200 and monitors is not None, "monitors answer")
+        if lazy:
+            code, lp, _ = api(base, "GET", f"/projects/{pid}?live=false&lazy=true")
+            g = (lp or {}).get("graph", {})
+            check(code == 200 and (g.get("lazy") or {}).get("total_assets") == 4 and not [n for n in g.get("nodes", []) if n.get("node_kind") == "asset"],
+                  "large project is served as a group summary, without asset nodes")
+            code, sl, _ = api(base, "GET", f"/projects/{pid}/graph/groups/orders")
+            check(code == 200 and sorted(n["id"] for n in (sl or {}).get("nodes", [])) == ["clean_orders", "order_totals", "raw_orders"], "a group's assets load on demand")
+            code, se, _ = api(base, "GET", f"/projects/{pid}/graph-search?q=lonely")
+            check(code == 200 and (se or {}).get("total") == 1, "server-side asset search works")
 
         # ---- 2. UI ------------------------------------------------------------------------------------------
         print("UI")
@@ -132,12 +147,16 @@ def main() -> int:
         page_errors: list[str] = []
         bad_responses: list[str] = []
         forbidden_hits: list[str] = []
+        group_fetches: list[str] = []
+        search_log: list[str] = []
         with sync_playwright() as p:
             channel = os.environ.get("SMOKE_BROWSER_CHANNEL")
             browser = p.chromium.launch(headless=True, **({"channel": channel} if channel else {}))
             pg = browser.new_page(viewport={"width": 1600, "height": 1000})
             pg.set_default_timeout(30000)
             pg.on("pageerror", lambda e: page_errors.append(str(e)[:300]))
+            console_errors: list[str] = []
+            pg.on("console", lambda m: console_errors.append(m.text[:200]) if m.type in ("error", "warning") else None)
 
             def on_response(r):
                 if "/api/v1/" not in r.url:
@@ -147,7 +166,15 @@ def main() -> int:
                     bad_responses.append(f"{r.status} {path[:120]}")
                 if any(f in path for f in FORBIDDEN_REQUESTS):
                     forbidden_hits.append(path[:120])
+                if "/graph/groups/" in path:
+                    group_fetches.append(path)
+                if "graph-search" in path:
+                    search_log.append(f"{r.status} {path[-60:]}")
             pg.on("response", on_response)
+            inflight: dict = {}
+            pg.on("request", lambda r: inflight.__setitem__(id(r), (time.time(), r.url.split("/api/v1")[-1][:80])) if "/api/v1/" in r.url else None)
+            pg.on("requestfinished", lambda r: inflight.pop(id(r), None))
+            pg.on("requestfailed", lambda r: inflight.pop(id(r), None))
 
             pg.goto(f"http://127.0.0.1:{ui_port}/")
             pg.wait_for_timeout(2500)
@@ -162,12 +189,45 @@ def main() -> int:
                 check(False, "graph renders nodes after opening the project")
 
             pg.get_by_role("button", name="Catalog").click()
+            if lazy:
+                try:
+                    pg.wait_for_selector("[data-testid=lazy-catalog] tbody td.font-mono", timeout=60000)
+                except Exception:
+                    pass
             pg.wait_for_timeout(1500)
-            check(all(pg.get_by_text(a, exact=True).count() > 0 for a in ASSETS), "Catalog lists every asset")
+            counts = {a: pg.get_by_text(a, exact=True).count() for a in ASSETS}
+            if not all(counts.values()):
+                pg.screenshot(path=str(Path(tempfile.gettempdir()) / "smoke-catalog-fail.png"))
+                print("   graph-search responses seen:", search_log)
+                print("   in flight:", [f"{time.time()-t0:.0f}s {u}" for t0, u in inflight.values()])
+                print("   console errors:", console_errors[-30:])
+                print("   requests in flight / text:", pg.locator("[data-testid=lazy-catalog]").count(), pg.locator("[data-testid=lazy-catalog] svg.animate-spin").count())
+            check(all(c > 0 for c in counts.values()), f"Catalog lists every asset {counts if not all(counts.values()) else ''}")
 
             pg.get_by_text("raw_orders", exact=True).first.click()
             pg.wait_for_timeout(1500)
             check(pg.get_by_text("raw_orders").count() > 1, "selecting an asset opens its panel")
+
+            if lazy:
+                # selecting an asset (above) opened its full detail page: go back to the assets view, then to the graph
+                back = pg.locator("button[title^='Back to the asset graph']")
+                if back.count():
+                    back.first.click()
+                    pg.wait_for_timeout(1000)
+                pg.get_by_role("button", name="Graph").first.click()
+                pg.wait_for_timeout(2500)
+                before = len(group_fetches)
+                # dispatch the click: at fit-to-view zoom the first card can sit under a side panel, which would
+                # swallow a coordinate-based click
+                pg.wait_for_timeout(1500)
+                pg.screenshot(path=str(Path(tempfile.gettempdir()) / "smoke-graph-lazy.png"))
+                try:
+                    pg.locator(".react-flow__node").first.dispatch_event("click", timeout=10000)
+                    pg.wait_for_timeout(2500)
+                    # (opening the asset above already loaded its group, so a card click may be served from what is loaded)
+                    check(len(group_fetches) >= 1, f"a group's assets are fetched on demand ({len(group_fetches)} fetch(es))")
+                except Exception as e:
+                    check(False, f"group cards are shown again after viewing an asset ({str(e)[:80]})")
 
             for tab in TABS:
                 loc = pg.get_by_text(tab, exact=True)
@@ -204,7 +264,17 @@ def main() -> int:
             shutil.rmtree(work, ignore_errors=True)
 
     print(f"\n{'FAILED' if failures else 'OK'}: {len(failures)} failure(s)")
-    return 1 if failures else 0
+    return len(failures)
+
+
+def main() -> int:
+    mode = os.environ.get("SMOKE_MODE", "both")
+    bad = 0
+    if mode in ("both", "normal"):
+        bad += run(False)
+    if mode in ("both", "lazy"):
+        bad += run(True)
+    return 1 if bad else 0
 
 
 if __name__ == "__main__":
