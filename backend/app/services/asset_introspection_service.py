@@ -1,6 +1,7 @@
 """Service for introspecting Dagster assets using dg CLI."""
 
 import asyncio
+import os
 import json
 import shlex
 import subprocess
@@ -14,6 +15,14 @@ from ..models.project import Project
 from ..core.config import settings
 from ..core.uv_binary import venv_bin_path
 from .codegen_service import CodegenService
+
+
+
+def _vprint(*args, **kwargs):
+    """Per-asset/per-component discovery chatter. It scaled with the catalog (~10 lines per asset: a 30k-asset
+    project wrote 300k+ log lines per load), so it is opt-in: set DESIGNER_VERBOSE=1. Failures still print."""
+    if os.environ.get("DESIGNER_VERBOSE"):
+        print(*args, **kwargs)
 
 
 def _normalize_tags(raw_tags: Any) -> list[str]:
@@ -835,14 +844,14 @@ class AssetIntrospectionService:
                                                 manifest_data = yaml.safe_load(f)
                                                 icon = manifest_data.get('icon', 'package')
                                                 component_icons[pseudo_comp.id] = icon
-                                                print(f"[Asset Introspection] Loaded icon '{icon}' for {component_id}", flush=True)
+                                                _vprint(f"[Asset Introspection] Loaded icon '{icon}' for {component_id}", flush=True)
                                         except Exception as e:
                                             print(f"[Asset Introspection] Failed to load manifest for {component_id}: {e}", flush=True)
                                             component_icons[pseudo_comp.id] = 'package'
                                     else:
                                         component_icons[pseudo_comp.id] = 'package'
 
-                                print(f"[Asset Introspection] Loaded community component from defs: {component_id} -> {defs_data['type']}", flush=True)
+                                _vprint(f"[Asset Introspection] Loaded community component from defs: {component_id} -> {defs_data['type']}", flush=True)
                         except Exception as e:
                             print(f"[Asset Introspection] Failed to load defs.yaml from {component_folder}: {e}", flush=True)
         else:
@@ -876,7 +885,7 @@ class AssetIntrospectionService:
                 asset_source = asset.get("source", "")
 
                 import sys
-                print(f"[Asset Introspection] Processing asset: {asset_key}, kinds: {kinds}, source: {asset_source}", flush=True)
+                _vprint(f"[Asset Introspection] Processing asset: {asset_key}, kinds: {kinds}, source: {asset_source}", flush=True)
                 sys.stdout.flush()
 
                 # If source is null and this is NOT a dbt asset, try to find the Python file
@@ -887,7 +896,7 @@ class AssetIntrospectionService:
                     python_file = self._find_python_asset_file(project_dir, asset_key)
                     if python_file:
                         asset_source = str(python_file.relative_to(project_dir))
-                        print(f"[Asset Introspection] Found Python asset file: {asset_source}", flush=True)
+                        _vprint(f"[Asset Introspection] Found Python asset file: {asset_source}", flush=True)
 
                 for comp_id, comp in component_map.items():
                     # Check for dbt assets (must have "dbt" in kinds)
@@ -942,12 +951,12 @@ class AssetIntrospectionService:
                 # Community components create assets in defs/<asset_name>/defs.yaml
                 # Example: src/project_name/defs/my_asset/defs.yaml
                 if not source_component and asset_source:
-                    print(f"[Asset Introspection] Checking community components for asset {asset_key}, source: {asset_source}", flush=True)
+                    _vprint(f"[Asset Introspection] Checking community components for asset {asset_key}, source: {asset_source}", flush=True)
 
                     # First try matching against registered components
-                    print(f"[Asset Introspection] Available components: {list(component_map.keys())}", flush=True)
+                    _vprint(f"[Asset Introspection] Available components: {list(component_map.keys())}", flush=True)
                     for comp_id, comp in component_map.items():
-                        print(f"[Asset Introspection] Checking component {comp_id}: {comp.component_type}", flush=True)
+                        _vprint(f"[Asset Introspection] Checking component {comp_id}: {comp.component_type}", flush=True)
                         # Check if this is a community component (has .components. in the type)
                         if ".components." in comp.component_type:
                             # Extract component_id from type
@@ -961,7 +970,7 @@ class AssetIntrospectionService:
                                     # e.g., "src/project_name/defs/synthetic_data_generator/defs.yaml"
                                     if f"/defs/{component_id}/" in asset_source or f"\\defs\\{component_id}\\" in asset_source:
                                         source_component = comp_id
-                                        print(f"[Asset Introspection] Matched community component: {component_id} for asset: {asset_key}", flush=True)
+                                        _vprint(f"[Asset Introspection] Matched community component: {component_id} for asset: {asset_key}", flush=True)
                                         break
 
                     # If not matched yet, check if the asset source matches the pattern /defs/{folder}/defs.yaml
@@ -982,7 +991,7 @@ class AssetIntrospectionService:
                         match = re.search(r'/defs/(.+)/defs\.yaml', asset_source)
                         if match:
                             asset_folder = match.group(1)
-                            print(f"[Asset Introspection] Found unregistered component instance in folder: {asset_folder}", flush=True)
+                            _vprint(f"[Asset Introspection] Found unregistered component instance in folder: {asset_folder}", flush=True)
 
                             # Construct path to the YAML file
                             yaml_path = Path(project_dir) / asset_source.split(':')[0]
@@ -994,12 +1003,12 @@ class AssetIntrospectionService:
 
                                     component_type = yaml_data.get('type')
                                     if component_type:
-                                        print(f"[Asset Introspection] Found component type in YAML: {component_type}", flush=True)
+                                        _vprint(f"[Asset Introspection] Found component type in YAML: {component_type}", flush=True)
                                         # Check if we already created a pseudo-component for this folder
                                         pseudo_comp_id = f"community_{asset_folder}"
                                         if pseudo_comp_id in component_map:
                                             source_component = pseudo_comp_id
-                                            print(f"[Asset Introspection] Matched to pseudo-component: {pseudo_comp_id}", flush=True)
+                                            _vprint(f"[Asset Introspection] Matched to pseudo-component: {pseudo_comp_id}", flush=True)
                                         else:
                                             # Use the component type as the source_component
                                             source_component = component_type
@@ -1007,9 +1016,9 @@ class AssetIntrospectionService:
                                     print(f"[Asset Introspection] Error reading YAML for {asset_key}: {e}", flush=True)
 
                 if source_component:
-                    print(f"[Asset Introspection] Assigned source_component: {source_component} for asset: {asset_key}", flush=True)
+                    _vprint(f"[Asset Introspection] Assigned source_component: {source_component} for asset: {asset_key}", flush=True)
                 else:
-                    print(f"[Asset Introspection] No source_component found for asset: {asset_key}", flush=True)
+                    _vprint(f"[Asset Introspection] No source_component found for asset: {asset_key}", flush=True)
 
                 # Use existing position if available, otherwise calculate new position
                 if asset_id in existing_positions:
@@ -1037,9 +1046,9 @@ class AssetIntrospectionService:
                     component_type = source_comp.component_type
                     # Get the actual folder name (component_id) for community components
                     actual_component_id = component_id_map.get(source_component)
-                    print(f"[Asset Introspection] Including component attributes for {asset_key}: {component_attributes}", flush=True)
+                    _vprint(f"[Asset Introspection] Including component attributes for {asset_key}: {component_attributes}", flush=True)
                     if actual_component_id:
-                        print(f"[Asset Introspection] Component folder name: {actual_component_id}", flush=True)
+                        _vprint(f"[Asset Introspection] Component folder name: {actual_component_id}", flush=True)
                 elif source_component and "/defs/" in asset_source and "/defs.yaml" in asset_source:
                     # For unregistered components discovered from YAML, read the attributes
                     import re
@@ -1064,7 +1073,7 @@ class AssetIntrospectionService:
                                 # "defs.yaml[N]" convention for the multi-instance case only,
                                 # so a single-instance file's id stays plain.
                                 actual_component_id = f"{asset_folder}[{doc_idx}]" if doc_count > 1 else asset_folder
-                                print(f"[Asset Introspection] Read attributes from YAML for {asset_key}: {component_attributes}", flush=True)
+                                _vprint(f"[Asset Introspection] Read attributes from YAML for {asset_key}: {component_attributes}", flush=True)
                             except Exception as e:
                                 print(f"[Asset Introspection] Error reading attributes for {asset_key}: {e}", flush=True)
 
@@ -1125,7 +1134,7 @@ class AssetIntrospectionService:
                                         col_info += f", expects {len(io_expected_columns)} columns"
                                     if io_output_columns:
                                         col_info += f", outputs {len(io_output_columns)} columns"
-                                    print(f"[Asset Introspection] Found IO metadata for {asset_key}: input={io_input_type} (required={io_input_required}), output={io_output_type}{col_info}", flush=True)
+                                    _vprint(f"[Asset Introspection] Found IO metadata for {asset_key}: input={io_input_type} (required={io_input_required}), output={io_output_type}{col_info}", flush=True)
                         except Exception as e:
                             print(f"[Asset Introspection] Failed to read schema for {asset_key}: {e}", flush=True)
 

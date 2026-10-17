@@ -17,6 +17,7 @@ import { pickSpecializedSidebar } from './SpecializedSidebar';
 import { AddDbtModelDialog } from './AddDbtModelDialog';
 import { GitCommitDialog } from './GitCommitDialog';
 import { ColumnLineageOverlay } from './ColumnLineageOverlay';
+import { dbg } from '@/lib/debug';
 
 // Icon mapping for component icons
 const iconMap: Record<string, any> = {
@@ -632,7 +633,7 @@ export function PropertyPanel({ nodeId, onConfigureComponent, onOpenFile, onNewP
         });
 
         if (result.success) {
-          console.log('Materialization output:', result.stdout);
+          dbg('Materialization output:', result.stdout);
         } else {
           console.error('Materialization failed:', result.stderr);
         }
@@ -688,7 +689,7 @@ export function PropertyPanel({ nodeId, onConfigureComponent, onOpenFile, onNewP
         });
 
         if (result.success) {
-          console.log('Materialization output:', result.stdout);
+          dbg('Materialization output:', result.stdout);
         } else {
           console.error('Materialization failed:', result.stderr);
         }
@@ -724,7 +725,7 @@ export function PropertyPanel({ nodeId, onConfigureComponent, onOpenFile, onNewP
         });
 
         if (result.success) {
-          console.log('Backfill output:', result.stdout);
+          dbg('Backfill output:', result.stdout);
         } else {
           console.error('Backfill failed:', result.stderr);
         }

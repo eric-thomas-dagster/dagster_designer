@@ -83,6 +83,7 @@ import { projectsApi as _projectsApi } from './services/api';
 import { dagsterUIApi, projectsApi, filesApi, primitivesApi, dagsterPlusOrgBaseUrl } from './services/api';
 import type { ComponentInstance } from './types';
 import { API_BASE } from '@/services/api';
+import { dbg } from '@/lib/debug';
 
 function BrandMark() {
   const [failed, setFailed] = useState(false);
@@ -676,7 +677,7 @@ function App() {
     queryFn: async () => {
       if (!currentProject) return Promise.reject('No project');
       const result = await primitivesApi.getAllDefinitions(currentProject.id);
-      console.log('[Validation] Project:', currentProject.name, 'using_fallback:', result.using_fallback, 'jobs:', result.jobs?.length, 'schedules:', result.schedules?.length);
+      dbg('[Validation] Project:', currentProject.name, 'using_fallback:', result.using_fallback, 'jobs:', result.jobs?.length, 'schedules:', result.schedules?.length);
       return result;
     },
     // Skip validation entirely for Dagster+ projects — they don't
@@ -692,14 +693,14 @@ function App() {
 
   // Debug: Log when addingComponentType changes
   useEffect(() => {
-    console.log('[App] addingComponentType changed:', addingComponentType, 'currentProject:', currentProject?.id);
+    dbg('[App] addingComponentType changed:', addingComponentType, 'currentProject:', currentProject?.id);
   }, [addingComponentType, currentProject]);
 
   // Debug: Log when validation banner should be shown
   useEffect(() => {
     if (currentProject && backgroundValidationStatus) {
       const shouldShowBanner = backgroundValidationStatus.using_fallback && !dismissedValidationError;
-      console.log('[Validation Banner]', {
+      dbg('[Validation Banner]', {
         shouldShow: shouldShowBanner,
         using_fallback: backgroundValidationStatus.using_fallback,
         dismissed: dismissedValidationError,
@@ -828,7 +829,7 @@ function App() {
       if (editingNode?.data?.component_attributes) {
         componentAttributes = editingNode.data.component_attributes;
         componentId = editingComponent.id;
-        console.log('[App] Opening visual editor for editing component:', componentId, componentAttributes);
+        dbg('[App] Opening visual editor for editing component:', componentId, componentAttributes);
       }
     }
 
@@ -1059,7 +1060,7 @@ function App() {
         });
         if (response.ok) {
           const updatedProject = await response.json();
-          console.log('Assets regenerated:', updatedProject.graph.nodes.length, 'assets');
+          dbg('Assets regenerated:', updatedProject.graph.nodes.length, 'assets');
           // The project will be updated automatically from the backend response
           // Need to trigger a reload
           window.location.reload();

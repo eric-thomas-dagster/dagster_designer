@@ -28,6 +28,7 @@ import {
   HardDrive,
   Workflow,
 } from 'lucide-react';
+import { dbg } from '@/lib/debug';
 
 export function ProjectManager() {
   const {
@@ -402,7 +403,7 @@ export function ProjectManager() {
       });
 
       if (result.success) {
-        console.log('Materialization output:', result.stdout);
+        dbg('Materialization output:', result.stdout);
         notify.success(`${runnable.length} asset(s) materialized successfully!`);
       } else {
         console.error('Materialization failed:', result.stderr);
@@ -454,7 +455,7 @@ export function ProjectManager() {
         });
 
         if (result.success) {
-          console.log('Materialization output:', result.stdout);
+          dbg('Materialization output:', result.stdout);
           notify.success('Assets materialized successfully!');
         } else {
           console.error('Materialization failed:', result.stderr);
@@ -464,7 +465,7 @@ export function ProjectManager() {
         const result = await pipelinesApi.launch(currentProject.id, selectedJobName, config, tags);
 
         if (result.success) {
-          console.log('Job launch output:', result.stdout);
+          dbg('Job launch output:', result.stdout);
           notify.success('Job launched successfully!');
         } else {
           console.error('Job launch failed:', result.stderr);

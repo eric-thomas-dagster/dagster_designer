@@ -3,6 +3,7 @@ import type { Project, GraphNode, GraphEdge, ComponentInstance } from '@/types';
 import { projectsApi } from '@/services/api';
 import api from '@/services/api';
 import { useUnsavedChangesStore } from '@/hooks/useUnsavedChanges';
+import { dbg } from '@/lib/debug';
 
 interface ProjectStore {
   currentProject: Project | null;
@@ -191,7 +192,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
 
       // Start polling for dependency installation status
       // Backend will install dependencies and generate assets automatically
-      console.log('🔄 Starting dependency and asset generation...');
+      dbg('🔄 Starting dependency and asset generation...');
       set({ dependencyInstallStatus: 'installing', dependencyInstallError: null });
       get().pollDependencyStatus(project.id);
 
@@ -214,11 +215,11 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
       });
 
       // Trigger asset generation in the background (non-blocking)
-      console.log('🔄 Triggering asset generation in background...');
+      dbg('🔄 Triggering asset generation in background...');
       set({ assetGenerationStatus: 'generating', assetGenerationError: null });
 
       projectsApi.regenerateAssets(project.id, true).then(() => {
-        console.log('✅ Assets generated successfully');
+        dbg('✅ Assets generated successfully');
         set({ assetGenerationStatus: 'success', assetGenerationError: null });
         // Reload the project to get the updated graph with assets
         get().loadProject(project.id);
@@ -335,10 +336,10 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   },
 
   updateComponents: async (components: ComponentInstance[]) => {
-    console.log('[useProject] updateComponents called with', components.length, 'components');
+    dbg('[useProject] updateComponents called with', components.length, 'components');
     const { currentProject } = get();
     if (!currentProject) {
-      console.log('[useProject] No current project, skipping update');
+      dbg('[useProject] No current project, skipping update');
       return;
     }
 
@@ -355,7 +356,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
       await projectsApi.update(currentProject.id, {
         components,
       });
-      console.log('[useProject] Components saved to backend');
+      dbg('[useProject] Components saved to backend');
     } catch (error) {
       console.error('[useProject] Failed to save components:', error);
       set({ error: 'Failed to save components' });
@@ -363,7 +364,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   },
 
   setCurrentProject: (project: Project) => {
-    console.log('[useProject] setCurrentProject called');
+    dbg('[useProject] setCurrentProject called');
     set({ currentProject: project });
   },
 
@@ -430,7 +431,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
           setTimeout(poll, 2000);
         } else if (status === 'success') {
           // Dependencies installed! Backend is automatically generating assets
-          console.log('✅ Dependencies installed, waiting for automatic asset generation...');
+          dbg('✅ Dependencies installed, waiting for automatic asset generation...');
 
           // Auto-dismiss dependency success after 2 seconds
           setTimeout(() => {
@@ -470,7 +471,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
                 // through the automatic background flow" (e.g. the backend
                 // restarted mid-generation and lost its in-memory status)
                 // and falling back to whatever's on disk.
-                console.log(`✅ Asset generation ${genStatus.status} (${genStatus.node_count ?? '?'} nodes)`);
+                dbg(`✅ Asset generation ${genStatus.status} (${genStatus.node_count ?? '?'} nodes)`);
                 set({ assetGenerationStatus: 'success', assetGenerationError: null });
                 get().loadProject(projectId);
                 setTimeout(() => {

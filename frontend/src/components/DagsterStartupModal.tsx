@@ -1,6 +1,7 @@
 import { useEffect, useState, useRef } from 'react';
 import { X, Terminal, CheckCircle, XCircle, Loader } from 'lucide-react';
 import { API_BASE } from '@/services/api';
+import { dbg } from '@/lib/debug';
 
 interface DagsterStartupModalProps {
   projectId: string;
@@ -58,9 +59,9 @@ export function DagsterStartupModal({ projectId, onClose, onSuccess }: DagsterSt
       // Get response text first (so we can inspect it)
       const text = await response.text();
 
-      console.log('Response status:', response.status);
-      console.log('Response text:', text);
-      console.log('Response headers:', Object.fromEntries(response.headers.entries()));
+      dbg('Response status:', response.status);
+      dbg('Response text:', text);
+      dbg('Response headers:', Object.fromEntries(response.headers.entries()));
 
       // Check if response is ok before parsing JSON
       if (!response.ok) {
@@ -71,7 +72,7 @@ export function DagsterStartupModal({ projectId, onClose, onSuccess }: DagsterSt
         try {
           if (text) {
             errorData = JSON.parse(text);
-            console.log('Parsed error data:', errorData);
+            dbg('Parsed error data:', errorData);
             errorDetail = errorData.detail || errorDetail;
           }
         } catch (parseError) {

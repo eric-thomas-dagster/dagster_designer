@@ -36,6 +36,7 @@ import {
 } from '@/services/api';
 import { useProjectStore } from '@/hooks/useProject';
 import { useIsDarkMode } from '@/hooks/useIsDarkMode';
+import { dbg } from '@/lib/debug';
 
 interface TemplateBuilderProps {
   initialTab?: string | null;
@@ -124,7 +125,7 @@ export function TemplateBuilder({ initialTab, initialAssetKey, hideSubNav = fals
   // Initialize community sensor attributes with defaults when schema loads
   useEffect(() => {
     if (communitySensorSchema?.attributes) {
-      console.log('Community sensor schema loaded:', communitySensorSchema);
+      dbg('Community sensor schema loaded:', communitySensorSchema);
       const defaults: Record<string, any> = {};
       Object.entries(communitySensorSchema.attributes).forEach(([key, attr]) => {
         if (attr.default !== undefined) {
@@ -137,9 +138,9 @@ export function TemplateBuilder({ initialTab, initialAssetKey, hideSubNav = fals
 
   // Debug log
   useEffect(() => {
-    console.log('Selected community sensor:', selectedCommunitySensor);
-    console.log('Schema loading:', schemaLoading);
-    console.log('Schema data:', communitySensorSchema);
+    dbg('Selected community sensor:', selectedCommunitySensor);
+    dbg('Schema loading:', schemaLoading);
+    dbg('Schema data:', communitySensorSchema);
   }, [selectedCommunitySensor, schemaLoading, communitySensorSchema]);
 
   // State management for community asset checks
@@ -159,7 +160,7 @@ export function TemplateBuilder({ initialTab, initialAssetKey, hideSubNav = fals
   // Initialize community asset check attributes with defaults when schema loads
   useEffect(() => {
     if (communityAssetCheckSchema?.attributes) {
-      console.log('Community asset check schema loaded:', communityAssetCheckSchema);
+      dbg('Community asset check schema loaded:', communityAssetCheckSchema);
       const defaults: Record<string, any> = {};
       Object.entries(communityAssetCheckSchema.attributes).forEach(([key, attr]) => {
         if (attr.default !== undefined) {
@@ -175,7 +176,7 @@ export function TemplateBuilder({ initialTab, initialAssetKey, hideSubNav = fals
     if (selectedCommunityAssetCheck === 'enhanced_data_quality_checks' && !communityAssetCheckInstanceName) {
       const timestamp = new Date().getTime().toString().slice(-6);
       const suggestedName = `enhanced_data_quality_checks_${timestamp}`;
-      console.log('[TemplateBuilder] Auto-generating instance name:', suggestedName);
+      dbg('[TemplateBuilder] Auto-generating instance name:', suggestedName);
       setCommunityAssetCheckInstanceName(suggestedName);
     } else if (selectedCommunityAssetCheck !== 'enhanced_data_quality_checks') {
       // Clear instance name when switching away from enhanced_data_quality_checks
@@ -441,7 +442,7 @@ ${generateYamlAttributes(communityAssetCheckAttributes, 1)}`;
           ? { name: communityAssetCheckInstanceName, ...communityAssetCheckAttributes }
           : communityAssetCheckAttributes;
 
-        console.log('[TemplateBuilder] Saving community asset check with config:', config);
+        dbg('[TemplateBuilder] Saving community asset check with config:', config);
 
         const response = await fetch(`${API_BASE}/templates/configure/${selectedCommunityAssetCheck}`, {
           method: 'POST',

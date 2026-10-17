@@ -1,5 +1,6 @@
 import { API_BASE } from '@/services/api';
 import { useProjectStore } from '@/hooks/useProject';
+import { dbg } from '@/lib/debug';
 
 export interface GeniePickLike {
   component_type: string;
@@ -286,14 +287,14 @@ export async function applyGeniePicks(
     );
     const missing = [...expectedNames].filter((n) => !foundNames.has(n));
     if (missing.length === 0) {
-      if (attempt > 0) console.log(`[applyGeniePicks] All picks visible after ${attempt} retry(ies).`);
+      if (attempt > 0) dbg(`[applyGeniePicks] All picks visible after ${attempt} retry(ies).`);
       break;
     }
     if (attempt === MAX_RETRIES) {
       console.warn(`[applyGeniePicks] Gave up after ${MAX_RETRIES + 1} tries; still missing:`, missing);
       break;
     }
-    console.log(
+    dbg(
       `[applyGeniePicks] Retry ${attempt + 1}/${MAX_RETRIES}: still missing`,
       missing,
       `— waiting ${RETRY_DELAY_MS}ms`,

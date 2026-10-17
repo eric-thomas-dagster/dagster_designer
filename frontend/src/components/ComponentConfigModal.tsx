@@ -14,6 +14,7 @@ import { AGENTIC_PIPELINE_FAMILY } from '@/lib/agenticPipelineFamily';
 import { DOCUMENT_EXTRACTOR_FAMILY } from '@/lib/documentExtractorFamily';
 import { extractComponentId } from '@/lib/componentId';
 import { isFieldVisible as isFieldVisibleRule, labelFor as labelForRule } from '@/lib/fieldVisibility';
+import { dbg } from '@/lib/debug';
 
 // `x-dagster-io` type fields (inputs.type, outputs.type, accepts[]) are
 // freeform strings community component authors write by hand, not a
@@ -238,7 +239,7 @@ export function ComponentConfigModal({
     setFormData((prev) => ({ ...defaults, ...prev }));
   }, [isNew, componentSchema]);
 
-  console.log('[ComponentConfigModal] Opened with:', {
+  dbg('[ComponentConfigModal] Opened with:', {
     isNew,
     type,
     hasComponent: !!component,
@@ -543,7 +544,7 @@ export function ComponentConfigModal({
           // live as the cause of a blank/gray screen on opening this modal.
           if (upstreamKeys.length > 0) {
             updatedFormData.upstream_asset_keys = upstreamKeys;
-            console.log('[ComponentConfigModal] Populated upstream_asset_keys from graph edges:', upstreamKeys);
+            dbg('[ComponentConfigModal] Populated upstream_asset_keys from graph edges:', upstreamKeys);
           }
         }
       }
@@ -649,7 +650,7 @@ export function ComponentConfigModal({
   // Auto-suggest instance name for new multi-check components
   useEffect(() => {
     if (!componentSchema) return;
-    console.log('[ComponentConfigModal] Instance name auto-generation check:', {
+    dbg('[ComponentConfigModal] Instance name auto-generation check:', {
       isNew,
       isCommunityComponent,
       hasSingleAssetField,
@@ -662,14 +663,14 @@ export function ComponentConfigModal({
       // Extract component_id from type for default name suggestion
       const parts = type.split('.');
       const componentsIndex = parts.indexOf('components');
-      console.log('[ComponentConfigModal] Extracting component_id:', { parts, componentsIndex });
+      dbg('[ComponentConfigModal] Extracting component_id:', { parts, componentsIndex });
 
       if (componentsIndex !== -1 && componentsIndex + 1 < parts.length) {
         const componentId = parts[componentsIndex + 1];
         // Suggest name with timestamp for uniqueness
         const timestamp = new Date().getTime().toString().slice(-6);
         const suggestedName = `${componentId}_${timestamp}`;
-        console.log('[ComponentConfigModal] Setting auto-generated instance name:', suggestedName);
+        dbg('[ComponentConfigModal] Setting auto-generated instance name:', suggestedName);
         setLabel(suggestedName);
       }
     }
@@ -1008,14 +1009,14 @@ export function ComponentConfigModal({
         const result = await response.json();
 
         // Reload the project and regenerate lineage to pick up the new asset
-        console.log('[ComponentConfigModal] Reloading project and regenerating lineage after configuring community component');
+        dbg('[ComponentConfigModal] Reloading project and regenerating lineage after configuring community component');
         await loadProject(currentProject.id);
 
         // Automatically regenerate lineage so the new asset appears immediately
         try {
           const { projectsApi } = await import('@/services/api');
           await projectsApi.regenerateAssets(currentProject.id, true);
-          console.log('[ComponentConfigModal] Lineage regenerated successfully');
+          dbg('[ComponentConfigModal] Lineage regenerated successfully');
         } catch (error) {
           console.error('[ComponentConfigModal] Failed to regenerate lineage:', error);
           // Don't fail the whole operation if regeneration fails
@@ -1766,7 +1767,7 @@ export function ComponentConfigModal({
       );
     }
 
-    console.log('[ComponentConfigModal] Rendering field:', fieldName, 'type:', fieldType, 'has properties:', !!fieldSchema.properties, 'hasDisplayVersion:', hasDisplayVersion);
+    dbg('[ComponentConfigModal] Rendering field:', fieldName, 'type:', fieldType, 'has properties:', !!fieldSchema.properties, 'hasDisplayVersion:', hasDisplayVersion);
 
     // Special handling for sql_template field - allow choosing between inline SQL or file path
     if (fieldName === 'sql_template') {
@@ -2581,7 +2582,7 @@ export function ComponentConfigModal({
       // Check if this object has nested properties defined in the schema
       if (fieldSchema.properties && typeof fieldSchema.properties === 'object') {
         const objValue = value || {};
-        console.log('[ComponentConfigModal] Rendering nested object fields for:', fieldName, Object.keys(fieldSchema.properties));
+        dbg('[ComponentConfigModal] Rendering nested object fields for:', fieldName, Object.keys(fieldSchema.properties));
 
         return (
           <div className="space-y-3 pl-4 border-l-2 border-blue-200 bg-blue-50 p-3 rounded">

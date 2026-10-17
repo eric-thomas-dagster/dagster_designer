@@ -48,6 +48,7 @@ import { useIsDarkMode } from '@/hooks/useIsDarkMode';
 import { projectsApi, componentsApi, partitionsApi, API_BASE } from '@/services/api';
 import { Play, Plus, Layers, CheckCircle, Group, Ungroup } from 'lucide-react';
 import type { GraphNode, GraphEdge, ComponentSchema } from '@/types';
+import { dbg } from '@/lib/debug';
 
 // Node for the "collapse to groups" mode. Fixed width (so edges hit
 // consistent x-anchors), auto height (so content doesn't leave blank
@@ -142,7 +143,7 @@ function CustomEdge({ id, source, target, sourceX, sourceY, targetX, targetY, so
   const { currentProject, setCurrentProject } = useProjectStore();
   const { setEdges, getNodes } = useReactFlow();
 
-  console.log('[CustomEdge] Component called for edge:', id, 'source:', source, 'target:', target, 'data.is_custom:', data?.is_custom, 'selected:', selected);
+  dbg('[CustomEdge] Component called for edge:', id, 'source:', source, 'target:', target, 'data.is_custom:', data?.is_custom, 'selected:', selected);
 
   const [edgePath, labelX, labelY] = getBezierPath({
     sourceX,
@@ -173,7 +174,7 @@ function CustomEdge({ id, source, target, sourceX, sourceY, targetX, targetY, so
     const sourceAssetKey = sourceNode.data?.asset_key || source;
     const targetAssetKey = targetNode.data?.asset_key || target;
 
-    console.log('[CustomEdge] Deleting custom lineage:', sourceAssetKey, '->', targetAssetKey);
+    dbg('[CustomEdge] Deleting custom lineage:', sourceAssetKey, '->', targetAssetKey);
 
     // Immediately remove the edge from the UI for instant feedback
     setEdges((edges) => edges.filter((edge) => edge.id !== id));
@@ -182,15 +183,15 @@ function CustomEdge({ id, source, target, sourceX, sourceY, targetX, targetY, so
       // Call API to remove custom lineage in the background
       await projectsApi.removeCustomLineage(currentProject.id, sourceAssetKey, targetAssetKey);
 
-      console.log('[CustomEdge] Custom lineage removed successfully');
+      dbg('[CustomEdge] Custom lineage removed successfully');
 
       // Regenerate to refresh the graph and ensure saved state is correct
-      console.log('[CustomEdge] Regenerating assets to refresh graph state');
+      dbg('[CustomEdge] Regenerating assets to refresh graph state');
       const response = await fetch(`${API_BASE}/projects/${currentProject.id}/regenerate-assets`, {
         method: 'POST',
       });
       const updatedProject = await response.json();
-      console.log('[CustomEdge] Regenerated project has', updatedProject.graph.edges.length, 'edges,', updatedProject.custom_lineage.length, 'custom lineage entries');
+      dbg('[CustomEdge] Regenerated project has', updatedProject.graph.edges.length, 'edges,', updatedProject.custom_lineage.length, 'custom lineage entries');
 
       // Update edges from backend with smart routing
       const currentNodes = getNodes();
@@ -218,7 +219,7 @@ function CustomEdge({ id, source, target, sourceX, sourceY, targetX, targetY, so
       // Update project state
       setCurrentProject(updatedProject);
 
-      console.log('[CustomEdge] Graph regenerated successfully');
+      dbg('[CustomEdge] Graph regenerated successfully');
     } catch (error) {
       console.error('[CustomEdge] Failed to delete custom lineage:', error);
       notify.error('Failed to delete custom lineage. See console for details.');
@@ -263,7 +264,7 @@ function CustomEdge({ id, source, target, sourceX, sourceY, targetX, targetY, so
     return <BaseEdge id={id} path={edgePath} markerEnd={markerEnd} />;
   }
 
-  console.log('[CustomEdge]', id, '- selected:', selected, 'isCustom:', isCustom);
+  dbg('[CustomEdge]', id, '- selected:', selected, 'isCustom:', isCustom);
 
   return (
     <>
@@ -598,14 +599,14 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
   useEffect(() => {
     if (isFirstExpandEffect.current) {
       isFirstExpandEffect.current = false;
-      console.log('[GraphEditor] fitView-on-change effect: skipping initial mount');
+      dbg('[GraphEditor] fitView-on-change effect: skipping initial mount');
       return;
     }
     // TEMPORARY diagnostic -- confirms whether this effect is firing at
     // all when a filter/expand/collapse change happens, and how many
     // nodes it's about to fit around. Remove once the "zoom doesn't
     // change" report is confirmed fixed.
-    console.log('[GraphEditor] fitView-on-change effect firing:', {
+    dbg('[GraphEditor] fitView-on-change effect firing:', {
       expandedGroupsSize: expandedGroups.size,
       collapseToGroups,
       groupFilter,
@@ -635,7 +636,7 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
     const raf1 = requestAnimationFrame(() => {
       raf2 = requestAnimationFrame(() => {
         const targetNodes = getNodes();
-        console.log('[GraphEditor] calling fitView with', targetNodes.length, 'nodes, sample dims:',
+        dbg('[GraphEditor] calling fitView with', targetNodes.length, 'nodes, sample dims:',
           targetNodes.slice(0, 3).map((n) => ({ id: n.id, width: n.width, height: n.height, position: n.position })));
         fitView({ padding: 0.2, duration: 300, nodes: targetNodes });
       });
@@ -935,7 +936,7 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
       }
     });
 
-    console.log('[GraphEditor] Loading schemas for', componentTypes.size, 'component types');
+    dbg('[GraphEditor] Loading schemas for', componentTypes.size, 'component types');
 
     // Load schemas that aren't already cached
     const loadPromises: Promise<void>[] = [];
@@ -946,7 +947,7 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
             .get(componentType, currentProject.id)
             .then((schema) => {
               componentSchemasCache.set(componentType, schema);
-              console.log(
+              dbg(
                 '[GraphEditor] Loaded schema for',
                 componentType,
                 '- IO metadata:',
@@ -967,7 +968,7 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
 
     if (loadPromises.length > 0) {
       Promise.all(loadPromises).then(() => {
-        console.log('[GraphEditor] All schemas loaded');
+        dbg('[GraphEditor] All schemas loaded');
         setSchemasLoaded(true);
       });
     } else {
@@ -996,7 +997,7 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
       if (assetEdges.length > 0) {
         if (!depGraphComponent) {
           // Create new DependencyGraphComponent
-          console.log('[GraphEditor] Creating DependencyGraphComponent with', assetEdges.length, 'edges');
+          dbg('[GraphEditor] Creating DependencyGraphComponent with', assetEdges.length, 'edges');
           const newComponents = [
             ...currentProject.components,
             {
@@ -1015,7 +1016,7 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
           await projectsApi.update(currentProject.id, { components: newComponents });
         } else {
           // Update existing DependencyGraphComponent
-          console.log('[GraphEditor] Updating DependencyGraphComponent with', assetEdges.length, 'edges');
+          dbg('[GraphEditor] Updating DependencyGraphComponent with', assetEdges.length, 'edges');
           const updatedComponents = currentProject.components.map(c =>
             c.id === depGraphComponent.id
               ? { ...c, attributes: { ...c.attributes, edges: assetEdges } }
@@ -1026,7 +1027,7 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
         }
       } else if (depGraphComponent) {
         // Remove DependencyGraphComponent if no edges
-        console.log('[GraphEditor] Removing DependencyGraphComponent (no edges)');
+        dbg('[GraphEditor] Removing DependencyGraphComponent (no edges)');
         const updatedComponents = currentProject.components.filter(
           c => c.id !== depGraphComponent.id
         );
@@ -1040,7 +1041,7 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
 
   // Handle node deletion (used for keyboard shortcuts)
   const handleDeleteNode = useCallback(async (nodeId: string) => {
-    console.log('[GraphEditor] Deleting node:', nodeId);
+    dbg('[GraphEditor] Deleting node:', nodeId);
 
     // Optimistic UI: remove locally so the pointer/keyboard delete
     // feels instant.
@@ -1130,14 +1131,14 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
   useEffect(() => {
     if (isSelfInflictedGraphUpdate.current) {
       isSelfInflictedGraphUpdate.current = false;
-      console.log('[GraphEditor] Skipping reload - graph change was our own save echoing back');
+      dbg('[GraphEditor] Skipping reload - graph change was our own save echoing back');
       return;
     }
-    console.log('[GraphEditor] Loading graph for project:', currentProject?.id);
+    dbg('[GraphEditor] Loading graph for project:', currentProject?.id);
     isInitialLoad.current = true;
 
     if (currentProject?.graph) {
-      console.log('[GraphEditor] Graph has', currentProject.graph.nodes.length, 'nodes');
+      dbg('[GraphEditor] Graph has', currentProject.graph.nodes.length, 'nodes');
 
       // Auto-arrange only when the incoming layout is actually broken —
       // i.e., group bounding boxes overlap. Users who've manually arranged
@@ -1188,7 +1189,7 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
         }
       }
       if (hasOverlap && names.length > 1 && !willBeGrouped) {
-        console.log('[GraphEditor] Group boxes overlap — scheduling auto-arrange');
+        dbg('[GraphEditor] Group boxes overlap — scheduling auto-arrange');
         shouldAutoArrange.current = true;
       }
 
@@ -1277,7 +1278,7 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
 
       // Apply custom lineage to edges
       const customLineage = currentProject.custom_lineage || [];
-      console.log('[GraphEditor] Loading edges, custom lineage entries:', customLineage.length);
+      dbg('[GraphEditor] Loading edges, custom lineage entries:', customLineage.length);
 
       // Mark edges as custom if they exist in custom_lineage
       // IMPORTANT: Also normalize edge source/target to replace slashes with underscores
@@ -1333,8 +1334,8 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
       });
       const deduplicatedEdges = Array.from(edgeMap.values());
 
-      console.log('[GraphEditor] Edges after deduplication:', deduplicatedEdges.length);
-      console.log('[GraphEditor] Edges with custom lineage:', deduplicatedEdges.filter((e: GraphEdge) => e.is_custom).length);
+      dbg('[GraphEditor] Edges after deduplication:', deduplicatedEdges.length);
+      dbg('[GraphEditor] Edges with custom lineage:', deduplicatedEdges.filter((e: GraphEdge) => e.is_custom).length);
 
       // Preserve selection state from current edges
       const currentSelectedEdgeIds = new Set(edges.filter(e => e.selected).map(e => e.id));
@@ -1361,9 +1362,9 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
         };
       });
 
-      console.log('[GraphEditor] Total flow edges created:', flowEdges.length);
-      console.log('[GraphEditor] Custom edges (type=custom):', flowEdges.filter(e => e.type === 'custom').length);
-      console.log('[GraphEditor] Custom edge IDs:', flowEdges.filter(e => e.type === 'custom').map(e => e.id));
+      dbg('[GraphEditor] Total flow edges created:', flowEdges.length);
+      dbg('[GraphEditor] Custom edges (type=custom):', flowEdges.filter(e => e.type === 'custom').length);
+      dbg('[GraphEditor] Custom edge IDs:', flowEdges.filter(e => e.type === 'custom').map(e => e.id));
 
       // Check if all edges have valid source/target nodes
       const nodeIds = new Set(flowNodes.map(n => n.id));
@@ -1384,12 +1385,12 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
 
     // Mark initial load as complete after rendering
     const timer = setTimeout(() => {
-      console.log('[GraphEditor] Initial load complete');
+      dbg('[GraphEditor] Initial load complete');
       isInitialLoad.current = false;
 
       // Auto-arrange groups if flag is set (e.g., after regeneration)
       if (shouldAutoArrange.current) {
-        console.log('[GraphEditor] Auto-arranging groups after load');
+        dbg('[GraphEditor] Auto-arranging groups after load');
         shouldAutoArrange.current = false;
         // Wait for React Flow to fully process nodes (use getNodes() which accesses React Flow's internal state)
         setTimeout(() => {
@@ -1686,12 +1687,12 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
 
     // Don't trigger regeneration if dependencies are still installing
     if (dependencyInstallStatus === 'installing') {
-      console.log('[GraphEditor] Skipping auto-regeneration - dependencies are still installing');
+      dbg('[GraphEditor] Skipping auto-regeneration - dependencies are still installing');
       return;
     }
 
     if (hasAssetFactories && !hasAssets) {
-      console.log('[GraphEditor] Project has components but no assets - triggering regeneration');
+      dbg('[GraphEditor] Project has components but no assets - triggering regeneration');
       hasTriggeredRegeneration.current = true;
 
       // Trigger asset regeneration
@@ -1700,7 +1701,7 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
       })
         .then((response) => response.json())
         .then((updatedProject) => {
-          console.log('[GraphEditor] Assets regenerated:', updatedProject.graph.nodes.length, 'nodes');
+          dbg('[GraphEditor] Assets regenerated:', updatedProject.graph.nodes.length, 'nodes');
 
           // Update the graph with the regenerated assets
           const flowNodes: Node[] = updatedProject.graph.nodes.map((node: GraphNode) => {
@@ -1761,7 +1762,7 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
   // Save graph on changes (skip during initial load to prevent infinite loop)
   useEffect(() => {
     if (!currentProject || isInitialLoad.current) {
-      console.log('[GraphEditor] Skipping graph save - isInitialLoad:', isInitialLoad.current);
+      dbg('[GraphEditor] Skipping graph save - isInitialLoad:', isInitialLoad.current);
       return;
     }
     // Create a hash of nodes and edges excluding the 'selected' property to avoid saving on selection changes
@@ -1784,11 +1785,11 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
 
     // Only save if the hash has changed (ignoring selection changes)
     if (currentHash === lastSavedNodesHash.current) {
-      console.log('[GraphEditor] Skipping graph save - no meaningful changes');
+      dbg('[GraphEditor] Skipping graph save - no meaningful changes');
       return;
     }
 
-    console.log('[GraphEditor] Saving graph with', nodes.length, 'nodes and', edges.length, 'edges');
+    dbg('[GraphEditor] Saving graph with', nodes.length, 'nodes and', edges.length, 'edges');
     lastSavedNodesHash.current = currentHash;
 
     const graphNodes: GraphNode[] = nodes.map((node) => {
@@ -1826,7 +1827,7 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
       is_custom: edge.data?.is_custom || false,
     }));
 
-    console.log('[GraphEditor] Calling updateGraph');
+    dbg('[GraphEditor] Calling updateGraph');
     isSelfInflictedGraphUpdate.current = true;
     updateGraph(graphNodes, graphEdges);
 
@@ -1890,11 +1891,11 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
   // Validate DataFrame connections based on IO metadata
   const isValidConnection = useCallback(
     (connection: Connection): boolean => {
-      console.log('[GraphEditor] isValidConnection called with:', connection);
+      dbg('[GraphEditor] isValidConnection called with:', connection);
 
       // Prevent self-loops
       if (connection.source === connection.target) {
-        console.log('[GraphEditor] Self-loop detected - rejecting connection');
+        dbg('[GraphEditor] Self-loop detected - rejecting connection');
         return false;
       }
 
@@ -1902,7 +1903,7 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
       const edgeExists = edges.some(
         (edge) => edge.source === connection.source && edge.target === connection.target
       );
-      console.log('[GraphEditor] Edge already exists:', edgeExists);
+      dbg('[GraphEditor] Edge already exists:', edgeExists);
 
       // Allow duplicate edges for custom lineage
       // ReactFlow will prevent the connection from being made if we return false here
@@ -1912,7 +1913,7 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
       const targetNode = nodes.find((n) => n.id === connection.target);
 
       if (!sourceNode || !targetNode) {
-        console.log('[GraphEditor] Source or target node not found');
+        dbg('[GraphEditor] Source or target node not found');
         return true; // Let it through if nodes not found
       }
 
@@ -1920,10 +1921,10 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
       const isSourceAsset = sourceNode?.data?.node_kind === 'asset';
       const isTargetAsset = targetNode?.data?.node_kind === 'asset';
 
-      console.log('[GraphEditor] Source is asset:', isSourceAsset, 'Target is asset:', isTargetAsset);
+      dbg('[GraphEditor] Source is asset:', isSourceAsset, 'Target is asset:', isTargetAsset);
 
       if (isSourceAsset && isTargetAsset) {
-        console.log('[GraphEditor] Both nodes are assets - custom lineage allowed (validation will happen on release)');
+        dbg('[GraphEditor] Both nodes are assets - custom lineage allowed (validation will happen on release)');
         // Allow the connection attempt - validation with user feedback happens in onConnect
         return true;
       }
@@ -2024,24 +2025,24 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
 
   const onConnect = useCallback(
     async (connection: Connection) => {
-      console.log('='.repeat(80));
-      console.log('[GraphEditor] 🎯 onConnect CALLED with:', connection);
-      console.log('='.repeat(80));
+      dbg('='.repeat(80));
+      dbg('[GraphEditor] 🎯 onConnect CALLED with:', connection);
+      dbg('='.repeat(80));
 
       // Validate connection first
       if (!isValidConnection(connection)) {
-        console.log('[GraphEditor] Connection rejected by validation');
+        dbg('[GraphEditor] Connection rejected by validation');
         return;
       }
 
-      console.log('[GraphEditor] ✅ Connection passed validation');
+      dbg('[GraphEditor] ✅ Connection passed validation');
 
       // Check if both nodes exist
       const sourceNode = nodes.find((n) => n.id === connection.source);
       const targetNode = nodes.find((n) => n.id === connection.target);
 
       if (!sourceNode || !targetNode) {
-        console.log('[GraphEditor] Source or target node not found in onConnect');
+        dbg('[GraphEditor] Source or target node not found in onConnect');
         return;
       }
 
@@ -2049,14 +2050,14 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
       const isSourceAsset = sourceNode?.data?.node_kind === 'asset';
       const isTargetAsset = targetNode?.data?.node_kind === 'asset';
 
-      console.log('[GraphEditor] onConnect - Source is asset:', isSourceAsset, 'Target is asset:', isTargetAsset);
+      dbg('[GraphEditor] onConnect - Source is asset:', isSourceAsset, 'Target is asset:', isTargetAsset);
 
       // If both are assets, this is custom lineage
       if (isSourceAsset && isTargetAsset && currentProject) {
         const sourceAssetKey = sourceNode.data.asset_key || sourceNode.data.label;
         const targetAssetKey = targetNode.data.asset_key || targetNode.data.label;
 
-        console.log('[GraphEditor] Creating custom lineage:', sourceAssetKey, '->', targetAssetKey);
+        dbg('[GraphEditor] Creating custom lineage:', sourceAssetKey, '->', targetAssetKey);
 
         // Snapshot for rollback -- a new custom-lineage edge can introduce
         // a cycle or otherwise break the whole project's load (Dagster's
@@ -2113,13 +2114,13 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
           is_custom: true,
         };
         setEdges((eds) => addEdge({...connection, id: newEdge.id, data: { is_custom: true }}, eds));
-        console.log('[GraphEditor] Optimistically added edge to UI');
+        dbg('[GraphEditor] Optimistically added edge to UI');
 
         try {
           // Call API to add custom lineage (non-blocking)
           await projectsApi.addCustomLineage(currentProject.id, sourceAssetKey, targetAssetKey);
 
-          console.log('[GraphEditor] Custom lineage saved, triggering background regeneration with layout recalculation');
+          dbg('[GraphEditor] Custom lineage saved, triggering background regeneration with layout recalculation');
 
           // Trigger asset regeneration in background to confirm and recalculate layout
           const response = await fetch(`${API_BASE}/projects/${currentProject.id}/regenerate-assets?recalculate_layout=true`, {
@@ -2235,7 +2236,7 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
             return;
           }
 
-          console.log('[GraphEditor] Custom lineage applied successfully');
+          dbg('[GraphEditor] Custom lineage applied successfully');
         } catch (error) {
           console.error('[GraphEditor] Failed to add custom lineage:', error);
           notify.error('Failed to add custom lineage. See console for details.');
@@ -2259,7 +2260,7 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
             if (node.id === connection.target) {
               const currentDeps = node.data.deps || [];
               if (!currentDeps.includes(sourceAssetKey)) {
-                console.log('[GraphEditor] Adding dependency:', sourceAssetKey, 'to', targetNode.id);
+                dbg('[GraphEditor] Adding dependency:', sourceAssetKey, 'to', targetNode.id);
                 return {
                   ...node,
                   data: {
@@ -2328,13 +2329,13 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
       }
       if (runnable.length === 0) return;
 
-      console.log('[GraphEditor] Materializing assets:', runnable);
+      dbg('[GraphEditor] Materializing assets:', runnable);
       const result = await projectsApi.materialize(currentProject.id, runnable);
-      console.log('[GraphEditor] Materialization result:', result);
+      dbg('[GraphEditor] Materialization result:', result);
 
       if (result.success) {
         notify.success(`Successfully materialized ${runnable.length} asset(s)!\n\nOutput:\n${result.stdout.slice(0, 500)}`);
-        console.log('Materialization output:', result.stdout);
+        dbg('Materialization output:', result.stdout);
         await loadProject(currentProject.id);
       } else {
         // Last ~500 chars, not first -- `dg launch`'s own startup noise
@@ -2417,24 +2418,24 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
 
   const onDrop = useCallback(
     (event: React.DragEvent) => {
-      console.log('[GraphEditor] Drop event triggered');
+      dbg('[GraphEditor] Drop event triggered');
       event.preventDefault();
 
       const componentData = event.dataTransfer.getData('application/reactflow');
       if (!componentData) {
-        console.log('[GraphEditor] No component data found');
+        dbg('[GraphEditor] No component data found');
         return;
       }
 
       const component = JSON.parse(componentData);
-      console.log('[GraphEditor] Dropping component:', component);
+      dbg('[GraphEditor] Dropping component:', component);
 
       // Convert screen coordinates to flow coordinates
       const position = screenToFlowPosition({
         x: event.clientX,
         y: event.clientY,
       });
-      console.log('[GraphEditor] Position:', position);
+      dbg('[GraphEditor] Position:', position);
 
       const newNode: Node = {
         id: `${component.type}-${Date.now()}`,
@@ -2451,12 +2452,12 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
         },
       };
 
-      console.log('[GraphEditor] Adding new node:', newNode.id);
+      dbg('[GraphEditor] Adding new node:', newNode.id);
       setNodes((nds) => [...nds, newNode]);
 
       // Trigger layout recalculation after adding a new asset
       if (currentProject) {
-        console.log('[GraphEditor] Triggering layout recalculation after adding component');
+        dbg('[GraphEditor] Triggering layout recalculation after adding component');
         fetch(`${API_BASE}/projects/${currentProject.id}/regenerate-assets?recalculate_layout=true`, {
           method: 'POST',
         }).then(async (response) => {
@@ -2962,7 +2963,7 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
   // authorings are real files that already show up via subprocess
   // hydration (M3 will merge those into the graph too).
   const { drafts: allDrafts } = useDrafts(currentProject?.id ?? null);
-  const { forDraft: previewForDraft } = usePreviews(currentProject?.id ?? null);
+  const { forDraft: previewForDraft } = usePreviews(currentProject && (currentProject as any).is_dagster_plus ? currentProject.id : null);
   const draftNodes: Node[] = React.useMemo(() => {
     if (!allDrafts || allDrafts.length === 0) return [];
     let minX = 0;
@@ -3830,8 +3831,8 @@ function GroupOverlay({ nodes, setNodes, onCollapseGroup }: { nodes: Node[]; set
   const handleGroupHeaderClick = useCallback((groupName: string, event: React.MouseEvent) => {
     event.stopPropagation();
 
-    console.log('[GroupOverlay] Group header clicked - selecting nodes in:', groupName);
-    console.log('[GroupOverlay] 💡 TIP: After selection, drag any of the selected asset nodes to move the entire group');
+    dbg('[GroupOverlay] Group header clicked - selecting nodes in:', groupName);
+    dbg('[GroupOverlay] 💡 TIP: After selection, drag any of the selected asset nodes to move the entire group');
 
     // Select all nodes in this group
     setNodes((nds) =>
@@ -3840,7 +3841,7 @@ function GroupOverlay({ nodes, setNodes, onCollapseGroup }: { nodes: Node[]; set
         const isAsset = node.data?.node_kind === 'asset';
         const isInGroup = nodeGroupName && nodeGroupName === groupName && isAsset;
 
-        console.log('[GroupOverlay] Node:', node.id, '- nodeGroup:', nodeGroupName, '- targetGroup:', groupName, '- isAsset:', isAsset, '- selected:', isInGroup);
+        dbg('[GroupOverlay] Node:', node.id, '- nodeGroup:', nodeGroupName, '- targetGroup:', groupName, '- isAsset:', isAsset, '- selected:', isInGroup);
 
         return {
           ...node,
@@ -3995,7 +3996,7 @@ function GroupOverlay({ nodes, setNodes, onCollapseGroup }: { nodes: Node[]; set
             onMouseDown={(e) => {
               e.preventDefault();
               e.stopPropagation();
-              console.log('[GroupOverlay] Group header clicked!', bound.groupName);
+              dbg('[GroupOverlay] Group header clicked!', bound.groupName);
               handleGroupHeaderClick(bound.groupName, e);
             }}
             // A fast double-click here only stops the *mousedown* above
