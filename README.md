@@ -6,7 +6,7 @@ A visual pipeline designer for Dagster with drag-and-drop component editing, ins
 
 ## Download
 
-The desktop app (macOS + Windows) is built automatically from the latest commit on every push -- grab the most recent installer from the [**latest release**](https://github.com/eric-thomas-dagster/dagster-designer-desktop/releases/latest). It's a rolling build, not a stable/versioned release, so expect it to move fast.
+The desktop app (macOS + Windows) is built automatically from the latest commit on every push -- grab the most recent installer from the [**latest release**](https://github.com/eric-thomas-dagster/dagster-designer-desktop/releases/latest). Each build has its own version (`v0.1.<build>`) with release notes listing what changed, and older builds stay downloadable on the releases page. `latest` always points at the newest one, so expect it to move fast.
 
 Unsigned for now, so the OS will warn on first launch:
 - **macOS**: right-click the app → Open (instead of double-clicking) to bypass Gatekeeper the first time.
