@@ -1196,7 +1196,9 @@ async def install_component(
         )
 
 
-_install_locks: dict[str, "asyncio.Lock"] = {}
+# Whole-endpoint lock, DISTINCT from `_install_locks` above: that one guards just the CLI/pyproject stretch inside the
+# install, and asyncio locks aren't re-entrant -- sharing it with the wrapper below deadlocked every install.
+_install_endpoint_locks: dict[str, "asyncio.Lock"] = {}
 
 
 @router.post("/install-via-cli/{component_id}")
@@ -1208,7 +1210,7 @@ async def install_component_via_cli(
     component id and then moves it to the instance's name; two installs of the same component (an Agent Builder plan
     with three `openai_agent` reviewers sent them all at once) collided there and all but one failed with a 500."""
     import asyncio
-    lock = _install_locks.setdefault(request.project_id, asyncio.Lock())
+    lock = _install_endpoint_locks.setdefault(request.project_id, asyncio.Lock())
     async with lock:
         return await _install_component_via_cli_locked(component_id, request)
 
