@@ -30,6 +30,16 @@ function closeSettingsInternal() {
 
 // Fired after a successful key save so any open "needs an API key" banner
 // can refetch provider status without a full reload.
+type SettingsTab = 'ai' | 'projects' | 'performance' | 'github';
+// Each section of settings gets its own tab, so the dialog stays one screen tall however many sections it grows.
+// Only the AI tab has a Save button (the others apply as you change them).
+const SETTINGS_TABS: Array<{ id: SettingsTab; label: string; desktopOnly?: boolean }> = [
+  { id: 'ai', label: 'AI keys' },
+  { id: 'projects', label: 'Projects folder', desktopOnly: true },
+  { id: 'performance', label: 'Performance' },
+  { id: 'github', label: 'GitHub' },
+];
+
 const PROVIDERS_CHANGED_EVENT = 'dagster-ai-providers-changed';
 export function onAiProvidersChanged(handler: () => void): () => void {
   window.addEventListener(PROVIDERS_CHANGED_EVENT, handler);
@@ -54,6 +64,18 @@ function SettingsDialog({ onClose }: { onClose: () => void }) {
   const [anthropicKey, setAnthropicKey] = useState('');
   const [anthropicWorkspaceId, setAnthropicWorkspaceId] = useState('');
   const [saving, setSaving] = useState(false);
+  const [tab, setTab] = useState<SettingsTab>(() => {
+    try {
+      const t = localStorage.getItem('designer:settings-tab') as SettingsTab | null;
+      return t && SETTINGS_TABS.some((x) => x.id === t) ? t : 'ai';
+    } catch {
+      return 'ai';
+    }
+  });
+  const chooseTab = (t: SettingsTab) => {
+    setTab(t);
+    try { localStorage.setItem('designer:settings-tab', t); } catch { /* remembering the tab is a nicety */ }
+  };
 
   useEffect(() => {
     aiApi.providers().then(setStatus).catch(() => setStatus(null));
@@ -110,21 +132,37 @@ function SettingsDialog({ onClose }: { onClose: () => void }) {
   return (
     <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
       {/* Header and the Save/Close row stay put; only the middle scrolls, so Save is reachable in a short window. */}
-      <div className="bg-white rounded-lg shadow-xl w-full max-w-md max-h-[90vh] flex flex-col">
+      <div className="bg-white rounded-lg shadow-xl w-full max-w-lg max-h-[90vh] flex flex-col">
         <div className="flex items-center justify-between px-6 pt-6 mb-1 flex-shrink-0">
           <div className="flex items-center gap-2">
             <KeyRound className="w-5 h-5 text-primary" />
-            <h2 className="text-lg font-semibold">Dagster AI Settings</h2>
+            <h2 className="text-lg font-semibold">Settings</h2>
           </div>
           <button onClick={onClose} aria-label="Close">
             <X className="w-5 h-5 text-gray-400 hover:text-gray-600" />
           </button>
         </div>
-        <p className="text-sm text-gray-500 mb-4 px-6 flex-shrink-0">
+        <div className="flex gap-1 px-6 mt-3 border-b border-gray-200 flex-shrink-0" role="tablist">
+          {SETTINGS_TABS.filter((t) => !t.desktopOnly || isTauri).map((t) => (
+            <button
+              key={t.id}
+              role="tab"
+              aria-selected={tab === t.id}
+              onClick={() => chooseTab(t.id)}
+              className={`px-3 py-2 text-sm -mb-px border-b-2 transition-colors ${
+                tab === t.id ? 'border-primary text-primary font-medium' : 'border-transparent text-gray-500 hover:text-gray-800'
+              }`}
+            >
+              {t.label}
+            </button>
+          ))}
+        </div>
+
+        <div className="flex-1 min-h-0 overflow-y-auto px-6 py-4">
+        {tab === 'ai' && (<>
+        <p className="text-sm text-gray-500 mb-4">
           Used by the AI assistant across every project. Saved keys apply immediately — no restart needed.
         </p>
-
-        <div className="flex-1 min-h-0 overflow-y-auto px-6 pb-2">
         <div className="space-y-4">
           <ProviderField
             label="OpenAI"
@@ -185,11 +223,11 @@ function SettingsDialog({ onClose }: { onClose: () => void }) {
           </div>
         </div>
 
-        {isTauri && <ProjectsFolderSection />}
+        </>)}
 
-        <FastLoadingSection />
-
-        <GitHubSection />
+        {tab === 'projects' && isTauri && <ProjectsFolderSection />}
+        {tab === 'performance' && <FastLoadingSection />}
+        {tab === 'github' && <GitHubSection />}
         </div>
 
         <div className="flex justify-end gap-2 px-6 py-4 border-t border-gray-100 flex-shrink-0">
@@ -200,13 +238,13 @@ function SettingsDialog({ onClose }: { onClose: () => void }) {
           >
             Close
           </button>
-          <button
+          {tab === 'ai' && <button
             onClick={save}
             disabled={saving || (!openaiKey.trim() && !anthropicKey.trim() && !anthropicWorkspaceId.trim())}
             className="px-4 py-2 text-sm bg-primary text-primary-foreground rounded-md hover:bg-accent disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {saving ? 'Saving…' : 'Save'}
-          </button>
+          </button>}
         </div>
       </div>
     </div>
@@ -239,7 +277,7 @@ function FastLoadingSection() {
   };
 
   return (
-    <div className="mt-6 pt-4 border-t border-gray-200">
+    <div className="pt-1">
       <div className="flex items-center gap-2 mb-1">
         <Zap className="w-4 h-4 text-primary" />
         <h3 className="text-sm font-semibold text-gray-900">Fast local loading</h3>
@@ -350,7 +388,7 @@ function ProjectsFolderSection() {
   };
 
   return (
-    <div className="mt-6 pt-4 border-t border-gray-200">
+    <div className="pt-1">
       <div className="flex items-center gap-2 mb-1">
         <FolderCog className="w-4 h-4 text-primary" />
         <h3 className="text-sm font-semibold text-gray-900">Projects folder</h3>
@@ -441,7 +479,7 @@ function GitHubSection() {
   useEffect(() => { if (!modalOpen) refresh(); }, [modalOpen]);
 
   return (
-    <div className="mt-6 pt-4 border-t border-gray-200">
+    <div className="pt-1">
       <div className="flex items-center gap-2 mb-1">
         <Github className="w-4 h-4 text-primary" />
         <h3 className="text-sm font-semibold text-gray-900">GitHub</h3>
