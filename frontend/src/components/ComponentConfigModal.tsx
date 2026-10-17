@@ -944,16 +944,18 @@ export function ComponentConfigModal({
       return;
     }
 
-    // Renaming an asset changes its key, so anything built on it loses its upstream (and the project can
-    // stop loading). Say so before saving, naming who depends on it.
+    // Renaming an asset changes its key. The server moves the instance and updates everything that referred to the
+    // old key (upstream settings, deps, lineage), so say what will be touched before doing it.
+    let renamedFrom: string | null = null;
     if (!isNew && assetName && currentProject) {
       const newKey = toAssetKeyString(formData.asset_name) ?? toAssetKeyString(formData.asset_key);
       if (newKey && newKey !== assetName) {
+        renamedFrom = assetName;
         const dependents = downstreamAssetLabels(currentProject, assetName);
         if (dependents.length > 0) {
           const ok = await confirmDialog(
-            `Renaming "${assetName}" to "${newKey}" changes its asset key.\n\n${dependents.length} other asset${dependents.length === 1 ? '' : 's'} depend${dependents.length === 1 ? 's' : ''} on it: ${summarizeNames(dependents)}.\n\nThey will lose their upstream and the project may fail to load until you update ${dependents.length === 1 ? 'it' : 'them'}.`,
-            { title: 'Rename an asset others depend on?', destructive: true },
+            `Rename "${assetName}" to "${newKey}"?\n\n${dependents.length} other asset${dependents.length === 1 ? '' : 's'} build${dependents.length === 1 ? 's' : ''} on it: ${summarizeNames(dependents)}.\n\nTheir references will be updated to the new name automatically. If the project doesn't load afterwards, the rename is undone.`,
+            { title: 'Rename an asset others depend on' },
           );
           if (!ok) return;
         }
@@ -1013,7 +1015,8 @@ export function ComponentConfigModal({
             project_id: currentProject.id,
             config: {
               name: instanceName,
-              ...formData
+              ...formData,
+              ...(renamedFrom ? { _renamed_from: renamedFrom } : {}),
             }
           })
         });

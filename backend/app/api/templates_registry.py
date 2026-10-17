@@ -485,8 +485,14 @@ async def configure_component(
         # Create/update YAML config file
         instance_name = request.config.get('name', component_id)
 
+        # Renaming an existing instance: the frontend says what it used to be called (`_renamed_from`). The old
+        # instance folder is moved to the new name and everything that referenced the old key is updated -- see below.
+        renamed_from = request.config.get('_renamed_from')
+        if renamed_from == instance_name:
+            renamed_from = None
+
         # Extract attributes (excluding 'name')
-        raw_attributes = {k: v for k, v in request.config.items() if k != 'name'}
+        raw_attributes = {k: v for k, v in request.config.items() if k not in ('name', '_renamed_from')}
 
         print(f"[Configure] Instance name: {instance_name}")
         print(f"[Configure] Raw attributes: {json.dumps(raw_attributes, indent=2)[:500]}")
@@ -509,6 +515,38 @@ async def configure_component(
 
         # Create subdirectory for the component instance
         instance_dir = defs_dir / instance_name
+        rename_old_dir: Optional[Path] = None
+        rename_backup: Optional[Path] = None
+        rename_touched: dict = {}
+        rename_lineage_backup = None
+        if renamed_from:
+            from ..services.asset_rename import rewrite_references
+            import shutil as _shutil, tempfile as _tempfile
+            rename_old_dir = defs_dir / renamed_from
+            if instance_dir.exists():
+                raise HTTPException(status_code=409, detail=f"Can't rename '{renamed_from}' to '{instance_name}': an instance with that name already exists.")
+            if rename_old_dir.is_dir():
+                rename_backup = Path(_tempfile.mkdtemp(prefix="rename-")) / renamed_from
+                _shutil.copytree(rename_old_dir, rename_backup)
+                # Point everything that used the old key at the new one, THEN move the instance, so the project
+                # is never loaded with a dangling reference.
+                rename_touched = rewrite_references(defs_dir, renamed_from, instance_name, skip_dir=rename_old_dir)
+                _shutil.rmtree(rename_old_dir)
+                print(f"[Configure] Renamed '{renamed_from}' -> '{instance_name}'; updated references in {len(rename_touched)} file(s)", flush=True)
+            else:
+                rename_old_dir = None
+            # Stored lineage / overrides keyed by the old asset
+            rename_lineage_backup = (
+                [__import__('copy').copy(e) for e in project.custom_lineage],
+                dict(project.asset_field_overrides),
+            )
+            for e in project.custom_lineage:
+                if e.source == renamed_from:
+                    e.source = instance_name
+                if e.target == renamed_from:
+                    e.target = instance_name
+            if renamed_from in project.asset_field_overrides:
+                project.asset_field_overrides[instance_name] = project.asset_field_overrides.pop(renamed_from)
         instance_dir.mkdir(parents=True, exist_ok=True)
         yaml_file = instance_dir / "defs.yaml"
 
@@ -580,6 +618,18 @@ async def configure_component(
                     print(f"[Configure] Warning: failed to remove broken new instance {yaml_file}: {cleanup_err}")
             else:
                 yaml_file.write_text(original_text)
+            if renamed_from:
+                # Undo the rename: references back to the old key, the old instance folder back, lineage back.
+                try:
+                    from ..services.asset_rename import restore as _restore_refs
+                    import shutil as _shutil
+                    _restore_refs(rename_touched)
+                    if rename_backup is not None and rename_old_dir is not None and not rename_old_dir.exists():
+                        _shutil.copytree(rename_backup, rename_old_dir)
+                    if rename_lineage_backup:
+                        project.custom_lineage, project.asset_field_overrides = rename_lineage_backup
+                except Exception as undo_err:
+                    print(f"[Configure] Warning: couldn't fully undo the rename of {renamed_from}: {undo_err}", flush=True)
 
             return {
                 "success": False,
@@ -621,6 +671,8 @@ async def configure_component(
                 attributes=validated_attributes,
                 is_asset_factory=True,
             )
+            if renamed_from:
+                project.components = [c for c in project.components if c.id != renamed_from]
             existing_idx = next(
                 (i for i, c in enumerate(project.components) if c.id == instance_name), None
             )
