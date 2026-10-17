@@ -6,7 +6,8 @@ import { TranslationEditor } from './TranslationEditor';
 import { EnhancedDataQualityChecksBuilder } from './EnhancedDataQualityChecksBuilder';
 import { useProjectStore } from '@/hooks/useProject';
 import { dbtAdaptersApi, projectsApi, communityTemplatesApi, templatesApi, type AdapterInfo , API_BASE } from '@/services/api';
-import { notify } from './Notifications';
+import { notify, confirmDialog } from './Notifications';
+import { downstreamAssetLabels, summarizeNames } from '@/lib/dependents';
 import type { ComponentInstance } from '@/types';
 import type { ComponentSchema } from '@/services/api';
 import { parseUpstreamAssetKeys } from '@/lib/upstreamAssetKeys';
@@ -941,6 +942,22 @@ export function ComponentConfigModal({
         validation.missing.map(f => `• ${f}`).join('\n')
       );
       return;
+    }
+
+    // Renaming an asset changes its key, so anything built on it loses its upstream (and the project can
+    // stop loading). Say so before saving, naming who depends on it.
+    if (!isNew && assetName && currentProject) {
+      const newKey = toAssetKeyString(formData.asset_name) ?? toAssetKeyString(formData.asset_key);
+      if (newKey && newKey !== assetName) {
+        const dependents = downstreamAssetLabels(currentProject, assetName);
+        if (dependents.length > 0) {
+          const ok = await confirmDialog(
+            `Renaming "${assetName}" to "${newKey}" changes its asset key.\n\n${dependents.length} other asset${dependents.length === 1 ? '' : 's'} depend${dependents.length === 1 ? 's' : ''} on it: ${summarizeNames(dependents)}.\n\nThey will lose their upstream and the project may fail to load until you update ${dependents.length === 1 ? 'it' : 'them'}.`,
+            { title: 'Rename an asset others depend on?', destructive: true },
+          );
+          if (!ok) return;
+        }
+      }
     }
 
     // Independent of the component's own attributes -- apply regardless
