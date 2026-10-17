@@ -2038,8 +2038,52 @@ async def delete_project(project_id: str):
     return None
 
 
+def _asset_key_of_instance(instance_dir: Path, fallback: str) -> str:
+    """The asset key a component instance produces (its `asset_name`), else the folder name."""
+    import yaml as _yaml
+    try:
+        attrs = (_yaml.safe_load((instance_dir / "defs.yaml").read_text()) or {}).get("attributes") or {}
+        name = attrs.get("asset_name") or attrs.get("asset_key")
+        return name if isinstance(name, str) and name else fallback
+    except Exception:
+        return fallback
+
+
+def _find_instance_dir(project_dir: Path, component_id: str) -> Path | None:
+    skip_parts = {'.venv', 'venv', 'node_modules', '.git', '__pycache__', '.local_defs_state'}
+    for candidate in project_dir.rglob(f"defs/{component_id}"):
+        if candidate.is_dir() and not any(part in skip_parts for part in candidate.parts):
+            return candidate
+    return None
+
+
+@router.get("/{project_id}/asset-references/{component_id}")
+async def get_asset_references(project_id: str, component_id: str):
+    """What else names the asset a component instance produces -- jobs, schedules, sensors, checks (which would be
+    updated or removed with it) and components that consume it as an input (which would break). For the delete dialog."""
+    from ..services.asset_references import find_references
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    project_dir = project_service._get_project_dir(project)
+    inst = _find_instance_dir(project_dir, component_id)
+    if inst is None:
+        return {"asset_key": component_id, "references": []}
+    key = _asset_key_of_instance(inst, component_id)
+    refs = await asyncio.to_thread(find_references, inst.parent, key, inst)
+    return {
+        "asset_key": key,
+        "references": [
+            {"component": r.component, "type": r.class_name, "automation": r.is_automation,
+             "removed_with_it": r.removed_with_asset,
+             "scalar_fields": r.scalar_fields, "list_fields": r.list_fields}
+            for r in refs
+        ],
+    }
+
+
 @router.delete("/{project_id}/component-instances/{component_id}", response_model=Project)
-async def delete_component_instance(project_id: str, component_id: str):
+async def delete_component_instance(project_id: str, component_id: str, cascade: bool = False):
     """Delete a component instance (asset created from a component).
 
     This removes the component instance directory (/defs/{component_id}/)
@@ -2097,9 +2141,16 @@ async def delete_component_instance(project_id: str, component_id: str):
 
     try:
         # Delete the on-disk folder if present.
+        cascade_summary: dict | None = None
         if component_instance_dir:
+            deleted_key = _asset_key_of_instance(component_instance_dir, component_id)
             shutil.rmtree(component_instance_dir)
             print(f"[Delete Component Instance] Deleted {component_instance_dir}")
+            if cascade:
+                # Jobs / schedules / checks that named the deleted asset would stop the whole project loading.
+                from ..services.asset_references import apply_cascade
+                cascade_summary = apply_cascade(component_instance_dir.parent, deleted_key, component_instance_dir)
+                print(f"[Delete Component Instance] Cascade for '{deleted_key}': {cascade_summary}", flush=True)
         else:
             print(f"[Delete Component Instance] No on-disk folder for '{component_id}' — JSON-only cleanup")
 
@@ -2108,6 +2159,9 @@ async def delete_component_instance(project_id: str, component_id: str):
         # a top-level JSON list that isn't touched by introspection, so
         # stale entries accumulate here otherwise.
         project.components = [c for c in (project.components or []) if c.id != component_id]
+        if cascade_summary:
+            gone = set(cascade_summary["removed"])
+            project.components = [c for c in project.components if c.id not in gone]
 
         # Also scrub any custom lineage edge referencing the deleted asset
         # (as either source or target) -- left behind, a dangling TARGET

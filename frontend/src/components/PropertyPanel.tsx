@@ -1894,10 +1894,18 @@ export function PropertyPanel({ nodeId, onConfigureComponent, onOpenFile, onNewP
                       // Warn when other assets build on this one: removing it leaves them with a missing
                       // upstream and can stop the whole project from loading.
                       const dependents = downstreamAssetLabels(currentProject, nodeId);
+                      // Jobs / schedules / sensors / checks that name this asset are updated or removed with it (otherwise
+                      // they stop the whole project loading) -- list them.
+                      const refInfo = await projectsApi.assetReferences(currentProject.id, componentId).catch(() => null);
+                      const goneWith = (refInfo?.references ?? []).filter((r) => r.removed_with_it).map((r) => r.component);
+                      const updatedWith = (refInfo?.references ?? []).filter((r) => r.automation && !r.removed_with_it).map((r) => r.component);
+                      const cascadeNote = goneWith.length + updatedWith.length > 0
+                        ? `\n\nThis will also ${goneWith.length ? `remove ${summarizeNames(goneWith)}` : ''}${goneWith.length && updatedWith.length ? ' and ' : ''}${updatedWith.length ? `update ${summarizeNames(updatedWith)}` : ''} (they reference this asset).`
+                        : '';
                       const confirmed = await confirmDialog(
-                        dependents.length > 0
+                        (dependents.length > 0
                           ? `"${node.data.asset_key || node.data.label}" is used by ${dependents.length} other asset${dependents.length === 1 ? '' : 's'}: ${summarizeNames(dependents)}.\n\nDeleting it will break ${dependents.length === 1 ? 'that asset' : 'those assets'} (their upstream will be missing) and the project may fail to load until you fix ${dependents.length === 1 ? 'it' : 'them'}.\n\nThis permanently removes the component instance and all its configuration.`
-                          : `Are you sure you want to delete "${node.data.asset_key || node.data.label}"?\n\nThis will permanently remove the component instance and all its configuration.`,
+                          : `Are you sure you want to delete "${node.data.asset_key || node.data.label}"?\n\nThis will permanently remove the component instance and all its configuration.`) + cascadeNote,
                         { title: dependents.length > 0 ? 'Delete an asset others depend on?' : 'Delete component instance', destructive: true }
                       );
 

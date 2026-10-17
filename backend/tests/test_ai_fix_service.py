@@ -147,3 +147,24 @@ def test_build_prompt_carries_the_task_and_the_planner_failure_and_the_safety_ru
     assert "never touch .env" in p and "dg check defs" in p
     # with no failure context it still makes sense
     assert "could not complete this request." in svc.build_prompt("build", "", "Shop", "m", "as_package", task="t")
+
+
+def test_iter_lines_handles_lines_far_longer_than_asyncios_default_limit():
+    import asyncio
+
+    big = b'{"type":"user","content":"' + b"x" * 400_000 + b'"}'
+    async def go():
+        r = asyncio.StreamReader()           # default limit: 64 KiB
+        r.feed_data(b"first\n" + big + b"\nlast")
+        r.feed_eof()
+        return [l async for l in svc.iter_lines(r)]
+    out = asyncio.run(go())
+    assert out == [b"first", big, b"last"]
+
+    async def old_way():
+        r = asyncio.StreamReader()
+        r.feed_data(big + b"\n"); r.feed_eof()
+        return [l async for l in r]
+    import pytest
+    with pytest.raises(ValueError):   # "Separator is not found, and chunk exceed the limit" -- the bug this replaces
+        asyncio.run(old_way())

@@ -277,6 +277,29 @@ def discard_snapshot(project_id: str, snapshot_id: str) -> None:
 
 # --------------------------------------------------------------- the run -----
 
+async def iter_lines(stream, chunk: int = 65536, max_line: int = 16 * 1024 * 1024) -> AsyncIterator[bytes]:
+    """Lines from a subprocess pipe with NO 64KB line limit. `async for line in proc.stdout` raises 'Separator is not found,
+    and chunk exceed the limit' on a line longer than asyncio's default buffer -- and the CLI's stream-json puts a whole tool
+    result (a big file the agent read) on ONE line, so a fix run died with that error even though nothing was wrong."""
+    buf = b""
+    while True:
+        data = await stream.read(chunk)
+        if not data:
+            break
+        buf += data
+        while True:
+            i = buf.find(b"\n")
+            if i < 0:
+                break
+            line, buf = buf[:i], buf[i + 1:]
+            yield line
+        if len(buf) > max_line:  # a single absurd line: pass on what we have rather than grow without bound
+            yield buf[:max_line]
+            buf = b""
+    if buf:
+        yield buf
+
+
 async def stream_task(
     claude_bin: str, project_dir: Path, mode: Mode, prompt: str, env: dict[str, str],
 ) -> AsyncIterator[str]:
@@ -292,7 +315,7 @@ async def stream_task(
     timed_out = False
     try:
         async with asyncio.timeout(RUN_TIMEOUT_SECONDS):
-            async for line in proc.stdout:
+            async for line in iter_lines(proc.stdout):
                 decoded = line.decode(errors="replace").rstrip("\n")
                 if decoded:
                     yield decoded

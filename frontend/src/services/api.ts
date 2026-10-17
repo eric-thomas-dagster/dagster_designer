@@ -266,10 +266,21 @@ export const projectsApi = {
     await api.delete(`/projects/${id}`);
   },
 
-  deleteComponentInstance: async (projectId: string, componentId: string) => {
-    const response = await api.delete<Project>(`/projects/${projectId}/component-instances/${componentId}`);
+  /** `cascade` (default on): also fix what else names the deleted asset -- a job/schedule/check over it is removed, a key is
+   *  dropped from a list that names several -- so the project still loads. Without it a leftover reference stops the WHOLE
+   *  project loading ("Selected keys must be a subset of existing executable asset keys"). */
+  deleteComponentInstance: async (projectId: string, componentId: string, opts?: { cascade?: boolean }) => {
+    const response = await api.delete<Project>(`/projects/${projectId}/component-instances/${componentId}`, {
+      params: { cascade: opts?.cascade ?? true },
+    });
     return response.data;
   },
+
+  /** What else names the asset a component produces (for the delete confirmation). */
+  assetReferences: async (projectId: string, componentId: string): Promise<{
+    asset_key: string;
+    references: Array<{ component: string; type: string; automation: boolean; removed_with_it: boolean; scalar_fields: string[]; list_fields: string[] }>;
+  }> => (await api.get(`/projects/${projectId}/asset-references/${encodeURIComponent(componentId)}`)).data,
 
   materialize: async (
     projectId: string,
