@@ -129,3 +129,21 @@ def test_old_snapshots_are_pruned(project):
     ids = [svc.create_snapshot("p1", project) for _ in range(svc._KEEP_SNAPSHOTS + 3)]
     remaining = {p.name for p in svc._snapshot_root("p1").iterdir()}
     assert len(remaining) == svc._KEEP_SNAPSHOTS and ids[-1] in remaining
+
+
+def test_build_mode_has_exactly_fix_permissions():
+    # "build" implements a request the catalog planner couldn't; it must be no more powerful than "fix".
+    assert _after(_args("build"), "--permission-mode") == ["acceptEdits"]
+    assert _after(_args("build"), "--allowedTools") == _after(_args("fix"), "--allowedTools")
+    assert _after(_args("build"), "--disallowedTools") == _after(_args("fix"), "--disallowedTools")
+    assert svc.MAX_BUDGET_USD["build"] == svc.MAX_BUDGET_USD["fix"]
+
+
+def test_build_prompt_carries_the_task_and_the_planner_failure_and_the_safety_rules():
+    p = svc.build_prompt("build", "attributes.source -- Input should be a valid dictionary", "Shop", "shop_mod", "as_package",
+                         task="pull the domain out of the email field")
+    assert p.startswith("/dagster-expert ")
+    assert "pull the domain out of the email field" in p and "valid dictionary" in p and "`shop_mod`" in p
+    assert "never touch .env" in p and "dg check defs" in p
+    # with no failure context it still makes sense
+    assert "could not complete this request." in svc.build_prompt("build", "", "Shop", "m", "as_package", task="t")

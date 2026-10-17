@@ -28,7 +28,9 @@ class AiFixStatus(BaseModel):
 
 class AiFixRunRequest(BaseModel):
     mode: svc.Mode
-    error_text: str
+    error_text: str = ""
+    # mode="build": what the user asked for. error_text then carries why the catalog planner couldn't do it (optional).
+    task: str = ""
 
 
 class ChangedFile(BaseModel):
@@ -73,7 +75,10 @@ async def ai_fix_run(project_id: str, req: AiFixRunRequest):
     around the CLI's own stream-json lines. For mode=fix the first event carries
     the snapshot id needed by /result, /undo and /keep."""
     project, project_dir = _local_project(project_id)
-    if not req.error_text.strip():
+    if req.mode == "build":
+        if not req.task.strip():
+            raise HTTPException(status_code=400, detail="Nothing to build: no task was given.")
+    elif not req.error_text.strip():
         raise HTTPException(status_code=400, detail="No validation error text to work from.")
     claude_bin = dagster_ai_service.find_claude_cli()
     if not claude_bin:
@@ -90,12 +95,13 @@ async def ai_fix_run(project_id: str, req: AiFixRunRequest):
         req.mode, req.error_text, project.name,
         project_service.get_project_root_module(project),
         getattr(project, "component_install_mode", None) or "as_package",
+        task=req.task,
     )
 
     async def _gen():
         async with lock:
             snapshot_id = None
-            if req.mode == "fix":
+            if req.mode in ("fix", "build"):
                 snapshot_id = svc.create_snapshot(project_id, project_dir)
             yield json.dumps({"type": "designer", "event": "started", "mode": req.mode, "snapshot_id": snapshot_id}) + "\n"
             try:

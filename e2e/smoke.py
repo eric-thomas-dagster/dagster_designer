@@ -229,6 +229,56 @@ def run(lazy: bool) -> int:
                 except Exception as e:
                     check(False, f"group cards are shown again after viewing an asset ({str(e)[:80]})")
 
+            if not lazy:
+                # Dagster AI can't plan a request -> with Claude Code available it offers to build it instead. The network
+                # is faked here (no LLM key, no real claude); this checks the wiring: offer -> build -> diff -> keep.
+                import json as _json
+                pg.route("**/api/v1/ai/providers", lambda r: r.fulfill(json=dict(openai_available=True, anthropic_available=False, any_available=True, anthropic_workspace_id_configured=False)))
+                pg.route("**/api/v1/ai/plan", lambda r: r.fulfill(json=dict(picks=[], notes=["no component fits"], clarifying_question=None)))
+                pg.route("**/api/v1/ai-fix/status", lambda r: r.fulfill(json=dict(claude_found=True, skill_installed=True, can_run=True, reason=None)))
+                ndjson = "\n".join(_json.dumps(e) for e in [
+                    {"type": "designer", "event": "started", "mode": "build", "snapshot_id": "20260101T000000000000Z-abc123"},
+                    {"type": "result", "result": "Added customers_with_domain.", "total_cost_usd": 0.4, "is_error": False},
+                    {"type": "designer", "event": "finished", "returncode": 0},
+                ]) + "\n"
+                run_bodies: list = []
+                def _fake_run(route):
+                    run_bodies.append(route.request.post_data_json)
+                    route.fulfill(body=ndjson, content_type="application/x-ndjson")
+                pg.route("**/api/v1/projects/*/ai-fix/run", _fake_run)
+                pg.route("**/ai-fix/20260101T000000000000Z-abc123/result", lambda r: r.fulfill(json=dict(
+                    valid=True, validation_error=None, changes=[dict(path="src/x/defs/new/defs.yaml", status="added", diff="+type: x")])))
+                pg.reload()
+                pg.wait_for_timeout(2500)
+                try:
+                    pg.get_by_role("button", name="Project").click()
+                    pg.get_by_text("Open Project", exact=True).click()
+                    pg.wait_for_timeout(800)
+                    pg.get_by_text("smoke-fixture", exact=False).first.click()
+                    pg.wait_for_selector(".react-flow__node", timeout=30000)
+                    box = pg.get_by_placeholder("Ask Dagster AI to build a pipeline", exact=False)
+                    box.fill("add a domain column from email")
+                    box.press("Enter")
+                    pg.get_by_text("Build it with Claude Code", exact=False).first.wait_for(timeout=15000)
+                    check(True, "an unplannable request offers to be built with Claude Code")
+                    pg.get_by_role("button", name="Build it with Claude Code…").click()
+                    pg.get_by_role("button", name="Start building").click()
+                    pg.get_by_role("button", name="Keep changes").wait_for(timeout=15000)
+                    check(bool(run_bodies) and run_bodies[0].get("mode") == "build" and "domain column" in run_bodies[0].get("task", ""),
+                          "the build request carries the user's task")
+                    check(pg.get_by_text("src/x/defs/new/defs.yaml").count() > 0, "the result is shown as a reviewable diff with Keep/Undo")
+                except Exception as e:
+                    check(False, f"Claude Code build offer flow ({str(e)[:100]})")
+                    pg.screenshot(path=str(Path(tempfile.gettempdir()) / "smoke-build-offer-fail.png"))
+                pg.unroute_all()
+                pg.reload()
+                pg.wait_for_timeout(2000)
+                pg.get_by_role("button", name="Project").click()
+                pg.get_by_text("Open Project", exact=True).click()
+                pg.wait_for_timeout(800)
+                pg.get_by_text("smoke-fixture", exact=False).first.click()
+                pg.wait_for_timeout(3000)
+
             for tab in TABS:
                 loc = pg.get_by_text(tab, exact=True)
                 if loc.count() == 0:

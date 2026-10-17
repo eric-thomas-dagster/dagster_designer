@@ -1,9 +1,11 @@
 import { useState, useRef, useEffect, useMemo } from 'react';
+import { createPortal } from 'react-dom';
 import { useQueryClient } from '@tanstack/react-query';
 import { Sparkles, ArrowUp, Loader2, ChevronDown, X, Check } from 'lucide-react';
 import { useProjectStore } from '@/hooks/useProject';
 import { notify, confirmDialog } from './Notifications';
-import { API_BASE, aiApi, type AiProvidersStatus } from '@/services/api';
+import { API_BASE, aiApi, aiFixApi, type AiProvidersStatus } from '@/services/api';
+import { AiFixPanel } from './AiFixPanel';
 import { openSettings, onAiProvidersChanged } from './SettingsDialog';
 import { applyGeniePicks, resolveComponentIdFromCurrentProject } from '@/lib/applyGeniePicks';
 
@@ -45,13 +47,21 @@ const MODEL_OPTIONS = [
 ];
 
 export function DagsterAIBar() {
-  const { currentProject } = useProjectStore();
+  const { currentProject, loadProject } = useProjectStore();
   const queryClient = useQueryClient();
   const [task, setTask] = useState('');
   const [thinking, setThinking] = useState(false);
   const [applying, setApplying] = useState(false);
   const [plan, setPlan] = useState<AIPlanResponse | null>(null);
   const [refinement, setRefinement] = useState('');
+  // When Dagster AI can't do the task from the component catalog (no plan, or its change was undone because the project
+  // stopped loading) and the user has Claude Code + dagster-expert, offer to hand the same task to it.
+  const [claudeOffer, setClaudeOffer] = useState<{ task: string; context: string } | null>(null);
+  const offerClaude = async (offerTask: string, context: string) => {
+    if (!offerTask) return;
+    const st = await aiFixApi.status().catch(() => null);
+    if (st?.can_run) setClaudeOffer({ task: offerTask, context });
+  };
   // Real conversation history (see genie_service.py's `history` param +
   // AgentPipelineBuilder.tsx's identical mechanism) -- scoped to ONE
   // continuous refine-the-same-plan sequence, not accumulated forever.
@@ -173,6 +183,7 @@ export function DagsterAIBar() {
       if (isRefinement) setRefinement('');
       if (data.picks.length === 0) {
         notify.warning(data.notes.join('\n') || 'Dagster AI could not build a plan for that task.');
+        void offerClaude(task.trim(), data.notes.join('\n'));
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -210,6 +221,7 @@ export function DagsterAIBar() {
 
       if (rolledBack) {
         notify.error(`Dagster AI's changes were undone because the project no longer loaded with them:\n\n${rolledBack}`);
+        void offerClaude(task.trim(), rolledBack);
       } else if (failed === 0) {
         notify.success(`Dagster AI added ${installed} asset${installed === 1 ? '' : 's'} to the graph.`);
       } else if (installed === 0) {
@@ -488,6 +500,40 @@ ANTHROPIC_API_KEY=sk-ant-...`}
           </div>
         )}
       </div>
+
+      {claudeOffer && currentProject && createPortal(
+        <div className="fixed inset-0 z-[70] bg-black/40 flex items-center justify-center p-4">
+          <div className="bg-white rounded-lg shadow-xl w-full max-w-xl max-h-[90vh] overflow-y-auto p-4">
+            <div className="flex items-start justify-between gap-3 mb-2">
+              <p className="text-sm text-gray-700 min-w-0">
+                <span className="font-medium text-gray-900">Your request: </span>{claudeOffer.task}
+              </p>
+              <button onClick={() => setClaudeOffer(null)} aria-label="Close" className="flex-shrink-0">
+                <X className="w-4 h-4 text-gray-400 hover:text-gray-600" />
+              </button>
+            </div>
+            <AiFixPanel
+              projectId={currentProject.id}
+              task={claudeOffer.task}
+              errorText={claudeOffer.context}
+              quietIfUnavailable
+              onKept={async () => {
+                setClaudeOffer(null);
+                setPlan(null); setTask(''); setHistory([]);
+                await queryClient.invalidateQueries({ queryKey: ['primitives', currentProject.id] });
+                await queryClient.invalidateQueries({ queryKey: ['definitions', currentProject.id] });
+                try {
+                  const { projectsApi } = await import('@/services/api');
+                  await projectsApi.regenerateAssets(currentProject.id, false);
+                } catch { /* the reload below still picks up whatever loaded */ }
+                await loadProject(currentProject.id, { silent: true });
+                notify.success('Claude Code finished: the new asset is in your project.');
+              }}
+            />
+          </div>
+        </div>,
+        document.body,
+      )}
     </div>
   );
 }

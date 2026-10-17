@@ -21,6 +21,14 @@ interface Props {
   errorText: string;
   /** Called after the user keeps a fix, so the host can re-validate / reload. */
   onKept: () => void;
+  /**
+   * "Build it" mode: the user asked for something the catalog-based Dagster AI couldn't do (or its attempt was undone).
+   * Claude Code + dagster-expert implement `task` directly in the project -- same permissions, snapshot, diff and
+   * undo as Fix. `errorText` then optionally says why the first attempt failed.
+   */
+  task?: string;
+  /** Render nothing (rather than an install hint) when Claude Code isn't available. */
+  quietIfUnavailable?: boolean;
 }
 
 function describeTool(name: string, input: any): string {
@@ -53,11 +61,11 @@ function DiffView({ diff }: { diff: string }) {
   );
 }
 
-export function AiFixPanel({ projectId, errorText, onKept }: Props) {
+export function AiFixPanel({ projectId, errorText, onKept, task, quietIfUnavailable }: Props) {
   const [status, setStatus] = useState<AiFixStatus | null>(null);
   const [installing, setInstalling] = useState(false);
   const [phase, setPhase] = useState<Phase>('idle');
-  const [mode, setMode] = useState<'explain' | 'fix'>('explain');
+  const [mode, setMode] = useState<'explain' | 'fix' | 'build'>(task ? 'build' : 'explain');
   const [activity, setActivity] = useState<string[]>([]);
   const [text, setText] = useState('');
   const [error, setError] = useState<string | null>(null);
@@ -74,7 +82,7 @@ export function AiFixPanel({ projectId, errorText, onKept }: Props) {
     return () => abortRef.current?.abort();
   }, []);
 
-  const run = async (m: 'explain' | 'fix') => {
+  const run = async (m: 'explain' | 'fix' | 'build') => {
     setMode(m); setPhase('running'); setActivity([]); setText(''); setError(null);
     setCost(null); setSnapshotId(null); setResult(null); setReverted(false); setOpen(new Set());
     const controller = new AbortController();
@@ -86,7 +94,7 @@ export function AiFixPanel({ projectId, errorText, onKept }: Props) {
       const r = await fetch(`${API_BASE}/projects/${projectId}/ai-fix/run`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ mode: m, error_text: errorText }),
+        body: JSON.stringify({ mode: m, error_text: errorText, ...(m === 'build' ? { task } : {}) }),
         signal: controller.signal,
       });
       if (!r.ok || !r.body) {
@@ -129,7 +137,7 @@ export function AiFixPanel({ projectId, errorText, onKept }: Props) {
       if (e?.name !== 'AbortError') fatal = e?.message || String(e);
     }
     if (fatal) setError(fatal);
-    if (m === 'fix' && snap) {
+    if ((m === 'fix' || m === 'build') && snap) {
       try { setResult(await aiFixApi.result(projectId, snap)); }
       catch (e: any) { setError((x) => x ?? (e?.response?.data?.detail || e?.message || 'Could not read the result.')); }
     }
@@ -159,6 +167,7 @@ export function AiFixPanel({ projectId, errorText, onKept }: Props) {
 
   // ---- not available: stay out of the way, but say how to get it ---------
   if (!status) return null;
+  if (!status.can_run && quietIfUnavailable) return null;
   if (!status.can_run) {
     return (
       <div className="mb-4 p-3 bg-gray-50 border border-dashed border-gray-300 rounded-md text-xs text-gray-600 flex items-center justify-between gap-3">
@@ -184,10 +193,25 @@ export function AiFixPanel({ projectId, errorText, onKept }: Props) {
     <div className="mb-4 p-4 border border-primary/30 bg-primary/5 rounded-md">
       <div className="flex items-center gap-2 mb-1">
         <Sparkles className="w-4 h-4 text-primary" />
-        <h3 className="text-sm font-semibold text-gray-900">Fix with Claude Code</h3>
+        <h3 className="text-sm font-semibold text-gray-900">{task ? 'Build it with Claude Code' : 'Fix with Claude Code'}</h3>
       </div>
 
-      {phase === 'idle' && (
+      {phase === 'idle' && task && (
+        <>
+          <p className="text-xs text-gray-600 mb-3">
+            Dagster AI couldn't build this from the component catalog. Your Claude Code (with the dagster-expert skill) can
+            try: it looks for a fitting component, or writes a small custom asset, inside this project only (never{' '}
+            <code>.env</code>), then checks that the project loads. You review the diff and can undo.
+          </p>
+          <div className="flex gap-2">
+            <button onClick={() => setPhase('confirm')} className="px-3 py-1.5 text-xs font-medium text-white bg-primary rounded hover:opacity-90">
+              Build it with Claude Code…
+            </button>
+          </div>
+        </>
+      )}
+
+      {phase === 'idle' && !task && (
         <>
           <p className="text-xs text-gray-600 mb-3">
             Uses your Claude Code and the dagster-expert skill on this project. <b>Explain</b> is read-only.
@@ -207,11 +231,12 @@ export function AiFixPanel({ projectId, errorText, onKept }: Props) {
       {phase === 'confirm' && (
         <div className="text-xs text-gray-700">
           <p className="mb-2">
-            Claude Code will edit files in this project to fix the error. A snapshot is taken first, so you can review
-            every change and undo it. It runs on your Claude account and usually takes one to a few minutes.
+            {task ? 'Claude Code will add this to the project.' : 'Claude Code will edit files in this project to fix the error.'}{' '}
+            A snapshot is taken first, so you can review every change and undo it. It runs on your Claude account and
+            usually takes one to a few minutes.
           </p>
           <div className="flex gap-2">
-            <button onClick={() => run('fix')} className="px-3 py-1.5 font-medium text-white bg-primary rounded hover:opacity-90">Start fixing</button>
+            <button onClick={() => run(task ? 'build' : 'fix')} className="px-3 py-1.5 font-medium text-white bg-primary rounded hover:opacity-90">{task ? 'Start building' : 'Start fixing'}</button>
             <button onClick={() => setPhase('idle')} className="px-3 py-1.5 font-medium border border-gray-300 rounded hover:bg-gray-100">Cancel</button>
           </div>
         </div>
@@ -222,7 +247,7 @@ export function AiFixPanel({ projectId, errorText, onKept }: Props) {
           <div className="flex items-center justify-between mb-2">
             <span className="flex items-center gap-2 text-gray-700">
               <Loader2 className="w-3.5 h-3.5 animate-spin" />
-              {mode === 'fix' ? 'Claude Code is working on a fix…' : 'Claude Code is investigating…'}
+              {mode === 'build' ? 'Claude Code is building it…' : mode === 'fix' ? 'Claude Code is working on a fix…' : 'Claude Code is investigating…'}
             </span>
             <button onClick={stop} className="flex items-center gap-1 px-2 py-1 border border-gray-300 rounded hover:bg-gray-100">
               <Square className="w-3 h-3" /> Stop
@@ -244,11 +269,11 @@ export function AiFixPanel({ projectId, errorText, onKept }: Props) {
           )}
           {text && <p className="whitespace-pre-wrap text-gray-800 mb-3">{text}</p>}
 
-          {mode === 'fix' && result && !reverted && (
+          {mode !== 'explain' && result && !reverted && (
             <div className="mb-3">
               <p className={`mb-2 flex items-center gap-1.5 font-medium ${result.valid ? 'text-green-700' : 'text-amber-700'}`}>
                 {result.valid ? <CheckCircle2 className="w-3.5 h-3.5" /> : <XCircle className="w-3.5 h-3.5" />}
-                {result.valid ? 'The project validates now.' : 'The project still fails validation.'}
+                {result.valid ? (mode === 'build' ? 'The project loads with the change.' : 'The project validates now.') : (mode === 'build' ? 'The project doesn\'t load with this change.' : 'The project still fails validation.')}
               </p>
               {!result.valid && result.validation_error && (
                 <pre className="mb-2 text-[11px] bg-red-50 text-red-900 border border-red-200 rounded p-2 max-h-32 overflow-auto whitespace-pre-wrap">{result.validation_error.slice(0, 1500)}</pre>
@@ -281,7 +306,7 @@ export function AiFixPanel({ projectId, errorText, onKept }: Props) {
           {reverted && <p className="mb-3 text-gray-700">Changes reverted. The project is back to how it was.</p>}
 
           <div className="flex items-center gap-2">
-            {mode === 'fix' && snapshotId && !reverted && (
+            {mode !== 'explain' && snapshotId && !reverted && (
               <>
                 <button disabled={busy} onClick={keep} className="flex items-center gap-1 px-3 py-1.5 font-medium text-white bg-green-600 rounded hover:bg-green-700 disabled:opacity-50">
                   <Check className="w-3.5 h-3.5" /> Keep changes
@@ -292,9 +317,9 @@ export function AiFixPanel({ projectId, errorText, onKept }: Props) {
               </>
             )}
             {/* After an explanation (or a failed/undone fix), the natural next step is to let it try. */}
-            {(mode === 'explain' || reverted || (mode === 'fix' && !snapshotId)) && (
+            {(mode === 'explain' || reverted || !snapshotId) && (
               <button onClick={() => setPhase('confirm')} className="px-3 py-1.5 font-medium text-white bg-primary rounded hover:opacity-90">
-                {mode === 'fix' ? 'Try fixing again…' : 'Fix it…'}
+                {mode === 'build' ? 'Try building again…' : mode === 'fix' ? 'Try fixing again…' : 'Fix it…'}
               </button>
             )}
             {(!snapshotId || reverted) && (

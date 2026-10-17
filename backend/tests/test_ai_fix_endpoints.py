@@ -115,3 +115,18 @@ def test_dagster_plus_projects_are_refused(env, monkeypatch):
     monkeypatch.setattr(api.project_service, "get_project", lambda pid: cloud)
     r = env.client.post("/api/v1/projects/p1/ai-fix/run", json={"mode": "fix", "error_text": "x"})
     assert r.status_code == 400 and "local projects" in r.json()["detail"]
+
+
+def test_build_mode_snapshots_like_fix_and_needs_a_task(env):
+    c = env.client
+    # no task -> refused, even though an error text is present
+    assert c.post("/api/v1/projects/p1/ai-fix/run", json={"mode": "build", "error_text": "why it failed"}).status_code == 400
+    r = c.post("/api/v1/projects/p1/ai-fix/run", json={"mode": "build", "task": "add a domain column from email", "error_text": ""})
+    assert r.status_code == 200
+    events = [json.loads(l) for l in r.text.splitlines() if l.strip()]
+    sid = events[0]["snapshot_id"]
+    assert events[0]["mode"] == "build" and sid                       # reversible: a snapshot was taken first
+    res = c.get(f"/api/v1/projects/p1/ai-fix/{sid}/result").json()
+    assert {x["path"] for x in res["changes"]} == {"src/mod/defs/a/defs.yaml", "src/mod/defs/created.yaml"}
+    c.post(f"/api/v1/projects/p1/ai-fix/{sid}/undo")
+    assert not (env.proj / "src/mod/defs/created.yaml").exists()

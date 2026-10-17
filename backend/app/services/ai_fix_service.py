@@ -13,6 +13,8 @@ Safety model -- verified against the real CLI, not assumed:
   * `.env*` can't be read or edited, and arbitrary shell commands are denied.
   * Before a fix, the files it could touch are snapshotted so the whole change
     can be reviewed as a diff and undone in one click.
+  * "build" (implement a task the catalog-based planner couldn't) has exactly the same permissions and snapshot as
+    "fix"; only the prompt differs.
 """
 from __future__ import annotations
 
@@ -29,11 +31,11 @@ from typing import AsyncIterator, Literal
 
 from ..core.config import settings
 
-Mode = Literal["explain", "fix"]
+Mode = Literal["explain", "fix", "build"]
 
 # Rough ceilings: a bare invocation costs ~$0.2-0.3 (skills/plugins load into
 # context), so these leave room for real work without being open-ended.
-MAX_BUDGET_USD = {"explain": "1.00", "fix": "3.00"}
+MAX_BUDGET_USD = {"explain": "1.00", "fix": "3.00", "build": "3.00"}
 RUN_TIMEOUT_SECONDS = 15 * 60
 
 _READ_TOOLS = ["Read", "Glob", "Grep", "Bash(dg check defs:*)", "Bash(dg list defs:*)"]
@@ -69,13 +71,15 @@ def build_cli_args(mode: Mode, prompt: str) -> list[str]:
     if mode == "explain":
         args += ["--permission-mode", "dontAsk", "--allowedTools", *_READ_TOOLS,
                  "--disallowedTools", *_SECRET_DENY, *_NO_EDIT]
-    else:
+    else:  # fix and build may edit files inside the project
         args += ["--permission-mode", "acceptEdits", "--allowedTools", *_READ_TOOLS,
                  "--disallowedTools", *_SECRET_DENY]
     return args
 
 
-def build_prompt(mode: Mode, error_text: str, project_name: str, root_module: str, install_mode: str) -> str:
+def build_prompt(mode: Mode, error_text: str, project_name: str, root_module: str, install_mode: str, task: str = "") -> str:
+    if mode == "build":
+        return _build_task_prompt(task, error_text, project_name, root_module, install_mode)
     error_text = (error_text or "").strip()
     if len(error_text) > 12_000:
         error_text = error_text[:6_000] + "\n...[truncated]...\n" + error_text[-6_000:]
@@ -107,6 +111,41 @@ def build_prompt(mode: Mode, error_text: str, project_name: str, root_module: st
           ".env files, credentials or the data/ directory; do not install packages. Verify with `dg check defs` "
           "and keep going until it passes, or stop and explain why it can't be fixed safely. Finish with a short "
           "summary: the root cause and each file you changed."
+    )
+
+
+def _build_task_prompt(task: str, context: str, project_name: str, root_module: str, install_mode: str) -> str:
+    task = (task or "").strip()
+    context = (context or "").strip()
+    if len(context) > 6_000:
+        context = context[:3_000] + "\n...[truncated]...\n" + context[-3_000:]
+    shell_rule = (
+        "Shell access is deliberately minimal: the ONLY commands you may run are `dg check defs` and `dg list defs`, "
+        "typed exactly like that from the current directory (you are already in the project folder: no `cd`, no `uv run`, "
+        "no pipes or `&&`). Everything else is blocked and nobody is available to approve it, so use the Read/Glob/Grep "
+        "tools to look at files. Never ask for approval; if something is blocked, work around it or say so.\n\n"
+    )
+    why = (
+        f"An automated planner that picks pre-built components could not complete this request"
+        + (f", because:\n```\n{context}\n```\n\n" if context else ".\n\n")
+    )
+    return (
+        "/dagster-expert "
+        f"Implement this request in the Dagster Designer project '{project_name}' (Python root module `{root_module}`, "
+        f"component install mode `{install_mode}`: components come from the dagster-community-components package and are "
+        f"referenced by type from a defs.yaml, not copied into the project):\n\n> {task}\n\n"
+        + why
+        + shell_rule
+        + "How to do it: first look for an existing component that does this (the package's schemas are under the "
+          "project's .venv, `site-packages/dagster_community_components/assets/**/schema.json`; the project's existing "
+          "assets show how they are configured, e.g. a defs.yaml under src/*/defs/*/). If one fits, add a "
+          "`src/<module>/defs/<asset_name>/defs.yaml` that uses it, with every setting valid for its schema. Only if none "
+          "fits, write a small custom Python asset (`@dg.asset`) in a new file under src/<module>/defs/. Rules: work only "
+          "inside this project directory; add the new asset without changing existing ones; its upstream is the asset "
+          "named in the request; never touch .env files, credentials or the data/ directory; do not install packages. "
+          "Verify with `dg check defs` and `dg list defs` and keep going until the project loads and the new asset is "
+          "listed, or stop and explain why it can't be done safely. Finish with a short summary: what you built and each "
+          "file you added or changed."
     )
 
 
