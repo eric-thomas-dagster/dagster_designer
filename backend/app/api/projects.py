@@ -2230,6 +2230,17 @@ async def delete_component_instance(project_id: str, component_id: str, cascade:
             gone = {n.id for n in project.graph.nodes
                     if n.node_kind == "asset" and (n.id == component_id or (n.data or {}).get("component_id") == component_id
                                                    or (n.data or {}).get("asset_key") == component_id)}
+            # While the project can't load, the stored graph can't be refreshed, so assets of components whose folders were
+            # deleted earlier stay in it as ghosts that "come back" after every delete. Drop those too.
+            try:
+                defs_roots = list(project_dir.glob("src/*/defs")) + list(project_dir.glob("*/defs"))
+                on_disk = {d.name for r in defs_roots for d in r.iterdir() if d.is_dir()}
+                if defs_roots:
+                    gone |= {n.id for n in project.graph.nodes
+                             if n.node_kind == "asset" and (n.data or {}).get("component_id")
+                             and (n.data or {}).get("component_id") not in on_disk}
+            except OSError:
+                pass
             asset_nodes = [n for n in project.graph.nodes if n.node_kind == "asset" and n.id not in gone]
             asset_edges = [e for e in project.graph.edges if e.source not in gone and e.target not in gone]
 

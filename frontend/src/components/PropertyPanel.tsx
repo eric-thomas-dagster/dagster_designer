@@ -1919,9 +1919,17 @@ export function PropertyPanel({ nodeId, onConfigureComponent, onOpenFile, onNewP
 
                       try {
                         // Optimistic update: immediately remove the node from the UI
-                        const updatedNodes = currentProject.graph.nodes.filter(n => n.id !== nodeId);
+                        // A component can emit several assets (an agentic_pipeline emits five): remove ALL of its nodes,
+                        // not just the one that was clicked -- otherwise the others stay in the graph, get saved back by the
+                        // auto-save, and "come back" after the delete.
+                        const gone = new Set(
+                          currentProject.graph.nodes
+                            .filter(n => n.id === nodeId || (n.data as any)?.component_id === componentId)
+                            .map(n => n.id)
+                        );
+                        const updatedNodes = currentProject.graph.nodes.filter(n => !gone.has(n.id));
                         const updatedEdges = currentProject.graph.edges.filter(
-                          e => e.source !== nodeId && e.target !== nodeId
+                          e => !gone.has(e.source) && !gone.has(e.target)
                         );
                         await updateGraph(updatedNodes, updatedEdges);
 

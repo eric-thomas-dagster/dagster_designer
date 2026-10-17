@@ -1085,9 +1085,15 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
       }
     }
     try {
-      const updatedNodes = currentProject.graph.nodes.filter((n) => n.id !== nodeId);
+      // every node the component emitted, not just the selected one (see PropertyPanel's delete)
+      const goneIds = new Set(
+        currentProject.graph.nodes
+          .filter((n) => n.id === nodeId || (n.data as any)?.component_id === componentId)
+          .map((n) => n.id),
+      );
+      const updatedNodes = currentProject.graph.nodes.filter((n) => !goneIds.has(n.id));
       const updatedEdges = currentProject.graph.edges.filter(
-        (e) => e.source !== nodeId && e.target !== nodeId,
+        (e) => !goneIds.has(e.source) && !goneIds.has(e.target),
       );
       const updatedComponents = currentProject.components.filter((c) => c.id !== nodeId);
       await projectsApi.update(currentProject.id, {
