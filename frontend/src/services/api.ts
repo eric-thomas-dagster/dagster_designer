@@ -224,6 +224,12 @@ export const projectsApi = {
     return response.data;
   },
 
+  /** Install the Python packages this project's community components need but its venv lacks. Can take minutes. */
+  ensureDependencies: async (id: string): Promise<{ checked: string[]; installed: string[]; failed: string | null }> => {
+    const response = await api.post(`/projects/${id}/ensure-dependencies`, undefined, { timeout: 15 * 60_000 });
+    return response.data;
+  },
+
   /** Stale / freshness / last-run status per asset key (local projects), fetched separately from the project. */
   getLiveStatus: async (id: string): Promise<Record<string, Record<string, string>>> => {
     const response = await api.get<{ statuses: Record<string, Record<string, string>> }>(`/projects/${id}/asset-live-status`);

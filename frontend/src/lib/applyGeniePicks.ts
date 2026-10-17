@@ -212,6 +212,10 @@ export async function applyGeniePicks(
       if (body.components_list_warning) {
         warning = `${pick.asset_name}: ${body.components_list_warning}`;
       }
+      if (body.dependencies?.failed) {
+        // The component is in the project but can't run until its packages are installed -- say so, don't let it fail later.
+        warning = `${pick.asset_name}: couldn't install the packages it needs (${body.dependencies.failed})`;
+      }
       return { ok: true, warning, addedName: pick.asset_name };
     } catch (e) {
       console.warn(`[applyGeniePicks] Failed to install ${pick.component_type}:`, e);

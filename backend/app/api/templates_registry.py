@@ -656,6 +656,16 @@ async def configure_component(
                 "components_list_warning": None,
             }
 
+        # The component must be runnable, not just loadable: make sure its Python dependencies are installed.
+        try:
+            from ..services.component_dependencies import ensure_dependencies as _ensure_cfg_deps
+            async with _install_lock_for(request.project_id):
+                _cfg_deps = await asyncio.to_thread(_ensure_cfg_deps, project_dir, {component_id})
+            if _cfg_deps["failed"]:
+                print(f"[Configure] Warning: could not install dependencies for {component_id}: {_cfg_deps['failed']}", flush=True)
+        except Exception as _dep_err:
+            print(f"[Configure] Warning: dependency check failed for {component_id}: {_dep_err}", flush=True)
+
         # Add/update this instance in project.components -- a *separate*
         # list from graph.nodes that e.g. IngestionsPanel filters on, not
         # the graph. Without this, a component installed via
@@ -1328,12 +1338,16 @@ async def _install_component_via_cli_locked(
                 missing_system_deps = [f for f in brew_formulas if _sh2.which(f) is None]
             except Exception as e:
                 print(f"[CLI Install] Warning: could not check system dependencies: {e}")
+            from ..services.component_dependencies import ensure_dependencies as _ensure_deps
+            async with _install_lock_for(request.project_id):
+                skip_deps = await asyncio.to_thread(_ensure_deps, project_dir, {component_id})
             return {
                 "success": True,
                 "component_id": component_id,
                 "component_type": existing_type,
                 "defs_yaml": None,
                 "missing_system_deps": missing_system_deps,
+                "dependencies": skip_deps,
             }
 
     def _build_cmd(refresh: bool) -> list[str]:
@@ -1407,6 +1421,7 @@ async def _install_component_via_cli_locked(
     # racing on that file. Scoped to just this stretch, not the whole
     # endpoint, so unrelated work (parsing the written defs.yaml, checking
     # system deps) doesn't needlessly queue behind another install.
+    dep_result: dict | None = None
     async with _install_lock_for(request.project_id):
         result = await asyncio.to_thread(_run, False)
         stdout = result.stdout or ""
@@ -1423,53 +1438,14 @@ async def _install_component_via_cli_locked(
             detail = (stderr or stdout or "unknown error").strip().splitlines()
             raise HTTPException(status_code=500, detail=f"CLI install failed: {' | '.join(detail[-5:])}")
 
-        # Safety-net dependency install. Some community templates ship a
-        # `requirements.txt` (e.g. airtable_ingestion needs dlt[airtable])
-        # that `dagster-component add --auto-install` doesn't reliably pick
-        # up — we've hit at least one case where the CLI reported success
-        # but the deps never made it into the venv, leaving Dagster with a
-        # ModuleNotFoundError on the next load. Read the template's
-        # requirements.txt and `uv add` anything listed. Errors here are
-        # non-fatal so a bad line doesn't kill the whole install.
-        try:
-            comp_dirs = list(project_dir.glob(f"src/*/components/{component_id}")) + list(project_dir.glob(f"*/components/{component_id}"))
-            req_path = None
-            for cd in comp_dirs:
-                candidate = cd / "requirements.txt"
-                if candidate.exists():
-                    req_path = candidate
-                    break
-            if req_path is None:
-                # `--as-package` copies nothing into the project, so there is no components/<id>/ to read -- but the
-                # package carries each component's own requirements.txt. Without this the dependencies of a
-                # package-mode install were never installed at all: an agentic_pipeline run failed with
-                # "No module named 'mcp'" (and would have with litellm), though its install "succeeded".
-                req_path = package_requirements_path(project_dir, component_id)
-            if req_path:
-                reqs: list[str] = []
-                for line in req_path.read_text().splitlines():
-                    line = line.strip()
-                    if not line or line.startswith("#"):
-                        continue
-                    reqs.append(line)
-                if reqs:
-                    print(f"[CLI Install] Installing template requirements: {reqs}")
-                    add_result = await asyncio.to_thread(
-                        subprocess.run,
-                        [find_uv_binary("uv"), "add", *reqs],
-                        cwd=str(project_dir),
-                        env=project_subprocess_env(project_dir),
-                        capture_output=True,
-                        text=True,
-                        timeout=300,
-                    )
-                    if add_result.returncode != 0:
-                        tail = (add_result.stderr or add_result.stdout or "").strip().splitlines()[-5:]
-                        print(f"[CLI Install] Warning: `uv add` for template deps failed: {' | '.join(tail)}")
-                    else:
-                        print(f"[CLI Install] Installed template requirements successfully.")
-        except Exception as _dep_e:
-            print(f"[CLI Install] Warning: could not install template requirements: {_dep_e}")
+        # Install the component's own requirements (package mode copies nothing, so they were never installed -- see
+        # services/component_dependencies.py). Failures are reported on the response, not swallowed.
+        from ..services.component_dependencies import ensure_dependencies
+        dep_result = await asyncio.to_thread(ensure_dependencies, project_dir, {component_id})
+        if dep_result["installed"]:
+            print(f"[CLI Install] Installed template requirements: {dep_result['installed']}")
+        if dep_result["failed"]:
+            print(f"[CLI Install] Warning: could not install template requirements: {dep_result['failed']}")
 
     # System-level (non-pip) dependencies, e.g. ocr_extractor needs the
     # `tesseract` BINARY -- pip/uv can install pytesseract (the Python
@@ -1783,6 +1759,7 @@ async def _install_component_via_cli_locked(
         "dropped_attributes": dropped_attributes,
         "components_list_warning": components_list_warning,
         "missing_system_deps": missing_system_deps,
+        "dependencies": dep_result,
     }
 
 

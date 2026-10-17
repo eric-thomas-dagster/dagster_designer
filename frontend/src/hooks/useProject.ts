@@ -82,6 +82,22 @@ function composeLazyGraph(base: PipelineGraph, slices: Record<string, LazySlice>
 }
 
 const LIVE_STATUS_FIELDS = ['stale_status', 'freshness_status', 'last_run_status'] as const;
+const _depsChecked = new Set<string>();
+/** Once per project per session: components installed as a package never had their Python dependencies installed (the first
+ *  run then died with "No module named ..."). This quietly installs whatever is missing and says so only if it had to. */
+async function ensureComponentDependencies(projectId: string) {
+  if (_depsChecked.has(projectId)) return;
+  _depsChecked.add(projectId);
+  try {
+    const r = await projectsApi.ensureDependencies(projectId);
+    const { notify } = await import('@/components/Notifications');
+    if (r.installed.length > 0) notify.success(`Installed the packages your components needed: ${r.installed.slice(0, 6).join(', ')}${r.installed.length > 6 ? '…' : ''}`, { durationMs: 10_000 });
+    else if (r.failed) notify.warning(`Some packages your components need could not be installed:\n${r.failed}`, 30_000);
+  } catch {
+    _depsChecked.delete(projectId); // try again next time the project is opened
+  }
+}
+
 /** Matches the server's default (DESIGNER_LAZY_THRESHOLD): above this many assets a project is served in pieces. */
 const LAZY_ASSET_THRESHOLD = 5000;
 
@@ -168,7 +184,10 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
         error: cloudError ? `Couldn't load data from Dagster+: ${cloudError}` : null,
       });
 
-      if (!(project as any).is_dagster_plus) void get().refreshLiveStatus(id);
+      if (!(project as any).is_dagster_plus) {
+        void get().refreshLiveStatus(id);
+        void ensureComponentDependencies(id);
+      }
 
       // Sync dependency-install state from the backend so validation is
       // blocked correctly even after an app restart or project switch.

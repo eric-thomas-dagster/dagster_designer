@@ -831,6 +831,26 @@ async def search_graph_assets(project_id: str, q: str = "", group: str | None = 
     return graph_index.search_assets(idx, q=q, group=group, kind=kind, offset=max(0, offset), limit=max(1, min(limit, 500)))
 
 
+@router.post("/{project_id}/ensure-dependencies")
+async def ensure_project_dependencies(project_id: str):
+    """Install the Python packages the project's community components need but its venv lacks (components installed
+    as a package never had theirs installed). Idempotent and cheap when nothing is missing. Repairs projects installed
+    before installs did this themselves."""
+    from ..services.component_dependencies import ensure_dependencies, used_component_ids
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    if project.is_dagster_plus:
+        return {"checked": [], "installed": [], "failed": None}
+    project_dir = project_service._get_project_dir(project)
+    if not project_dir.exists():
+        raise HTTPException(status_code=404, detail="Project directory not found")
+    from .templates_registry import _install_lock_for
+    ids = await asyncio.to_thread(used_component_ids, project_dir)
+    async with _install_lock_for(project_id):  # same lock installs hold: both rewrite pyproject.toml / the venv
+        return await asyncio.to_thread(ensure_dependencies, project_dir, ids)
+
+
 @router.get("/{project_id}/asset-live-status")
 async def get_asset_live_status(project_id: str):
     """Live per-asset status (stale / freshness / last run) for a LOCAL project.
