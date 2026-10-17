@@ -372,6 +372,11 @@ function App() {
   // event in AssetDetailPage's Events tab) -- seeds RunsPanel's initial
   // selection so it opens straight to that run instead of the list.
   const [runToOpen, setRunToOpen] = useState<string | null>(null);
+  // The installed build's real version (stamped per release), not a hard-coded label.
+  const [appVersion, setAppVersion] = useState('0.1');
+  useEffect(() => {
+    import('@tauri-apps/api/app').then((m) => m.getVersion()).then(setAppVersion).catch(() => { /* browser dev: keep the default */ });
+  }, []);
   const [runsFilter, setRunsFilter] = useState<{ tagKey?: string; tagValue?: string } | null>(null);
   const handleOpenRun = (runId: string) => {
     setRunToOpen(runId);
@@ -1456,7 +1461,7 @@ function App() {
             </button>
           </div>
           {!navCollapsed && (
-            <span className={`text-[11px] ${isTauri ? 'text-gray-400 dark:text-white/40' : 'text-white/40'}`}>v0.1</span>
+            <span className={`text-[11px] ${isTauri ? 'text-gray-400 dark:text-white/40' : 'text-white/40'}`} title="Dagster Designer version">v{appVersion}</span>
           )}
         </div>
       </nav>
