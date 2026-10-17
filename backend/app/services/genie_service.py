@@ -333,6 +333,10 @@ def _pip_available(pkg: str) -> bool:
         return False
 
 
+# Always shown to the planner at full detail (see _keyword_prefilter).
+_ALWAYS_OFFERED_COMPONENT_IDS = ("dataframe_transformer",)
+
+
 def _keyword_prefilter(
     components: list[dict[str, Any]], task: str, cap: int = 250
 ) -> tuple[list[dict[str, Any]], set[str], set[str]]:
@@ -461,6 +465,16 @@ def _keyword_prefilter(
         # Match forms: `asset_job`, `assetjob`, `AssetJobComponent` (via
         # CamelCase or snake_case) — presence anywhere in the task.
         if cid in task_lower or cn in task_norm:
+            forced_ids.append(cid)
+
+    # General-purpose building blocks the planner must always be able to pick, whatever words the task uses. The
+    # keyword score only matches a component's own text, so `dataframe_transformer` (split / replace / substring /
+    # window ops...) ranked outside the top 20 "transformation" components for e.g. "pull the domain out of the email
+    # field" and was missing from the catalog entirely -- the planner then reached for a look-alike (an extractor for
+    # list/dict columns, or a SQL transform needing a connection string) and the plan failed.
+    present_ids = {c.get("id") for c in components}
+    for cid in _ALWAYS_OFFERED_COMPONENT_IDS:
+        if cid in present_ids and cid not in forced_ids:
             forced_ids.append(cid)
 
     # Reserved coverage per essential category so we always show enough breadth
@@ -775,6 +789,18 @@ SYSTEM_PROMPT = (
     "  already is) avoids that dependency entirely. Only reach for a DataFrame-"
     "  based component when the task genuinely needs Python/pandas logic that "
     "  isn't expressible as SQL (e.g. a specific library call, complex branching).\n"
+    "- DERIVING A VALUE FROM A TEXT COLUMN (the domain of an email, a prefix, a "
+    "  suffix, the pieces of a delimited string): this takes PRECEDENCE over the "
+    "  warehouse-native rule above -- a simple per-row derivation needs no "
+    "  connection string or SQL, so use `dataframe_transformer` with `split_ops` "
+    "  for anything delimited. `split_ops` is a JSON STRING (not a nested list), "
+    "  e.g. split_ops: '[{\"column\": \"email\", \"delimiter\": \"@\", "
+    "  \"into\": \"local_part,domain\"}]' puts the part after the @ in "
+    "  `domain`. In every op, `into` is ONE comma-separated STRING "
+    "  (\"local_part,domain\"), never a list. Do NOT use `dataframe_extract_field` for this: it only reads items "
+    "  out of columns whose VALUES are lists or dicts, and has no regex option. "
+    "  Only use field names that exist in the component's schema -- never invent "
+    "  one (e.g. `regex`).\n"
     "- COMPLETE EVERY FIELD THAT AFFECTS BEHAVIOR, not just the ones marked "
     "  required: a field being optional in the schema does NOT mean it's safe to "
     "  omit -- when you install a component, any field you don't supply keeps "
@@ -2305,6 +2331,11 @@ async def plan(
                 notes.append(f"⚠︎ Issue: {iss}")
             notes.append(f"⚠︎ Auto-repair failed: {type(e).__name__}: {str(e)[:120]}")
 
+    try:
+        notes.extend(await _sanitize_pick_configs(picks, components_by_id))
+    except Exception as e:  # a backstop must never break planning
+        notes.append(f"⚠︎ Couldn't double-check field types: {type(e).__name__}: {str(e)[:100]}")
+
     # Hard, deterministic block -- see _per_row_partition_misuse's
     # docstring. Checked before every other backstop: a plan built this
     # way is GUARANTEED to fail materialize (confirmed live, twice), so
@@ -2997,6 +3028,93 @@ async def _detect_schema_issues(picks: list[GeniePick], components_by_id: dict[s
                 f"whichever valid name it actually means (keep its value)."
             )
     return issues
+
+
+def _normalize_json_ops(description: str, text: str) -> str:
+    """For a JSON-text field whose documented example writes a value as a comma-separated string (`"into":
+    "first_name,last_name"`), turn a list written there instead (`"into": ["first_name", "last_name"]`) into that string.
+    Models keep writing the list; the component then does str(list).split(",") and creates columns literally named
+    `['first_name'` and `'last_name']` -- no error, just wrong output. Leaves anything it doesn't recognise untouched."""
+    try:
+        ops = json.loads(text)
+    except (ValueError, TypeError):
+        return text
+    if not isinstance(ops, list):
+        return text
+    changed = False
+    for op in ops:
+        if not isinstance(op, dict):
+            continue
+        for key, val in list(op.items()):
+            if isinstance(val, list) and val and all(isinstance(x, (str, int, float)) for x in val) \
+                    and f'"{key}": "' in description:
+                op[key] = ",".join(str(x) for x in val)
+                changed = True
+    return json.dumps(ops) if changed else text
+
+
+def _parses_as_json(text: str) -> bool:
+    try:
+        json.loads(text)
+        return True
+    except (ValueError, TypeError):
+        return False
+
+
+async def _sanitize_pick_configs(picks: list[GeniePick], components_by_id: dict[str, dict[str, Any]]) -> list[str]:
+    """Final, deterministic backstop: drop any config field that is not in the component's schema or whose value has
+    the wrong type, and say so. The LLM repair pass above can make this worse -- a real plan's made-up `regex` field
+    was "repaired" into `source` (an object-typed field) holding a regex STRING, which fails the component's own
+    validation, and Designer then (correctly) undid the whole plan. A dropped field degrades one pick; a wrong-typed
+    one takes the whole project down. Returns human-readable notes for what was removed."""
+    import asyncio
+    add_picks = [p for p in picks if p.action == "add" and p.config]
+    if not add_picks:
+        return []
+    types_needed = {p.component_type for p in add_picks}
+    urls = {ct: (components_by_id.get(ct) or {}).get("schema_url") for ct in types_needed}
+    urls = {ct: u for ct, u in urls.items() if u}
+    if not urls:
+        return []
+    fetched = await asyncio.gather(*(_fetch_schema(u) for u in urls.values()))
+    schemas = dict(zip(urls.keys(), fetched))
+    notes: list[str] = []
+    for p in add_picks:
+        schema = schemas.get(p.component_type)
+        if not schema:
+            continue
+        attrs = schema.get("attributes") or {}
+        removed: list[str] = []
+        for field in list(p.config.keys()):
+            if field not in attrs:
+                # Unknown names are handled (renamed/aliased) elsewhere; only a type clash is unsafe to keep.
+                continue
+            value = p.config[field]
+            spec = attrs[field] if isinstance(attrs[field], dict) else {}
+            if (isinstance(value, (list, dict)) and spec.get("type") == "string"
+                    and "JSON" in (spec.get("description") or "")):
+                # The component wants the JSON TEXT of this structure (e.g. split_ops); the model gave the structure.
+                # Serializing it is exactly what was meant, so convert instead of discarding the whole field.
+                p.config[field] = value = json.dumps(value)
+                notes.append(f"ℹ Converted {field} on '{p.asset_name}' to the JSON text the component expects.")
+            if isinstance(value, str) and spec.get("type") == "string" and "JSON" in (spec.get("description") or ""):
+                fixed = _normalize_json_ops(spec.get("description") or "", value)
+                if fixed != value:
+                    p.config[field] = value = fixed
+                    notes.append(f"ℹ Normalized {field} on '{p.asset_name}' (a list was written where the component takes a comma-separated string).")
+            bad_json = (
+                isinstance(value, str) and spec.get("type") == "string" and "JSON" in (spec.get("description") or "")
+                and not _parses_as_json(value)
+            )
+            if bad_json or _type_mismatches(schema, {field: value}):
+                removed.append(field)
+                del p.config[field]
+        if removed:
+            notes.append(
+                f"⚠︎ Removed {', '.join(removed)} from '{p.asset_name}' ({p.component_type}): the value's type doesn't "
+                f"match what the component expects, and keeping it would stop the project loading."
+            )
+    return notes
 
 
 # ------------------------------------------------------------------

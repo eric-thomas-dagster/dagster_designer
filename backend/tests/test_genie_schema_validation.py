@@ -136,3 +136,80 @@ class TestUnknownFields:
 
     def test_empty_config_produces_no_unknowns(self):
         assert _unknown_fields(SQL_TRANSFORM_SCHEMA, {}) == []
+
+
+class TestSanitizePickConfigs:
+    """The LLM repair pass once 'repaired' an invented `regex` field into `source` (an object-typed field) holding a
+    regex string; that value fails the component's validation, so the whole plan was applied and then undone."""
+
+    def _run(self, config, schema):
+        import asyncio
+        from unittest.mock import patch
+
+        from app.services import genie_service as g
+
+        pick = g.GeniePick(component_type="extract", asset_name="out", upstream_asset_names=[], config=config, action="add", reason="r")
+
+        async def fake_fetch(url, client=None):
+            return schema
+
+        with patch.object(g, "_fetch_schema", fake_fetch):
+            notes = asyncio.run(g._sanitize_pick_configs([pick], {"extract": {"schema_url": "http://x/schema.json"}}))
+        return pick, notes
+
+    SCHEMA = {"attributes": {"source": {"type": "object"}, "source_column": {"type": "string"}, "index": {"type": "integer"}}}
+
+    def test_wrong_typed_field_is_dropped_and_reported(self):
+        pick, notes = self._run({"source_column": "email", "source": "@(.+)$"}, self.SCHEMA)
+        assert pick.config == {"source_column": "email"}
+        assert len(notes) == 1 and "source" in notes[0] and "out" in notes[0]
+
+    def test_valid_config_is_untouched(self):
+        pick, notes = self._run({"source_column": "email", "index": 1}, self.SCHEMA)
+        assert pick.config == {"source_column": "email", "index": 1} and notes == []
+
+    def test_unknown_names_are_left_for_the_alias_step(self):
+        pick, notes = self._run({"nonsense": "x"}, self.SCHEMA)
+        assert pick.config == {"nonsense": "x"} and notes == []
+
+
+class TestSanitizeJsonStringFields:
+    SCHEMA = {"attributes": {"split_ops": {"type": "string", "description": 'JSON list of split ops: [{"column": "a"}]'},
+                             "note": {"type": "string", "description": "free text"}}}
+
+    def _run(self, config):
+        return TestSanitizePickConfigs()._run(config, self.SCHEMA)
+
+    def test_a_structure_for_a_json_text_field_is_serialized_not_dropped(self):
+        import json
+        ops = [{"column": "email", "delimiter": "@", "into": "local,domain"}]
+        pick, notes = self._run({"split_ops": ops})
+        assert json.loads(pick.config["split_ops"]) == ops and any("Converted split_ops" in n for n in notes)
+
+    def test_a_json_field_that_is_not_json_is_dropped(self):
+        pick, notes = self._run({"split_ops": "email@local_part,domain", "note": "x"})
+        assert pick.config == {"note": "x"} and "split_ops" in notes[0]
+
+    def test_valid_json_in_a_json_field_is_kept(self):
+        good = '[{"column": "email", "delimiter": "@", "into": "local,domain"}]'
+        pick, notes = self._run({"split_ops": good})
+        assert pick.config == {"split_ops": good} and notes == []
+
+
+class TestNormalizeJsonOps:
+    DESC = 'JSON list of split ops: [{"column": "full_name", "delimiter": " ", "into": "first_name,last_name"}].'
+
+    def test_list_where_the_example_shows_a_string_is_joined(self):
+        import json
+        from app.services.genie_service import _normalize_json_ops
+        out = _normalize_json_ops(self.DESC, json.dumps([{"column": "email", "delimiter": "@", "into": ["local_part", "domain"]}]))
+        assert json.loads(out)[0]["into"] == "local_part,domain"
+
+    def test_already_correct_and_unrelated_values_are_untouched(self):
+        import json
+        from app.services.genie_service import _normalize_json_ops
+        good = json.dumps([{"column": "email", "into": "a,b"}])
+        assert _normalize_json_ops(self.DESC, good) == good
+        other = json.dumps([{"column": "email", "keep": ["x", "y"]}])      # `keep` isn't a string-valued key in the example
+        assert _normalize_json_ops(self.DESC, other) == other
+        assert _normalize_json_ops(self.DESC, "not json") == "not json"

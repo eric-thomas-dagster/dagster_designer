@@ -18,6 +18,8 @@
  * applies everywhere at once instead of needing to be re-implemented per
  * call site.
  */
+import { conciseValidationReason } from './validationReason';
+
 export interface ValidateOrRollbackResult {
   ok: boolean;
   /** Set only when ok is false -- the validation error that caused the
@@ -50,7 +52,9 @@ export async function validateProjectOrRollback(
       }
       return {
         ok: false,
+        // Prefer the specific reason ("comp: attributes.field -- Input should be ...") over the generic headline.
         error:
+          conciseValidationReason(validation.details?.validation_error || validation.details?.stderr) ||
           validation.error ||
           validation.details?.validation_error ||
           'The resulting project failed to validate (Dagster rejected the combined definitions). The change was undone.',

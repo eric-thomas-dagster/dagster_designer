@@ -80,6 +80,10 @@ def coerce_to_schema(prop: dict | None, value):
     t = types[0]
     if t == 'string':
         if isinstance(value, str): return value, True
+        if isinstance(value, (list, dict)) and 'JSON' in (prop.get('description') or ''):
+            # the component takes the JSON TEXT of a structure (e.g. a list of ops) -- serialize it
+            import json as _json
+            return _json.dumps(value), True
         if isinstance(value, (list, tuple)):
             return (str(value[0]), True) if len(value) == 1 and not isinstance(value[0], (dict, list)) else (value, False)
         if isinstance(value, bool): return ('true' if value else 'false'), True

@@ -21,6 +21,7 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
       - run: npm ci
       - run: npx tsc --noEmit -p .
+      - run: npm test
       # `npm run lint` is left out here: eslint 9 needs an eslint.config.js
       # this project doesn't have (pre-existing gap, not something this
       # workflow introduced) -- it currently just errors immediately rather

@@ -46,3 +46,12 @@ def test_coerce_to_schema_reshapes_or_rejects():
     assert c({'type': ['string', 'null']}, ['q']) == ('q', True)
     assert c(None, ['q']) == (['q'], True) and c(S, None) == (None, True)
     assert c({'type': 'object'}, {'a': 1}) == ({'a': 1}, True) and c({'type': 'object'}, 'x')[1] is False
+
+
+def test_structure_for_a_json_text_field_is_serialized():
+    import json
+    from app.api.templates_registry import coerce_to_schema as c
+    prop = {'type': 'string', 'description': 'JSON list of split ops'}
+    v, ok = c(prop, [{"column": "email"}])
+    assert ok and json.loads(v) == [{"column": "email"}]
+    assert c({'type': 'string', 'description': 'plain'}, [{"a": 1}])[1] is False   # still refused when it isn't JSON text
