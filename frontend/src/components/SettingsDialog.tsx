@@ -109,8 +109,9 @@ function SettingsDialog({ onClose }: { onClose: () => void }) {
 
   return (
     <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-      <div className="bg-white rounded-lg shadow-xl w-full max-w-md p-6">
-        <div className="flex items-center justify-between mb-1">
+      {/* Header and the Save/Close row stay put; only the middle scrolls, so Save is reachable in a short window. */}
+      <div className="bg-white rounded-lg shadow-xl w-full max-w-md max-h-[90vh] flex flex-col">
+        <div className="flex items-center justify-between px-6 pt-6 mb-1 flex-shrink-0">
           <div className="flex items-center gap-2">
             <KeyRound className="w-5 h-5 text-primary" />
             <h2 className="text-lg font-semibold">Dagster AI Settings</h2>
@@ -119,10 +120,11 @@ function SettingsDialog({ onClose }: { onClose: () => void }) {
             <X className="w-5 h-5 text-gray-400 hover:text-gray-600" />
           </button>
         </div>
-        <p className="text-sm text-gray-500 mb-4">
+        <p className="text-sm text-gray-500 mb-4 px-6 flex-shrink-0">
           Used by the AI assistant across every project. Saved keys apply immediately — no restart needed.
         </p>
 
+        <div className="flex-1 min-h-0 overflow-y-auto px-6 pb-2">
         <div className="space-y-4">
           <ProviderField
             label="OpenAI"
@@ -188,8 +190,9 @@ function SettingsDialog({ onClose }: { onClose: () => void }) {
         <FastLoadingSection />
 
         <GitHubSection />
+        </div>
 
-        <div className="flex justify-end gap-2 mt-6">
+        <div className="flex justify-end gap-2 px-6 py-4 border-t border-gray-100 flex-shrink-0">
           <button
             onClick={onClose}
             disabled={saving}
