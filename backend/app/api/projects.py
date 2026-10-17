@@ -2159,7 +2159,13 @@ async def delete_component_instance(project_id: str, component_id: str, cascade:
     # path to fix it.
     has_folder = component_instance_dir is not None
     has_component_entry = any(c.id == component_id for c in (project.components or []))
-    if not has_folder and not has_component_entry:
+    # Ghost graph nodes (stored graph still lists the asset after its folder and
+    # component entry are gone) must be deletable too, or they can never be cleared.
+    has_graph_nodes = any(
+        component_id in (n.id, (n.data or {}).get('component_id'), (n.data or {}).get('asset_key'))
+        for n in (project.graph.nodes if project.graph else [])
+    )
+    if not has_folder and not has_component_entry and not has_graph_nodes:
         raise HTTPException(
             status_code=404,
             detail=f"Component instance '{component_id}' not found on disk or in project JSON"

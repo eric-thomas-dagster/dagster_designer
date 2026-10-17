@@ -58,3 +58,23 @@ def test_ghost_assets_of_already_deleted_components_are_dropped_too(monkeypatch,
     monkeypatch.setattr(P.asset_introspection_service, "clear_cache", lambda pid: None)
     asyncio.run(P.delete_component_instance("p", "victim"))
     assert sorted(n.id for n in saved["graph"].nodes) == ["kept_a", "stg"]     # both victim assets AND the ghost are gone; dbt-style node kept
+
+
+def test_deleting_a_pure_ghost_does_not_404(monkeypatch, tmp_path):
+    """The ghost's folder AND component entry are already gone (only graph nodes remain) -- that used to 404, so the
+    UI's delete silently did nothing and the ghost 'came back'."""
+    defs = tmp_path / "src" / "m" / "defs"
+    (defs / "kept").mkdir(parents=True); (defs / "kept" / "defs.yaml").write_text("type: x\n")
+    nodes = [_node("ghost_a", "ghost_pipeline"), _node("ghost_b", "ghost_pipeline"), _node("kept_a", "kept")]
+    proj = SimpleNamespace(id="p", components=[], custom_lineage=[], asset_field_overrides={}, graph=Graph(nodes=nodes, edges=[]))
+    saved = {}
+    monkeypatch.setattr(P.project_service, "get_project", lambda pid: proj)
+    monkeypatch.setattr(P.project_service, "_get_project_dir", lambda p: tmp_path)
+    monkeypatch.setattr(P.project_service, "update_project", lambda pid, upd: saved.setdefault("graph", upd.graph) and proj)
+
+    async def boom(*a, **k):
+        raise RuntimeError("project does not load")
+    monkeypatch.setattr(P.asset_introspection_service, "get_assets_for_project_async", boom)
+    monkeypatch.setattr(P.asset_introspection_service, "clear_cache", lambda pid: None)
+    asyncio.run(P.delete_component_instance("p", "ghost_pipeline"))
+    assert [n.id for n in saved["graph"].nodes] == ["kept_a"]
