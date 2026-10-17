@@ -89,7 +89,15 @@ async function ensureComponentDependencies(projectId: string) {
   if (_depsChecked.has(projectId)) return;
   _depsChecked.add(projectId);
   try {
-    const r = await projectsApi.ensureDependencies(projectId);
+    let st = await projectsApi.ensureDependencies(projectId);
+    // The install runs on the server in the background; poll lightly (each poll is a quick request, so nothing else queues
+    // behind it) for up to ~15 minutes.
+    for (let i = 0; st.state === 'running' && i < 300; i++) {
+      await new Promise((r) => setTimeout(r, 3000));
+      st = await projectsApi.ensureDependenciesStatus(projectId);
+    }
+    const r = st.result;
+    if (!r) return;
     const { notify } = await import('@/components/Notifications');
     if (r.installed.length > 0) notify.success(`Installed the packages your components needed: ${r.installed.slice(0, 6).join(', ')}${r.installed.length > 6 ? '…' : ''}`, { durationMs: 10_000 });
     else if (r.failed) notify.warning(`Some packages your components need could not be installed:\n${r.failed}`, 30_000);

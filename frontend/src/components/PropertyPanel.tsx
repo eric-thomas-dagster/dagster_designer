@@ -1896,7 +1896,13 @@ export function PropertyPanel({ nodeId, onConfigureComponent, onOpenFile, onNewP
                       const dependents = downstreamAssetLabels(currentProject, nodeId);
                       // Jobs / schedules / sensors / checks that name this asset are updated or removed with it (otherwise
                       // they stop the whole project loading) -- list them.
-                      const refInfo = await projectsApi.assetReferences(currentProject.id, componentId).catch(() => null);
+                      // Bounded wait: the UI has only a handful of connections to the backend, and slow background requests (a dev server
+                      // start, schema loads) can hold them all -- the confirmation must not wait on this lookup. The server
+                      // applies the same cleanup when it deletes, so skipping the note only means a less detailed dialog.
+                      const refInfo = await Promise.race([
+                        projectsApi.assetReferences(currentProject.id, componentId).catch(() => null),
+                        new Promise<null>((resolve) => setTimeout(() => resolve(null), 1500)),
+                      ]);
                       const goneWith = (refInfo?.references ?? []).filter((r) => r.removed_with_it).map((r) => r.component);
                       const updatedWith = (refInfo?.references ?? []).filter((r) => r.automation && !r.removed_with_it).map((r) => r.component);
                       const cascadeNote = goneWith.length + updatedWith.length > 0

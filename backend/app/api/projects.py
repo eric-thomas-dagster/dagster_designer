@@ -831,24 +831,50 @@ async def search_graph_assets(project_id: str, q: str = "", group: str | None = 
     return graph_index.search_assets(idx, q=q, group=group, kind=kind, offset=max(0, offset), limit=max(1, min(limit, 500)))
 
 
+_dep_jobs: dict[str, dict] = {}
+
+
+async def _run_ensure_dependencies(project_id: str, project_dir: Path) -> None:
+    from ..services.component_dependencies import ensure_dependencies, used_component_ids
+    from .templates_registry import _install_lock_for
+    job = _dep_jobs[project_id]
+    try:
+        ids = await asyncio.to_thread(used_component_ids, project_dir)
+        async with _install_lock_for(project_id):  # same lock installs hold: both rewrite pyproject.toml / the venv
+            job["result"] = await asyncio.to_thread(ensure_dependencies, project_dir, ids)
+    except Exception as e:  # never leave a job 'running' forever
+        job["result"] = {"checked": [], "installed": [], "failed": f"{type(e).__name__}: {str(e)[:200]}"}
+    finally:
+        job["state"] = "done"
+
+
 @router.post("/{project_id}/ensure-dependencies")
 async def ensure_project_dependencies(project_id: str):
-    """Install the Python packages the project's community components need but its venv lacks (components installed
-    as a package never had theirs installed). Idempotent and cheap when nothing is missing. Repairs projects installed
-    before installs did this themselves."""
-    from ..services.component_dependencies import ensure_dependencies, used_component_ids
+    """Start installing the Python packages the project's community components need but its venv lacks (components
+    installed as a package never had theirs installed). Returns IMMEDIATELY -- an install can take minutes, and a request held
+    open that long ties up one of the UI's few connections, so every click behind it (a delete confirmation, say) sat waiting.
+    Poll GET .../ensure-dependencies for the outcome. Idempotent: cheap when nothing is missing."""
     project = project_service.get_project(project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
     if project.is_dagster_plus:
-        return {"checked": [], "installed": [], "failed": None}
+        return {"state": "done", "result": {"checked": [], "installed": [], "failed": None}}
     project_dir = project_service._get_project_dir(project)
     if not project_dir.exists():
         raise HTTPException(status_code=404, detail="Project directory not found")
-    from .templates_registry import _install_lock_for
-    ids = await asyncio.to_thread(used_component_ids, project_dir)
-    async with _install_lock_for(project_id):  # same lock installs hold: both rewrite pyproject.toml / the venv
-        return await asyncio.to_thread(ensure_dependencies, project_dir, ids)
+    job = _dep_jobs.get(project_id)
+    if not job or job["state"] != "running":
+        job = _dep_jobs[project_id] = {"state": "running", "result": None}
+        job["task"] = asyncio.create_task(_run_ensure_dependencies(project_id, project_dir))
+    return {"state": job["state"], "result": job["result"]}
+
+
+@router.get("/{project_id}/ensure-dependencies")
+async def ensure_project_dependencies_status(project_id: str):
+    job = _dep_jobs.get(project_id)
+    if not job:
+        return {"state": "idle", "result": None}
+    return {"state": job["state"], "result": job["result"]}
 
 
 @router.get("/{project_id}/asset-live-status")
