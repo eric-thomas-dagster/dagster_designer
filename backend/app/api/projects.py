@@ -2050,8 +2050,20 @@ async def delete_component_instance(project_id: str, component_id: str):
 
         # Regenerate assets to reflect the change
         # Get assets from dg list defs (using async version for non-blocking)
-        asset_nodes, asset_edges = await asset_introspection_service.get_assets_for_project_async(project, recalculate_layout=False)
-        print(f"[Delete Component Instance] Got {len(asset_nodes)} nodes, {len(asset_edges)} edges from introspection")
+        # The folder is already gone, so a project that can't load right now (the usual reason someone is
+        # deleting a component -- e.g. rolling back one that broke the project) must NOT turn this into a 500
+        # that leaves the stored project out of sync. Fall back to pruning the deleted asset from the stored
+        # graph; the next successful introspection reconciles the rest.
+        try:
+            asset_nodes, asset_edges = await asset_introspection_service.get_assets_for_project_async(project, recalculate_layout=False)
+            print(f"[Delete Component Instance] Got {len(asset_nodes)} nodes, {len(asset_edges)} edges from introspection")
+        except Exception as intro_err:
+            print(f"[Delete Component Instance] Project doesn't load after the delete ({str(intro_err)[:200]}); pruning the stored graph instead", flush=True)
+            gone = {n.id for n in project.graph.nodes
+                    if n.node_kind == "asset" and (n.id == component_id or (n.data or {}).get("component_id") == component_id
+                                                   or (n.data or {}).get("asset_key") == component_id)}
+            asset_nodes = [n for n in project.graph.nodes if n.node_kind == "asset" and n.id not in gone]
+            asset_edges = [e for e in project.graph.edges if e.source not in gone and e.target not in gone]
 
         # Update project graph with assets (preserving any non-asset nodes)
         non_asset_nodes = [n for n in project.graph.nodes if n.node_kind != "asset"]

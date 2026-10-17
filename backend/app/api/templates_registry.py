@@ -63,6 +63,57 @@ def coerce_alias_value(target_key: str, value):
     return value, True
 
 
+def coerce_to_schema(prop: dict | None, value):
+    """Reshape `value` to the declared JSON-schema type of `prop` where that is unambiguous, so an AI plan
+    or a hand-built request can't write a shape the component's own validation rejects (which takes the
+    WHOLE project down on load). Returns (value, ok); ok=False means it can't be expressed in that type
+    (the caller drops the field and reports it instead of writing something broken)."""
+    if not isinstance(prop, dict) or value is None:
+        return value, True
+    t = prop.get('type')
+    types = [x for x in (t if isinstance(t, list) else [t]) if x and x != 'null']
+    if not types or any(x == 'object' and isinstance(value, dict) for x in types):
+        return value, True
+    enum = [e for e in (prop.get('enum') or []) if e is not None]
+    if enum and isinstance(value, str) and value not in enum:
+        return value, False
+    t = types[0]
+    if t == 'string':
+        if isinstance(value, str): return value, True
+        if isinstance(value, (list, tuple)):
+            return (str(value[0]), True) if len(value) == 1 and not isinstance(value[0], (dict, list)) else (value, False)
+        if isinstance(value, bool): return ('true' if value else 'false'), True
+        if isinstance(value, (int, float)): return str(value), True
+        return value, False
+    if t == 'array':
+        if isinstance(value, (list, tuple)): return list(value), True
+        if isinstance(value, str): return ([value] if value.strip() else []), True
+        return value, False
+    if t == 'integer':
+        if isinstance(value, bool): return value, False
+        if isinstance(value, int): return value, True
+        if isinstance(value, float) and value.is_integer(): return int(value), True
+        if isinstance(value, str):
+            try: return int(value.strip()), True
+            except ValueError: return value, False
+        return value, False
+    if t == 'number':
+        if isinstance(value, bool): return value, False
+        if isinstance(value, (int, float)): return value, True
+        if isinstance(value, str):
+            try: return float(value.strip()), True
+            except ValueError: return value, False
+        return value, False
+    if t == 'boolean':
+        if isinstance(value, bool): return value, True
+        if isinstance(value, str) and value.strip().lower() in ('true', 'false'):
+            return value.strip().lower() == 'true', True
+        return value, False
+    if t == 'object':
+        return value, isinstance(value, dict)
+    return value, True
+
+
 def detect_project_structure(project_dir: Path, project_name_sanitized: str):
     """
     Detect the actual project structure and return paths to key directories.
@@ -1434,6 +1485,7 @@ async def install_component_via_cli(
             existing_attrs = {}
 
         allowed_keys: Optional[set] = None
+        schema_props: dict = {}
         # Resolve the schema.json under the installed component dir. This
         # only exists for vendored/file-copy installs -- as_package mode
         # has no components/<id>/ directory at all (see the fallback
@@ -1446,6 +1498,7 @@ async def install_component_via_cli(
                 props = schema.get('properties') or schema.get('attributes') or {}
                 if isinstance(props, dict):
                     allowed_keys = set(props.keys())
+                    schema_props = props
         except Exception as e:
             print(f"[CLI Install] Warning: couldn't read schema.json for {component_id}: {e}")
 
@@ -1470,6 +1523,7 @@ async def install_component_via_cli(
                     props = dg_schema.schema.get("properties") or {}
                     if isinstance(props, dict) and props:
                         allowed_keys = set(props.keys())
+                        schema_props = props
             except Exception as e:
                 print(f"[CLI Install] Warning: couldn't resolve schema via dg for {component_id}: {e}")
 
@@ -1495,12 +1549,19 @@ async def install_component_via_cli(
                 merged[k] = v
                 continue
             if k in allowed_keys:
+                v, type_ok = coerce_to_schema(schema_props.get(k), v)
+                if not type_ok:
+                    print(f"[CLI Install] '{k}'={v!r} doesn't fit the schema type for {component_id}; dropping it", flush=True)
+                    dropped.append(k)
+                    continue
                 merged[k] = v
                 continue
             # Try aliasing.
             aliased = ATTRIBUTE_ALIAS_MAP.get(k)
             if aliased and aliased in allowed_keys:
                 v, shape_ok = coerce_alias_value(aliased, v)
+                if shape_ok:
+                    v, shape_ok = coerce_to_schema(schema_props.get(aliased), v)
                 if not shape_ok:
                     dropped.append(k)
                     continue
@@ -1734,6 +1795,7 @@ async def update_component_instance_attributes(instance_id: str, request: Update
             schema_component_id = type_parts[idx + 1]
 
     allowed_keys: Optional[set] = None
+    schema_props: dict = {}
     if schema_component_id:
         try:
             schema_candidates = list(project_dir.glob(f"src/*/components/{schema_component_id}/schema.json")) + \
@@ -1744,6 +1806,7 @@ async def update_component_instance_attributes(instance_id: str, request: Update
                 props = schema.get('properties') or schema.get('attributes') or {}
                 if isinstance(props, dict):
                     allowed_keys = set(props.keys())
+                    schema_props = props
         except Exception as e:
             print(f"[Update Attributes] Warning: couldn't read schema.json for {schema_component_id}: {e}")
 
@@ -1754,10 +1817,20 @@ async def update_component_instance_attributes(instance_id: str, request: Update
     dropped: list[str] = []
     for k, v in request.attributes.items():
         if allowed_keys is None or k in allowed_keys:
+            v, type_ok = coerce_to_schema(schema_props.get(k), v)
+            if not type_ok:
+                dropped.append(k)
+                continue
             merged[k] = v
             continue
         aliased = ATTRIBUTE_ALIAS_MAP.get(k)
         if aliased and aliased in allowed_keys:
+            v, shape_ok = coerce_alias_value(aliased, v)
+            if shape_ok:
+                v, shape_ok = coerce_to_schema(schema_props.get(aliased), v)
+            if not shape_ok:
+                dropped.append(k)
+                continue
             merged[aliased] = v
             continue
         dropped.append(k)

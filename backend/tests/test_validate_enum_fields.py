@@ -32,3 +32,17 @@ def test_alias_value_is_reshaped_between_singular_and_plural():
     assert c('upstream_asset_key', ['a', 'b'])[1] is False
     assert c('upstream_asset_keys', 'x') == (['x'], True)
     assert c('file_path', 'p') == ('p', True)
+
+
+def test_coerce_to_schema_reshapes_or_rejects():
+    from app.api.templates_registry import coerce_to_schema as c
+    S, A, I, N, B = ({'type': t} for t in ('string', 'array', 'integer', 'number', 'boolean'))
+    assert c(S, ['x']) == ('x', True) and c(S, ['x', 'y'])[1] is False and c(S, 5) == ('5', True)
+    assert c(A, 'x') == (['x'], True) and c(A, ('a', 'b')) == (['a', 'b'], True)
+    assert c(I, '7') == (7, True) and c(I, 7.0) == (7, True) and c(I, 'x')[1] is False and c(I, True)[1] is False
+    assert c(N, '1.5') == (1.5, True)
+    assert c(B, 'True') == (True, True) and c(B, 'maybe')[1] is False
+    assert c({'type': 'string', 'enum': ['a', 'b']}, 'z')[1] is False and c({'type': 'string', 'enum': ['a']}, 'a')[1] is True
+    assert c({'type': ['string', 'null']}, ['q']) == ('q', True)
+    assert c(None, ['q']) == (['q'], True) and c(S, None) == (None, True)
+    assert c({'type': 'object'}, {'a': 1}) == ({'a': 1}, True) and c({'type': 'object'}, 'x')[1] is False
