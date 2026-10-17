@@ -131,8 +131,8 @@ function SettingsDialog({ onClose }: { onClose: () => void }) {
 
   return (
     <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-      {/* Header and the Save/Close row stay put; only the middle scrolls, so Save is reachable in a short window. */}
-      <div className="bg-white rounded-lg shadow-xl w-full max-w-lg max-h-[90vh] flex flex-col">
+      {/* Fixed height (capped to the window): header, tabs and the Close/Save row never move between tabs; only the middle scrolls. */}
+      <div className="bg-white rounded-lg shadow-xl w-full max-w-lg h-[min(34rem,90vh)] flex flex-col">
         <div className="flex items-center justify-between px-6 pt-6 mb-1 flex-shrink-0">
           <div className="flex items-center gap-2">
             <KeyRound className="w-5 h-5 text-primary" />
