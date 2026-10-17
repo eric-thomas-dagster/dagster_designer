@@ -12,7 +12,7 @@ import { notify, confirmDialog } from './Notifications';
 import { downstreamAssetLabels, summarizeNames } from '@/lib/dependents';
 import { assetsApi, projectsApi, primitivesApi, partitionsApi, templatesApi, API_BASE, type BackfillRequest } from '@/services/api';
 import type { ComponentInstance } from '@/types';
-import { InlineAttributesForm } from './InlineAttributesForm';
+import { InlineAttributesForm, MAX_INLINE_SETTINGS, inlineSettingCount } from './InlineAttributesForm';
 import { pickSpecializedSidebar } from './SpecializedSidebar';
 import { AddDbtModelDialog } from './AddDbtModelDialog';
 import { GitCommitDialog } from './GitCommitDialog';
@@ -1328,7 +1328,7 @@ export function PropertyPanel({ nodeId, onConfigureComponent, onOpenFile, onNewP
                     ? <>This is a project-local custom component -- Designer can't introspect its config schema, so click <strong>Open YAML</strong> to edit its <code>defs.yaml</code> directly in the code editor instead.</>
                     : <>This is a project-local custom component with no config schema Designer can read, and no source file found to open either.</>
                 ) : (
-                  <>Click <strong>Advanced</strong> for the full config modal (SQL editor, translation rules, etc.), or edit the common fields directly below.</>
+                  <>Click <strong>Advanced</strong> for the full config modal (SQL editor, translation rules, etc.){sourceComponentSchema?.schema?.properties && inlineSettingCount(sourceComponentSchema.schema.properties) > MAX_INLINE_SETTINGS && !pickSpecializedSidebar(sourceComponent.component_type) ? '.' : ', or edit the common fields directly below.'}</>
                 )}
               </p>
 
@@ -1337,7 +1337,17 @@ export function PropertyPanel({ nodeId, onConfigureComponent, onOpenFile, onNewP
                   them here saves a modal round-trip. Falls back to the
                   Advanced modal for special widgets (sql_template,
                   upstream_asset_keys, translation, etc.). */}
-              {sourceComponentSchema?.schema?.properties && (() => {
+              {sourceComponentSchema?.schema?.properties
+                && inlineSettingCount(sourceComponentSchema.schema.properties) > MAX_INLINE_SETTINGS
+                && !pickSpecializedSidebar(sourceComponent.component_type) && (
+                <p className="mt-2 text-xs text-gray-500">
+                  This component has {inlineSettingCount(sourceComponentSchema.schema.properties)} settings, so they live
+                  in <strong>Advanced</strong> rather than here.
+                </p>
+              )}
+              {sourceComponentSchema?.schema?.properties
+                && (inlineSettingCount(sourceComponentSchema.schema.properties) <= MAX_INLINE_SETTINGS
+                    || !!pickSpecializedSidebar(sourceComponent.component_type)) && (() => {
                 // If we have a hand-tuned sidebar for this component
                 // (join, filter, etc.), render it instead of the
                 // schema-driven generic form. Users still get the
