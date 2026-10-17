@@ -4381,6 +4381,33 @@ async def _expand_partition_range(project_id: str, asset_keys: list[str], start:
 _dagster_backfills: dict[str, dict] = {}
 
 
+async def _ensure_dev_server(project: Project, timeout_s: float = 90.0) -> dict | None:
+    """The project's daemon-health result, starting its dev server first if it isn't running (a real Dagster
+    backfill needs the webserver + daemon; without one the backfill used to silently degrade to a slow,
+    sequential `dg launch` per partition). None if it can't be brought up in time."""
+    from ..services import dagster_backfill as dbf
+
+    health = await _run_dagster_graphql(project, dbf.DAEMON_HEALTH_QUERY, {})
+    if health is not None:
+        return health
+    try:
+        from .dagster_webserver import start_dagster_ui
+        print(f"[backfill] dev server for {project.id} isn't running; starting it", flush=True)
+        await start_dagster_ui(project.id)
+    except HTTPException as e:
+        print(f"[backfill] couldn't start the dev server: {e.detail}", flush=True)
+    except Exception as e:
+        print(f"[backfill] couldn't start the dev server: {e}", flush=True)
+    import time
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        health = await _run_dagster_graphql(project, dbf.DAEMON_HEALTH_QUERY, {})
+        if health is not None and dbf.backfill_daemon_healthy(health):
+            return health
+        await asyncio.sleep(2.0)
+    return health
+
+
 async def _reload_dev_server_locations(project: Project, timeout_s: float = 120.0) -> None:
     """Reload every code location on the project's local dev server and wait until they are LOADED
     (a reload re-runs the project's definitions build, which can take a while with dbt)."""
@@ -4415,9 +4442,9 @@ async def _try_dagster_backfill(project, project_id: str, request: "BackfillRequ
 
     if request.config:
         return None, None, "run config is only supported on the CLI path"
-    health = await _run_dagster_graphql(project, dbf.DAEMON_HEALTH_QUERY, {})
+    health = await _ensure_dev_server(project)
     if health is None:
-        return None, None, "the project's dev server isn't running"
+        return None, None, "the project's dev server isn't running and could not be started"
     if not dbf.backfill_daemon_healthy(health):
         return None, None, "the dev server's backfill daemon isn't healthy"
 
@@ -4658,6 +4685,9 @@ async def _run_backfill_in_background(project_id: str, project_dir: Path, reques
         all_stdout: list[str] = []
         all_stderr: list[str] = []
         failed = False
+        failed_launches = 0
+        consecutive_failures = 0
+        MAX_CONSECUTIVE_BACKFILL_FAILURES = 3
         queue = list(partition_arg_sets)
         while queue:
             partition_args = queue.pop(0)
@@ -4692,7 +4722,16 @@ async def _run_backfill_in_background(project_id: str, project_dir: Path, reques
             all_stderr.append(result.stderr)
             if result.returncode != 0:
                 failed = True
-                break  # stop at the first failure rather than launching the rest
+                failed_launches += 1
+                consecutive_failures += 1
+                _backfill_job_update(backfill_id, launched=len(all_stdout), failed_runs=failed_launches)
+                # One partition's run failing (bad data for that day) shouldn't cancel the rest of the
+                # backfill -- but several in a row means something systemic (project won't load, missing
+                # credentials), so stop rather than burn through every remaining partition.
+                if consecutive_failures >= MAX_CONSECUTIVE_BACKFILL_FAILURES:
+                    break
+                continue
+            consecutive_failures = 0
             _backfill_job_update(backfill_id, launched=len(all_stdout))
 
         success = not failed
@@ -4712,6 +4751,11 @@ async def _run_backfill_in_background(project_id: str, project_dir: Path, reques
             # (e.g. AssetDetailPage.tsx) -- this is just the reason.
             stderr_lines = [l for l in combined_stderr.splitlines() if l.strip()]
             message = stderr_lines[-1] if stderr_lines else "no error output captured"
+            if len(all_stdout) > 1:
+                skipped = len(queue)
+                message = (f"{failed_launches} of {len(all_stdout)} partition launches failed"
+                           + (f"; stopped after {MAX_CONSECUTIVE_BACKFILL_FAILURES} failures in a row, {skipped} not attempted" if skipped else "")
+                           + f". Last error: {message}")
 
         # materialize_assets logs an ingestion event per asset so the
         # Ingestions tab's history/sparklines have real data to show --

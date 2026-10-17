@@ -97,9 +97,22 @@ def test_a_range_that_works_is_still_one_launch(run_backfill):
 
 
 def test_a_real_failure_is_reported_not_swallowed(run_backfill):
-    job, launches = run_backfill(req(partition_selection=KEYS[:3]), [(1, "noise\nSomething real broke")])
+    job, launches = run_backfill(req(partition_selection=KEYS[:1]), [(1, "noise\nSomething real broke")])
     assert job["state"] == "failed" and job["message"] == "Something real broke"
-    assert len(launches) == 1                                                    # stops at the first failure
+    assert len(launches) == 1
+
+
+def test_one_failing_partition_does_not_cancel_the_rest(run_backfill):
+    job, launches = run_backfill(req(partition_selection=KEYS[:3]), [(0, ""), (1, "bad day"), (0, "")])
+    assert len(launches) == 3                                                    # kept going after the failure
+    assert job["state"] == "failed" and "1 of 3" in job["message"] and "bad day" in job["message"]
+    assert job["failed_runs"] == 1
+
+
+def test_repeated_failures_stop_the_backfill(run_backfill):
+    job, launches = run_backfill(req(partition_selection=KEYS[:5]), [(1, "no creds")] * 5)
+    assert len(launches) == 3                                                    # 3 in a row = systemic: stop
+    assert "stopped after 3 failures in a row" in job["message"] and "2 not attempted" in job["message"]
 
 
 def test_failure_in_an_expanded_partition_reports_progress_so_far(run_backfill):
@@ -107,7 +120,7 @@ def test_failure_in_an_expanded_partition_reports_progress_so_far(run_backfill):
         req(partition_range={"start": KEYS[0], "end": KEYS[4]}),
         [(1, POLICY_ERROR), (0, ""), (0, ""), (1, "disk full")],
     )
-    assert job["state"] == "failed" and job["launched"] == 2 and job["message"] == "disk full"
+    assert job["state"] == "failed" and job["launched"] == 5 and "1 of 5" in job["message"] and "disk full" in job["message"]
 
 
 def test_unexpandable_range_surfaces_the_original_error(run_backfill):

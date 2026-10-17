@@ -44,6 +44,10 @@ def env(monkeypatch):
         return None
     monkeypatch.setattr(P, "_run_dagster_graphql", fake_graphql)
 
+    async def fake_ensure(project, timeout_s=90.0):   # never really start a dev server in tests
+        return await fake_graphql(project, dbf.DAEMON_HEALTH_QUERY, {})
+    monkeypatch.setattr(P, "_ensure_dev_server", fake_ensure)
+
     async def fake_reload(project, timeout_s=120.0):
         state.reloaded = True
     state.reloaded = False
