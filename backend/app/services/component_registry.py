@@ -960,6 +960,11 @@ class ComponentRegistry:
                 return component_class.model_json_schema()
         except (TypeError, AttributeError):
             pass
+        except Exception as e:
+            # e.g. pydantic.errors.PydanticInvalidForJsonSchema for a model with a Callable field (some Dagster
+            # components have them; newer pydantic refuses to describe them). One such component used to turn
+            # GET /components into a 500 for the whole library -- register it without a schema instead.
+            print(f"[component_registry] no JSON schema for {getattr(component_class, '__name__', component_class)}: {str(e)[:120]}", flush=True)
 
         return None
 
