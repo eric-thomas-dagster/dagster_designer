@@ -533,7 +533,7 @@ export function AgentPipelineBuilder({
     if (!latestPlan || !currentProject || applying || latestPlan.picks.length === 0) return;
     setApplying(true);
     try {
-      const { installed, failed, warnings, rolledBack } = await applyGeniePicks(
+      const { installed, failed, warnings, errors, rolledBack } = await applyGeniePicks(
         currentProject.id,
         latestPlan.picks,
         resolveComponentIdFromCurrentProject,
@@ -561,9 +561,9 @@ export function AgentPipelineBuilder({
           return;
         }
       } else if (installed === 0) {
-        notify.error(`Could not install any of the ${latestPlan.picks.length} proposed picks.`);
+        notify.error(`Could not install any of the ${latestPlan.picks.length} proposed picks:\n${errors.join('\n')}`, 30_000);
       } else {
-        notify.warning(`Added ${installed} of ${latestPlan.picks.length} picks; ${failed} failed. See console.`);
+        notify.warning(`Added ${installed} of ${latestPlan.picks.length} picks; ${failed} failed:\n${errors.join('\n')}`, 30_000);
       }
       if (warnings.length > 0) {
         notify.warning(`Some applied config differs from the plan:\n${warnings.join('\n')}`);

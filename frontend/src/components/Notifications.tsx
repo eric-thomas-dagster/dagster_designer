@@ -89,7 +89,7 @@ export const notify = {
   success: (message: unknown, opts?: ToastOptions) => pushToast('success', message, opts?.durationMs ?? 4000, opts?.action),
   error: (message: unknown, durationMs = 6000) => pushToast('error', message, durationMs),
   info: (message: unknown, opts?: ToastOptions) => pushToast('info', message, opts?.durationMs ?? 4000, opts?.action),
-  warning: (message: unknown) => pushToast('warning', message, 5000),
+  warning: (message: unknown, durationMs = 5000) => pushToast('warning', message, durationMs),
 };
 
 export function confirmDialog(

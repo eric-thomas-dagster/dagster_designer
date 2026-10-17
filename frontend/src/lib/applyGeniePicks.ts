@@ -21,6 +21,8 @@ export interface ApplyGeniePicksResult {
   installed: number;
   failed: number;
   warnings: string[];
+  /** Why each failed pick failed ("asset: reason"), so the caller can say so instead of pointing at the console. */
+  errors: string[];
   /** Set when every "add" pick that appeared to install successfully was
    *  automatically deleted again because the resulting project failed to
    *  load as a whole (Dagster's definitions build is all-or-nothing -- one
@@ -61,6 +63,8 @@ export async function applyGeniePicks(
   let installed = 0;
   let failed = 0;
   const warnings: string[] = [];
+  const errors: string[] = [];
+  const reason = (e: unknown) => (e instanceof Error ? e.message : String(e));
   // Every "add" pick's instance_name that successfully installed THIS
   // call -- the exact set to roll back (delete again) if the project as
   // a whole fails to validate afterward. Not "edit"/"remove" picks: there
@@ -85,14 +89,14 @@ export async function applyGeniePicks(
   // row for an N-pick plan.
   const snapshotGraphNodes = useProjectStore.getState().currentProject?.graph.nodes;
 
-  async function processPick(pick: GeniePickLike): Promise<{ ok: boolean; warning?: string; addedName?: string }> {
+  async function processPick(pick: GeniePickLike): Promise<{ ok: boolean; warning?: string; addedName?: string; error?: string }> {
     const action = pick.action || 'add';
 
     if (action === 'remove') {
       const componentId = resolveComponentId(pick.asset_name);
       if (!componentId) {
         console.warn(`[applyGeniePicks] Could not resolve existing asset '${pick.asset_name}' to remove`);
-        return { ok: false };
+        return { ok: false, error: `${pick.asset_name}: couldn't find it in the project to remove` };
       }
       try {
         const { projectsApi } = await import('@/services/api');
@@ -100,7 +104,7 @@ export async function applyGeniePicks(
         return { ok: true };
       } catch (e) {
         console.warn(`[applyGeniePicks] Failed to remove ${pick.asset_name}:`, e);
-        return { ok: false };
+        return { ok: false, error: `${pick.asset_name}: ${reason(e)}` };
       }
     }
 
@@ -108,7 +112,7 @@ export async function applyGeniePicks(
       const componentId = resolveComponentId(pick.asset_name);
       if (!componentId) {
         console.warn(`[applyGeniePicks] Could not resolve existing asset '${pick.asset_name}' to edit`);
-        return { ok: false };
+        return { ok: false, error: `${pick.asset_name}: couldn't find it in the project to edit` };
       }
       try {
         const res = await fetch(`${API_BASE}/templates/component-instance/${componentId}/attributes`, {
@@ -130,7 +134,7 @@ export async function applyGeniePicks(
         return { ok: true, warning };
       } catch (e) {
         console.warn(`[applyGeniePicks] Failed to edit ${pick.asset_name}:`, e);
-        return { ok: false };
+        return { ok: false, error: `${pick.asset_name}: ${reason(e)}` };
       }
     }
 
@@ -211,19 +215,21 @@ export async function applyGeniePicks(
       return { ok: true, warning, addedName: pick.asset_name };
     } catch (e) {
       console.warn(`[applyGeniePicks] Failed to install ${pick.component_type}:`, e);
-      return { ok: false };
+      return { ok: false, error: `${pick.asset_name}: ${reason(e)}` };
     }
   }
 
   const results = await Promise.allSettled(picks.map(processPick));
   for (const result of results) {
     if (result.status === 'fulfilled') {
-      const { ok, warning, addedName } = result.value;
+      const { ok, warning, addedName, error } = result.value;
       if (ok) installed++; else failed++;
+      if (error) errors.push(error);
       if (warning) warnings.push(warning);
       if (addedName) addedInstanceNames.push(addedName);
     } else {
       failed++;
+      errors.push(`unexpected error: ${reason(result.reason)}`);
       console.warn('[applyGeniePicks] Pick processing rejected unexpectedly:', result.reason);
     }
   }
@@ -251,7 +257,7 @@ export async function applyGeniePicks(
       }
     });
     if (!result.ok) {
-      return { installed: 0, failed: picks.length, warnings, rolledBack: result.error };
+      return { installed: 0, failed: picks.length, warnings, errors, rolledBack: result.error };
     }
   }
 
@@ -309,7 +315,7 @@ export async function applyGeniePicks(
     await useProjectStore.getState().loadProject(projectId);
   }
 
-  return { installed, failed, warnings };
+  return { installed, failed, warnings, errors };
 }
 
 /** Resolves a Genie pick's asset_name back to a real component instance

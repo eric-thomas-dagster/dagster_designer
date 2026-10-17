@@ -205,7 +205,7 @@ export function DagsterAIBar() {
     }
     setApplying(true);
     try {
-      const { installed, failed, warnings, rolledBack } = await applyGeniePicks(
+      const { installed, failed, warnings, errors, rolledBack } = await applyGeniePicks(
         currentProject.id,
         plan.picks,
         resolveComponentIdFromCurrentProject,
@@ -225,9 +225,9 @@ export function DagsterAIBar() {
       } else if (failed === 0) {
         notify.success(`Dagster AI added ${installed} asset${installed === 1 ? '' : 's'} to the graph.`);
       } else if (installed === 0) {
-        notify.error(`Dagster AI could not install any of the ${plan.picks.length} proposed picks.`);
+        notify.error(`Dagster AI could not install any of the ${plan.picks.length} proposed picks:\n${errors.join('\n')}`, 30_000);
       } else {
-        notify.warning(`Dagster AI added ${installed} of ${plan.picks.length} picks; ${failed} failed. See console.`);
+        notify.warning(`Dagster AI added ${installed} of ${plan.picks.length} picks; ${failed} failed:\n${errors.join('\n')}`, 30_000);
       }
       if (warnings.length > 0) {
         notify.warning(`Some applied config differs from the plan:\n${warnings.join('\n')}`);
