@@ -120,7 +120,7 @@ def test_failure_in_an_expanded_partition_reports_progress_so_far(run_backfill):
         req(partition_range={"start": KEYS[0], "end": KEYS[4]}),
         [(1, POLICY_ERROR), (0, ""), (0, ""), (1, "disk full")],
     )
-    assert job["state"] == "failed" and job["launched"] == 5 and "1 of 5" in job["message"] and "disk full" in job["message"]
+    assert job["state"] == "failed" and job["launched"] == 5 and "3 of 5" in job["message"] and "disk full" in job["message"]  # the fake repeats its last result
 
 
 def test_unexpandable_range_surfaces_the_original_error(run_backfill):
