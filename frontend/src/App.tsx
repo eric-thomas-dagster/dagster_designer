@@ -371,6 +371,7 @@ function App() {
   // event in AssetDetailPage's Events tab) -- seeds RunsPanel's initial
   // selection so it opens straight to that run instead of the list.
   const [runToOpen, setRunToOpen] = useState<string | null>(null);
+  const [runsFilter, setRunsFilter] = useState<{ tagKey?: string; tagValue?: string } | null>(null);
   const handleOpenRun = (runId: string) => {
     setRunToOpen(runId);
     setActiveMainTab('runs');
@@ -379,7 +380,7 @@ function App() {
   // a materialization starts) -- see lib/runLink.ts.
   useEffect(() => registerRunOpener(handleOpenRun), []); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(
-    () => registerRunsListOpener(() => { setRunToOpen(null); setActiveMainTab('runs'); }),
+    () => registerRunsListOpener((filter) => { setRunToOpen(null); setRunsFilter(filter ?? null); setActiveMainTab('runs'); }),
     [], // eslint-disable-line react-hooks/exhaustive-deps
   );
   // Same idea, for jumping from an asset's checks list (Property Panel) to
@@ -1950,8 +1951,9 @@ function App() {
           {/* Runs Tab Content */}
           <Tabs.Content value="runs" className="flex-1 overflow-hidden">
             <RunsPanel
-              key={runToOpen ? `run-${runToOpen}` : `runs-${tabResetNonce.runs || 0}`}
+              key={runToOpen ? `run-${runToOpen}` : `runs-${tabResetNonce.runs || 0}-${runsFilter ? `${runsFilter.tagKey}=${runsFilter.tagValue}` : ''}`}
               initialRunId={runToOpen ?? undefined}
+              initialTag={runsFilter ?? undefined}
             />
           </Tabs.Content>
 

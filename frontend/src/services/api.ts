@@ -39,7 +39,10 @@ export interface BackfillStatus {
  * looked like "Backfill launched". Module-level, so it keeps going if the panel that started it unmounts.
  */
 function watchBackfill(projectId: string, backfillId: string, launches: number | null, engine: 'dagster' | 'cli') {
-  const viewRuns = { label: 'View runs', onClick: () => openRunsList() };
+  // A Dagster backfill tags every run it launches, so "View runs" can show exactly this backfill's runs.
+  const viewRuns = engine === 'dagster'
+    ? { label: "View this backfill's runs", onClick: () => openRunsList({ tagKey: 'dagster/backfill', tagValue: backfillId.replace(/^dagster:/, '') }) }
+    : { label: 'View runs', onClick: () => openRunsList() };
   const runs = (n: number) => `${n} run${n === 1 ? '' : 's'}`;
   if (engine === 'dagster') {
     // A real Dagster backfill: the daemon picks it up on its next tick (~30s), then launches runs in

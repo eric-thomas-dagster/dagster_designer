@@ -24,7 +24,7 @@ import { Notice } from './Notice';
  * last runId). Filter by status. Job-name filter is server-side too.
  * Clicking a row opens the run in the Dagster UI (local or cloud).
  */
-export function RunsPanel({ initialRunId }: { initialRunId?: string } = {}) {
+export function RunsPanel({ initialRunId, initialTag }: { initialRunId?: string; initialTag?: { tagKey?: string; tagValue?: string } } = {}) {
   const { currentProject } = useProjectStore();
   const [runs, setRuns] = useState<Run[]>([]);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(initialRunId ?? null);
@@ -40,11 +40,11 @@ export function RunsPanel({ initialRunId }: { initialRunId?: string } = {}) {
   const [statusFilter, setStatusFilter] = useState<Set<string>>(new Set());
   const [jobFilter, setJobFilter] = useState('');
   const [codeLocation, setCodeLocation] = useState('');
-  const [tagKey, setTagKey] = useState('');
-  const [tagValue, setTagValue] = useState('');
+  const [tagKey, setTagKey] = useState(initialTag?.tagKey ?? '');
+  const [tagValue, setTagValue] = useState(initialTag?.tagValue ?? '');
   const [dateFrom, setDateFrom] = useState('');   // YYYY-MM-DD
   const [dateTo, setDateTo] = useState('');
-  const [showAdvanced, setShowAdvanced] = useState(false);
+  const [showAdvanced, setShowAdvanced] = useState(!!initialTag?.tagKey);
   const [codeLocationOptions, setCodeLocationOptions] = useState<string[]>([]);
   const [tagKeyOptions, setTagKeyOptions] = useState<string[]>([]);
   const [tagValueOptions, setTagValueOptions] = useState<string[]>([]);
