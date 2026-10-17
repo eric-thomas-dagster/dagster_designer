@@ -1,0 +1,22 @@
+[project]
+name = "smoke-fixture"
+version = "0.1.0"
+requires-python = ">=3.10,<3.14"
+dependencies = ["dagster", "dagster-webserver"]
+
+[dependency-groups]
+dev = ["dagster-dg-cli"]
+
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[tool.dg]
+directory_type = "project"
+
+[tool.dg.project]
+root_module = "smoke_fixture"
+registry_modules = ["smoke_fixture.components"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
