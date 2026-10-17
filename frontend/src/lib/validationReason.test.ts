@@ -11,6 +11,10 @@ describe('conciseValidationReason', () => {
   it('names the component, the field and what was wrong', () => {
     expect(conciseValidationReason(PYDANTIC)).toBe("customers_with_domain: attributes.source -- Input should be a valid dictionary (got '@(.+)$')");
   });
+  it('reads a missing component class from a dagster symbol error', () => {
+    const t = "Loading location p failed:\n\ndagster_shared.error.DagsterUnresolvableSymbolError: Module `dagster_community_components` has no attribute `DataframeTransformerComponent`.\n\nStack Trace:";
+    expect(conciseValidationReason(t)).toBe('Module `dagster_community_components` has no attribute `DataframeTransformerComponent`.');
+  });
   it('falls back to a recognisable dagster error line', () => {
     expect(conciseValidationReason("Error while loading component x[0]:\nComponent type 'a.B' not found.")).toContain("x: Component type 'a.B' not found");
   });

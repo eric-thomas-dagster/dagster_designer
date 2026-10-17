@@ -18,6 +18,9 @@ export function conciseValidationReason(text?: string | null): string | null {
     const got = next.match(/input_value=('[^']*'|"[^"]*"|[^,\]]+)/)?.[1];
     return `${component ? `${component}: ` : ''}${m[1]} -- ${msg}${got ? ` (got ${got})` : ''}`;
   }
+  // Dagster's own errors: "dagster_shared.error.DagsterUnresolvableSymbolError: Module `pkg` has no attribute `Name`."
+  const named = clean.match(/^[\w.]*Dagster\w*Error: (.+)$/m);
+  if (named) return `${component ? `${component}: ` : ''}${named[1].trim().replace(/\s+/g, ' ').slice(0, 240)}`;
   const generic = lines.find((l) => /Component type '.+' not found|Duplicate (asset|definition)|was not found|DagsterInvalid\w+/.test(l));
   if (generic) return `${component ? `${component}: ` : ''}${generic.trim().slice(0, 240)}`;
   return component ? `${component} could not be loaded` : null;

@@ -480,6 +480,8 @@ async def configure_component(
         elif stub_defs_file.exists():
             stub_data = yaml.safe_load(stub_defs_file.read_text()) or {}
             component_type = stub_data.get('type')
+            from ..services.component_type_resolver import resolve_component_type
+            component_type = resolve_component_type(project_dir, component_id, component_type)
         else:
             raise HTTPException(status_code=404, detail="Component manifest not found")
 
@@ -1245,7 +1247,8 @@ async def install_component_via_cli(
                     parsed = yaml.safe_load(c.read_text()) or {}
                     t = parsed.get("type")
                     if isinstance(t, str) and t.startswith("dagster_community_components."):
-                        return t
+                        from ..services.component_type_resolver import resolve_component_type
+                        return resolve_component_type(project_dir, component_id, t)
                 except Exception:
                     continue
             return None
@@ -1479,6 +1482,16 @@ async def install_component_via_cli(
             status_code=500,
             detail=f"defs.yaml at {defs_yaml_path} has no `type:` field to return",
         )
+
+    # The CLI guesses the class name by title-casing the id; for ~1 component in 5 that isn't the real class
+    # (DataframeTransformerComponent vs DataFrameTransformerComponent) and the project then fails to load.
+    from ..services.component_type_resolver import resolve_component_type
+    real_type = resolve_component_type(project_dir, component_id, component_type)
+    if real_type != component_type:
+        print(f"[CLI Install] Corrected component type {component_type} -> {real_type}", flush=True)
+        defs_yaml_path.write_text(defs_yaml_path.read_text().replace(component_type, real_type, 1))
+        parsed["type"] = real_type
+        component_type = real_type
 
     # Fire-and-forget: warm the dg-introspected schema cache for this type
     # RIGHT NOW, concurrently with everything else this endpoint still has
