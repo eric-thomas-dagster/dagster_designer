@@ -777,6 +777,50 @@ function App() {
     }
   };
 
+  const [isResolvingMissing, setIsResolvingMissing] = useState(false);
+
+  // The project won't load because something (a schedule, job, check, dependency) still names an asset that was deleted.
+  // Preview what would change, ask, then clean those references up and re-validate.
+  const handleResolveMissingAssets = async () => {
+    if (!currentProject) return;
+    setIsResolvingMissing(true);
+    try {
+      const preview = await projectsApi.resolveMissingAssets(currentProject.id, true);
+      const lines: string[] = [];
+      for (const [key, h] of Object.entries(preview.healed)) {
+        lines.push(`"${key}" no longer exists.`);
+        if (h.removed.length) lines.push(`  • remove: ${h.removed.join(', ')}`);
+        if (h.edited.length) lines.push(`  • drop the reference from: ${h.edited.join(', ')}`);
+        if (h.left.length) lines.push(`  • still needs you (builds on it): ${h.left.join(', ')}`);
+      }
+      if (!lines.length) {
+        notify.warning('Could not find which asset is missing from the error. Use "Fix with Claude Code" or delete the broken component.');
+        return;
+      }
+      const ok = await confirmDialog(
+        `${lines.join('\n')}\n\nOnly these references change; no other assets are touched.`,
+        { title: 'Remove references to missing assets?', destructive: true }
+      );
+      if (!ok) return;
+      const result = await projectsApi.resolveMissingAssets(currentProject.id, false);
+      await useProjectStore.getState().loadProject(currentProject.id, { silent: true });
+      const fresh = await projectsApi.validate(currentProject.id);
+      setValidationResult(fresh);
+      if (fresh.valid) {
+        setShowValidationDialog(false);
+        setDismissedValidationError(false);
+        notify.success('References cleaned up -- the project loads again.');
+      } else {
+        notify.warning(result.ok ? 'References cleaned up, but the project still has other errors.' : 'Cleaned up what I could; the project still has errors.');
+      }
+    } catch (e) {
+      console.error('[Validation] resolve missing assets failed:', e);
+      notify.error('Could not clean up the references. Check the console for details.');
+    } finally {
+      setIsResolvingMissing(false);
+    }
+  };
+
   // Handler to run validation and show detailed results
   const handleViewValidationDetails = async () => {
     if (!currentProject) return;
@@ -2487,6 +2531,26 @@ function App() {
                       </>
                     );
                   })()}
+
+                  {currentProject && !(currentProject as any).is_dagster_plus &&
+                    /no AssetsDefinition objects supply these keys|Invalid selected keys|Selected keys must be a subset/.test(
+                      [validationResult.error, validationResult.details?.validation_error, validationResult.details?.stderr].filter(Boolean).join('\n')
+                    ) && (
+                    <div className="mb-4 p-4 bg-amber-50 border border-amber-200 rounded-md">
+                      <h3 className="text-sm font-semibold text-amber-900 mb-1">Something points at an asset that no longer exists</h3>
+                      <p className="text-xs text-amber-800 mb-3">
+                        A schedule, job, check or dependency still names a deleted asset, which stops the whole project loading.
+                        You'll see exactly what changes before anything is touched.
+                      </p>
+                      <button
+                        onClick={handleResolveMissingAssets}
+                        disabled={isResolvingMissing || isValidating}
+                        className="px-3 py-1.5 text-sm font-medium rounded-md bg-amber-600 text-white hover:bg-amber-700 disabled:opacity-50"
+                      >
+                        {isResolvingMissing ? 'Working…' : 'Clean up references to missing assets'}
+                      </button>
+                    </div>
+                  )}
 
                   {currentProject && !(currentProject as any).is_dagster_plus && (
                     <AiFixPanel

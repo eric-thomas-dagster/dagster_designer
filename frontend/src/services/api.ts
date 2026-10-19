@@ -283,6 +283,16 @@ export const projectsApi = {
     references: Array<{ component: string; type: string; automation: boolean; removed_with_it: boolean; scalar_fields: string[]; list_fields: string[] }>;
   }> => (await api.get(`/projects/${projectId}/asset-references/${encodeURIComponent(componentId)}`)).data,
 
+  /** Heals a project that won't load because something names an asset that no longer exists (a schedule, job, check or
+   *  dependency left behind by a delete). `dryRun` only reports what would change. */
+  resolveMissingAssets: async (projectId: string, dryRun = false): Promise<{
+    ok: boolean;
+    dry_run: boolean;
+    rounds: number;
+    error?: string | null;
+    healed: Record<string, { removed: string[]; edited: string[]; left: string[] }>;
+  }> => (await api.post(`/projects/${projectId}/resolve-missing-assets`, { dry_run: dryRun })).data,
+
   materialize: async (
     projectId: string,
     assetKeys?: string[],

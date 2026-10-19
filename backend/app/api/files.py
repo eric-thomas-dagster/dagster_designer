@@ -6,6 +6,7 @@ import subprocess
 import sys
 from typing import AsyncGenerator
 
+from pathlib import Path
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -127,6 +128,33 @@ async def write_file(project_id: str, file_path: str, request: WriteFileRequest)
         raise HTTPException(status_code=500, detail=f"Failed to write file: {str(e)}")
 
 
+def _defs_component_dir(project_id: str, rel_path: str, *, is_dir: bool):
+    """(defs_dir, component_dir) when `rel_path` is a whole defs/<component>/ folder or its defs.yaml, else None."""
+    parts = Path(rel_path).parts
+    if "defs" not in parts:
+        return None
+    i = parts.index("defs")
+    want = i + 2 if is_dir else i + 3
+    if len(parts) != want or (not is_dir and parts[-1] != "defs.yaml"):
+        return None
+    root = file_service._get_project_path(project_id)
+    return root.joinpath(*parts[: i + 1]), root.joinpath(*parts[: i + 2])
+
+
+def _cascade_after_component_delete(info, key: str, result: dict) -> dict:
+    """Deleting a component from the Code editor used to leave schedules/checks/dependencies pointing at its asset, which
+    stops the whole project loading. Clean them up the same way the asset Delete button does."""
+    from ..services.asset_references import apply_cascade
+    if info is None:
+        return result
+    defs_dir, comp_dir = info
+    try:
+        result["cascade"] = apply_cascade(defs_dir, key, comp_dir)
+    except Exception as e:  # never fail the delete itself over cleanup
+        result["cascade_error"] = str(e)
+    return result
+
+
 @router.delete("/delete/{project_id}/{file_path:path}")
 async def delete_file(project_id: str, file_path: str):
     """
@@ -140,7 +168,11 @@ async def delete_file(project_id: str, file_path: str):
         Success message
     """
     try:
+        from ..services.asset_references import component_asset_key
+        info = _defs_component_dir(project_id, file_path, is_dir=False)
+        key = component_asset_key(info[1], info[1].name) if info else ""
         result = file_service.delete_file(project_id, file_path)
+        _cascade_after_component_delete(info, key, result)
         _invalidate_if_definition_file(project_id, file_path)
         return result
     except FileNotFoundError as e:
@@ -189,7 +221,12 @@ async def delete_directory(project_id: str, dir_path: str):
         Success message
     """
     try:
+        from ..services.asset_references import component_asset_key
+        info = _defs_component_dir(project_id, dir_path, is_dir=True)
+        key = component_asset_key(info[1], info[1].name) if info else ""
         result = file_service.delete_directory(project_id, dir_path)
+        _cascade_after_component_delete(info, key, result)
+        _invalidate_if_definition_file(project_id, dir_path)
         return result
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))

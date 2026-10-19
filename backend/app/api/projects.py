@@ -2083,6 +2083,76 @@ def _find_instance_dir(project_dir: Path, component_id: str) -> Path | None:
     return None
 
 
+class ResolveMissingAssetsRequest(BaseModel):
+    dry_run: bool = False
+
+
+def _project_defs_dir(project_dir: Path) -> Path | None:
+    skip = {'.venv', 'venv', 'node_modules', '.git', '__pycache__'}
+    for d in sorted(project_dir.glob("src/*/defs")) + sorted(project_dir.glob("*/defs")):
+        if d.is_dir() and not any(part in skip for part in d.parts):
+            return d
+    return None
+
+
+@router.post("/{project_id}/resolve-missing-assets")
+async def resolve_missing_assets(project_id: str, req: ResolveMissingAssetsRequest | None = None):
+    """Heal a project that won't load because something names an asset that no longer exists (a job/schedule/check/
+    dependency left behind by a delete -- from the UI, the Code editor, a git pull, ...). Works from the load error itself:
+    parses the missing keys, then cleans every reference (see asset_references.heal_missing_assets) and re-validates,
+    repeating because fixing one reference can reveal the next. `dry_run` only reports what would change."""
+    from ..services.asset_references import parse_missing_asset_keys, heal_missing_assets, _remove_from_lists
+
+    dry_run = bool(req and req.dry_run)
+    project = project_service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    project_dir = project_service._get_project_dir(project)
+    defs_dir = _project_defs_dir(project_dir)
+    if defs_dir is None:
+        raise HTTPException(status_code=404, detail="No defs folder found for this project")
+
+    ok, err = await asset_introspection_service.validate_project_defs_async(project)
+    if ok:
+        return {"ok": True, "healed": {}, "rounds": 0, "dry_run": dry_run}
+
+    healed: dict[str, dict] = {}
+    rounds = 0
+    while True:
+        keys = [k for k in parse_missing_asset_keys(err or "") if k not in healed]
+        if not keys:
+            break
+        healed.update(await asyncio.to_thread(heal_missing_assets, defs_dir, keys, dry_run))
+        if dry_run:
+            return {"ok": False, "healed": healed, "rounds": 0, "dry_run": True, "error": err}
+        rounds += 1
+        ok, err = await asset_introspection_service.validate_project_defs_async(project)
+        if ok or rounds >= 6:
+            break
+
+    if healed:
+        # Keep Designer's own record in step with the files, or the next write from it would put the references back.
+        gone_components = {c for h in healed.values() for c in h.get("removed", [])}
+        for c in project.components or []:
+            if c.id not in gone_components and isinstance(c.attributes, dict):
+                for key in healed:
+                    _remove_from_lists(c.attributes, key, False)
+        project.components = [c for c in (project.components or []) if c.id not in gone_components]
+        before = len(project.custom_lineage)
+        project.custom_lineage = [e for e in project.custom_lineage if e.source not in healed and e.target not in healed]
+        dropped_override = any(project.asset_field_overrides.pop(k, None) is not None for k in list(healed))
+        updated = project_service.update_project(
+            project_id,
+            ProjectUpdate(components=project.components, custom_lineage=project.custom_lineage,
+                          asset_field_overrides=project.asset_field_overrides),
+        )
+        if updated and (before != len(project.custom_lineage) or dropped_override):
+            project_service._write_post_processing_defs_yaml(updated)
+        asset_introspection_service.clear_cache(project.id)
+
+    return {"ok": ok, "healed": healed, "rounds": rounds, "dry_run": False, "error": None if ok else err}
+
+
 @router.get("/{project_id}/asset-references/{component_id}")
 async def get_asset_references(project_id: str, component_id: str):
     """What else names the asset a component instance produces -- jobs, schedules, sensors, checks (which would be
