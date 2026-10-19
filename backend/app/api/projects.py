@@ -2112,7 +2112,7 @@ async def resolve_missing_assets(project_id: str, req: ResolveMissingAssetsReque
     if defs_dir is None:
         raise HTTPException(status_code=404, detail="No defs folder found for this project")
 
-    ok, err = await asset_introspection_service.validate_project_defs_async(project)
+    ok, err = await asset_introspection_service.validate_project_defs_async(project, tail_lines=None)
     if ok:
         return {"ok": True, "healed": {}, "rounds": 0, "dry_run": dry_run}
 
@@ -2124,9 +2124,9 @@ async def resolve_missing_assets(project_id: str, req: ResolveMissingAssetsReque
             break
         healed.update(await asyncio.to_thread(heal_missing_assets, defs_dir, keys, dry_run))
         if dry_run:
-            return {"ok": False, "healed": healed, "rounds": 0, "dry_run": True, "error": err}
+            return {"ok": False, "healed": healed, "rounds": 0, "dry_run": True, "error": "\n".join((err or "").splitlines()[-30:])}
         rounds += 1
-        ok, err = await asset_introspection_service.validate_project_defs_async(project)
+        ok, err = await asset_introspection_service.validate_project_defs_async(project, tail_lines=None)
         if ok or rounds >= 6:
             break
 
@@ -2150,7 +2150,7 @@ async def resolve_missing_assets(project_id: str, req: ResolveMissingAssetsReque
             project_service._write_post_processing_defs_yaml(updated)
         asset_introspection_service.clear_cache(project.id)
 
-    return {"ok": ok, "healed": healed, "rounds": rounds, "dry_run": False, "error": None if ok else err}
+    return {"ok": ok, "healed": healed, "rounds": rounds, "dry_run": False, "error": None if ok else "\n".join(err.splitlines()[-30:])}
 
 
 @router.get("/{project_id}/asset-references/{component_id}")

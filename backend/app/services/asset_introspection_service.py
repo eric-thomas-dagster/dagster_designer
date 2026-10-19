@@ -253,7 +253,7 @@ class AssetIntrospectionService:
             del _assets_cache[project_id]
             print(f"[Asset Introspection] Cleared cache for project {project_id}", flush=True)
 
-    async def validate_project_defs_async(self, project: Project) -> "tuple[bool, str | None]":
+    async def validate_project_defs_async(self, project: Project, tail_lines: "int | None" = 30) -> "tuple[bool, str | None]":
         """Confirm the project's definitions still load cleanly, by
         running the exact same `dg list defs` that normal introspection
         uses -- it has to fully LOAD the defs tree to list it, so a
@@ -293,7 +293,8 @@ class AssetIntrospectionService:
             # -- dg's own tree-build trace before it can run long (see
             # e.g. the ComponentTreeException examples surfaced this
             # session), so keep the TAIL, not the head.
-            error_tail = "\n".join(str(e).strip().splitlines()[-30:])
+            lines = str(e).strip().splitlines()
+            error_tail = "\n".join(lines if tail_lines is None else lines[-tail_lines:])
             return False, error_tail
         finally:
             # Don't leave a validation run's result cached as if it were

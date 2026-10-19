@@ -22,7 +22,7 @@ def _setup(monkeypatch, tmp_path):
     def loads_ok():
         return "pr_review_fetch_pr_diff" not in "".join(p.read_text() for p in defs.rglob("defs.yaml"))
 
-    async def validate(project):
+    async def validate(project, tail_lines=30):
         return (True, None) if loads_ok() else (False, ERR)
 
     monkeypatch.setattr(P.project_service, "get_project", lambda pid: proj)
