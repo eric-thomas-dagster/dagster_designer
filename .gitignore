@@ -76,3 +76,5 @@ frontend/*.log
 # Documentation (keep locally, not in repo)
 *.md
 !README.md
+!docs/
+!docs/**/*.md
