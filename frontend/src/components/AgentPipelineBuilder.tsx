@@ -10,6 +10,7 @@ import { applyGeniePicks, resolveComponentIdFromCurrentProject, type GeniePickLi
 import { parseUpstreamAssetKeys } from '@/lib/upstreamAssetKeys';
 import { parseStepMetadataFields, formatCost, formatLatency } from '@/lib/stepMetadata';
 import type { ComponentInstance } from '@/types';
+import { RequiredResourcesBanner, type RequiredResource } from './RequiredResourcesBanner';
 
 interface AgentPick extends GeniePickLike {
   reason: string;
@@ -27,6 +28,8 @@ interface AgentPlanResponse {
   // Genie needs an answer before it can finish -- see the ASK RATHER
   // THAN FABRICATE A DATA SOURCE rule in genie_service.py.
   clarifying_question: ClarifyingQuestion | null;
+  // Resources the plan refers to (e.g. the context receipt store), installed separately from the picks.
+  requires_resources?: RequiredResource[];
 }
 
 // A turn in the conversation. "genie" turns carry the plan they resulted
@@ -755,6 +758,14 @@ export function AgentPipelineBuilder({
                           <div className="bg-gray-50 border border-gray-200 text-gray-600 rounded-lg px-3 py-2 text-sm">
                             {turn.plan.notes.join('\n') || 'Could not build a plan for that — try adding more detail.'}
                           </div>
+                        )}
+
+                        {currentProject && (
+                          <RequiredResourcesBanner
+                            resources={turn.plan.requires_resources}
+                            projectId={currentProject.id}
+                            onInstalled={() => queryClient.invalidateQueries({ queryKey: ['installed-resources', currentProject.id] })}
+                          />
                         )}
 
                         {/* Info/warning notes (auto-repair, dropped/renamed

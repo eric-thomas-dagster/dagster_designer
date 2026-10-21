@@ -1,5 +1,6 @@
-import { useState } from 'react';
-import { Sparkles, FileText, BrainCircuit, Search, ShieldCheck, Film, Mic, Loader2, Wand2 } from 'lucide-react';
+import { useMemo, useState } from 'react';
+import { useQuery } from '@tanstack/react-query';
+import { Sparkles, FileText, BrainCircuit, Search, ShieldCheck, Film, Mic, Loader2, Wand2, MessagesSquare } from 'lucide-react';
 import { useProjectStore } from '@/hooks/useProject';
 import { API_BASE } from '@/services/api';
 import { notify } from './Notifications';
@@ -20,6 +21,8 @@ import { MlflowInferenceConfigStep } from './MlflowInferenceConfigStep';
 import { AutoMLConfigStep } from './AutoMLConfigStep';
 import { LlmJudgeConfigStep } from './LlmJudgeConfigStep';
 import { ContextEngineeringConfigStep } from './ContextEngineeringConfigStep';
+import { RagQueryConfigStep } from './RagQueryConfigStep';
+import { KnowledgeBaseHealth } from './KnowledgeBaseHealth';
 import { SqlTransformConfigStep } from './SqlTransformConfigStep';
 import { TransformSourcePicker } from './TransformSourcePicker';
 import { JoinConfigStep } from './JoinConfigStep';
@@ -42,6 +45,9 @@ interface HubCard {
 // history for how these were derived. Kept as a flat list here (not
 // re-fetched from the manifest) since it only drives card copy/counts,
 // not functional filtering.
+// Cards that install a component and open its bespoke step straight away, instead of a wizard.
+const RAG_CARD_COMPONENTS: Record<string, string> = { rag: 'context_engineering_pipeline', rag_query: 'rag_pipeline' };
+
 const CARDS: HubCard[] = [
   {
     id: 'agents_pipelines',
@@ -70,9 +76,17 @@ const CARDS: HubCard[] = [
   {
     id: 'rag',
     label: 'RAG & Vector Search',
-    description: 'Build a governed knowledge base — chunk, classify, embed, and index raw text. Combine as many sources as you want (support tickets, contracts, call transcripts, ...) into one searchable store. Querying it back falls back to the raw form for now.',
+    description: 'Build a governed knowledge base — chunk, classify, embed, and index raw text. Combine as many sources as you want (support tickets, contracts, call transcripts, ...) into one searchable store.',
     icon: Search,
     count: 11,
+    status: 'ready',
+  },
+  {
+    id: 'rag_query',
+    label: 'Query a Knowledge Base',
+    description: 'Answer questions from a knowledge base you built — pick it, point at the questions, choose a model. The retriever is matched to how the knowledge base was embedded.',
+    icon: MessagesSquare,
+    count: 1,
     status: 'ready',
   },
   {
@@ -123,6 +137,25 @@ export function AiMlHub() {
   const [openBuilder, setOpenBuilder] = useState<string | null>(null);
   const [pendingConfig, setPendingConfig] = useState<{ componentType: string; initialAttributes?: Record<string, any>; sourcePath?: string } | null>(null);
   const [installingRag, setInstallingRag] = useState(false);
+
+  // Live component counts for the scoped builders (the static numbers above are only the fallback while the manifest
+  // can't be reached), so a card's count tracks the catalog instead of drifting.
+  const { data: builderCounts } = useQuery<{ id: string; count: number }[]>({
+    queryKey: ['genie-builders'],
+    queryFn: async () => {
+      const res = await fetch(`${API_BASE}/ai/builders`);
+      return res.ok ? res.json() : [];
+    },
+    staleTime: 10 * 60 * 1000,
+  });
+  const cards = useMemo(() => {
+    const counts = new Map((builderCounts || []).map((b) => [b.id, b.count]));
+    return CARDS.map((c) => (counts.has(c.id) && counts.get(c.id)! > 0 ? { ...c, count: counts.get(c.id)! } : c));
+  }, [builderCounts]);
+  const hasKnowledgeBase = (currentProject?.components || []).some((c) => {
+    const id = extractComponentId(c.component_type);
+    return id === 'context_engineering_pipeline' || id === 'context_receipt_store';
+  });
   // Transform's real "existing asset" path opens the actual DataPreviewModal
   // (the same live-preview-driven visual builder the graph's own Transform
   // button opens) directly against the picked asset, instead of a reduced
@@ -139,11 +172,11 @@ export function AiMlHub() {
   // SingleComponentWizard's step 1 would force a CSV/asset pick before
   // ever reaching that screen, hiding the warehouse path behind a gate
   // with no way to skip it. Install straight in, no source pre-picked.
-  const handleOpenRag = async () => {
+  const handleOpenRag = async (componentId: string) => {
     if (!currentProject || installingRag) return;
     setInstallingRag(true);
     try {
-      const res = await fetch(`${API_BASE}/templates/install-via-cli/context_engineering_pipeline`, {
+      const res = await fetch(`${API_BASE}/templates/install-via-cli/${componentId}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ project_id: currentProject.id, config: {}, template_only: true }),
@@ -178,14 +211,14 @@ export function AiMlHub() {
         </div>
 
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3">
-          {CARDS.map((card) => {
+          {cards.map((card) => {
             const Icon = card.icon;
             const disabled = card.status === 'soon';
             return (
               <button
                 key={card.id}
-                onClick={() => !disabled && (card.id === 'rag' ? handleOpenRag() : setOpenBuilder(card.id))}
-                disabled={disabled || (card.id === 'rag' && installingRag)}
+                onClick={() => !disabled && (RAG_CARD_COMPONENTS[card.id] ? handleOpenRag(RAG_CARD_COMPONENTS[card.id]) : setOpenBuilder(card.id))}
+                disabled={disabled || (!!RAG_CARD_COMPONENTS[card.id] && installingRag)}
                 className={`text-left p-4 rounded-lg border flex items-start gap-3 transition-all ${
                   disabled
                     ? 'bg-gray-100 border-gray-200 opacity-60 cursor-not-allowed'
@@ -193,7 +226,7 @@ export function AiMlHub() {
                 }`}
               >
                 <div className={`w-9 h-9 rounded-md flex items-center justify-center flex-shrink-0 ${disabled ? 'bg-gray-200' : 'bg-violet-50 border border-violet-100'}`}>
-                  {card.id === 'rag' && installingRag ? (
+                  {RAG_CARD_COMPONENTS[card.id] && installingRag ? (
                     <Loader2 className="w-4.5 h-4.5 text-violet-600 animate-spin" />
                   ) : (
                     <Icon className={`w-4.5 h-4.5 ${disabled ? 'text-gray-400' : 'text-violet-600'}`} />
@@ -213,6 +246,8 @@ export function AiMlHub() {
             );
           })}
         </div>
+
+        {hasKnowledgeBase && currentProject && <KnowledgeBaseHealth projectId={currentProject.id} />}
       </div>
 
       {openBuilder === 'agents_pipelines' && (
@@ -431,6 +466,13 @@ export function AiMlHub() {
           />
         ) : extractComponentId(pendingConfig.componentType) === 'context_engineering_pipeline' ? (
           <ContextEngineeringConfigStep
+            componentType={pendingConfig.componentType}
+            initialAttributes={pendingConfig.initialAttributes || {}}
+            onDone={() => setPendingConfig(null)}
+            onClose={() => setPendingConfig(null)}
+          />
+        ) : extractComponentId(pendingConfig.componentType) === 'rag_pipeline' ? (
+          <RagQueryConfigStep
             componentType={pendingConfig.componentType}
             initialAttributes={pendingConfig.initialAttributes || {}}
             onDone={() => setPendingConfig(null)}
