@@ -245,6 +245,16 @@ export function ContextEngineeringConfigStep({
   };
   const [metadataColumns, setMetadataColumns] = useState<string>((seedAttrs.metadata_columns || []).join(', '));
 
+  // Governance + receipts (both optional). `receipts` reads retrieval receipts written by the context_receipt_store
+  // RESOURCE (installed from the Resources tab) back into every rebuild; python mode names that resource by
+  // `resource_key`, sql mode reads the receipt tables directly via `dataset`.
+  const seedReceipts = (seedAttrs.receipts || {}) as Record<string, any>;
+  const [sensitivity, setSensitivity] = useState<string>(seedAttrs.context_policy?.sensitivity || '');
+  const [receiptsOn, setReceiptsOn] = useState<boolean>(!!seedAttrs.receipts);
+  const [receiptsResourceKey, setReceiptsResourceKey] = useState<string>(seedReceipts.resource_key || 'context_receipts');
+  const [receiptsDataset, setReceiptsDataset] = useState<string>(seedReceipts.dataset || '');
+  const [receiptsWindowDays, setReceiptsWindowDays] = useState<number>(seedReceipts.window_days ?? 30);
+
   // Stage 1: chunk (always on)
   const [chunkSize, setChunkSize] = useState<number>(seedChunk.chunk_size ?? 500);
   const [chunkOverlap, setChunkOverlap] = useState<number>(seedChunk.chunk_overlap ?? 50);
@@ -403,6 +413,14 @@ export function ContextEngineeringConfigStep({
       }
       const metaCols = metadataColumns.split(',').map((s) => s.trim()).filter(Boolean);
       if (metaCols.length > 0) config.metadata_columns = metaCols;
+      if (sensitivity) config.context_policy = { ...(seedAttrs.context_policy || {}), sensitivity };
+      if (receiptsOn) {
+        config.receipts = {
+          ...seedReceipts,
+          ...(pushdown ? { dataset: receiptsDataset.trim() } : { resource_key: receiptsResourceKey.trim() }),
+          window_days: receiptsWindowDays,
+        };
+      }
 
       const res = await fetch(`${API_BASE}/templates/configure/${componentId}`, {
         method: 'POST',
@@ -735,6 +753,56 @@ export function ContextEngineeringConfigStep({
                 className="w-full px-2.5 py-1.5 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono"
               />
               <p className="text-[10px] text-gray-400 mt-0.5">Comma-separated. Carried onto every chunk for filtered search later.</p>
+            </div>
+
+            <div className="border-t border-gray-100 pt-4 space-y-3">
+              <h3 className="text-xs font-semibold text-gray-700 uppercase tracking-wider">Governance &amp; receipts <span className="text-gray-400 font-normal normal-case">(optional)</span></h3>
+              <div>
+                <label className="block text-xs font-medium text-gray-700 mb-1">Sensitivity</label>
+                <select
+                  value={sensitivity}
+                  onChange={(e) => setSensitivity(e.target.value)}
+                  className="w-full px-2.5 py-1.5 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                >
+                  <option value="">Not declared</option>
+                  <option value="public">public</option>
+                  <option value="internal">internal</option>
+                  <option value="confidential">confidential</option>
+                  <option value="restricted">restricted</option>
+                </select>
+                <p className="text-[10px] text-gray-400 mt-0.5">Recorded on the asset so a retrieval gateway can enforce it.</p>
+              </div>
+              <label className="flex items-start gap-2 text-xs text-gray-700">
+                <input type="checkbox" checked={receiptsOn} onChange={(e) => setReceiptsOn(e.target.checked)} className="mt-0.5" />
+                <span>
+                  Learn from retrieval receipts
+                  <span className="block text-[10px] text-gray-400">Each rebuild reads what was actually retrieved and how it turned out, and flags chunks users keep rating badly. Needs the Context Receipt Store resource (Resources tab) and a serving layer that records receipts, such as rag_pipeline.</span>
+                </span>
+              </label>
+              {receiptsOn && (
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-xs font-medium text-gray-700 mb-1">{pushdown ? 'Receipts dataset' : 'Receipt store resource key'}</label>
+                    <input
+                      type="text"
+                      value={pushdown ? receiptsDataset : receiptsResourceKey}
+                      onChange={(e) => (pushdown ? setReceiptsDataset(e.target.value) : setReceiptsResourceKey(e.target.value))}
+                      placeholder={pushdown ? 'my-project.context_receipts' : 'context_receipts'}
+                      className="w-full px-2.5 py-1.5 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-gray-700 mb-1">Window (days)</label>
+                    <input
+                      type="number"
+                      min={1}
+                      value={receiptsWindowDays}
+                      onChange={(e) => setReceiptsWindowDays(Math.max(1, Number(e.target.value) || 1))}
+                      className="w-full px-2.5 py-1.5 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono"
+                    />
+                  </div>
+                </div>
+              )}
             </div>
 
             <div className="border-t border-gray-100 pt-4">

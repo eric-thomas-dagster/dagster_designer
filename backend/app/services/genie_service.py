@@ -75,6 +75,7 @@ _AI_HINT_SUBSTRINGS = (
     "claude", "anthropic", "openai", "agentic", "agent", "chatbot",
     "embedding", "transcri", "extract", "machine learning",
     "artificial intelligence", "large language model",
+    "context engineering", "knowledge base", "vector", "retrieval", "chunk", "receipt",
 )
 
 
@@ -89,8 +90,8 @@ def agents_pipelines_component_ids(components: list[dict[str, Any]]) -> set[str]
     real manifest tagging gap (vanta_evidence_response_agent has no
     `agent` tag despite its name). Deliberately excludes id-suffix
     `_pipeline` -- that would also pull in huggingface_pipeline (a plain
-    inference pipeline) and rag_pipeline (belongs to the separate RAG &
-    Vector Search bin's own guided-form curation, not this one).
+    inference pipeline) and rag_pipeline (curated by the separate RAG &
+    Vector Search bin; it is added back explicitly via `always` below so an agent plan can include its query side).
     """
     trigger_tags = {"agent", "multi-agent"}
     agent_ids = {
@@ -133,7 +134,13 @@ def agents_pipelines_component_ids(components: list[dict[str, Any]]) -> set[str]
     # silently left it OUT of this pool -- the Agent Builder could not pick the one component built for exactly this
     # (several reviewers + a combiner as steps of ONE pipeline) and fell back to five separate agents. Always include it,
     # plus the per-row LLM components the planner prompt tells it to reach for when a task is "for every row".
-    always = {"agentic_pipeline", "litellm_inference_asset", "openai_llm", "openrouter_llm"} & {
+    # context_engineering_pipeline (chunk/classify/embed/write_vector_store: the BUILD side of a knowledge base) and
+    # rag_pipeline (the QUERY side) carry no `agent` tag and end in `_pipeline`, so they were invisible here too -- "build
+    # a support agent over our tickets" could never plan the knowledge base the agent retrieves from.
+    always = {
+        "agentic_pipeline", "litellm_inference_asset", "openai_llm", "openrouter_llm",
+        "context_engineering_pipeline", "rag_pipeline",
+    } & {
         c["id"] for c in components if c.get("id")
     }
     return agent_ids | source_ids | always
@@ -889,6 +896,16 @@ SYSTEM_PROMPT = (
     "  needs agentic_pipeline-only machinery (MCP "
     "  tools, routing between specialists, multi-agent debate) that "
     "  doesn't apply per-row.\n"
+    "- CONTEXT / KNOWLEDGE-BASE REQUESTS (critical): when the request is to build, index or govern a "
+    "  searchable knowledge base from raw text (tickets, docs, code) -- chunking, classifying, embedding, "
+    "  writing to a vector store -- pick ONE `context_engineering_pipeline` (steps: chunk first, then "
+    "  classify/embed/write_vector_store, optional filter/dedupe/sensitivity/stamp), NOT `agentic_pipeline`. "
+    "  It is the BUILD side only; if the request also asks to answer questions from it, add a separate "
+    "  `rag_pipeline` pick for the query side, and chain `agentic_pipeline` only for LLM orchestration "
+    "  on top. Its `receipts:` block needs the `context_receipt_store` RESOURCE (`resource_key: "
+    "  context_receipts`), which is installed from the Resources panel, never as a pick: set the key "
+    "  and mention in `reason` that the store resource must be installed. `execution_mode: sql` supports "
+    "  only chunk/classify/embed.\n"
     "- PREFER `agentic_pipeline` FOR ANYTHING AGENTIC (critical): when the request is built "
     "  from LLM / agent steps -- several reviewers or specialists, routing, debate, "
     "  critique/revise, summarising or combining several outputs, an agent loop "
