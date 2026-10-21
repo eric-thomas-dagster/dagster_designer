@@ -14,7 +14,7 @@ import asyncio
 import json
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable
 
 import httpx
@@ -134,15 +134,10 @@ def agents_pipelines_component_ids(components: list[dict[str, Any]]) -> set[str]
     # silently left it OUT of this pool -- the Agent Builder could not pick the one component built for exactly this
     # (several reviewers + a combiner as steps of ONE pipeline) and fell back to five separate agents. Always include it,
     # plus the per-row LLM components the planner prompt tells it to reach for when a task is "for every row".
-    # context_engineering_pipeline (chunk/classify/embed/write_vector_store: the BUILD side of a knowledge base) and
-    # rag_pipeline (the QUERY side) carry no `agent` tag and end in `_pipeline`, so they were invisible here too -- "build
-    # a support agent over our tickets" could never plan the knowledge base the agent retrieves from.
-    always = {
-        "agentic_pipeline", "litellm_inference_asset", "openai_llm", "openrouter_llm",
-        "context_engineering_pipeline", "rag_pipeline",
-    } & {
-        c["id"] for c in components if c.get("id")
-    }
+    # The whole-agentic-pipeline-in-one-YAML component, the per-row LLM components the planner prompt recommends, and the
+    # knowledge-base build/query pair carry no `agent` tag and no `_agent` suffix, so the rules above would leave them out.
+    # genie_catalog supplies them: manifest `builders: [agents_pipelines]` first, built-in defaults when it isn't declared.
+    always = _catalog.builder_pool_ids(components, _catalog.BUILDER_AGENTS_PIPELINES)
     return agent_ids | source_ids | always
 
 
@@ -153,16 +148,19 @@ def agents_pipelines_component_ids(components: list[dict[str, Any]]) -> set[str]
 # token budget and doesn't need catalog-wide prefiltering.
 _SCOPE_COMPONENT_ID_RESOLVERS: dict[str, Callable[[list[dict[str, Any]]], set[str]]] = {
     "agents_pipelines": agents_pipelines_component_ids,
+    "rag": lambda components: _catalog.builder_pool_ids(components, _catalog.BUILDER_RAG),
 }
 
 
 # Manifest cache — in-memory (15 min TTL) with a disk fallback so we survive
 # GitHub's 60/hr unauthenticated rate-limit on raw.githubusercontent.com.
-_manifest_cache: dict[str, Any] = {"data": None, "fetched_at": 0.0}
+_manifest_cache: dict[str, Any] = {"data": None, "fetched_at": 0.0, "etag": None}
 _MANIFEST_TTL = 900.0  # seconds
 
 # Look up disk cache next to the backend package.
 from pathlib import Path as _Path
+
+from app.services import genie_catalog as _catalog
 
 _DISK_CACHE_PATH = _Path(__file__).resolve().parent.parent.parent / ".manifest_cache.json"
 
@@ -230,6 +228,9 @@ class GeniePlan:
     # None means the plan is complete and ready to apply -- see
     # GenieClarifyingQuestion.
     clarifying_question: GenieClarifyingQuestion | None = None
+    # Resources (e.g. the context receipt store) the picked configs refer to. Installed from the Resources tab, never as
+    # picks, so the UI surfaces them as a separate "install this too" list: [{component_id, resource_key, reason, needed_by}].
+    requires_resources: list[dict[str, str]] = field(default_factory=list)
 
 
 class GenieError(RuntimeError):
@@ -268,11 +269,19 @@ async def fetch_manifest() -> dict[str, Any]:
             _manifest_cache["fetched_at"] = 0.0  # force refresh attempt
             cached = disk
 
+    # Conditional request: a 304 costs no body and (for raw.githubusercontent.com) is far cheaper against the unauthenticated
+    # rate limit, so the TTL refresh can be frequent without risking the 60/hr cap. Only sent when the ETag belongs to the
+    # data we're holding, so a disk-warmed cache without an ETag always gets a full fetch.
+    headers = {"If-None-Match": _manifest_cache["etag"]} if cached and _manifest_cache.get("etag") else {}
     try:
         async with httpx.AsyncClient() as client:
-            r = await client.get(MANIFEST_URL, timeout=15.0)
+            r = await client.get(MANIFEST_URL, timeout=15.0, headers=headers)
+            if r.status_code == 304 and cached:
+                _manifest_cache["fetched_at"] = now
+                return cached
             r.raise_for_status()
             data = r.json()
+            _manifest_cache["etag"] = r.headers.get("etag")
     except httpx.HTTPStatusError as e:
         if cached:
             return cached
@@ -2273,11 +2282,11 @@ async def plan(
         # each side and the name lookup missed, match those two directly.
         prev_family_picks = [
             pp for pp in (previous_plan or [])
-            if pp.get("component_type") in _AGENTIC_PIPELINE_FAMILY
+            if _has_check(pp.get("component_type") or "", _catalog.CHECK_MODEL_PROVIDER)
         ]
         for pk in picks:
             prev = prev_by_name.get(pk.asset_name)
-            if prev is None and pk.component_type in _AGENTIC_PIPELINE_FAMILY and len(prev_family_picks) == 1:
+            if prev is None and _has_check(pk.component_type, _catalog.CHECK_MODEL_PROVIDER) and len(prev_family_picks) == 1:
                 prev = prev_family_picks[0]
             prev_config = prev.get("config") if prev else None
             if isinstance(prev_config, dict) and isinstance(pk.config, dict):
@@ -2288,7 +2297,7 @@ async def plan(
     # against, since it also covers a brand new step added THIS turn that
     # has no prior-turn counterpart at all to restore from.
     for pk in picks:
-        if pk.component_type in _AGENTIC_PIPELINE_FAMILY and isinstance(pk.config, dict):
+        if _has_check(pk.component_type, _catalog.CHECK_MODEL_PROVIDER) and isinstance(pk.config, dict):
             _fill_forward_model_fields(pk.config)
 
     picks_by_name: dict[str, GeniePick] = {pk.asset_name: pk for pk in picks}
@@ -2354,8 +2363,10 @@ async def plan(
     # that explicit).
     coord_issues = _detect_coordination_issues(picks)
     schema_issues = await _detect_schema_issues(picks, components_by_id)
-    all_issues = schema_issues + coord_issues
-    if schema_issues or (coord_issues and len(picks) >= 2):
+    pipeline_checks = _catalog.pipeline_checks_by_type(components)
+    context_issues = _context_pipeline_issues(picks, pipeline_checks)
+    all_issues = schema_issues + coord_issues + context_issues
+    if schema_issues or context_issues or (coord_issues and len(picks) >= 2):
         try:
             repaired_picks = await _repair_picks(
                 original_picks=picks,
@@ -2389,7 +2400,7 @@ async def plan(
     # it must never reach "Ready" even if every other check would
     # otherwise be satisfied (model/api_key_env_var can be fully
     # resolved and this is STILL broken -- that's exactly what happened).
-    if _per_row_partition_misuse(picks):
+    if _per_row_partition_misuse(picks, pipeline_checks):
         clarifying_question = GenieClarifyingQuestion(
             question=(
                 "This pipeline processes each row of a DataFrame "
@@ -2416,7 +2427,7 @@ async def plan(
     # own targeted question rather than falling through to the generic
     # one. Checked BEFORE the generic backstop so it wins when both would
     # otherwise fire on the same TODO value.
-    if _model_provider_gap(picks) and clarifying_question is None:
+    if _model_provider_gap(picks, pipeline_checks) and clarifying_question is None:
         clarifying_question = GenieClarifyingQuestion(
             question="Which LLM provider/model should this pipeline use? "
             "(applies to every step)",
@@ -2490,6 +2501,7 @@ async def plan(
         tokens_completion=usage.get("completion_tokens", 0),
         notes=notes,
         clarifying_question=clarifying_question,
+        requires_resources=_catalog.required_resources(picks, components),
     )
 
 
@@ -2910,7 +2922,16 @@ def _has_todo_placeholder(picks: list[GeniePick]) -> bool:
 # repeated once per nested block, it's worth anticipating deterministically
 # rather than leaving each block's TODO-or-not up to the model's judgment
 # every time -- see PICK A MODEL/PROVIDER ONCE, APPLY EVERYWHERE.
-_AGENTIC_PIPELINE_FAMILY = {"agentic_pipeline", "ml_pipeline", "polars_pipeline", "warehouse_pipeline"}
+# Kept for callers/tests that import it; which checks apply to a component now comes from genie_catalog (manifest
+# `genie_checks`, else DEFAULT_PIPELINE_CHECKS) via _has_check below.
+_AGENTIC_PIPELINE_FAMILY = {
+    cid for cid, checks in _catalog.DEFAULT_PIPELINE_CHECKS.items() if _catalog.CHECK_MODEL_PROVIDER in checks
+}
+
+
+def _has_check(component_type: str, check: str, checks: dict[str, frozenset[str]] | None = None) -> bool:
+    return check in (checks if checks is not None else _catalog.DEFAULT_PIPELINE_CHECKS).get(component_type, frozenset())
+
 # Ops whose `model`/`api_key_env_var` live directly on the step dict
 # itself (per steps_schemas, both are `required`) -- as opposed to
 # route/debate/critique_loop, where those fields live one level down in a
@@ -2918,7 +2939,7 @@ _AGENTIC_PIPELINE_FAMILY = {"agentic_pipeline", "ml_pipeline", "polars_pipeline"
 _DIRECT_MODEL_OPS = {"llm_call", "synthesize"}
 
 
-def _model_provider_gap(picks: list[GeniePick]) -> bool:
+def _model_provider_gap(picks: list[GeniePick], checks: dict[str, frozenset[str]] | None = None) -> bool:
     """True if any agentic-pipeline-family pick has a step (or nested
     specialist/proposer/router/arbitrator block) that declares `model`/
     `api_key_env_var` but leaves either missing or TODO-placeholdered.
@@ -2951,8 +2972,69 @@ def _model_provider_gap(picks: list[GeniePick]) -> bool:
     return any(
         _scan(p.config)
         for p in picks
-        if p.component_type in _AGENTIC_PIPELINE_FAMILY and p.action != "remove"
+        if _has_check(p.component_type, _catalog.CHECK_MODEL_PROVIDER, checks) and p.action != "remove"
     )
+
+
+# Ops the warehouse-native (`execution_mode: sql`) statement can run; retrieval_eval works in both modes.
+_CONTEXT_SQL_OPS = {"chunk", "classify", "embed", "retrieval_eval"}
+_CONTEXT_KNOWN_OPS = {
+    "chunk", "classify", "embed", "write_vector_store", "enrich", "filter", "dedupe", "sensitivity", "stamp", "retrieval_eval",
+}
+_CONTEXT_EMBED_KEYED = {"openai": "OpenAI", "cohere": "Cohere"}
+
+
+def _context_pipeline_issues(picks: list[GeniePick], checks: dict[str, frozenset[str]] | None = None) -> list[str]:
+    """Concrete, fixable problems in a knowledge-base build (context_engineering_pipeline-style picks).
+
+    Returned as issue strings for the same targeted repair call the schema/coordination issues use, rather than a hard
+    block: every one has an obvious fix the model can apply (reorder, drop an op, add the missing field).
+    """
+    issues: list[str] = []
+    for p in picks:
+        if p.action == "remove" or not _has_check(p.component_type, _catalog.CHECK_CONTEXT_PIPELINE, checks):
+            continue
+        cfg = p.config or {}
+        steps = [s for s in (cfg.get("steps") or []) if isinstance(s, dict)]
+        name = p.asset_name
+        if not steps:
+            continue
+        ops = [s.get("op") for s in steps]
+        if ops[0] != "chunk":
+            issues.append(f"'{name}': the first step must be `chunk` (found `{ops[0]}`).")
+        for s in steps:
+            op = s.get("op")
+            if op and op not in _CONTEXT_KNOWN_OPS:
+                issues.append(f"'{name}': step '{s.get('id')}' uses unknown op `{op}`; valid ops are {sorted(_CONTEXT_KNOWN_OPS)}.")
+        if cfg.get("execution_mode") == "sql":
+            for s in steps:
+                if s.get("op") not in _CONTEXT_SQL_OPS:
+                    issues.append(
+                        f"'{name}': execution_mode 'sql' supports only chunk/classify/embed/retrieval_eval; "
+                        f"step '{s.get('id')}' (`{s.get('op')}`) needs python mode."
+                    )
+                elif s.get("op") == "classify" and s.get("mode") == "custom":
+                    issues.append(f"'{name}': classify `mode: custom` is python-only and can't run in execution_mode 'sql'.")
+            if not cfg.get("output_table"):
+                issues.append(f"'{name}': execution_mode 'sql' writes to a table, so `output_table` is required.")
+        elif "write_vector_store" not in ops:
+            issues.append(f"'{name}': python mode needs a final `write_vector_store` step or nothing is indexed.")
+        for s in steps:
+            op, sid = s.get("op"), s.get("id")
+            if op == "enrich" and _is_todo_or_missing(s.get("model")):
+                issues.append(f"'{name}': enrich step '{sid}' calls an LLM per chunk and needs `model`.")
+            if op == "classify" and s.get("mode") == "llm" and _is_todo_or_missing(s.get("model")):
+                issues.append(f"'{name}': classify step '{sid}' uses `mode: llm` and needs `model`.")
+            if op == "embed":
+                provider = s.get("provider", "sentence_transformers")
+                if provider in _CONTEXT_EMBED_KEYED and _is_todo_or_missing(s.get("api_key_env_var")):
+                    issues.append(f"'{name}': embed step '{sid}' uses {_CONTEXT_EMBED_KEYED[provider]} and needs `api_key_env_var`.")
+                if provider == "litellm" and _is_todo_or_missing(s.get("model")):
+                    issues.append(f"'{name}': embed step '{sid}' uses litellm and needs `model` as '<provider>/<model>'.")
+        receipts = cfg.get("receipts")
+        if isinstance(receipts, dict) and cfg.get("execution_mode") != "sql" and _is_todo_or_missing(receipts.get("resource_key")):
+            issues.append(f"'{name}': receipts needs `resource_key` naming the context receipt store resource (default `context_receipts`).")
+    return issues
 
 
 # Ops that only ever produce ONE aggregate result (a routing decision, a
@@ -2967,7 +3049,7 @@ _WHOLE_PIPELINE_ONLY_OPS = {
 }
 
 
-def _per_row_partition_misuse(picks: list[GeniePick]) -> bool:
+def _per_row_partition_misuse(picks: list[GeniePick], checks: dict[str, frozenset[str]] | None = None) -> bool:
     """True if an agentic_pipeline-family pick is built as a plain linear
     chain of per-row-only ops (classify/llm_call/extract, each reading the
     previous step's single output as `source`) with NOTHING that actually
@@ -3003,7 +3085,7 @@ def _per_row_partition_misuse(picks: list[GeniePick]) -> bool:
     nothing here needs actual pipeline orchestration."
     """
     for p in picks:
-        if p.component_type not in _AGENTIC_PIPELINE_FAMILY or p.action == "remove":
+        if not _has_check(p.component_type, _catalog.CHECK_PER_ROW_MISUSE, checks) or p.action == "remove":
             continue
         config = p.config or {}
         steps = config.get("steps")
@@ -3496,7 +3578,7 @@ async def _repair_picks(
             # a hallucinated addition.
             continue
         repaired_config = p.get("config") or original.config
-        if original.component_type in _AGENTIC_PIPELINE_FAMILY:
+        if _has_check(original.component_type, _catalog.CHECK_MODEL_PROVIDER):
             _reapply_resolved_model_fields(repaired_config, original.config)
         out.append(
             GeniePick(

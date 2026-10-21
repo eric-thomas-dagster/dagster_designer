@@ -13,8 +13,10 @@ from pydantic import BaseModel
 
 from ..core.config import settings
 from ..services.genie_service import (
+    _SCOPE_COMPONENT_ID_RESOLVERS,
     DEFAULT_MODEL,
     GenieError,
+    fetch_manifest,
     plan,
 )
 from ..services import dagster_ai_service
@@ -142,6 +144,14 @@ class GenieClarifyingQuestionResponse(BaseModel):
     options: list[str] | None = None
 
 
+class RequiredResourceResponse(BaseModel):
+    component_id: str
+    resource_key: str
+    reason: str = ""
+    needed_by: str = ""
+    installed: bool | None = None
+
+
 class GeniePlanResponse(BaseModel):
     picks: list[GeniePickResponse]
     task: str
@@ -151,6 +161,9 @@ class GeniePlanResponse(BaseModel):
     notes: list[str]
     # None means the plan is complete and ready to apply.
     clarifying_question: GenieClarifyingQuestionResponse | None = None
+    # Resources the plan refers to (e.g. the context receipt store); each is installed from the Resources tab.
+    # `installed` is only filled when the request carried a project_id.
+    requires_resources: list[RequiredResourceResponse] = []
 
 
 @router.post("/plan", response_model=GeniePlanResponse)
@@ -207,7 +220,50 @@ async def genie_plan(req: GeniePlanRequest) -> GeniePlanResponse:
             if result.clarifying_question
             else None
         ),
+        requires_resources=[
+            RequiredResourceResponse(**r, installed=_resource_installed(req.project_id, r["resource_key"]))
+            for r in result.requires_resources
+        ],
     )
+
+
+def _resource_installed(project_id: str | None, resource_key: str) -> bool | None:
+    """True/False when we can tell whether the project already has a resource instance with this key, else None."""
+    if not project_id:
+        return None
+    try:
+        from app.services.project_service import project_service
+
+        project = project_service.get_project(project_id)
+        if project is None:
+            return None
+        for c in project.components:
+            attrs = c.attributes or {}
+            if attrs.get("resource_key") == resource_key and "receipt" in (c.component_type or "").lower():
+                return True
+        return False
+    except Exception:
+        return None
+
+
+class BuilderInfo(BaseModel):
+    id: str
+    count: int
+
+
+@router.get("/builders", response_model=list[BuilderInfo])
+async def genie_builders() -> list[BuilderInfo]:
+    """How many manifest components each scoped builder can plan with, so the hub's card counts track the catalog
+    instead of a hard-coded number. Empty when the manifest can't be fetched (the UI keeps its static counts)."""
+    try:
+        manifest = await fetch_manifest()
+    except GenieError:
+        return []
+    components = manifest.get("components") or []
+    return [
+        BuilderInfo(id=builder, count=len(resolver(components)))
+        for builder, resolver in sorted(_SCOPE_COMPONENT_ID_RESOLVERS.items())
+    ]
 
 
 # --- "Ask Dagster AI" panel ---------------------------------------------
