@@ -391,6 +391,7 @@ export function DocumentExtractorConfigStep({
           sourcePath={effectiveSourcePath}
           upstreamAssetKey={upstreamAssetKey}
           apiKeyEnvVar={apiKeyEnvVar}
+          assetName={assetName}
           settings={{ outputFields, documentType, model, apiBaseEnvVar: apiBaseEnvVar.trim() || undefined, fieldRegions }}
         />
 

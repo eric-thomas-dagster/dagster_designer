@@ -132,3 +132,71 @@ def test_cache_is_keyed_by_hash_and_stores_no_file_path(project):
     assert svc._cache, "a successful result should have been cached"
     assert all(len(k) == 64 and all(c in "0123456789abcdef" for c in k) for k in svc._cache)
     assert all("file" not in value for _ts, value in svc._cache.values())
+
+
+# --- golden set + scoring through the API ---------------------------------------------------------------------------
+
+def _digest_of(project, text):
+    return svc._file_digest(_docs(project.tmp, probe=text)[0])
+
+
+def _mark(project, **kw):
+    body = {"asset_name": "invoices", "path": "/x/a.txt", **kw}
+    return project.client.put("/api/projects/p1/extraction/golden", json=body)
+
+
+def test_marked_fields_are_scored_and_summarized_on_the_next_run(project):
+    files = _docs(project.tmp, a="alpha", b="beta")
+    first = _post(project, _body(files, asset_name="invoices")).json()
+    assert first["score"]["accuracy"] is None  # nothing marked yet
+    a, b = first["results"]
+    # the stand-in extractor returns "<text>:total"; mark a as right (model's own value) and b as wrong
+    assert _mark(project, digest=a["digest"], field="total", value=a["fields"]["total"], extracted=a["fields"]["total"]).json()["match"] is True
+    wrong = _mark(project, digest=b["digest"], field="total", value_text="999", extracted=b["fields"]["total"]).json()
+    assert wrong["match"] is False and wrong["expected"] == {"total": 999} and wrong["marked_documents"] == 2
+    again = _post(project, _body(files, asset_name="invoices")).json()
+    assert again["cached"] == 2  # scoring needs no new model calls
+    assert again["results"][0]["match"] == {"total": True} and again["results"][1]["match"] == {"total": False}
+    assert again["results"][1]["expected"] == {"total": 999}
+    assert (again["score"]["marked"], again["score"]["correct"], again["score"]["accuracy"]) == (2, 1, 0.5)
+
+
+def test_scoring_follows_the_document_content_not_its_filename(project):
+    files = _docs(project.tmp, a="alpha")
+    first = _post(project, _body(files, asset_name="invoices")).json()["results"][0]
+    _mark(project, digest=first["digest"], field="total", value=first["fields"]["total"])
+    (project.tmp / "renamed.txt").write_text("alpha")
+    moved = _post(project, _body([str(project.tmp / "renamed.txt")], asset_name="invoices")).json()
+    assert moved["results"][0]["match"] == {"total": True}
+
+
+def test_a_field_marked_empty_is_right_when_blank_and_a_failed_document_misses_the_rest(project):
+    files = _docs(project.tmp, a="alpha", b="BOOM")
+    res = _post(project, _body(files, asset_name="invoices")).json()["results"]
+    _mark(project, digest=res[1]["digest"], field="total", value_text="12.5")
+    again = _post(project, _body(files, asset_name="invoices")).json()
+    assert again["results"][1]["ok"] is False and again["results"][1]["match"] == {"total": False}
+
+
+def test_unmarking_removes_the_expectation(project):
+    files = _docs(project.tmp, a="alpha")
+    r = _post(project, _body(files, asset_name="invoices")).json()["results"][0]
+    _mark(project, digest=r["digest"], field="total", value_text="1")
+    gone = project.client.delete("/api/projects/p1/extraction/golden", params={"asset_name": "invoices", "digest": r["digest"], "field": "total"}).json()
+    assert gone == {"expected": {}, "marked_documents": 0}
+    assert _post(project, _body(files, asset_name="invoices")).json()["results"][0]["match"] == {}
+
+
+def test_golden_get_and_unknown_project(project):
+    files = _docs(project.tmp, a="alpha")
+    r = _post(project, _body(files, asset_name="invoices")).json()["results"][0]
+    _mark(project, digest=r["digest"], field="vendor", value_text="")  # blank = should be empty
+    got = project.client.get("/api/projects/p1/extraction/golden", params={"asset_name": "invoices"}).json()
+    assert got["documents"][r["digest"]]["expected"] == {"vendor": None}
+    assert project.client.get("/api/projects/nope/extraction/golden", params={"asset_name": "x"}).status_code == 404
+
+
+def test_no_asset_name_means_no_scoring(project):
+    files = _docs(project.tmp, a="alpha")
+    res = _post(project, _body(files)).json()
+    assert res["score"] is None and "match" not in res["results"][0]

@@ -19,6 +19,8 @@ from pathlib import Path
 from typing import Any
 
 from ..core.uv_binary import project_subprocess_env
+from . import extraction_golden_service as golden
+from . import extraction_scoring as scoring
 from .project_service import project_service
 
 MAX_FILES = 10
@@ -110,12 +112,12 @@ async def try_extraction(project_id: str, spec: dict[str, Any], use_cache: bool 
     if not spec.get("output_fields"):
         raise ExtractionTryError("Add at least one field to extract.", "no_fields")
 
-    digests = await asyncio.to_thread(lambda: [_file_digest(f) for f in files]) if use_cache else [None] * len(files)
-    keys = [cache_key(d, spec) if d else None for d in digests]
+    digests = await asyncio.to_thread(lambda: [_file_digest(f) for f in files])
+    keys = [cache_key(d, spec) for d in digests]
     results: dict[int, dict[str, Any]] = {}
     pending: list[int] = []
     for i, k in enumerate(keys):
-        hit = _cache_get(k) if k else None
+        hit = _cache_get(k) if (k and use_cache) else None  # "re-run" skips the lookup but still refreshes the cache below
         if hit is not None:
             results[i] = {**hit, "file": files[i], "cached": True}
         else:
@@ -156,9 +158,34 @@ async def try_extraction(project_id: str, spec: dict[str, Any], use_cache: bool 
                 _cache_put(keys[i], {k: v for k, v in r.items() if k != "file"})
 
     ordered = [results[i] for i in range(len(files))]
+    for r, digest in zip(ordered, digests):
+        r["digest"] = digest
+
+    # Score against the golden set (values a person confirmed) when this extraction has one -- done here, after the cache, so a cached
+    # result is scored against the CURRENT golden set rather than whatever was marked when it was first run.
+    score = None
+    asset_name = spec.get("asset_name")
+    if asset_name:
+        data = golden.load(project_dir, asset_name)
+        per_doc = []
+        for r in ordered:
+            expected = golden.expected_for(data, r["digest"])
+            r["expected"] = expected
+            r["match"] = scoring.score_document(r.get("fields") if r.get("ok") else None, expected) if expected else {}
+            if r["match"]:
+                per_doc.append(r["match"])
+        score = scoring.summarize(per_doc)
     return {
         "results": ordered,
         "model": spec["model"],
         "cached": sum(1 for r in ordered if r.get("cached")),
         "calls": sum(1 for r in ordered if not r.get("cached")),
+        "score": score,
     }
+
+
+def project_dir_for(project_id: str) -> Path:
+    project = project_service.get_project(project_id)
+    if project is None:
+        raise ExtractionTryError("Project not found", "not_found")
+    return project_service._get_project_dir(project)
