@@ -5,6 +5,7 @@ import { projectsApi, API_BASE } from '@/services/api';
 import { notify } from './Notifications';
 import { DocumentPreviewPanel } from './DocumentPreviewPanel';
 import { DocumentAnnotator, type FieldRegion } from './DocumentAnnotator';
+import { ExtractionTryPanel } from './ExtractionTryPanel';
 import type { ComponentInstance } from '@/types';
 
 // Mirrors structured_document_extractor's own `_PRESET_FIELDS` (see that
@@ -88,6 +89,8 @@ export function DocumentExtractorConfigStep({
   const [newField, setNewField] = useState('');
   const [model, setModel] = useState(seedAttrs.model || 'gpt-4o');
   const [apiKeyEnvVar, setApiKeyEnvVar] = useState(seedAttrs.api_key_env_var || 'OPENAI_API_KEY');
+  // For a local / self-hosted model (e.g. OLLAMA_API_BASE with model 'ollama/llava'); empty = the provider's default endpoint.
+  const [apiBaseEnvVar, setApiBaseEnvVar] = useState<string>(seedAttrs.api_base_env_var || '');
   const [postProcess, setPostProcess] = useState<'none' | 'move' | 'delete'>(seedAttrs.post_process || 'none');
   const [postProcessDir, setPostProcessDir] = useState(seedAttrs.post_process_dir || '');
   const [saving, setSaving] = useState(false);
@@ -156,6 +159,7 @@ export function DocumentExtractorConfigStep({
         model,
         api_key_env_var: apiKeyEnvVar,
       };
+      if (apiBaseEnvVar.trim()) config.api_base_env_var = apiBaseEnvVar.trim();
       if (upstreamAssetKey) {
         config.upstream_asset_key = upstreamAssetKey;
         config.input_column = 'local_path';
@@ -337,6 +341,19 @@ export function DocumentExtractorConfigStep({
                   className="w-full px-2.5 py-1.5 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono"
                 />
               </div>
+              <div className="col-span-2">
+                <label className="block text-xs font-medium text-gray-700 mb-1">
+                  API base env var <span className="text-gray-400 font-normal">(optional, for a local model)</span>
+                </label>
+                <input
+                  type="text"
+                  value={apiBaseEnvVar}
+                  onChange={(e) => setApiBaseEnvVar(e.target.value)}
+                  placeholder="OLLAMA_API_BASE"
+                  className="w-full px-2.5 py-1.5 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono"
+                />
+                <p className="text-[10px] text-gray-400 mt-0.5">Name of the env var holding the server URL, e.g. OLLAMA_API_BASE=http://localhost:11434 with model <span className="font-mono">ollama/llava</span>. Leave empty for OpenAI, Anthropic and other hosted providers.</p>
+              </div>
             </div>
 
             {!upstreamAssetKey && (
@@ -369,6 +386,13 @@ export function DocumentExtractorConfigStep({
             )}
           </div>
         </div>
+
+        <ExtractionTryPanel
+          sourcePath={effectiveSourcePath}
+          upstreamAssetKey={upstreamAssetKey}
+          apiKeyEnvVar={apiKeyEnvVar}
+          settings={{ outputFields, documentType, model, apiBaseEnvVar: apiBaseEnvVar.trim() || undefined, fieldRegions }}
+        />
 
         <div className="flex justify-end gap-2 px-6 py-4 border-t border-gray-200">
           {isEditing && onReviewExtractions && (

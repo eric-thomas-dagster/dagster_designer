@@ -51,7 +51,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .core.config import settings
 from .services.telemetry_service import log_designer_action, telemetry_uploader
-from .api import components, projects, git, codegen, dagster, files, templates, primitives, dagster_webserver, dbt_adapters, integrations, env_vars, pipelines, templates_registry, dbt_cloud, assets, dependencies, pipeline_templates, genie, alerts, runs, designer_loc, drafts, authored, promotion, preview, app_settings, ai_fix, knowledge_base
+from .api import components, projects, git, codegen, dagster, files, templates, primitives, dagster_webserver, dbt_adapters, integrations, env_vars, pipelines, templates_registry, dbt_cloud, assets, dependencies, pipeline_templates, genie, alerts, runs, designer_loc, drafts, authored, promotion, preview, app_settings, ai_fix, knowledge_base, extraction
 
 # Create FastAPI app
 app = FastAPI(
@@ -89,6 +89,7 @@ app.include_router(dependencies.router, prefix=settings.api_prefix)  # New: Depe
 app.include_router(pipeline_templates.router, prefix=settings.api_prefix)  # New: Pipeline templates
 app.include_router(genie.router, prefix=settings.api_prefix)  # New: Genie NL planner
 app.include_router(knowledge_base.router, prefix=settings.api_prefix)  # New: knowledge-base health from the receipt store
+app.include_router(extraction.router, prefix=settings.api_prefix)  # New: try a document extraction on samples
 app.include_router(alerts.router, prefix=settings.api_prefix)  # New: Alert policies (Dagster+)
 app.include_router(runs.router, prefix=settings.api_prefix)  # New: Runs history (local dagster dev + Dagster+)
 app.include_router(designer_loc.router, prefix=settings.api_prefix)  # New: Designer-managed code location subprocess
