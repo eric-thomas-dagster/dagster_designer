@@ -82,6 +82,7 @@ export function ExtractionTryPanel({
   settings,
   apiKeyEnvVar,
   assetName,
+  onResults,
 }: {
   sourcePath?: string;
   upstreamAssetKey?: string;
@@ -89,6 +90,8 @@ export function ExtractionTryPanel({
   apiKeyEnvVar: string;
   /** Names the extraction so marks are saved (and scored) per extraction. */
   assetName?: string;
+  /** Called whenever the shown results change (a run, or a value marked right/wrong). */
+  onResults?: (results: TryResult[]) => void;
 }) {
   const { currentProject } = useProjectStore();
   const [open, setOpen] = useState(true);
@@ -161,6 +164,11 @@ export function ExtractionTryPanel({
       setRunning(false);
     }
   };
+
+  useEffect(() => {
+    onResults?.(results);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [results]);
 
   const canMark = !!currentProject && !!assetName?.trim();
   const goldenUrl = currentProject ? `${API_BASE}/projects/${currentProject.id}/extraction/golden` : '';

@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { X, Loader2, FileText, Plus, Sparkles, Image as ImageIcon, Crosshair } from 'lucide-react';
 import { useProjectStore } from '@/hooks/useProject';
 import { projectsApi, API_BASE } from '@/services/api';
@@ -6,6 +6,13 @@ import { notify } from './Notifications';
 import { DocumentPreviewPanel } from './DocumentPreviewPanel';
 import { DocumentAnnotator, type FieldRegion } from './DocumentAnnotator';
 import { ExtractionTryPanel } from './ExtractionTryPanel';
+import { UnattendedSection, type WatchDraft } from './UnattendedSection';
+import { scoreResults, type TryResult } from '@/lib/extractionTry';
+import {
+  automationNames, buildValidation, freezeDescription, processedDirFor, validationDraftFromConfig, watchDirectory, watchPattern,
+  type ValidationDraft,
+} from '@/lib/extractionFreeze';
+import { createWatchAutomation } from '@/lib/extractionAutomation';
 import type { ComponentInstance } from '@/types';
 
 // Mirrors structured_document_extractor's own `_PRESET_FIELDS` (see that
@@ -91,6 +98,34 @@ export function DocumentExtractorConfigStep({
   const [apiKeyEnvVar, setApiKeyEnvVar] = useState(seedAttrs.api_key_env_var || 'OPENAI_API_KEY');
   // For a local / self-hosted model (e.g. OLLAMA_API_BASE with model 'ollama/llava'); empty = the provider's default endpoint.
   const [apiBaseEnvVar, setApiBaseEnvVar] = useState<string>(seedAttrs.api_base_env_var || '');
+
+  // Run unattended: validation rules, and an optional folder watch (a sensor + job created alongside the extractor).
+  const [sampleResults, setSampleResults] = useState<TryResult[]>([]);
+  const [validationDraft, setValidationDraft] = useState<ValidationDraft>(() => validationDraftFromConfig(seedAttrs.validation));
+  const watchDir = !upstreamAssetKey ? watchDirectory(effectiveSourcePath) : null;
+  const automation = automationNames(seedAttrs.asset_name || component?.label || defaultAssetName(initialDocType, upstreamAssetKey));
+  const [watch, setWatch] = useState<WatchDraft>({
+    enabled: !!currentProject?.components.some((c) => c.attributes?.sensor_name === automation.sensor),
+    pattern: watchPattern([]),
+    intervalSeconds: 60,
+  });
+  const watchPatternTouched = useRef(false);
+  useEffect(() => {
+    // Until the pattern is edited by hand, follow the sample files' extensions.
+    if (!watchPatternTouched.current && sampleResults.length > 0) {
+      setWatch((w) => ({ ...w, pattern: watchPattern(sampleResults.map((r) => r.file)) }));
+    }
+  }, [sampleResults]);
+  const processedDir = watchDir ? processedDirFor(watchDir) : '';
+  const changeWatch = (next: WatchDraft) => {
+    if (next.pattern !== watch.pattern) watchPatternTouched.current = true;
+    if (next.enabled && !watch.enabled && postProcess === 'none' && processedDir) {
+      // Without moving finished files the extractor would re-read the whole folder on every run.
+      setPostProcess('move');
+      setPostProcessDir(postProcessDir || processedDir);
+    }
+    setWatch(next);
+  };
   const [postProcess, setPostProcess] = useState<'none' | 'move' | 'delete'>(seedAttrs.post_process || 'none');
   const [postProcessDir, setPostProcessDir] = useState(seedAttrs.post_process_dir || '');
   const [saving, setSaving] = useState(false);
@@ -173,6 +208,13 @@ export function DocumentExtractorConfigStep({
         config.post_process = postProcess;
         if (postProcess === 'move') config.post_process_dir = postProcessDir.trim();
       }
+      const validation = buildValidation(validationDraft, outputFields);
+      if (validation) {
+        config.validation = validation;
+        const score = scoreResults(sampleResults);
+        const frozen = freezeDescription(documentType, sampleResults.length, score.marked, score.correct);
+        if (frozen) config.description = frozen;
+      }
 
       const res = await fetch(`${API_BASE}/templates/configure/${componentId}`, {
         method: 'POST',
@@ -181,6 +223,19 @@ export function DocumentExtractorConfigStep({
       });
       const body = await res.json().catch(() => ({} as any));
       if (!res.ok) throw new Error(body.detail || 'Failed to configure component');
+
+      if (watch.enabled && watchDir) {
+        try {
+          await createWatchAutomation(currentProject.id, {
+            assetName: assetName.trim(),
+            directory: watchDir,
+            pattern: watch.pattern,
+            intervalSeconds: watch.intervalSeconds,
+          });
+        } catch (e: any) {
+          notify.error(`The extractor was saved, but watching the folder wasn't set up: ${e?.message ?? e}`);
+        }
+      }
 
       await loadProject(currentProject.id);
       try {
@@ -384,6 +439,17 @@ export function DocumentExtractorConfigStep({
                 </p>
               </div>
             )}
+
+            <UnattendedSection
+              fields={outputFields}
+              draft={validationDraft}
+              onDraft={setValidationDraft}
+              sampleResults={sampleResults}
+              watch={watch}
+              onWatch={changeWatch}
+              watchDir={watchDir}
+              processedDir={processedDir}
+            />
           </div>
         </div>
 
@@ -392,6 +458,7 @@ export function DocumentExtractorConfigStep({
           upstreamAssetKey={upstreamAssetKey}
           apiKeyEnvVar={apiKeyEnvVar}
           assetName={assetName}
+          onResults={setSampleResults}
           settings={{ outputFields, documentType, model, apiBaseEnvVar: apiBaseEnvVar.trim() || undefined, fieldRegions }}
         />
 
