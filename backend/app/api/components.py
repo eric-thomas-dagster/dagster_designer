@@ -2,8 +2,10 @@
 
 import asyncio
 import json
+import os
 import subprocess
 import time
+from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
 
@@ -150,6 +152,56 @@ def _find_installed_schema_json(project, component_type: str) -> dict | None:
     return None
 
 
+def _apply_introspected_fields(schema_out: dict, info: dict | None) -> None:
+    """Fill what `dg`'s schema leaves out from what the component class itself declares (scripts/inspect_component.py).
+
+    Never overwrites a value `dg` provided. Class-level `x-*`/`ui:*` hints (e.g. `x-dagster-io`) land at the top of the schema,
+    where the canvas looks for them.
+    """
+    if not info or not info.get("success"):
+        return
+    properties = schema_out.get("properties")
+    if isinstance(properties, dict):
+        for name, field_schema in properties.items():
+            known = (info.get("fields") or {}).get(name)
+            if not isinstance(field_schema, dict) or not isinstance(known, dict):
+                continue
+            if not field_schema.get("description") and known.get("description"):
+                field_schema["description"] = known["description"]
+            for key, value in (known.get("extras") or {}).items():
+                field_schema.setdefault(key, value)
+    for key, value in (info.get("class_extras") or {}).items():
+        schema_out.setdefault(key, value)
+
+
+async def _introspect_component_class(project, component_type: str, env: dict, work_dir) -> dict | None:
+    """Ask the project's own Python for the component class's field metadata; None if it can't be read."""
+    from ..services.project_service import project_service
+
+    project_dir = project_service._get_project_dir(project)
+    python = venv_bin_path(project_dir / ".venv", "python")
+    if not python.exists():
+        return None
+    src_dir = project_dir / "src"
+    run_env = dict(env)
+    run_env["PYTHONPATH"] = os.pathsep.join(p for p in (str(src_dir) if src_dir.is_dir() else "", env.get("PYTHONPATH", "")) if p)
+    try:
+        result = await asyncio.to_thread(
+            subprocess.run,
+            [str(python), "-m", "scripts.inspect_component", component_type],
+            cwd=str(Path(__file__).resolve().parent.parent.parent),
+            env=run_env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        last_line = (result.stdout.strip().splitlines() or [""])[-1]
+        info = json.loads(last_line)
+    except (subprocess.TimeoutExpired, OSError, json.JSONDecodeError):
+        return None
+    return info if isinstance(info, dict) and info.get("success") and "fields" in info else None
+
+
 async def _get_component_schema_via_dg(project, component_type: str) -> "ComponentSchema | None":
     """Resolve a component's schema by asking the project's OWN `dg` CLI,
     instead of guessing from a checked-in schema.json (may not exist) or
@@ -234,6 +286,10 @@ async def _get_component_schema_via_dg(project, component_type: str) -> "Compone
             }
         if merged_defs:
             schema_out["$defs"] = merged_defs
+
+        # The component class itself is the first source for what `dg` leaves out (descriptions of defaulted fields, UI hints,
+        # class-level metadata); schema.json below only fills what is still missing.
+        _apply_introspected_fields(schema_out, await _introspect_component_class(project, component_type, env, work_dir))
 
         # Backfill from the component's own installed schema.json, when one
         # exists: descriptions `dg` dropped (see _find_installed_schema_json
