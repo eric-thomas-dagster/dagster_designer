@@ -8,6 +8,7 @@ import { API_BASE, assetsApi, aiApi, type AiProvidersStatus } from '@/services/a
 import { pickFile } from '@/services/tauri';
 import { applyGeniePicks, resolveComponentIdFromCurrentProject, type GeniePickLike } from '@/lib/applyGeniePicks';
 import { parseUpstreamAssetKeys } from '@/lib/upstreamAssetKeys';
+import { availableModels as filterModels } from '@/lib/aiModels';
 import { parseStepMetadataFields, formatCost, formatLatency } from '@/lib/stepMetadata';
 import type { ComponentInstance } from '@/types';
 import { RequiredResourcesBanner, type RequiredResource } from './RequiredResourcesBanner';
@@ -374,13 +375,7 @@ export function AgentPipelineBuilder({
   // Mirrors DagsterAIBar's provider-aware model selection so a configured
   // Anthropic-only key actually gets used instead of silently defaulting
   // to a provider with no key.
-  const availableModels = useMemo(() => {
-    if (!providers) return MODEL_OPTIONS;
-    return MODEL_OPTIONS.filter((m) => {
-      const isClaude = m.value.startsWith('claude');
-      return isClaude ? providers.anthropic_available : providers.openai_available;
-    });
-  }, [providers]);
+  const availableModels = useMemo(() => filterModels(MODEL_OPTIONS, providers), [providers]);
   const [model, setModel] = useState(MODEL_OPTIONS[0].value);
   useEffect(() => {
     if (!providers || availableModels.length === 0) return;

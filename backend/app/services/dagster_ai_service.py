@@ -26,6 +26,8 @@ from typing import AsyncIterator
 
 import httpx
 
+from . import llm_endpoints as _endpoints
+
 CLAUDE_BIN_NAME = "claude"
 DAGSTER_SKILLS_MARKETPLACE = "dagster-io/skills"
 DAGSTER_EXPERT_PLUGIN = "dagster-expert@dagster"
@@ -212,6 +214,7 @@ async def status() -> dict:
         "dagster_expert_installed": installed,
         "openai_available": bool(os.getenv("OPENAI_API_KEY")),
         "anthropic_available": bool(os.getenv("ANTHROPIC_API_KEY")),
+        "local_available": _endpoints.local_available(),
         # Whether Tier 2 (direct API fallback) will use the real
         # dagster-expert reference docs as its system prompt, vs. the
         # generic one -- found independently of dagster_expert_installed
@@ -298,16 +301,35 @@ async def fallback_chat(question: str, history: list[dict] | None = None) -> str
     """
     anthropic_key = os.getenv("ANTHROPIC_API_KEY")
     openai_key = os.getenv("OPENAI_API_KEY")
-    if not anthropic_key and not openai_key:
-        raise RuntimeError("No AI provider configured — add a key in Settings.")
+    # A local server is used when it's the only thing configured, or when the user asked to prefer it (Settings).
+    use_local = _endpoints.local_available() and (_endpoints.prefers_local() or not (anthropic_key or openai_key))
+    if not anthropic_key and not openai_key and not use_local:
+        raise RuntimeError("No AI provider configured — add a key or a local model in Settings.")
 
     system_prompt = _select_reference_context(question) or FALLBACK_SYSTEM_PROMPT
 
     messages = [{"role": h["role"], "content": h["content"]} for h in (history or [])]
     messages.append({"role": "user", "content": question})
 
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        if anthropic_key:
+    async with httpx.AsyncClient(timeout=180.0 if use_local else 60.0) as client:
+        if use_local:
+            try:
+                target = _endpoints.resolve_chat_target(_endpoints.LOCAL_PREFIX)
+            except _endpoints.EndpointNotConfigured as e:
+                raise RuntimeError(str(e)) from e
+            try:
+                r = await client.post(
+                    target.url,
+                    headers=target.headers,
+                    json={"model": target.model, "messages": [{"role": "system", "content": system_prompt}, *messages]},
+                )
+            except httpx.TransportError as e:
+                raise RuntimeError(_endpoints.unreachable_message(target, e)) from e
+            if r.status_code != 200:
+                raise RuntimeError(f"Local model error {r.status_code}: {r.text[:400]}")
+            data = r.json()
+            return (data.get("choices") or [{}])[0].get("message", {}).get("content", "")
+        elif anthropic_key:
             headers = {
                 "x-api-key": anthropic_key,
                 "anthropic-version": "2023-06-01",

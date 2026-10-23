@@ -8,6 +8,7 @@ import { API_BASE, aiApi, aiFixApi, type AiProvidersStatus } from '@/services/ap
 import { AiFixPanel } from './AiFixPanel';
 import { openSettings, onAiProvidersChanged } from './SettingsDialog';
 import { applyGeniePicks, resolveComponentIdFromCurrentProject } from '@/lib/applyGeniePicks';
+import { availableModels as filterModels } from '@/lib/aiModels';
 
 interface AIPick {
   component_type: string;
@@ -100,13 +101,7 @@ export function DagsterAIBar() {
     return () => { cancelled = true; unsubscribe(); };
   }, []);
 
-  const availableModels = useMemo(() => {
-    if (!providers) return MODEL_OPTIONS;
-    return MODEL_OPTIONS.filter((m) => {
-      const isClaude = m.value.startsWith('claude');
-      return isClaude ? providers.anthropic_available : providers.openai_available;
-    });
-  }, [providers]);
+  const availableModels = useMemo(() => filterModels(MODEL_OPTIONS, providers), [providers]);
 
   const [model, setModel] = useState(MODEL_OPTIONS[0].value);
   // Once providers load, snap `model` to a supported one if the default isn't.

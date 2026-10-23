@@ -7,6 +7,7 @@ import { notify } from './Notifications';
 import { DbtVisualComposer } from './DbtVisualComposer';
 import { useIsDarkMode } from '@/hooks/useIsDarkMode';
 import { onAiProvidersChanged } from './SettingsDialog';
+import { availableModels as filterModels } from '@/lib/aiModels';
 
 // Same ordering/rationale as DagsterAIBar's copy of this list: first
 // available-per-provider entry becomes the default.
@@ -76,13 +77,7 @@ export function AddDbtModelDialog({ open, onOpenChange, projectId, onCreated }: 
     const unsubscribe = onAiProvidersChanged(load);
     return () => { cancelled = true; unsubscribe(); };
   }, [open]);
-  const availableAiModels = useMemo(() => {
-    if (!aiProviders) return AI_MODEL_OPTIONS;
-    return AI_MODEL_OPTIONS.filter((m) => {
-      const isClaude = m.value.startsWith('claude');
-      return isClaude ? aiProviders.anthropic_available : aiProviders.openai_available;
-    });
-  }, [aiProviders]);
+  const availableAiModels = useMemo(() => filterModels(AI_MODEL_OPTIONS, aiProviders), [aiProviders]);
   const [aiModel, setAiModel] = useState(AI_MODEL_OPTIONS[0].value);
   useEffect(() => {
     if (!aiProviders || availableAiModels.length === 0) return;

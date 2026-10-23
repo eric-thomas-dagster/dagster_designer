@@ -65,13 +65,13 @@ export function DagsterExpertPanel({ onClose, pendingQuestion, onPendingQuestion
               if (cancelled) return;
               setTier('cli');
             } catch {
-              if (!cancelled) setTier(s.anthropic_available || s.openai_available ? 'fallback' : 'none');
+              if (!cancelled) setTier(s.anthropic_available || s.openai_available || s.local_available ? 'fallback' : 'none');
             } finally {
               if (!cancelled) setInstalling(false);
             }
           }
         } else {
-          setTier(s.anthropic_available || s.openai_available ? 'fallback' : 'none');
+          setTier(s.anthropic_available || s.openai_available || s.local_available ? 'fallback' : 'none');
         }
       } catch {
         if (!cancelled) setTier('none');

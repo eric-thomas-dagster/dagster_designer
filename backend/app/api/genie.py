@@ -20,6 +20,7 @@ from ..services.genie_service import (
     plan,
 )
 from ..services import dagster_ai_service
+from ..services import llm_endpoints
 from .assets import get_known_schemas
 
 router = APIRouter(prefix="/ai", tags=["ai"])
@@ -48,6 +49,30 @@ class AiProvidersStatus(BaseModel):
     # dagster_ai_service.py). Most keys don't need this, so it's surfaced
     # as informational status, never required for anthropic_available.
     anthropic_workspace_id_configured: bool = False
+    # A local / self-hosted OpenAI-compatible server (Ollama, LM Studio, vLLM, ...). `local_base_url` and `local_model` are
+    # echoed back (not secret) so Settings can show what's configured; the optional key never is.
+    local_available: bool = False
+    local_base_url: str = ""
+    local_model: str = ""
+    local_api_key_configured: bool = False
+    local_prefer: bool = False
+
+
+def _providers_status() -> AiProvidersStatus:
+    openai = bool(os.getenv("OPENAI_API_KEY"))
+    anthropic = bool(os.getenv("ANTHROPIC_API_KEY"))
+    local = llm_endpoints.local_available()
+    return AiProvidersStatus(
+        openai_available=openai,
+        anthropic_available=anthropic,
+        any_available=openai or anthropic or local,
+        anthropic_workspace_id_configured=bool(os.getenv("ANTHROPIC_WORKSPACE_ID")),
+        local_available=local,
+        local_base_url=os.getenv("LOCAL_LLM_BASE_URL", "").strip(),
+        local_model=llm_endpoints.local_default_model(),
+        local_api_key_configured=bool(os.getenv("LOCAL_LLM_API_KEY", "").strip()),
+        local_prefer=llm_endpoints.prefers_local(),
+    )
 
 
 @router.get("/providers", response_model=AiProvidersStatus)
@@ -55,14 +80,7 @@ async def ai_providers_status() -> AiProvidersStatus:
     """Report which LLM providers have their API keys configured. The
     frontend uses this to hide models the user can't reach and to show
     setup instructions when nothing's configured."""
-    openai = bool(os.getenv("OPENAI_API_KEY"))
-    anthropic = bool(os.getenv("ANTHROPIC_API_KEY"))
-    return AiProvidersStatus(
-        openai_available=openai,
-        anthropic_available=anthropic,
-        any_available=openai or anthropic,
-        anthropic_workspace_id_configured=bool(os.getenv("ANTHROPIC_WORKSPACE_ID")),
-    )
+    return _providers_status()
 
 
 class SetAiKeysRequest(BaseModel):
@@ -77,6 +95,11 @@ class SetAiKeysRequest(BaseModel):
     # header". Find the workspace ID in the Anthropic console under
     # Settings > Workspaces.
     anthropic_workspace_id: str | None = None
+    # Local server: a URL (empty clears it), default model, optional key, and "prefer for Dagster AI chat" ("1"/"0").
+    local_base_url: str | None = None
+    local_model: str | None = None
+    local_api_key: str | None = None
+    local_prefer: bool | None = None
 
 
 @router.post("/keys", response_model=AiProvidersStatus)
@@ -93,6 +116,10 @@ async def set_ai_keys(request: SetAiKeysRequest) -> AiProvidersStatus:
         ("OPENAI_API_KEY", request.openai_api_key),
         ("ANTHROPIC_API_KEY", request.anthropic_api_key),
         ("ANTHROPIC_WORKSPACE_ID", request.anthropic_workspace_id),
+        ("LOCAL_LLM_BASE_URL", request.local_base_url),
+        ("LOCAL_LLM_MODEL", request.local_model),
+        ("LOCAL_LLM_API_KEY", request.local_api_key),
+        ("LOCAL_LLM_PREFER", None if request.local_prefer is None else ("1" if request.local_prefer else "")),
     ):
         if value is None:
             continue
@@ -105,6 +132,38 @@ async def set_ai_keys(request: SetAiKeysRequest) -> AiProvidersStatus:
             os.environ.pop(env_var, None)
 
     return await ai_providers_status()
+
+
+class LocalModelsResponse(BaseModel):
+    models: list[str] = []
+    error: str | None = None
+
+
+@router.get("/local/models", response_model=LocalModelsResponse)
+async def local_models(base_url: str | None = None) -> LocalModelsResponse:
+    """Models the local server reports (OpenAI-compatible `GET /v1/models`; Ollama and LM Studio both serve it), so Settings
+    can offer a list instead of making someone type `llama3.1:70b` from memory. `base_url` lets Settings test a URL before saving."""
+    import httpx
+
+    base = llm_endpoints.normalize_base_url(base_url) if base_url else llm_endpoints.local_base_url()
+    if not base:
+        return LocalModelsResponse(error="Enter your local server's URL first.")
+    headers = {}
+    key = os.getenv("LOCAL_LLM_API_KEY", "").strip()
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            r = await client.get(f"{base}/models", headers=headers)
+    except httpx.HTTPError as e:
+        return LocalModelsResponse(error=f"Couldn't reach {base} ({type(e).__name__}). Is the server running?")
+    if r.status_code != 200:
+        return LocalModelsResponse(error=f"{base}/models answered {r.status_code}.")
+    try:
+        ids = sorted({m["id"] for m in (r.json().get("data") or []) if isinstance(m, dict) and m.get("id")})
+    except ValueError:
+        return LocalModelsResponse(error="The server's model list wasn't valid JSON.")
+    return LocalModelsResponse(models=ids)
 
 
 class GeniePlanRequest(BaseModel):
@@ -281,6 +340,7 @@ class DagsterAiStatusResponse(BaseModel):
     openai_available: bool
     anthropic_available: bool
     reference_docs_available: bool
+    local_available: bool = False
 
 
 @router.get("/dagster-expert/status", response_model=DagsterAiStatusResponse)

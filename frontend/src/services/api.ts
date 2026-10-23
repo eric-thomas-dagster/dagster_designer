@@ -3287,6 +3287,12 @@ export interface AiProvidersStatus {
   anthropic_available: boolean;
   any_available: boolean;
   anthropic_workspace_id_configured: boolean;
+  // A local / self-hosted OpenAI-compatible server (Ollama, LM Studio, vLLM, ...). Optional so older callers and mocks still type-check.
+  local_available?: boolean;
+  local_base_url?: string;
+  local_model?: string;
+  local_api_key_configured?: boolean;
+  local_prefer?: boolean;
 }
 
 export const aiApi = {
@@ -3301,8 +3307,18 @@ export const aiApi = {
     openai_api_key?: string;
     anthropic_api_key?: string;
     anthropic_workspace_id?: string;
+    // Local server: '' clears the URL / model / key.
+    local_base_url?: string;
+    local_model?: string;
+    local_api_key?: string;
+    local_prefer?: boolean;
   }): Promise<AiProvidersStatus> => {
     const response = await api.post<AiProvidersStatus>('/ai/keys', keys);
+    return response.data;
+  },
+  // Models the local server reports; `baseUrl` tests a URL before it is saved.
+  localModels: async (baseUrl?: string): Promise<{ models: string[]; error: string | null }> => {
+    const response = await api.get<{ models: string[]; error: string | null }>('/ai/local/models', { params: baseUrl ? { base_url: baseUrl } : {} });
     return response.data;
   },
 };

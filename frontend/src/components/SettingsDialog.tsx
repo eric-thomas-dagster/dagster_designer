@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { X, KeyRound, ExternalLink, CheckCircle2, FolderCog, Github, Zap } from 'lucide-react';
 import { aiApi, appSettingsApi, projectsApi, promotionApi, type AiProvidersStatus } from '@/services/api';
 import { notify, confirmDialog } from './Notifications';
@@ -77,19 +77,59 @@ function SettingsDialog({ onClose }: { onClose: () => void }) {
     try { localStorage.setItem('designer:settings-tab', t); } catch { /* remembering the tab is a nicety */ }
   };
 
+  // Local model (Ollama, LM Studio, vLLM, ...). Seeded from the saved settings once they load, then edited locally.
+  const [localUrl, setLocalUrl] = useState('');
+  const [localModel, setLocalModel] = useState('');
+  const [localKey, setLocalKey] = useState('');
+  const [localPrefer, setLocalPrefer] = useState(false);
+  const [localModels, setLocalModels] = useState<string[]>([]);
+  const [localNote, setLocalNote] = useState<{ ok: boolean; text: string } | null>(null);
+  const [detecting, setDetecting] = useState(false);
+  const localSeeded = useRef(false);
+
   useEffect(() => {
     aiApi.providers().then(setStatus).catch(() => setStatus(null));
   }, []);
+  useEffect(() => {
+    if (!status || localSeeded.current) return;
+    localSeeded.current = true;
+    setLocalUrl(status.local_base_url || '');
+    setLocalModel(status.local_model || '');
+    setLocalPrefer(!!status.local_prefer);
+  }, [status]);
+
+  const detectLocalModels = async () => {
+    setDetecting(true);
+    setLocalNote(null);
+    try {
+      const res = await aiApi.localModels(localUrl.trim() || undefined);
+      setLocalModels(res.models);
+      if (res.error) setLocalNote({ ok: false, text: res.error });
+      else {
+        setLocalNote({ ok: true, text: res.models.length ? `Connected — ${res.models.length} model${res.models.length === 1 ? '' : 's'} found.` : 'Connected, but the server lists no models yet.' });
+        if (!localModel && res.models.length > 0) setLocalModel(res.models[0]);
+      }
+    } catch {
+      setLocalNote({ ok: false, text: 'Could not check the server.' });
+    } finally {
+      setDetecting(false);
+    }
+  };
 
   const save = async () => {
     // Only send fields the user actually typed something into -- an empty
     // field means "leave this key alone", not "clear it". Clearing is a
     // deliberate separate action (the trash icon) so a blank field left
     // over from a previous visit can't accidentally wipe a working key.
-    const body: { openai_api_key?: string; anthropic_api_key?: string; anthropic_workspace_id?: string } = {};
+    const body: Parameters<typeof aiApi.setKeys>[0] = {};
     if (openaiKey.trim()) body.openai_api_key = openaiKey.trim();
     if (anthropicKey.trim()) body.anthropic_api_key = anthropicKey.trim();
     if (anthropicWorkspaceId.trim()) body.anthropic_workspace_id = anthropicWorkspaceId.trim();
+    // Local settings are plain values (not secrets), so they're sent when changed -- an emptied URL/model means "clear it".
+    if (localUrl.trim() !== (status?.local_base_url || '')) body.local_base_url = localUrl.trim();
+    if (localModel.trim() !== (status?.local_model || '')) body.local_model = localModel.trim();
+    if (localKey.trim()) body.local_api_key = localKey.trim();
+    if (localPrefer !== !!status?.local_prefer) body.local_prefer = localPrefer;
     if (Object.keys(body).length === 0) {
       onClose();
       return;
@@ -101,7 +141,8 @@ function SettingsDialog({ onClose }: { onClose: () => void }) {
       setOpenaiKey('');
       setAnthropicKey('');
       setAnthropicWorkspaceId('');
-      notify.success('API key saved — ready to use right away, no restart needed.');
+      setLocalKey('');
+      notify.success('Saved — ready to use right away, no restart needed.');
       window.dispatchEvent(new Event(PROVIDERS_CHANGED_EVENT));
     } catch (e: any) {
       notify.error(e?.response?.data?.detail || 'Failed to save API key.');
@@ -219,6 +260,67 @@ function SettingsDialog({ onClose }: { onClose: () => void }) {
               Only needed if your Anthropic key isn't scoped to a workspace — you'll see an error like
               "must include the anthropic-workspace-id header" if so. Find it in the Anthropic console under
               Settings → Workspaces.
+            </p>
+          </div>
+
+          <div className="border-t border-gray-200 pt-4 space-y-2">
+            <div className="flex items-center justify-between">
+              <label className="text-sm font-medium text-gray-700">
+                Local model <span className="text-gray-400 font-normal">(Ollama, LM Studio, vLLM…)</span>
+              </label>
+              {status?.local_available && (
+                <span className="inline-flex items-center gap-1 text-xs text-emerald-700">
+                  <CheckCircle2 className="w-3.5 h-3.5" /> Configured
+                </span>
+              )}
+            </div>
+            <div className="flex gap-2">
+              <input
+                type="text"
+                value={localUrl}
+                onChange={(e) => setLocalUrl(e.target.value)}
+                placeholder="http://localhost:11434"
+                disabled={saving}
+                className="flex-1 min-w-0 px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50 font-mono text-sm"
+              />
+              <button
+                onClick={detectLocalModels}
+                disabled={saving || detecting || !localUrl.trim()}
+                className="px-3 py-2 text-sm border border-gray-300 rounded-md hover:bg-gray-50 disabled:opacity-50"
+              >
+                {detecting ? 'Checking…' : 'Detect models'}
+              </button>
+            </div>
+            {localNote && <p className={`text-xs ${localNote.ok ? 'text-emerald-700' : 'text-amber-700'}`}>{localNote.text}</p>}
+            <input
+              type="text"
+              list="local-model-options"
+              value={localModel}
+              onChange={(e) => setLocalModel(e.target.value)}
+              placeholder="Default model, e.g. llama3.1:70b"
+              disabled={saving}
+              className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50 font-mono text-sm"
+            />
+            <datalist id="local-model-options">
+              {localModels.map((m) => <option key={m} value={m} />)}
+            </datalist>
+            <input
+              type="password"
+              value={localKey}
+              onChange={(e) => setLocalKey(e.target.value)}
+              placeholder={status?.local_api_key_configured ? '••••••••  (enter a new key to replace)' : 'API key (optional — most local servers ignore it)'}
+              disabled={saving}
+              className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50 text-sm"
+            />
+            <label className="flex items-start gap-2 text-xs text-gray-700">
+              <input type="checkbox" checked={localPrefer} onChange={(e) => setLocalPrefer(e.target.checked)} className="mt-0.5" />
+              <span>Use the local model for Dagster AI chat even when a hosted key is also set</span>
+            </label>
+            <p className="text-xs text-gray-500">
+              It then shows up in the model picker as “Local: &lt;model&gt;”. The planner sends a long prompt and needs strictly valid JSON, so
+              use a large model with a big context window (roughly 70B-class, 16k+ tokens). Smaller models work for chat and extraction but
+              often fail at planning. In Ollama, raise the context size (<span className="font-mono">num_ctx</span>) — its default silently truncates.
+              Document extraction uses its own <span className="font-mono">API base env var</span> field.
             </p>
           </div>
         </div>

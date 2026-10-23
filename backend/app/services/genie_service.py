@@ -161,6 +161,7 @@ _MANIFEST_TTL = 900.0  # seconds
 from pathlib import Path as _Path
 
 from app.services import genie_catalog as _catalog
+from app.services import llm_endpoints as _endpoints
 
 _DISK_CACHE_PATH = _Path(__file__).resolve().parent.parent.parent / ".manifest_cache.json"
 
@@ -1506,6 +1507,35 @@ async def _post_with_retry(
     return last_response  # pragma: no cover -- loop always returns above
 
 
+async def _post_chat_completions(
+    client: "httpx.AsyncClient", target: "_endpoints.ChatTarget", body: dict, *, max_retries: int = 2,
+) -> "httpx.Response":
+    """OpenAI-style chat POST to `target` (OpenAI, or a local OpenAI-compatible server).
+
+    On top of _post_with_retry: a local server that refuses `response_format: json_object` (LM Studio, some llama.cpp builds) is
+    retried once without it -- the prompts already say "respond with ONLY JSON" -- and one that isn't running becomes a
+    message saying so instead of a raw connection error.
+    """
+    body = {**body, "model": target.model}
+    try:
+        r = await _post_with_retry(client, target.url, headers=target.headers, json_body=body, max_retries=max_retries)
+        if target.is_local and "response_format" in body and _endpoints.json_mode_rejected(r.status_code, r.text):
+            body = {k: v for k, v in body.items() if k != "response_format"}
+            r = await _post_with_retry(client, target.url, headers=target.headers, json_body=body, max_retries=max_retries)
+        return r
+    except httpx.TransportError as e:
+        if target.is_local:
+            raise GenieError(_endpoints.unreachable_message(target, e)) from e
+        raise
+
+
+def _chat_target_or_error(model: str) -> "_endpoints.ChatTarget":
+    try:
+        return _endpoints.resolve_chat_target(model)
+    except _endpoints.EndpointNotConfigured as e:
+        raise GenieError(str(e)) from e
+
+
 def _friendly_provider_error(provider: str, status_code: int, response_text: str) -> str:
     """Turn a raw provider error response into something a user can act
     on, instead of a scary unfiltered JSON dump (same complaint the 429
@@ -1636,12 +1666,9 @@ async def plan(
                 "where you run the backend, then restart."
             )
     else:
-        api_key = os.getenv("OPENAI_API_KEY")
-        if not api_key:
-            raise GenieError(
-                "OPENAI_API_KEY is not set on the backend. Set it in the shell env "
-                "where you run the backend, then restart."
-            )
+        # OpenAI or a local OpenAI-compatible server (model "local:<name>") -- resolved per call by _post_chat_completions.
+        _chat_target_or_error(model)
+        api_key = ""
 
     # Fetch manifest + CLAUDE.md in parallel — both have 15-min in-memory
     # caches so this is fast on subsequent calls.
@@ -1869,12 +1896,11 @@ async def plan(
             # long and reusable turn to turn, instead of invalidating on
             # the first variable token the way the old task-first
             # ordering did.
-            r = await _post_with_retry(
+            _target = _chat_target_or_error(model)
+            r = await _post_chat_completions(
                 client,
-                "https://api.openai.com/v1/chat/completions",
-                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-                json_body={
-                    "model": model,
+                _target,
+                {
                     "messages": (
                         [{"role": "system", "content": SYSTEM_PROMPT}] + history_messages
                         if history_messages is not None
@@ -1888,9 +1914,9 @@ async def plan(
                 },
             )
             if r.status_code == 429:
-                raise GenieError("OpenAI is rate-limiting this API key right now. Wait a few seconds and try again.")
+                raise GenieError(f"{_target.label} is rate-limiting this API key right now. Wait a few seconds and try again.")
             if r.status_code != 200:
-                raise GenieError(_friendly_provider_error("OpenAI", r.status_code, r.text))
+                raise GenieError(_friendly_provider_error(_target.label, r.status_code, r.text))
             data = r.json()
 
             try:
@@ -2540,11 +2566,8 @@ async def generate_dbt_model_sql(
                 "ANTHROPIC_API_KEY is not set on the backend. Set it in Settings -> AI Providers, then try again."
             )
     else:
-        api_key = os.getenv("OPENAI_API_KEY")
-        if not api_key:
-            raise GenieError(
-                "OPENAI_API_KEY is not set on the backend. Set it in Settings -> AI Providers, then try again."
-            )
+        _chat_target_or_error(model)
+        api_key = ""
 
     model_columns = model_columns or {}
     if available_models:
@@ -2604,12 +2627,11 @@ async def generate_dbt_model_sql(
             blocks = data.get("content") or []
             content = next((b.get("text", "") for b in blocks if b.get("type") == "text"), "")
         else:
-            r = await _post_with_retry(
+            _target = _chat_target_or_error(model)
+            r = await _post_chat_completions(
                 client,
-                "https://api.openai.com/v1/chat/completions",
-                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-                json_body={
-                    "model": model,
+                _target,
+                {
                     "messages": [
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": task},
@@ -2618,9 +2640,9 @@ async def generate_dbt_model_sql(
                 },
             )
             if r.status_code == 429:
-                raise GenieError("OpenAI is rate-limiting this API key right now. Wait a few seconds and try again.")
+                raise GenieError(f"{_target.label} is rate-limiting this API key right now. Wait a few seconds and try again.")
             if r.status_code != 200:
-                raise GenieError(_friendly_provider_error("OpenAI", r.status_code, r.text))
+                raise GenieError(_friendly_provider_error(_target.label, r.status_code, r.text))
             data = r.json()
             try:
                 content = data["choices"][0]["message"]["content"]
@@ -3534,11 +3556,11 @@ async def _repair_picks(
             blocks = data.get("content") or []
             text = next((b.get("text", "") for b in blocks if b.get("type") == "text"), "")
         else:
-            r = await client.post(
-                "https://api.openai.com/v1/chat/completions",
-                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-                json={
-                    "model": model,
+            _target = _chat_target_or_error(model)
+            r = await _post_chat_completions(
+                client,
+                _target,
+                {
                     "messages": [
                         {"role": "system", "content": "You are repairing a Dagster component plan. Respond with ONLY the corrected JSON object."},
                         {"role": "user", "content": repair_prompt},
@@ -3546,6 +3568,7 @@ async def _repair_picks(
                     "response_format": {"type": "json_object"},
                     "temperature": 0.1,
                 },
+                max_retries=0,
             )
             if r.status_code != 200:
                 return None
