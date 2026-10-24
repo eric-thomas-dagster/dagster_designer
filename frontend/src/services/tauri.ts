@@ -305,3 +305,15 @@ export async function onBackendReady(handler: () => void): Promise<() => void> {
     return () => {};
   }
 }
+
+/**
+ * `dagster-designer://` links opened from outside the app (a browser, Slack, a README). Delivers each raw URL to `handler`, both
+ * links that launched the app and ones that arrive while it runs. A no-op outside the desktop app.
+ */
+export async function onDeepLink(handler: (url: string) => void): Promise<() => void> {
+  if (!isTauri) return () => {};
+  const { getCurrent, onOpenUrl } = await import('@tauri-apps/plugin-deep-link');
+  const launched = await getCurrent().catch(() => null);
+  launched?.forEach(handler);
+  return onOpenUrl((urls) => urls.forEach(handler));
+}

@@ -3,13 +3,15 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   Play, ChevronRight, ChevronDown, Layers as LayersIcon, Database, CheckCircle2, AlertTriangle,
   Book, Filter as FilterIcon, Clock, Zap, Timer, Users as UsersIcon,
-  ExternalLink, Copy, GitBranch, Tag as TagIcon, Pencil, X, Check, Loader2, ArrowLeft,
+  ExternalLink, Copy, Link2, GitBranch, Tag as TagIcon, Pencil, X, Check, Loader2, ArrowLeft,
   History, Calendar, ArrowUpRight, ArrowDownRight, Ban, Download, BarChart3, MinusCircle,
 } from 'lucide-react';
 import { useProjectStore } from '@/hooks/useProject';
 import { projectsApi, assetsApi, partitionsApi, primitivesApi, dagsterPlusOrgBaseUrl, type BackfillRequest, type AssetChangeEntry } from '@/services/api';
 import { classifyStatus, statusTextClass } from '@/lib/status';
 import { notify } from './Notifications';
+import { isTauri } from '@/services/tauri';
+import { buildAssetLink } from '@/lib/deepLink';
 import { PartitionBackfill } from './PartitionBackfill';
 import { StartDgDevButton } from './RunsPanel';
 import { InsightMetricCard } from './InsightMetricCard';
@@ -190,6 +192,15 @@ export function AssetDetailPage({ nodeId, onClose, onNewPrimitiveForAsset, onNav
               >
                 <Copy className="w-3.5 h-3.5" />
               </button>
+              {isTauri && currentProject && (
+                <button
+                  onClick={() => { navigator.clipboard.writeText(buildAssetLink(currentProject.name, assetKey)); notify.success('Link copied. Opening it launches Dagster Designer on this asset.'); }}
+                  className="p-1 text-gray-400 hover:text-gray-700 hover:bg-gray-100 rounded"
+                  title="Copy a link that opens this asset in Dagster Designer"
+                >
+                  <Link2 className="w-3.5 h-3.5" />
+                </button>
+              )}
             </div>
           </div>
         </div>
