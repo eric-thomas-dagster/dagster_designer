@@ -242,6 +242,12 @@ export const projectsApi = {
     return response.data;
   },
 
+  /** The project's folder on this machine (404 for a Dagster+ project, which has none). */
+  folder: async (id: string) => {
+    const response = await api.get<{ path: string }>(`/projects/${id}/folder`);
+    return response.data;
+  },
+
   import: async (path: string) => {
     const response = await api.post<Project>('/projects/import', { path });
     return response.data;

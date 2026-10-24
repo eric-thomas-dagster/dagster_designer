@@ -182,6 +182,44 @@ export async function secretSet(name: string, value: string): Promise<boolean> {
   }
 }
 
+/** Shows a file or folder in Finder / Explorer / the file manager. Throws if it can't. */
+export async function revealInFileManager(path: string): Promise<void> {
+  if (!isTauri) throw new Error('Only available in the desktop app');
+  const { revealItemInDir } = await import('@tauri-apps/plugin-opener');
+  await revealItemInDir(path);
+}
+
+export type EditorId = 'code' | 'cursor';
+
+/** Opens a folder in VS Code or Cursor. Throws a readable message when the editor isn't installed. */
+export async function openInEditor(editor: EditorId, path: string): Promise<void> {
+  if (!isTauri) throw new Error('Only available in the desktop app');
+  const { invoke } = await import('@tauri-apps/api/core');
+  try {
+    await invoke('open_in_editor', { editor, path });
+  } catch (e) {
+    throw new Error(typeof e === 'string' ? e : (e as Error)?.message || 'Could not open the editor');
+  }
+}
+
+/**
+ * Files or folders dragged onto the window from Finder / Explorer. The page can't see native drops itself, so the shell
+ * reports them (with absolute paths). Returns an unsubscribe function; a no-op outside the desktop app.
+ */
+export async function onFileDrop(handlers: { onEnter?: () => void; onLeave?: () => void; onDrop: (paths: string[]) => void }): Promise<() => void> {
+  if (!isTauri) return () => {};
+  const { getCurrentWebview } = await import('@tauri-apps/api/webview');
+  return getCurrentWebview().onDragDropEvent((event) => {
+    const p = event.payload;
+    if (p.type === 'enter') handlers.onEnter?.();
+    else if (p.type === 'leave') handlers.onLeave?.();
+    else if (p.type === 'drop') {
+      handlers.onLeave?.();
+      handlers.onDrop(p.paths);
+    }
+  });
+}
+
 /** Whether the OS keychain works on this machine (desktop app only). */
 export async function secretsAvailable(): Promise<boolean> {
   if (!isTauri) return false;

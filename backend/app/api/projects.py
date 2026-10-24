@@ -908,6 +908,21 @@ async def get_asset_live_status(project_id: str):
     return {"statuses": statuses}
 
 
+@router.get("/{project_id}/folder")
+async def get_project_folder(project_id: str):
+    """The project's folder on this machine, for "reveal in Finder" and "open in editor" in the desktop app.
+
+    A Dagster+ project is a connection, not a folder, so it has none (404).
+    """
+    project = project_service.get_project(project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+    folder = project_service._get_project_dir(project).resolve()
+    if getattr(project, "is_dagster_plus", False) or not folder.is_dir():
+        raise HTTPException(status_code=404, detail="This project has no folder on this machine")
+    return {"path": str(folder)}
+
+
 @router.get("/{project_id}", response_model=Project)
 async def get_project(project_id: str, live: bool = True, lazy: bool = False):
     """Get a project by ID.
