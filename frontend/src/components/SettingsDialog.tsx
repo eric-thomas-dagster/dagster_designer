@@ -5,6 +5,7 @@ import { notify, confirmDialog } from './Notifications';
 import { isTauri, getProjectsDir, setProjectsDir, pickDirectory } from '@/services/tauri';
 import { useProjectStore } from '@/hooks/useProject';
 import { PromotionSettingsModal } from './PromotionSettingsModal';
+import { DetectedLocalModel } from './DetectedLocalModel';
 
 // Lightweight module-level pub-sub, same pattern as Notifications.tsx's
 // toast/confirm queues -- avoids threading "is settings open" state through
@@ -41,6 +42,10 @@ const SETTINGS_TABS: Array<{ id: SettingsTab; label: string; desktopOnly?: boole
 ];
 
 const PROVIDERS_CHANGED_EVENT = 'dagster-ai-providers-changed';
+/** Tell every open picker and banner that provider settings changed (a key saved, a local model chosen). */
+export function notifyAiProvidersChanged(): void {
+  window.dispatchEvent(new Event(PROVIDERS_CHANGED_EVENT));
+}
 export function onAiProvidersChanged(handler: () => void): () => void {
   window.addEventListener(PROVIDERS_CHANGED_EVENT, handler);
   return () => window.removeEventListener(PROVIDERS_CHANGED_EVENT, handler);
@@ -89,6 +94,18 @@ function SettingsDialog({ onClose }: { onClose: () => void }) {
 
   useEffect(() => {
     aiApi.providers().then(setStatus).catch(() => setStatus(null));
+  }, []);
+  // Provider settings can change from outside this form (a detected local model chosen with one click), so follow them --
+  // otherwise Save would send the form's stale, empty local fields and wipe what was just saved.
+  useEffect(() => {
+    return onAiProvidersChanged(() => {
+      aiApi.providers().then((s) => {
+        setStatus(s);
+        setLocalUrl(s.local_base_url || '');
+        setLocalModel(s.local_model || '');
+        setLocalPrefer(!!s.local_prefer);
+      }).catch(() => {});
+    });
   }, []);
   useEffect(() => {
     if (!status || localSeeded.current) return;
@@ -274,6 +291,7 @@ function SettingsDialog({ onClose }: { onClose: () => void }) {
                 </span>
               )}
             </div>
+            {!status?.local_available && <DetectedLocalModel />}
             <div className="flex gap-2">
               <input
                 type="text"

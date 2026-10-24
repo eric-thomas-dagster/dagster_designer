@@ -12,6 +12,7 @@ import { availableModels as filterModels } from '@/lib/aiModels';
 import { parseStepMetadataFields, formatCost, formatLatency } from '@/lib/stepMetadata';
 import type { ComponentInstance } from '@/types';
 import { RequiredResourcesBanner, type RequiredResource } from './RequiredResourcesBanner';
+import { DetectedLocalModel } from './DetectedLocalModel';
 
 interface AgentPick extends GeniePickLike {
   reason: string;
@@ -623,6 +624,7 @@ export function AgentPipelineBuilder({
                   <div className="text-xs text-gray-600 mb-2">
                     Add an OpenAI or Anthropic key to plan agents/pipelines — takes effect immediately, no restart needed.
                   </div>
+                  <div className="mb-2"><DetectedLocalModel /></div>
                   <button
                     onClick={openSettings}
                     className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-primary text-primary-foreground rounded-md hover:bg-accent"

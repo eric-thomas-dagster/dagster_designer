@@ -214,3 +214,57 @@ def test_dagster_ai_says_so_when_nothing_is_configured_or_local_is_down(monkeypa
     _mock_httpx(monkeypatch, boom)
     with pytest.raises(RuntimeError, match="Couldn't reach"):
         asyncio.run(dai.fallback_chat("q", None))
+
+
+# --- detecting servers that are already running ------------------------------------------------------------------------
+
+def test_detects_servers_that_answer_with_a_model_list(monkeypatch):
+    def handler(request):
+        host = request.url.port
+        if host == 11434:
+            return httpx.Response(200, json={"data": [{"id": "llama3.1:8b"}, {"id": "qwen2.5"}, {"id": "qwen2.5"}]})
+        if host == 1234:
+            return httpx.Response(200, json={"data": []})  # running, nothing downloaded yet
+        raise httpx.ConnectError("refused")
+
+    _mock_httpx(monkeypatch, handler)
+    found = asyncio.run(ep.detect_local_servers())
+    assert found == [
+        {"name": "Ollama", "base_url": "http://127.0.0.1:11434", "models": ["llama3.1:8b", "qwen2.5"]},
+        {"name": "LM Studio", "base_url": "http://127.0.0.1:1234", "models": []},
+    ]
+
+
+def test_an_unrelated_app_on_a_probed_port_is_not_mistaken_for_a_model_server(monkeypatch):
+    def handler(request):
+        port = request.url.port
+        if port == 8000:
+            return httpx.Response(404, json={"detail": "Not Found"})  # e.g. another API
+        if port == 8080:
+            return httpx.Response(200, text="<html>not json</html>")
+        if port == 4891:
+            return httpx.Response(200, json={"models": ["wrong shape"]})
+        raise httpx.ConnectError("refused")
+
+    _mock_httpx(monkeypatch, handler)
+    assert asyncio.run(ep.detect_local_servers()) == []
+
+
+def test_detection_only_probes_this_machine(monkeypatch):
+    hosts = set()
+
+    def handler(request):
+        hosts.add(request.url.host)
+        raise httpx.ConnectError("refused")
+
+    _mock_httpx(monkeypatch, handler)
+    asyncio.run(ep.detect_local_servers())
+    assert hosts == {"127.0.0.1"}
+
+
+def test_the_detect_endpoint_reports_what_was_found(monkeypatch):
+    async def fake_detect(*a, **k):
+        return [{"name": "Ollama", "base_url": "http://127.0.0.1:11434", "models": ["llama3.1"]}]
+
+    monkeypatch.setattr(ep, "detect_local_servers", fake_detect)
+    assert _client().get("/api/ai/local/detect").json() == {"servers": [{"name": "Ollama", "base_url": "http://127.0.0.1:11434", "models": ["llama3.1"]}]}

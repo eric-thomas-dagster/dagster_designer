@@ -13,6 +13,7 @@ Configuration lives in env vars (set from Settings -> AI Providers, same as the 
 
 from __future__ import annotations
 
+import asyncio
 import os
 import re
 from dataclasses import dataclass
@@ -95,3 +96,39 @@ def unreachable_message(target: ChatTarget, error: Exception) -> str:
         f"Couldn't reach your local model server at {target.url.rsplit('/chat/completions', 1)[0]} ({type(error).__name__}). "
         "Is Ollama / LM Studio running, and is the URL right in Settings -> AI Providers?"
     )
+
+
+# Where local OpenAI-compatible servers listen by default.
+COMMON_LOCAL_SERVERS = (
+    ("Ollama", "http://127.0.0.1:11434"),
+    ("LM Studio", "http://127.0.0.1:1234"),
+    ("Jan", "http://127.0.0.1:1337"),
+    ("GPT4All", "http://127.0.0.1:4891"),
+    ("llama.cpp / llamafile", "http://127.0.0.1:8080"),
+    ("vLLM", "http://127.0.0.1:8000"),
+)
+
+
+async def detect_local_servers(timeout: float = 0.8) -> list[dict]:
+    """Local model servers answering on their default ports: [{name, base_url, models}].
+
+    Only this machine is probed. A port counts only if `/v1/models` returns an OpenAI-style model list, so another app that happens
+    to sit on 8000 or 8080 is ignored. A server with no models yet is still reported (so the UI can say to pull one).
+    """
+    import httpx
+
+    async def probe(client: "httpx.AsyncClient", name: str, base: str) -> dict | None:
+        try:
+            r = await client.get(f"{base}/v1/models")
+            data = r.json().get("data") if r.status_code == 200 else None
+        except (httpx.HTTPError, ValueError, AttributeError):
+            return None
+        if not isinstance(data, list):
+            return None
+        models = sorted({m["id"] for m in data if isinstance(m, dict) and isinstance(m.get("id"), str)})
+        return {"name": name, "base_url": base, "models": models}
+
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        found = await asyncio.gather(*(probe(client, name, base) for name, base in COMMON_LOCAL_SERVERS))
+    return [f for f in found if f is not None]
+

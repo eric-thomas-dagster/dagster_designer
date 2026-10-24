@@ -3316,6 +3316,11 @@ export const aiApi = {
     const response = await api.post<AiProvidersStatus>('/ai/keys', keys);
     return response.data;
   },
+  // Local model servers already running on this machine (Ollama, LM Studio, ...).
+  detectLocal: async (): Promise<{ servers: { name: string; base_url: string; models: string[] }[] }> => {
+    const response = await api.get<{ servers: { name: string; base_url: string; models: string[] }[] }>('/ai/local/detect');
+    return response.data;
+  },
   // Models the local server reports; `baseUrl` tests a URL before it is saved.
   localModels: async (baseUrl?: string): Promise<{ models: string[]; error: string | null }> => {
     const response = await api.get<{ models: string[]; error: string | null }>('/ai/local/models', { params: baseUrl ? { base_url: baseUrl } : {} });

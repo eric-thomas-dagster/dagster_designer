@@ -166,6 +166,22 @@ async def local_models(base_url: str | None = None) -> LocalModelsResponse:
     return LocalModelsResponse(models=ids)
 
 
+class DetectedLocalServer(BaseModel):
+    name: str
+    base_url: str
+    models: list[str] = []
+
+
+class DetectLocalResponse(BaseModel):
+    servers: list[DetectedLocalServer] = []
+
+
+@router.get("/local/detect", response_model=DetectLocalResponse)
+async def detect_local() -> DetectLocalResponse:
+    """Local model servers already running on this machine (Ollama, LM Studio, ...), so first-run setup can offer them in one click."""
+    return DetectLocalResponse(servers=[DetectedLocalServer(**s) for s in await llm_endpoints.detect_local_servers()])
+
+
 class GeniePlanRequest(BaseModel):
     task: str
     existing_assets: list[dict[str, Any]] | None = None

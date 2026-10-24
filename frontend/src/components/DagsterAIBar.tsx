@@ -6,6 +6,7 @@ import { useProjectStore } from '@/hooks/useProject';
 import { notify, confirmDialog } from './Notifications';
 import { API_BASE, aiApi, aiFixApi, type AiProvidersStatus } from '@/services/api';
 import { AiFixPanel } from './AiFixPanel';
+import { DetectedLocalModel } from './DetectedLocalModel';
 import { openSettings, onAiProvidersChanged } from './SettingsDialog';
 import { applyGeniePicks, resolveComponentIdFromCurrentProject } from '@/lib/applyGeniePicks';
 import { availableModels as filterModels } from '@/lib/aiModels';
@@ -407,6 +408,7 @@ export function DagsterAIBar() {
                 ) : (
                   <div>Add an OpenAI or Anthropic key to unlock the AI canvas planner — takes effect immediately, no restart needed.</div>
                 )}
+                <DetectedLocalModel />
                 <button
                   onClick={openSettings}
                   className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-primary text-primary-foreground rounded-md hover:bg-accent"

@@ -7,13 +7,7 @@ import { GraphEditor } from './components/GraphEditor';
 import { Library } from './components/Library';
 import { ComponentPalette } from './components/ComponentPalette';
 import { ProjectComponentsList } from './components/ProjectComponentsList';
-import { ComponentConfigModal } from './components/ComponentConfigModal';
-import { AgentPipelineBuilder } from './components/AgentPipelineBuilder';
-import { DocumentExtractionReview } from './components/DocumentExtractionReview';
-import { DocumentExtractorConfigStep } from './components/DocumentExtractorConfigStep';
-import { OcrExtractorConfigStep } from './components/OcrExtractorConfigStep';
 import { ClassifierConfigStep, CLASSIFIER_TYPE_CONFIG } from './components/ClassifierConfigStep';
-import { ClassificationReview } from './components/ClassificationReview';
 // Lazy: pulls in ModelMetricsView -> recharts (5.2MB package) via its own
 // eager import, a second path into the main bundle alongside
 // AssetDetailPage's inline "Model" tab. Only opened as a modal from a
@@ -21,19 +15,6 @@ import { ClassificationReview } from './components/ClassificationReview';
 const ModelEvaluationPanel = lazy(() =>
   import('./components/ModelEvaluationPanel').then((m) => ({ default: m.ModelEvaluationPanel }))
 );
-import { JoinConfigStep } from './components/JoinConfigStep';
-import { VideoSceneConfigStep } from './components/VideoSceneConfigStep';
-import { VideoFrameExtractConfigStep } from './components/VideoFrameExtractConfigStep';
-import { VideoAudioExtractConfigStep } from './components/VideoAudioExtractConfigStep';
-import { VideoMetadataConfigStep } from './components/VideoMetadataConfigStep';
-import { AudioDiarizedConfigStep } from './components/AudioDiarizedConfigStep';
-import { AudioTranscriberConfigStep } from './components/AudioTranscriberConfigStep';
-import { MlflowInferenceConfigStep } from './components/MlflowInferenceConfigStep';
-import { AutoMLConfigStep } from './components/AutoMLConfigStep';
-import { LlmJudgeConfigStep } from './components/LlmJudgeConfigStep';
-import { ContextEngineeringConfigStep } from './components/ContextEngineeringConfigStep';
-import { AiMlHub } from './components/AiMlHub';
-import { ActivatePanel } from './components/ActivatePanel';
 import { extractComponentId } from '@/lib/componentId';
 import { PropertyPanel } from './components/PropertyPanel';
 import { ProjectManager } from './components/ProjectManager';
@@ -44,25 +25,14 @@ import { ProjectManager } from './components/ProjectManager';
 const CodeEditor = lazy(() =>
   import('./components/CodeEditor').then((m) => ({ default: m.CodeEditor }))
 );
-import { TemplateBuilder } from './components/TemplateBuilder';
-import { PrimitivesManager } from './components/PrimitivesManager';
-import { ResourcesManager } from './components/ResourcesManager';
-import { PipelineBuilder } from './components/PipelineBuilder';
 import { DagsterStartupModal } from './components/DagsterStartupModal';
-import { AssetDetailPage, type Tab as AssetDetailTab } from './components/AssetDetailPage';
-import { AlertsPanel } from './components/AlertsPanel';
-import { RunsPanel } from './components/RunsPanel';
+import type { Tab as AssetDetailTab } from './components/AssetDetailPage';
 import { AiFixPanel } from './components/AiFixPanel';
 import { registerRunOpener, registerRunsListOpener } from './lib/runLink';
-import { DataPreviewModal } from './components/DataPreviewModal';
 import { DagsterCloudChip } from './components/DagsterCloudChip';
 import { SandboxStatusPill, pillLabel as sandboxPillLabel } from './components/SandboxStatusPill';
 import { useDesignerLoc } from './hooks/useDesignerLoc';
-import { GitCommitDialog } from './components/GitCommitDialog';
-import { PublishServerlessDialog } from './components/PublishServerlessDialog';
-import { AddMonitorDialog } from './components/AddMonitorDialog';
-import { AddComponentModal, type ConfigureAuthoringPayload } from './components/AddComponentModal';
-import { DraftsPanel } from './components/DraftsPanel';
+import type { ConfigureAuthoringPayload } from './components/AddComponentModal';
 import { useDrafts } from './hooks/useDrafts';
 import { NotificationHost, notify, confirmDialog } from './components/Notifications';
 import { SettingsHost, openSettings } from './components/SettingsDialog';
@@ -74,16 +44,51 @@ import { onMenuAction, onQuitRequested, onBackendReady, confirmQuit, openExterna
 import { WindowsCaptionButtons } from './components/WindowsCaptionButtons';
 import { hasUnsavedChanges } from './hooks/useUnsavedChanges';
 import { Network, FileCode, Zap, Package, ExternalLink, Settings, SlidersHorizontal, Workflow, ChevronDown, Skull, AlertTriangle, X, Loader2, CheckCircle, XCircle, PanelLeftClose, PanelLeft, Clock, Play, Radar, Timer, Download, Database, ShieldCheck, Cloud, Bell, BarChart3, Sparkles, Send } from 'lucide-react';
-import { IngestionsPanel } from './components/IngestionsPanel';
-import { InsightsPanel } from './components/InsightsPanel';
-import { DbtPanel } from './components/DbtPanel';
-import { MonitorsPanel } from './components/MonitorsPanel';
-import { AiAssistantPanel } from './components/AiAssistantPanel';
 import { projectsApi as _projectsApi } from './services/api';
 import { dagsterUIApi, projectsApi, filesApi, primitivesApi, dagsterPlusOrgBaseUrl } from './services/api';
 import type { ComponentInstance } from './types';
 import { API_BASE } from '@/services/api';
 import { dbg } from '@/lib/debug';
+import { lazyComponent } from './lib/lazyComponent';
+
+// Screens and dialogs load their code the first time they open, which keeps the first load small.
+const ComponentConfigModal = lazyComponent(() => import('./components/ComponentConfigModal'), 'ComponentConfigModal');
+const AgentPipelineBuilder = lazyComponent(() => import('./components/AgentPipelineBuilder'), 'AgentPipelineBuilder');
+const DocumentExtractionReview = lazyComponent(() => import('./components/DocumentExtractionReview'), 'DocumentExtractionReview');
+const DocumentExtractorConfigStep = lazyComponent(() => import('./components/DocumentExtractorConfigStep'), 'DocumentExtractorConfigStep');
+const OcrExtractorConfigStep = lazyComponent(() => import('./components/OcrExtractorConfigStep'), 'OcrExtractorConfigStep');
+const ClassificationReview = lazyComponent(() => import('./components/ClassificationReview'), 'ClassificationReview');
+const JoinConfigStep = lazyComponent(() => import('./components/JoinConfigStep'), 'JoinConfigStep');
+const VideoSceneConfigStep = lazyComponent(() => import('./components/VideoSceneConfigStep'), 'VideoSceneConfigStep');
+const VideoFrameExtractConfigStep = lazyComponent(() => import('./components/VideoFrameExtractConfigStep'), 'VideoFrameExtractConfigStep');
+const VideoAudioExtractConfigStep = lazyComponent(() => import('./components/VideoAudioExtractConfigStep'), 'VideoAudioExtractConfigStep');
+const VideoMetadataConfigStep = lazyComponent(() => import('./components/VideoMetadataConfigStep'), 'VideoMetadataConfigStep');
+const AudioDiarizedConfigStep = lazyComponent(() => import('./components/AudioDiarizedConfigStep'), 'AudioDiarizedConfigStep');
+const AudioTranscriberConfigStep = lazyComponent(() => import('./components/AudioTranscriberConfigStep'), 'AudioTranscriberConfigStep');
+const MlflowInferenceConfigStep = lazyComponent(() => import('./components/MlflowInferenceConfigStep'), 'MlflowInferenceConfigStep');
+const AutoMLConfigStep = lazyComponent(() => import('./components/AutoMLConfigStep'), 'AutoMLConfigStep');
+const LlmJudgeConfigStep = lazyComponent(() => import('./components/LlmJudgeConfigStep'), 'LlmJudgeConfigStep');
+const ContextEngineeringConfigStep = lazyComponent(() => import('./components/ContextEngineeringConfigStep'), 'ContextEngineeringConfigStep');
+const AiMlHub = lazyComponent(() => import('./components/AiMlHub'), 'AiMlHub');
+const ActivatePanel = lazyComponent(() => import('./components/ActivatePanel'), 'ActivatePanel');
+const TemplateBuilder = lazyComponent(() => import('./components/TemplateBuilder'), 'TemplateBuilder');
+const PrimitivesManager = lazyComponent(() => import('./components/PrimitivesManager'), 'PrimitivesManager');
+const ResourcesManager = lazyComponent(() => import('./components/ResourcesManager'), 'ResourcesManager');
+const PipelineBuilder = lazyComponent(() => import('./components/PipelineBuilder'), 'PipelineBuilder');
+const AssetDetailPage = lazyComponent(() => import('./components/AssetDetailPage'), 'AssetDetailPage');
+const AlertsPanel = lazyComponent(() => import('./components/AlertsPanel'), 'AlertsPanel');
+const RunsPanel = lazyComponent(() => import('./components/RunsPanel'), 'RunsPanel');
+const DataPreviewModal = lazyComponent(() => import('./components/DataPreviewModal'), 'DataPreviewModal');
+const GitCommitDialog = lazyComponent(() => import('./components/GitCommitDialog'), 'GitCommitDialog');
+const PublishServerlessDialog = lazyComponent(() => import('./components/PublishServerlessDialog'), 'PublishServerlessDialog');
+const AddMonitorDialog = lazyComponent(() => import('./components/AddMonitorDialog'), 'AddMonitorDialog');
+const AddComponentModal = lazyComponent(() => import('./components/AddComponentModal'), 'AddComponentModal');
+const DraftsPanel = lazyComponent(() => import('./components/DraftsPanel'), 'DraftsPanel');
+const IngestionsPanel = lazyComponent(() => import('./components/IngestionsPanel'), 'IngestionsPanel');
+const InsightsPanel = lazyComponent(() => import('./components/InsightsPanel'), 'InsightsPanel');
+const DbtPanel = lazyComponent(() => import('./components/DbtPanel'), 'DbtPanel');
+const MonitorsPanel = lazyComponent(() => import('./components/MonitorsPanel'), 'MonitorsPanel');
+const AiAssistantPanel = lazyComponent(() => import('./components/AiAssistantPanel'), 'AiAssistantPanel');
 
 function BrandMark() {
   const [failed, setFailed] = useState(false);
