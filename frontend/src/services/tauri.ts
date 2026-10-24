@@ -167,6 +167,82 @@ export async function setProjectsDir(path: string): Promise<void> {
 }
 
 /**
+ * Stores an API key in the OS keychain (macOS Keychain, Windows Credential Manager, the Linux secret service) through the
+ * desktop shell. Returns false when it couldn't -- not the desktop app, or no usable keychain on this machine -- so the
+ * caller can fall back to saving it the old way. The shell never lets the page read a key back.
+ */
+export async function secretSet(name: string, value: string): Promise<boolean> {
+  if (!isTauri) return false;
+  try {
+    const { invoke } = await import('@tauri-apps/api/core');
+    await invoke('secret_set', { name, value });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Shows a file or folder in Finder / Explorer / the file manager. Throws if it can't. */
+export async function revealInFileManager(path: string): Promise<void> {
+  if (!isTauri) throw new Error('Only available in the desktop app');
+  const { revealItemInDir } = await import('@tauri-apps/plugin-opener');
+  await revealItemInDir(path);
+}
+
+export type EditorId = 'code' | 'cursor';
+
+/** Opens a folder in VS Code or Cursor. Throws a readable message when the editor isn't installed. */
+export async function openInEditor(editor: EditorId, path: string): Promise<void> {
+  if (!isTauri) throw new Error('Only available in the desktop app');
+  const { invoke } = await import('@tauri-apps/api/core');
+  try {
+    await invoke('open_in_editor', { editor, path });
+  } catch (e) {
+    throw new Error(typeof e === 'string' ? e : (e as Error)?.message || 'Could not open the editor');
+  }
+}
+
+/**
+ * Files or folders dragged onto the window from Finder / Explorer. The page can't see native drops itself, so the shell
+ * reports them (with absolute paths). Returns an unsubscribe function; a no-op outside the desktop app.
+ */
+export async function onFileDrop(handlers: { onEnter?: () => void; onLeave?: () => void; onDrop: (paths: string[]) => void }): Promise<() => void> {
+  if (!isTauri) return () => {};
+  const { getCurrentWebview } = await import('@tauri-apps/api/webview');
+  return getCurrentWebview().onDragDropEvent((event) => {
+    const p = event.payload;
+    if (p.type === 'enter') handlers.onEnter?.();
+    else if (p.type === 'leave') handlers.onLeave?.();
+    else if (p.type === 'drop') {
+      handlers.onLeave?.();
+      handlers.onDrop(p.paths);
+    }
+  });
+}
+
+/** Whether the OS keychain works on this machine (desktop app only). */
+export async function secretsAvailable(): Promise<boolean> {
+  if (!isTauri) return false;
+  try {
+    const { invoke } = await import('@tauri-apps/api/core');
+    return await invoke<boolean>('secrets_available');
+  } catch {
+    return false;
+  }
+}
+
+/** Removes an API key from the OS keychain. Best effort: a missing key or keychain is not an error. */
+export async function secretDelete(name: string): Promise<void> {
+  if (!isTauri) return;
+  try {
+    const { invoke } = await import('@tauri-apps/api/core');
+    await invoke('secret_delete', { name });
+  } catch {
+    /* nothing to remove, or no keychain */
+  }
+}
+
+/**
  * Subscribes to "menu-action" events emitted by the native menu bar (see
  * src-tauri/src/main.rs). No-op outside Tauri. Returns an unsubscribe
  * function, mirroring `@tauri-apps/api/event`'s own `listen()`.

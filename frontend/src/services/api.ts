@@ -242,6 +242,12 @@ export const projectsApi = {
     return response.data;
   },
 
+  /** The project's folder on this machine (404 for a Dagster+ project, which has none). */
+  folder: async (id: string) => {
+    const response = await api.get<{ path: string }>(`/projects/${id}/folder`);
+    return response.data;
+  },
+
   import: async (path: string) => {
     const response = await api.post<Project>('/projects/import', { path });
     return response.data;
@@ -3312,6 +3318,8 @@ export const aiApi = {
     local_model?: string;
     local_api_key?: string;
     local_prefer?: boolean;
+    // false = apply to the running backend only, without writing the .env file (keys held in the OS keychain).
+    persist?: boolean;
   }): Promise<AiProvidersStatus> => {
     const response = await api.post<AiProvidersStatus>('/ai/keys', keys);
     return response.data;

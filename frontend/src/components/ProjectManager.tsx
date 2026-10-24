@@ -7,10 +7,12 @@ import { ConnectDagsterPlusDialog } from './ConnectDagsterPlusDialog';
 import { GitCommitDialog } from './GitCommitDialog';
 import { Launchpad } from './Launchpad';
 import { notify, confirmDialog } from './Notifications';
-import { onMenuAction, onBackendReady, isTauri, pickDirectory } from '@/services/tauri';
+import { onMenuAction, onBackendReady, isTauri, pickDirectory, getPlatform, revealInFileManager, openInEditor, type EditorId } from '@/services/tauri';
+import { fileManagerName } from '@/lib/fileManager';
 import { openSettings } from './SettingsDialog';
 import {
   FolderOpen,
+  Code2,
   Plus,
   Save,
   Download,
@@ -228,6 +230,20 @@ export function ProjectManager() {
       notify.error('Failed to create project. Check the console for details.');
     } finally {
       setIsCreating(false);
+    }
+  };
+
+  // The desktop app's folder shortcuts: find the project's folder on this machine, then act on it.
+  const [platform, setPlatform] = useState<string | null>(null);
+  useEffect(() => {
+    if (isTauri) getPlatform().then(setPlatform);
+  }, []);
+  const openProjectFolder = async (projectId: string, action: (path: string) => Promise<void>) => {
+    try {
+      const { path } = await projectsApi.folder(projectId);
+      await action(path);
+    } catch (e: any) {
+      notify.error(e?.response?.data?.detail || e?.message || 'Could not open the project folder.');
     }
   };
 
@@ -1218,6 +1234,31 @@ export function ProjectManager() {
                       Updated: {new Date(project.updated_at).toLocaleDateString()}
                     </div>
                   </button>
+                  {isTauri && !(project as any).is_dagster_plus && (
+                    <>
+                      <button
+                        onClick={(e) => { e.stopPropagation(); openProjectFolder(project.id, (path) => revealInFileManager(path)); }}
+                        className="p-2 text-gray-400 hover:text-gray-700 hover:bg-gray-100 rounded transition-colors opacity-0 group-hover:opacity-100"
+                        title={`Show in ${fileManagerName(platform)}`}
+                      >
+                        <FolderOpen className="w-4 h-4" />
+                      </button>
+                      <button
+                        onClick={(e) => { e.stopPropagation(); openProjectFolder(project.id, (path) => openInEditor('code' as EditorId, path)); }}
+                        className="p-2 text-gray-400 hover:text-gray-700 hover:bg-gray-100 rounded transition-colors opacity-0 group-hover:opacity-100"
+                        title="Open in VS Code"
+                      >
+                        <Code2 className="w-4 h-4" />
+                      </button>
+                      <button
+                        onClick={(e) => { e.stopPropagation(); openProjectFolder(project.id, (path) => openInEditor('cursor' as EditorId, path)); }}
+                        className="px-1.5 py-2 text-[10px] font-semibold text-gray-400 hover:text-gray-700 hover:bg-gray-100 rounded transition-colors opacity-0 group-hover:opacity-100"
+                        title="Open in Cursor"
+                      >
+                        Cursor
+                      </button>
+                    </>
+                  )}
                   <button
                     onClick={async (e) => {
                       e.stopPropagation();

@@ -100,6 +100,9 @@ class SetAiKeysRequest(BaseModel):
     local_model: str | None = None
     local_api_key: str | None = None
     local_prefer: bool | None = None
+    # False = apply to the running backend only, without writing the .env file. The desktop app uses it for keys it has just put
+    # in the OS keychain, so they are never saved in plain text (it passes them to the backend at launch instead).
+    persist: bool = True
 
 
 @router.post("/keys", response_model=AiProvidersStatus)
@@ -125,10 +128,12 @@ async def set_ai_keys(request: SetAiKeysRequest) -> AiProvidersStatus:
             continue
         value = value.strip()
         if value:
-            set_key(str(_ENV_PATH), env_var, value)
+            if request.persist:
+                set_key(str(_ENV_PATH), env_var, value)
             os.environ[env_var] = value
         else:
-            unset_key(str(_ENV_PATH), env_var)
+            if request.persist:
+                unset_key(str(_ENV_PATH), env_var)
             os.environ.pop(env_var, None)
 
     return await ai_providers_status()

@@ -17,9 +17,16 @@ LOCAL_ENV = ("LOCAL_LLM_BASE_URL", "LOCAL_LLM_MODEL", "LOCAL_LLM_API_KEY", "LOCA
 
 @pytest.fixture(autouse=True)
 def clean_env(monkeypatch, tmp_path):
-    for k in (*LOCAL_ENV, "OPENAI_API_KEY", "ANTHROPIC_API_KEY"):
+    names = (*LOCAL_ENV, "OPENAI_API_KEY", "ANTHROPIC_API_KEY")
+    for k in names:
         monkeypatch.delenv(k, raising=False)
     monkeypatch.setattr(genie_api, "_ENV_PATH", tmp_path / ".env")
+    yield
+    # the keys endpoint writes os.environ directly, which monkeypatch doesn't undo -- don't leak into other test files
+    import os
+
+    for k in names:
+        os.environ.pop(k, None)
 
 
 def _client():
@@ -268,3 +275,35 @@ def test_the_detect_endpoint_reports_what_was_found(monkeypatch):
 
     monkeypatch.setattr(ep, "detect_local_servers", fake_detect)
     assert _client().get("/api/ai/local/detect").json() == {"servers": [{"name": "Ollama", "base_url": "http://127.0.0.1:11434", "models": ["llama3.1"]}]}
+
+
+# --- keys that must not be written to disk (the desktop app keeps them in the OS keychain) --------------------------
+
+def test_a_key_applied_with_persist_false_is_live_but_never_written_to_the_env_file(tmp_path):
+    c = _client()
+    res = c.post("/api/ai/keys", json={"openai_api_key": "sk-secret", "persist": False}).json()
+    assert res["openai_available"] is True
+    import os
+
+    assert os.environ["OPENAI_API_KEY"] == "sk-secret"
+    assert not (tmp_path / ".env").exists() or "sk-secret" not in (tmp_path / ".env").read_text()
+
+
+def test_persist_defaults_to_true_so_existing_callers_still_save_to_the_env_file(tmp_path):
+    _client().post("/api/ai/keys", json={"openai_api_key": "sk-saved"})
+    assert "sk-saved" in (tmp_path / ".env").read_text()
+
+
+def test_clearing_with_persist_false_removes_the_live_value_but_leaves_the_file_alone(tmp_path):
+    c = _client()
+    c.post("/api/ai/keys", json={"openai_api_key": "sk-on-disk"})  # saved the old way
+    res = c.post("/api/ai/keys", json={"openai_api_key": "", "persist": False}).json()
+    assert res["openai_available"] is False
+    assert "sk-on-disk" in (tmp_path / ".env").read_text()
+
+
+def test_clearing_with_persist_true_removes_it_from_the_file_too(tmp_path):
+    c = _client()
+    c.post("/api/ai/keys", json={"openai_api_key": "sk-on-disk"})
+    c.post("/api/ai/keys", json={"openai_api_key": ""})
+    assert "sk-on-disk" not in (tmp_path / ".env").read_text()
