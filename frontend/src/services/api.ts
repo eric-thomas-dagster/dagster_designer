@@ -3312,6 +3312,8 @@ export const aiApi = {
     local_model?: string;
     local_api_key?: string;
     local_prefer?: boolean;
+    // false = apply to the running backend only, without writing the .env file (keys held in the OS keychain).
+    persist?: boolean;
   }): Promise<AiProvidersStatus> => {
     const response = await api.post<AiProvidersStatus>('/ai/keys', keys);
     return response.data;

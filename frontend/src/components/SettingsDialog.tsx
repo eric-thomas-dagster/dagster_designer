@@ -2,7 +2,8 @@ import { useEffect, useRef, useState } from 'react';
 import { X, KeyRound, ExternalLink, CheckCircle2, FolderCog, Github, Zap } from 'lucide-react';
 import { aiApi, appSettingsApi, projectsApi, promotionApi, type AiProvidersStatus } from '@/services/api';
 import { notify, confirmDialog } from './Notifications';
-import { isTauri, getProjectsDir, setProjectsDir, pickDirectory } from '@/services/tauri';
+import { isTauri, getProjectsDir, setProjectsDir, pickDirectory, secretSet, secretDelete, secretsAvailable } from '@/services/tauri';
+import { saveKeys, clearKey as clearKeyEverywhere, type KeyBody, type KeySaveDeps } from '@/lib/keySaving';
 import { useProjectStore } from '@/hooks/useProject';
 import { PromotionSettingsModal } from './PromotionSettingsModal';
 import { DetectedLocalModel } from './DetectedLocalModel';
@@ -42,6 +43,13 @@ const SETTINGS_TABS: Array<{ id: SettingsTab; label: string; desktopOnly?: boole
 ];
 
 const PROVIDERS_CHANGED_EVENT = 'dagster-ai-providers-changed';
+
+// Keys go into the OS keychain when the desktop app has one, and are saved the old way otherwise (see lib/keySaving.ts).
+const keyDeps: KeySaveDeps<AiProvidersStatus> = {
+  secretSet,
+  secretDelete,
+  setKeys: (body: KeyBody) => aiApi.setKeys(body as Parameters<typeof aiApi.setKeys>[0]),
+};
 /** Tell every open picker and banner that provider settings changed (a key saved, a local model chosen). */
 export function notifyAiProvidersChanged(): void {
   window.dispatchEvent(new Event(PROVIDERS_CHANGED_EVENT));
@@ -83,6 +91,10 @@ function SettingsDialog({ onClose }: { onClose: () => void }) {
   };
 
   // Local model (Ollama, LM Studio, vLLM, ...). Seeded from the saved settings once they load, then edited locally.
+  const [keychain, setKeychain] = useState<boolean | null>(null);
+  useEffect(() => {
+    if (isTauri) secretsAvailable().then(setKeychain);
+  }, []);
   const [localUrl, setLocalUrl] = useState('');
   const [localModel, setLocalModel] = useState('');
   const [localKey, setLocalKey] = useState('');
@@ -153,8 +165,8 @@ function SettingsDialog({ onClose }: { onClose: () => void }) {
     }
     setSaving(true);
     try {
-      const next = await aiApi.setKeys(body);
-      setStatus(next);
+      const next = await saveKeys(body as KeyBody, keyDeps);
+      if (next) setStatus(next);
       setOpenaiKey('');
       setAnthropicKey('');
       setAnthropicWorkspaceId('');
@@ -171,11 +183,8 @@ function SettingsDialog({ onClose }: { onClose: () => void }) {
   const clearKey = async (which: 'openai' | 'anthropic' | 'anthropic_workspace') => {
     setSaving(true);
     try {
-      const body =
-        which === 'openai' ? { openai_api_key: '' }
-        : which === 'anthropic' ? { anthropic_api_key: '' }
-        : { anthropic_workspace_id: '' };
-      const next = await aiApi.setKeys(body);
+      const field = which === 'openai' ? 'openai_api_key' : which === 'anthropic' ? 'anthropic_api_key' : 'anthropic_workspace_id';
+      const next = await clearKeyEverywhere(field, keyDeps);
       setStatus(next);
       const label = which === 'openai' ? 'OpenAI key' : which === 'anthropic' ? 'Anthropic key' : 'Anthropic workspace ID';
       notify.success(`${label} cleared.`);
@@ -220,6 +229,8 @@ function SettingsDialog({ onClose }: { onClose: () => void }) {
         {tab === 'ai' && (<>
         <p className="text-sm text-gray-500 mb-4">
           Used by the AI assistant across every project. Saved keys apply immediately — no restart needed.
+          {isTauri && keychain === true && ' API keys are kept in your computer’s keychain, not in a file.'}
+          {isTauri && keychain === false && ' No keychain was found on this machine, so API keys are saved in a file in the app’s data folder.'}
         </p>
         <div className="space-y-4">
           <ProviderField
