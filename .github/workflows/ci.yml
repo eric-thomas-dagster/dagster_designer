@@ -5,6 +5,14 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # The desktop app's release workflow runs these same checks on the exact commit it is about to build, and publishes
+  # only if they pass.
+  workflow_call:
+    inputs:
+      ref:
+        description: Commit to check out and test (empty = the event's own)
+        type: string
+        default: ""
 
 jobs:
   frontend:
@@ -14,6 +22,9 @@ jobs:
         working-directory: frontend
     steps:
       - uses: actions/checkout@v4
+        with:
+          repository: eric-thomas-dagster/dagster_designer
+          ref: ${{ inputs.ref }}
       - uses: actions/setup-node@v4
         with:
           node-version: 20
@@ -31,6 +42,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          repository: eric-thomas-dagster/dagster_designer
+          ref: ${{ inputs.ref }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -42,6 +56,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          repository: eric-thomas-dagster/dagster_designer
+          ref: ${{ inputs.ref }}
       - uses: astral-sh/setup-uv@v5
       - uses: actions/setup-python@v5
         with:
@@ -60,6 +77,9 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+        with:
+          repository: eric-thomas-dagster/dagster_designer
+          ref: ${{ inputs.ref }}
       - uses: astral-sh/setup-uv@v5
       - uses: actions/setup-python@v5
         with:
@@ -87,6 +107,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          repository: eric-thomas-dagster/dagster_designer
+          ref: ${{ inputs.ref }}
       - name: No hardcoded .venv/bin paths outside the shared helper
         run: |
           matches=$(grep -rn '\.venv"\s*/\s*"bin"\|venv_dir\s*/\s*"bin"' backend/app --include="*.py" \
