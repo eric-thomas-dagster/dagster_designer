@@ -51,6 +51,7 @@ import { API_BASE } from '@/services/api';
 import { dbg } from '@/lib/debug';
 import { lazyComponent } from './lib/lazyComponent';
 import { DropImportOverlay } from './components/DropImportOverlay';
+import { DeepLinkHost } from './components/DeepLinkHost';
 
 // Screens and dialogs load their code the first time they open, which keeps the first load small.
 const ComponentConfigModal = lazyComponent(() => import('./components/ComponentConfigModal'), 'ComponentConfigModal');
@@ -2917,6 +2918,7 @@ function App() {
       <NotificationHost />
       <SettingsHost />
       <DropImportOverlay />
+      <DeepLinkHost onOpenAsset={(nodeId) => { setActiveMainTab('assets'); setDetailNodeId(nodeId); }} />
       <PreferencesHost />
     </div>
   );
