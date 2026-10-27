@@ -6,7 +6,9 @@ import { classifyStatus } from '@/lib/status';
 import { useProjectStore } from '@/hooks/useProject';
 import { notify, confirmDialog } from './Notifications';
 import { downstreamAssetLabels, summarizeNames } from '@/lib/dependents';
-import { SimpleMarkdown } from './SimpleMarkdown';
+import { lazyComponent } from '../lib/lazyComponent';
+// Loaded the first time it is shown, not at startup.
+const SimpleMarkdown = lazyComponent(() => import('./SimpleMarkdown'), 'SimpleMarkdown');
 import { AddDbtModelDialog } from './AddDbtModelDialog';
 import { GitCommitDialog } from './GitCommitDialog';
 import { SqlDiffDialog } from './SqlDiffDialog';

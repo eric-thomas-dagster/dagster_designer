@@ -32,6 +32,7 @@ interface ProjectStore {
   loadProject: (id: string, opts?: { silent?: boolean }) => Promise<void>;
   loadProjects: () => Promise<void>;
   createProject: (name: string, description?: string, gitRepo?: string, gitBranch?: string) => Promise<Project>;
+  createSampleProject: () => Promise<Project>;
   importProject: (path: string) => Promise<Project>;
   updateGraph: (nodes: GraphNode[], edges: GraphEdge[]) => Promise<void>;
   updateComponents: (components: ComponentInstance[]) => Promise<void>;
@@ -294,6 +295,20 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
       return project;
     } catch (error) {
       set({ error: 'Failed to create project', isLoading: false });
+      throw error;
+    }
+  },
+
+  createSampleProject: async () => {
+    set({ isLoading: true, error: null });
+    try {
+      const project = await projectsApi.createSample();
+      set({ currentProject: project, projects: [project, ...get().projects], isLoading: false });
+      set({ dependencyInstallStatus: 'installing', dependencyInstallError: null });
+      get().pollDependencyStatus(project.id);
+      return project;
+    } catch (error) {
+      set({ error: 'Failed to create the sample project', isLoading: false });
       throw error;
     }
   },

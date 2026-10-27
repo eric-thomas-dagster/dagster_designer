@@ -133,6 +133,8 @@ def _load_yaml_document_at_line(yaml_path: "Path", target_line: int | None) -> t
     return docs[chosen_idx], chosen_idx, len(docs)
 
 
+from . import definitions_disk_cache
+
 # Simple in-memory cache for asset introspection to avoid re-running slow dg list defs
 # Cache structure: {project_id: (timestamp, assets_data)}
 _assets_cache: Dict[str, Tuple[float, dict]] = {}
@@ -180,6 +182,7 @@ def invalidate_project_caches(project_id: str) -> None:
     just-edited project kept reporting its OLD validation result for up to a minute."""
     _assets_cache.pop(project_id, None)
     _last_run_result.pop(project_id, None)
+    definitions_disk_cache.clear(project_id)
     try:
         from ..api.primitives import _definitions_cache
         _definitions_cache.pop(project_id, None)
@@ -249,6 +252,7 @@ class AssetIntrospectionService:
 
     def clear_cache(self, project_id: str) -> None:
         """Clear the asset introspection cache for a specific project."""
+        definitions_disk_cache.clear(project_id)
         if project_id in _assets_cache:
             del _assets_cache[project_id]
             print(f"[Asset Introspection] Cleared cache for project {project_id}", flush=True)
@@ -394,6 +398,13 @@ class AssetIntrospectionService:
                 print(f"[Asset Introspection] Returning cached data for project {project.id} (age: {age:.1f}s)", flush=True)
                 return cached_data
 
+        stored = definitions_disk_cache.load(project.id, project_dir)
+        if stored is not None:
+            print(f"[Asset Introspection] Using the saved definitions for project {project.id} (project files unchanged)", flush=True)
+            _assets_cache[project.id] = (current_time, stored)
+            return stored
+
+        load_started = time.time()
         # Get the path to dg in the project's virtualenv
         venv_dir = project_dir / ".venv"
         dg_path = venv_bin_path(venv_dir, "dg")
@@ -449,7 +460,10 @@ class AssetIntrospectionService:
 
             # Parse and cache the results
             assets_data = json.loads(result.stdout)
+            load_seconds = time.time() - load_started
+            print(f"[Asset Introspection] dg list defs took {load_seconds:.1f}s for project {project.id}", flush=True)
             _assets_cache[project.id] = (time.time(), assets_data)
+            definitions_disk_cache.store(project.id, project_dir, assets_data, load_seconds)
             print(f"[Asset Introspection] Cached results for project {project.id}", flush=True)
 
             return assets_data
@@ -509,6 +523,14 @@ class AssetIntrospectionService:
                     print(f"[Asset Introspection] Returning cached data for project {project.id} after lock (age: {age:.1f}s)", flush=True)
                     return cached_data
 
+            stored = await asyncio.to_thread(definitions_disk_cache.load, project.id, project_dir)
+            if stored is not None:
+                print(f"[Asset Introspection] Using the saved definitions for project {project.id} (project files unchanged)", flush=True)
+                _assets_cache[project.id] = (time.time(), stored)
+                record_last_run_result(project.id, True, None)
+                return stored
+
+            load_started = time.time()
             # Get the path to dg in the project's virtualenv
             venv_dir = project_dir / ".venv"
             dg_path = venv_bin_path(venv_dir, "dg")
@@ -589,7 +611,10 @@ class AssetIntrospectionService:
 
                 # Parse and cache the results
                 assets_data = json.loads(stdout.decode())
+                load_seconds = time.time() - load_started
+                print(f"[Asset Introspection] dg list defs took {load_seconds:.1f}s for project {project.id}", flush=True)
                 _assets_cache[project.id] = (time.time(), assets_data)
+                await asyncio.to_thread(definitions_disk_cache.store, project.id, project_dir, assets_data, load_seconds)
                 record_last_run_result(project.id, True, None)
                 print(f"[Asset Introspection] Cached results for project {project.id}", flush=True)
 

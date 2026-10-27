@@ -32,7 +32,9 @@ import { DraftNode } from './DraftNode';
 import { useDrafts } from '@/hooks/useDrafts';
 import { usePreviews } from '@/hooks/usePreviews';
 import { Launchpad } from './Launchpad';
-import { DataPreviewModal } from './DataPreviewModal';
+import { lazyComponent } from '../lib/lazyComponent';
+// Loaded the first time it is shown, not at startup.
+const DataPreviewModal = lazyComponent(() => import('./DataPreviewModal'), 'DataPreviewModal');
 import { AssetIOPanel } from './AssetIOPanel';
 import { DagsterAIBar } from './DagsterAIBar';
 import { AddDataDialog } from './AddDataDialog';

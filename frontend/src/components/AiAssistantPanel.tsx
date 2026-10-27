@@ -3,7 +3,9 @@ import {
   Sparkles, Loader2, Send, MessageSquare, Lightbulb, ChevronRight,
   AlertTriangle, Radio,
 } from 'lucide-react';
-import { SimpleMarkdown } from './SimpleMarkdown';
+import { lazyComponent } from '../lib/lazyComponent';
+// Loaded the first time it is shown, not at startup.
+const SimpleMarkdown = lazyComponent(() => import('./SimpleMarkdown'), 'SimpleMarkdown');
 
 /**
  * Reusable page-level AI Assistant callout — the same UX as the fleet

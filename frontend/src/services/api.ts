@@ -242,6 +242,12 @@ export const projectsApi = {
     return response.data;
   },
 
+  /** Creates the offline sample project (a small pipeline that runs with nothing to install or configure). */
+  createSample: async () => {
+    const response = await api.post<Project>('/projects/sample');
+    return response.data;
+  },
+
   /** The project's folder on this machine (404 for a Dagster+ project, which has none). */
   folder: async (id: string) => {
     const response = await api.get<{ path: string }>(`/projects/${id}/folder`);
