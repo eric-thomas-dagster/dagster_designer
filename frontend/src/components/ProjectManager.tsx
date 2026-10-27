@@ -39,6 +39,7 @@ export function ProjectManager() {
     loadProjects,
     loadProject,
     createProject,
+    createSampleProject,
     importProject,
     saveProject,
   } = useProjectStore();
@@ -194,6 +195,18 @@ export function ProjectManager() {
       });
     }
   }, [currentProject]);
+
+  const handleTrySample = async () => {
+    try {
+      setIsCreating(true);
+      await createSampleProject();
+      notify.info('Setting up the sample project… this takes a minute the first time. The graph will appear on its own.');
+    } catch {
+      notify.error('Could not create the sample project.');
+    } finally {
+      setIsCreating(false);
+    }
+  };
 
   const handleCreateProject = async () => {
     if (!newProjectName.trim()) return;
@@ -1191,7 +1204,17 @@ export function ProjectManager() {
 
             <div className="space-y-2 max-h-96 overflow-y-auto">
               {projects.length === 0 && (
-                <p className="text-center text-gray-500 py-8">No projects yet</p>
+                <div className="text-center py-8">
+                  <p className="text-gray-500">No projects yet</p>
+                  <button
+                    onClick={handleTrySample}
+                    disabled={isCreating}
+                    className="mt-3 px-4 py-2 text-sm font-medium bg-primary text-primary-foreground rounded-md hover:bg-accent disabled:opacity-50"
+                  >
+                    Try a sample project
+                  </button>
+                  <p className="mt-2 text-xs text-gray-400">A small coffee-shop pipeline that runs offline. Nothing to set up.</p>
+                </div>
               )}
               {projects.length > 0 && filteredProjects.length === 0 && (
                 <p className="text-center text-gray-500 py-8">

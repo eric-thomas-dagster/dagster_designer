@@ -126,6 +126,20 @@ async def create_project(project_create: ProjectCreate, background_tasks: Backgr
     return project
 
 
+@router.post("/sample", response_model=Project, status_code=201)
+async def create_sample_project(background_tasks: BackgroundTasks):
+    """Create the first-run sample project: a small offline pipeline (assets, a check, a schedule) so a new user has something real
+    to open. Created like any project; the sample files are written before the background dependency install loads the definitions."""
+    from ..services import sample_project_service as sample
+
+    name = sample.unique_name([p.name for p in project_service.list_projects()])
+    project = project_service.create_project(ProjectCreate(name=name, description=sample.SAMPLE_DESCRIPTION))
+    defs_dir = project_service._get_project_dir(project) / "src" / project_service.get_project_root_module(project) / "defs"
+    sample.add_sample_files(defs_dir)
+    background_tasks.add_task(_install_dependencies_and_generate_assets, project)
+    return project
+
+
 class ComponentSourceYamlUpdate(BaseModel):
     """Request to patch a component instance's `attributes:` block directly
     in its own defs.yaml, for a project whose normal component-save path
