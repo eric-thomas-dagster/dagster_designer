@@ -7,7 +7,9 @@ import { X, Save, Settings, Play, Trash2, Plus, Wand2, Database, Search, Package
 import { Launchpad } from './Launchpad';
 import { PartitionBackfill } from './PartitionBackfill';
 import { PartitionConfig } from './PartitionConfig';
-import { DataPreviewModal } from './DataPreviewModal';
+import { lazyComponent } from '../lib/lazyComponent';
+// Loaded the first time it is shown, not at startup.
+const DataPreviewModal = lazyComponent(() => import('./DataPreviewModal'), 'DataPreviewModal');
 import { notify, confirmDialog } from './Notifications';
 import { downstreamAssetLabels, summarizeNames } from '@/lib/dependents';
 import { assetsApi, projectsApi, primitivesApi, partitionsApi, templatesApi, API_BASE, type BackfillRequest } from '@/services/api';

@@ -1,6 +1,8 @@
 import { useState } from 'react';
 import { ChevronDown, ExternalLink } from 'lucide-react';
-import { SimpleMarkdown } from './SimpleMarkdown';
+import { lazyComponent } from '../lib/lazyComponent';
+// Loaded the first time it is shown, not at startup.
+const SimpleMarkdown = lazyComponent(() => import('./SimpleMarkdown'), 'SimpleMarkdown');
 import type { MetadataEntry } from '@/services/api';
 
 /** Renders one materialization/observation/check's typed metadata --
