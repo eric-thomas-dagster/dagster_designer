@@ -5,6 +5,8 @@ import { GroupByLocationToggle } from './GroupByLocationToggle';
 import { useThemePref } from '@/hooks/useThemePref';
 import type { ThemePref } from '@/lib/theme';
 import { useNotifyOnRunCompletion } from '@/hooks/useNotifyOnRunCompletion';
+import { useBackgroundModePref } from '@/hooks/useBackgroundMode';
+import { isTauri } from '@/services/tauri';
 
 // Same lightweight module-level pub-sub as SettingsDialog.tsx, kept as a
 // separate dialog on purpose: Settings holds credentials/config you set
@@ -45,6 +47,7 @@ function PreferencesDialog({ onClose }: { onClose: () => void }) {
   const [groupByLocationPref, setGroupByLocationPref] = useGroupByCodeLocation();
   const [themePref, setThemePref] = useThemePref();
   const [notifyOnRunCompletion, setNotifyOnRunCompletion] = useNotifyOnRunCompletion();
+  const [keepInTray, setKeepInTray] = useBackgroundModePref();
 
   return (
     <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
@@ -113,6 +116,20 @@ function PreferencesDialog({ onClose }: { onClose: () => void }) {
               />
             </label>
           </div>
+          {isTauri && (
+            <div className="flex items-start justify-between gap-4 mt-4">
+              <div>
+                <div className="text-sm font-medium text-gray-900">Keep running in the tray</div>
+                <div className="text-xs text-gray-500 mt-0.5">
+                  Closing the window keeps Dagster Designer running in the menu bar / system tray so it can notify you about Dagster+
+                  runs. On by default when you have a Dagster+ project. Open-source projects only run while the window is open.
+                </div>
+              </div>
+              <label className="inline-flex items-center flex-shrink-0">
+                <input type="checkbox" checked={keepInTray} onChange={(e) => setKeepInTray(e.target.checked)} className="w-3.5 h-3.5" />
+              </label>
+            </div>
+          )}
         </div>
 
         <div className="flex justify-end mt-6">

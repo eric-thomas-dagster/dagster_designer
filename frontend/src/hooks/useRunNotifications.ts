@@ -3,61 +3,60 @@ import { runsApi } from '@/services/api';
 import { sendNativeNotification } from '@/services/tauri';
 import { notify } from '@/components/Notifications';
 import { getNotifyOnRunCompletion } from '@/lib/runNotificationsPref';
+import { describeFinishedRun, detectFinishedRuns } from '@/lib/runTransitions';
 import { useProjectStore } from './useProject';
 
-const TERMINAL_STATUSES = new Set(['SUCCESS', 'FAILURE', 'CANCELED']);
 const POLL_MS = 15000;
+/** Dagster+ projects other than the one on screen are checked every this-many polls (about a minute). */
+const BACKGROUND_EVERY = 4;
 
 /**
- * Watches the current project's most recent runs and fires a notification
- * (in-app toast always, native OS notification under Tauri) the moment a
- * run transitions into a terminal state. Only fires on transitions observed
- * during this session -- the first poll after opening a project just
- * records baseline statuses, so we don't notify about runs that finished
- * before anyone was watching.
+ * Tells you when a run finishes: an in-app toast always, and a native OS notification (if the Preference is on).
+ *
+ * Watches the open project, plus every Dagster+ project even when it isn't the one on screen. Dagster+ runs happen on Dagster's
+ * servers whether or not this window is showing, so with the tray enabled (see useBackgroundMode) the app keeps telling you about
+ * them. Open-source projects only run while you're working in them, so only the open one is watched.
+ *
+ * Only runs seen in progress during this session are announced (see detectFinishedRuns).
  */
 export function useRunNotifications() {
-  const { currentProject } = useProjectStore();
-  const lastStatus = useRef<Map<string, string>>(new Map());
+  const currentId = useProjectStore((s) => s.currentProject?.id);
+  const projects = useProjectStore((s) => s.projects);
+  const seen = useRef<Map<string, Map<string, string>>>(new Map());
+  const latest = useRef({ currentId, projects });
+  latest.current = { currentId, projects };
 
   useEffect(() => {
-    lastStatus.current = new Map();
-  }, [currentProject?.id]);
-
-  useEffect(() => {
-    if (!currentProject) return;
     let cancelled = false;
+    let tick = 0;
 
-    const poll = async () => {
+    const watch = async (projectId: string, projectName: string | undefined, showName: boolean) => {
       try {
-        const { runs } = await runsApi.query(currentProject.id, { limit: 10 });
+        const { runs } = await runsApi.query(projectId, { limit: 10 });
         if (cancelled) return;
-        for (const run of runs) {
-          const status = run.status.toUpperCase();
-          const prevStatus = lastStatus.current.get(run.run_id);
-          lastStatus.current.set(run.run_id, status);
-
-          const justFinished =
-            prevStatus !== undefined && prevStatus !== status && !TERMINAL_STATUSES.has(prevStatus) && TERMINAL_STATUSES.has(status);
-          if (!justFinished) continue;
-
-          const label = run.job_name || run.pipeline_name || 'Run';
-          // In-app toast always fires; the native OS notification is
-          // gated behind the Preferences toggle (default on).
-          const nativeEnabled = getNotifyOnRunCompletion();
-          if (status === 'SUCCESS') {
-            notify.success(`${label} succeeded`);
-            if (nativeEnabled) sendNativeNotification('Run succeeded', label);
-          } else if (status === 'FAILURE') {
-            notify.error(`${label} failed`);
-            if (nativeEnabled) sendNativeNotification('Run failed', label);
-          } else if (status === 'CANCELED') {
-            notify.warning(`${label} was canceled`);
-            if (nativeEnabled) sendNativeNotification('Run canceled', label);
-          }
+        let byRun = seen.current.get(projectId);
+        if (!byRun) seen.current.set(projectId, (byRun = new Map()));
+        for (const finished of detectFinishedRuns(byRun, runs)) {
+          const { title, body } = describeFinishedRun(finished, showName ? projectName : undefined);
+          const text = showName && projectName ? `${finished.label} (${projectName})` : finished.label;
+          if (finished.status === 'SUCCESS') notify.success(`${text} succeeded`);
+          else if (finished.status === 'FAILURE') notify.error(`${text} failed`);
+          else notify.warning(`${text} was canceled`);
+          if (getNotifyOnRunCompletion()) sendNativeNotification(title, body);
         }
       } catch {
-        // Background watcher -- a failed poll just tries again next tick.
+        // Background watcher: a failed poll just tries again next time.
+      }
+    };
+
+    const poll = () => {
+      const { currentId: open, projects: all } = latest.current;
+      const everyone = tick % BACKGROUND_EVERY === 0;
+      tick += 1;
+      if (open) watch(open, all.find((p) => p.id === open)?.name, false);
+      if (!everyone) return;
+      for (const p of all) {
+        if (p.id !== open && (p as any).is_dagster_plus) watch(p.id, p.name, true);
       }
     };
 
@@ -67,5 +66,10 @@ export function useRunNotifications() {
       cancelled = true;
       clearInterval(id);
     };
-  }, [currentProject?.id]);
+  }, []);
+
+  // A different project's history starts fresh: only its in-progress runs are announced.
+  useEffect(() => {
+    if (currentId) seen.current.delete(currentId);
+  }, [currentId]);
 }
