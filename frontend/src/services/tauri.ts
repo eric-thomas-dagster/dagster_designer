@@ -317,3 +317,14 @@ export async function onDeepLink(handler: (url: string) => void): Promise<() => 
   launched?.forEach(handler);
   return onOpenUrl((urls) => urls.forEach(handler));
 }
+
+/** Shows a tray icon and keeps the app running there when its window is closed. Desktop app only; best effort. */
+export async function setBackgroundMode(enabled: boolean): Promise<void> {
+  if (!isTauri) return;
+  try {
+    const { invoke } = await import('@tauri-apps/api/core');
+    await invoke('set_background_mode', { enabled });
+  } catch {
+    // An older shell without the command just keeps its old behaviour.
+  }
+}

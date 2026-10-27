@@ -39,6 +39,7 @@ import { SettingsHost, openSettings } from './components/SettingsDialog';
 import { PreferencesHost, openPreferences } from './components/PreferencesDialog';
 import { useProjectStore } from './hooks/useProject';
 import { useRunNotifications } from './hooks/useRunNotifications';
+import { useBackgroundMode } from './hooks/useBackgroundMode';
 import { setActiveTabGlobal } from './services/activeTab';
 import { onMenuAction, onQuitRequested, onBackendReady, confirmQuit, openExternalUrl, getPlatform, isTauri } from './services/tauri';
 import { WindowsCaptionButtons } from './components/WindowsCaptionButtons';
@@ -313,6 +314,7 @@ function StatusStrip(props: StatusStripProps) {
 
 function App() {
   useRunNotifications();
+  useBackgroundMode();
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [editingComponent, setEditingComponent] = useState<ComponentInstance | null>(null);
   // Schedules/sensors/jobs opened for editing from the Automations tab have
