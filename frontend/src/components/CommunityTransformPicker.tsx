@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import * as Dialog from '@radix-ui/react-dialog';
 import { X, Search, Package, Loader2, Download, Info } from 'lucide-react';
 import { notify } from './Notifications';
-import { API_BASE } from '@/services/api';
+import { API_BASE, projectsApi } from '@/services/api';
 
 interface ManifestComponent {
   id: string;
@@ -93,6 +93,13 @@ export function CommunityTransformPicker({
     onSuccess: async (result) => {
       notify.success(`Installed. New asset "${result.instanceName}" chained onto ${upstreamAssetKey}.`);
       await queryClient.invalidateQueries({ queryKey: ['installed-components', projectId] });
+      // The install only writes the component's files; the graph's nodes come from Dagster's definitions, so without
+      // this the new asset never appears on the lineage until something else happens to regenerate.
+      try {
+        await projectsApi.regenerateAssets(projectId, true);
+      } catch (e) {
+        notify.error(`Installed, but the graph couldn't refresh: ${e instanceof Error ? e.message : String(e)}`);
+      }
       onInstalled(result);
       onOpenChange(false);
     },
