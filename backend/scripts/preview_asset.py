@@ -559,6 +559,8 @@ def create_mock_context(asset_key=None):
             self.log = self.SimpleLogger()
             self.has_partition_key = False
             self.partition_key = None
+            self.has_partition_key_range = False
+            self.partition_key_range = None
             self._output_metadata = {}
             self.resources = {}
             self.run = SimpleMockRun()
@@ -1004,6 +1006,16 @@ def main():
                     # Normalize key for use as Python identifier
                     param_name = exec_key.replace('/', '_')
                     kwargs[param_name] = exec_result
+                # Community components declare their input as `ins={"upstream": AssetIn(key=...)}` and read
+                # kwargs.get("upstream") from **kwargs -- the results above are keyed by asset key, so also hand each
+                # one over under its declared input name or the component never sees its upstream.
+                try:
+                    for in_name, in_key in asset_def.keys_by_input_name.items():
+                        user_key = "/".join(in_key.path)
+                        if in_name not in kwargs and user_key in executed_results:
+                            kwargs[in_name] = executed_results[user_key]
+                except Exception:
+                    pass
             else:
                 # Function has specific parameters — try three matching passes:
                 # 1. Name matches asset key exactly
@@ -1041,6 +1053,20 @@ def main():
                     kwargs[param_name] = exec_result
                     unassigned_params.remove(param_name)
                     unassigned_results.pop(exec_key)
+
+            # An upstream we couldn't run in-process (a dbt model/seed) comes back as the sentinel; handing that
+            # to the asset only produces a confusing crash deep inside it.
+            blocked = [k for k, v in executed_results.items() if v is _MULTIKEY_SENTINEL]
+            if blocked:
+                print(json.dumps({
+                    "success": False,
+                    "error": (
+                        f"Preview can't run '{asset_key}' because it reads from "
+                        f"{', '.join(sorted(blocked))}, a dbt asset that can't be previewed in-process. "
+                        f"Click Run to here to materialize the chain, then check the output directly."
+                    ),
+                }))
+                sys.exit(0)
 
             # Execute the asset
             try:
