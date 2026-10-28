@@ -1,4 +1,5 @@
 import React, { memo, useCallback, useEffect, useRef, useState } from 'react';
+import { ioIncompatibility } from '@/lib/ioCompat';
 import { createPortal } from 'react-dom';
 import ReactFlow, {
   Node,
@@ -2096,39 +2097,18 @@ function GraphEditorInner({ onNodeSelect, onPrimitiveClick, onAddDataSource, onV
         const edgesBeforeConnect = edges;
         const projectBeforeConnect = currentProject;
 
-        // Validate IO type compatibility and show alerts if invalid
-        const targetInputType = targetNode.data?.io_input_type;
-        const targetInputRequired = targetNode.data?.io_input_required;
-        const sourceOutputType = sourceNode.data?.io_output_type;
-
-        if (targetInputRequired && targetInputType) {
-          // Check if source produces output
-          if (!sourceOutputType) {
-            notify.error(
-              `Cannot Connect These Assets\n\n` +
-              `Source: "${sourceNode.data?.label || sourceNode.id}"\n` +
-              `• This asset does not produce output\n\n` +
-              `Target: "${targetNode.data?.label || targetNode.id}"\n` +
-              `• Requires ${targetInputType} input\n\n` +
-              `To fix: Connect an asset that produces ${targetInputType} output to the target.`
-            );
-            return;
-          }
-
-          // Check type compatibility
-          if (sourceOutputType !== targetInputType) {
-            notify.error(
-              `Type Mismatch - Connection Not Allowed\n\n` +
-              `Source: "${sourceNode.data?.label || sourceNode.id}"\n` +
-              `• Produces: ${sourceOutputType}\n\n` +
-              `Target: "${targetNode.data?.label || targetNode.id}"\n` +
-              `• Requires: ${targetInputType}\n\n` +
-              `These types are incompatible. To fix:\n` +
-              `• Connect a ${targetInputType}-producing asset to the target\n` +
-              `• Or use a different target component that accepts ${sourceOutputType}`
-            );
-            return;
-          }
+        // Validate the schema's x-dagster-io contract (see lib/ioCompat.ts) before drawing the edge.
+        const ioProblem = ioIncompatibility(
+          { label: sourceNode.data?.label || sourceNode.id, component_type: sourceNode.data?.component_type, io_output_type: sourceNode.data?.io_output_type },
+          {
+            label: targetNode.data?.label || targetNode.id,
+            io_input_type: targetNode.data?.io_input_type,
+            io_input_required: targetNode.data?.io_input_required,
+          },
+        );
+        if (ioProblem) {
+          notify.error(`Connection not allowed\n\n${ioProblem}`);
+          return;
         }
 
         // Optimistically add the edge immediately

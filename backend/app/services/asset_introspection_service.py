@@ -244,6 +244,37 @@ def get_project_defs_lock(project_id: str) -> asyncio.Lock:
     return _introspection_locks[project_id]
 
 
+
+_INSTALLED_SCHEMA_INDEX: dict[str, dict[str, Path]] = {}
+
+
+def find_installed_component_schema(project_dir: Path, component_type: str) -> Path | None:
+    """schema.json of a community component that is installed as a package in the project's venv.
+
+    Looks the class name (`dagster_community_components.AutoFieldComponent` -> `AutoFieldComponent`) up in an index of
+    every schema.json under the package, built once per package location."""
+    if not component_type or "." not in component_type:
+        return None
+    package, class_name = component_type.split(".")[0], component_type.rsplit(".", 1)[1]
+    for site in sorted((project_dir / ".venv" / "lib").glob("python*/site-packages")):
+        pkg_dir = site / package
+        if not pkg_dir.is_dir():
+            continue
+        key = str(pkg_dir)
+        index = _INSTALLED_SCHEMA_INDEX.get(key)
+        if index is None:
+            index = {}
+            for schema in pkg_dir.rglob("schema.json"):
+                try:
+                    declared = json.loads(schema.read_text()).get("component_type", "")
+                except Exception:
+                    continue
+                if declared:
+                    index.setdefault(declared.rsplit(".", 1)[-1], schema)
+            _INSTALLED_SCHEMA_INDEX[key] = index
+        return index.get(class_name)
+    return None
+
 class AssetIntrospectionService:
     """Service for discovering assets from Dagster components."""
 
@@ -1129,6 +1160,11 @@ class AssetIntrospectionService:
                         schema_file = components_dir / actual_component_id / "schema.json"
                     else:
                         schema_file = None
+
+                    if not (schema_file and schema_file.exists()):
+                        # Community components installed as a package (`dagster_community_components.<Class>`) have no
+                        # copy under the project's components/ folder -- read the schema shipped inside the package.
+                        schema_file = find_installed_component_schema(project_dir, component_type) or schema_file
 
                     if schema_file and schema_file.exists():
                         try:
