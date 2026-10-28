@@ -81,11 +81,11 @@ export function TransformSourcePicker({
                 onClick={() => onPickExistingAsset(a.assetKey)}
                 className="w-full flex items-center justify-between px-3 py-2 text-left border border-gray-200 rounded-md hover:border-blue-300 hover:bg-blue-50/40"
               >
-                <div>
-                  <div className="text-sm font-medium text-gray-900">{a.label}</div>
-                  {a.componentType && <div className="text-xs text-gray-400 font-mono">{a.componentType}</div>}
+                <div className="min-w-0 flex-1">
+                  <div className="text-sm font-medium text-gray-900 truncate">{a.label}</div>
+                  {a.componentType && <div className="text-xs text-gray-400 font-mono truncate" title={a.componentType}>{a.componentType}</div>}
                 </div>
-                <ArrowRight className="w-4 h-4 text-gray-300" />
+                <ArrowRight className="w-4 h-4 text-gray-300 flex-shrink-0 ml-2" />
               </button>
             ))
           )}
