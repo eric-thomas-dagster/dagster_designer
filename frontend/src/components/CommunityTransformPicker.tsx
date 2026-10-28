@@ -4,6 +4,8 @@ import * as Dialog from '@radix-ui/react-dialog';
 import { X, Search, Package, Loader2, Download, Info } from 'lucide-react';
 import { notify } from './Notifications';
 import { API_BASE, projectsApi } from '@/services/api';
+import { useProjectStore } from '@/hooks/useProject';
+import { DBT_UPSTREAM_REASON, isDbtBackedType } from '@/lib/dbtUpstream';
 
 interface ManifestComponent {
   id: string;
@@ -42,6 +44,12 @@ export function CommunityTransformPicker({
   const [query, setQuery] = useState('');
   const [installingId, setInstallingId] = useState<string | null>(null);
   const queryClient = useQueryClient();
+  const currentProject = useProjectStore((st) => st.currentProject);
+  const upstreamNode = currentProject?.graph.nodes.find(
+    (n) => (n.data as any)?.asset_key === upstreamAssetKey || n.id === upstreamAssetKey.replace(/\//g, '_'),
+  );
+  // Community transforms are pandas DataFrame -> DataFrame; a dbt asset can't feed one (see lib/dbtUpstream.ts).
+  const upstreamIsDbt = isDbtBackedType((upstreamNode?.data as any)?.component_type);
 
   const { data: manifest, isLoading } = useQuery({
     queryKey: ['community-templates-manifest'],
@@ -149,6 +157,12 @@ export function CommunityTransformPicker({
             </div>
           </div>
 
+          {upstreamIsDbt && (
+            <div className="flex-shrink-0 px-4 py-2 border-b border-amber-200 bg-amber-50 text-xs text-amber-800">
+              {DBT_UPSTREAM_REASON}
+            </div>
+          )}
+
           <div className="flex-1 overflow-y-auto min-h-0 p-2 space-y-1">
             {isLoading && (
               <div className="flex items-center justify-center py-8 text-gray-500 text-sm gap-2">
@@ -168,9 +182,9 @@ export function CommunityTransformPicker({
               return (
                 <button
                   key={c.id}
-                  onClick={() => !isInstalling && installMutation.mutate(c.id)}
-                  disabled={isInstalling}
-                  className="w-full flex items-start gap-3 px-3 py-2.5 text-left rounded-md hover:bg-gray-50 disabled:opacity-60 group border border-transparent hover:border-gray-200"
+                  onClick={() => !isInstalling && !upstreamIsDbt && installMutation.mutate(c.id)}
+                  disabled={isInstalling || upstreamIsDbt}
+                  className="w-full flex items-start gap-3 px-3 py-2.5 text-left rounded-md hover:bg-gray-50 disabled:opacity-60 disabled:cursor-not-allowed group border border-transparent hover:border-gray-200"
                 >
                   <div className="w-8 h-8 rounded bg-primary/10 text-primary flex items-center justify-center flex-shrink-0">
                     <Package className="w-4 h-4" />

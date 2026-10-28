@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react';
+import { isDbtBackedType } from '@/lib/dbtUpstream';
 import { X, Loader2, Search } from 'lucide-react';
 import { useProjectStore } from '@/hooks/useProject';
 import { projectsApi, API_BASE } from '@/services/api';
@@ -33,7 +34,7 @@ export function RagQueryConfigStep({
   const dataframeAssets = useMemo(() => {
     if (!currentProject) return [];
     return currentProject.graph.nodes
-      .filter((n) => (n.type === 'asset' || (n.data as any)?.asset_key) && typeof (n.data as any)?.io_output_type === 'string' && (n.data as any).io_output_type.toLowerCase().includes('dataframe'))
+      .filter((n) => !isDbtBackedType((n.data as any)?.component_type) && (n.type === 'asset' || (n.data as any)?.asset_key) && typeof (n.data as any)?.io_output_type === 'string' && (n.data as any).io_output_type.toLowerCase().includes('dataframe'))
       .map((n) => (n.data as any)?.asset_key || n.id) as string[];
   }, [currentProject]);
 

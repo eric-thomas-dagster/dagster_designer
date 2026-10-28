@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react';
+import { isDbtBackedType } from '@/lib/dbtUpstream';
 import {
   X, ArrowLeft, ArrowRight, Loader2, FileText, ScanText, Receipt, FileSearch, Layers, Terminal,
 } from 'lucide-react';
@@ -141,6 +142,7 @@ export function DocumentExtractionWizard({
         // Missing metadata means "unknown", not "definitely not a
         // dataframe" -- same fix already shipped for ClassificationWizard/
         // SingleComponentWizard's identical filter.
+        if (isDbtBackedType((n.data as any)?.component_type)) return false; // dbt tables aren't DataFrames
         return !ioOutputType || isDataFrameType(ioOutputType);
       })
       .map((n) => {

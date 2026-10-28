@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react';
+import { isDbtBackedType } from '@/lib/dbtUpstream';
 import { X, ArrowLeft, ArrowRight, Loader2, FolderOpen } from 'lucide-react';
 import { useProjectStore } from '@/hooks/useProject';
 import { notify } from './Notifications';
@@ -97,6 +98,7 @@ export function SingleComponentWizard({
         // output was invisible here, forcing "connect a new source" over
         // reusing the asset already in the graph. Same fix already
         // shipped for ClassificationWizard's identical filter.
+        if (isDbtBackedType((n.data as any)?.component_type)) return false; // dbt tables aren't DataFrames
         return !ioOutputType || isDataFrameType(ioOutputType);
       })
       .map((n) => ({

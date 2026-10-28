@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
+import { isDbtBackedType } from '@/lib/dbtUpstream';
 import { X, Loader2, Plus, Sparkles, Layers, Database, FileSpreadsheet } from 'lucide-react';
 import { useProjectStore } from '@/hooks/useProject';
 import { projectsApi, API_BASE } from '@/services/api';
@@ -126,7 +127,7 @@ export function ContextEngineeringConfigStep({
   const existingAssetSources = useMemo(() => {
     if (!currentProject) return [];
     return currentProject.graph.nodes
-      .filter((n) => (n.type === 'asset' || (n.data as any)?.asset_key) && typeof (n.data as any)?.io_output_type === 'string' && (n.data as any).io_output_type.toLowerCase().includes('dataframe'))
+      .filter((n) => !isDbtBackedType((n.data as any)?.component_type) && (n.type === 'asset' || (n.data as any)?.asset_key) && typeof (n.data as any)?.io_output_type === 'string' && (n.data as any).io_output_type.toLowerCase().includes('dataframe'))
       .map((n) => ({
         assetKey: (n.data as any)?.asset_key || n.id,
         label: (n.data as any)?.label || (n.data as any)?.asset_key || n.id,

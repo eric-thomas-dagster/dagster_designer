@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react';
+import { isDbtBackedType } from '@/lib/dbtUpstream';
 import { X, ArrowLeft, ArrowRight, Loader2, BrainCircuit, MessageSquareText, Sparkles, Image as ImageIcon, Headset, FileSpreadsheet, FolderOpen, Gauge, Scale, ShieldAlert, FileSearch, FileStack, GraduationCap, Wrench } from 'lucide-react';
 import { useProjectStore } from '@/hooks/useProject';
 import { notify } from './Notifications';
@@ -182,6 +183,7 @@ export function ClassificationWizard({
         // gap that hid SQL-backed transformer outputs from this picker
         // while TransformSourcePicker's broader filter still found them.
         // Only exclude on a POSITIVE non-dataframe signal (e.g. "image").
+        if (isDbtBackedType((n.data as any)?.component_type)) return false; // dbt tables aren't DataFrames
         return !ioOutputType || isDataFrameType(ioOutputType);
       })
       .map((n) => {
