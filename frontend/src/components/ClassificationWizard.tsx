@@ -319,11 +319,11 @@ export function ClassificationWizard({
                       }}
                       className="w-full flex items-center justify-between px-3 py-2 text-left border border-gray-200 rounded-md hover:border-blue-300 hover:bg-blue-50/40"
                     >
-                      <div>
-                        <div className="text-sm font-medium text-gray-900">{s.label}</div>
-                        {s.componentType && <div className="text-xs text-gray-400 font-mono">{s.componentType}</div>}
+                      <div className="min-w-0 flex-1">
+                        <div className="text-sm font-medium text-gray-900 truncate">{s.label}</div>
+                        {s.componentType && <div className="text-xs text-gray-400 font-mono truncate" title={s.componentType}>{s.componentType}</div>}
                       </div>
-                      <ArrowRight className="w-4 h-4 text-gray-300" />
+                      <ArrowRight className="w-4 h-4 text-gray-300 flex-shrink-0 ml-2" />
                     </button>
                   ))}
                 </div>
