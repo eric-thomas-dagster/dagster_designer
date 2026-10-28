@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-SAMPLE_NAME = "Coffee Shop (sample)"
+SAMPLE_NAME = "Coffee Shop Sample"
 SAMPLE_DESCRIPTION = "A tiny sample pipeline. Everything in it runs offline: open an asset and press Materialize."
 
 SAMPLE_ASSETS_PY = '''"""Sample pipeline: a coffee shop's orders, cleaned up and summarised. Edit anything, or delete this folder."""

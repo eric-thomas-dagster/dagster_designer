@@ -241,7 +241,7 @@ class ProjectService:
                     print(f"🔍 Detected project type: {project_type}")
 
                     # Now set the proper directory_name
-                    module_name = project.name.lower().replace(" ", "_").replace("-", "_")
+                    module_name = re.sub(r"[^a-z0-9_]", "_", project.name.lower())
                     if module_name and module_name[0].isdigit():
                         module_name = f"project_{module_name}"
                     project.directory_name = f"project_{project.id.split('-')[0]}_{module_name}"
@@ -591,7 +591,7 @@ class ProjectService:
         print(f"📋 Generated project ID: {project_id}")
 
         # Sanitize project name for directory
-        module_name = project_name.lower().replace(" ", "_").replace("-", "_")
+        module_name = re.sub(r"[^a-z0-9_]", "_", project_name.lower())
         if module_name and module_name[0].isdigit():
             module_name = f"project_{module_name}"
 
@@ -1761,7 +1761,7 @@ class ProjectService:
     def _scaffold_project_with_create_dagster(self, project: Project):
         """Scaffold project using create-dagster command."""
         # Sanitize project name for Python module (must start with letter/underscore)
-        module_name = project.name.lower().replace(" ", "_").replace("-", "_")
+        module_name = re.sub(r"[^a-z0-9_]", "_", project.name.lower())
         # Ensure module name starts with a letter or underscore
         if module_name and module_name[0].isdigit():
             module_name = f"project_{module_name}"
