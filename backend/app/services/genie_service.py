@@ -2071,6 +2071,12 @@ async def plan(
                     (pp for pp in (previous_plan or []) if pp.get("asset_name") == target_name),
                     None,
                 )
+                if prev_match is not None and action == "remove":
+                    # The model is retracting its OWN earlier proposal (e.g.
+                    # after the user said "yes, rebuild it that way"). Nothing
+                    # was applied, so dropping it is the whole job -- reviving
+                    # it as an "add" re-trips the per-row-misuse block forever.
+                    continue
                 if prev_match is not None:
                     merged_config = dict(prev_match.get("config") or {})
                     merged_config.update(p.get("config") or {})
