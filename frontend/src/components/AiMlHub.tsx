@@ -471,7 +471,7 @@ export function AiMlHub() {
             onDone={() => setPendingConfig(null)}
             onClose={() => setPendingConfig(null)}
           />
-        ) : extractComponentId(pendingConfig.componentType) === 'rag_pipeline' ? (
+        ) : (extractComponentId(pendingConfig.componentType) === 'rag_pipeline' || /rag_?pipeline/i.test(pendingConfig.componentType)) ? (
           <RagQueryConfigStep
             componentType={pendingConfig.componentType}
             initialAttributes={pendingConfig.initialAttributes || {}}
