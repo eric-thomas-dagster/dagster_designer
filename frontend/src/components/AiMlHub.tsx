@@ -183,7 +183,10 @@ export function AiMlHub() {
       });
       const body = await res.json().catch(() => ({} as any));
       if (!res.ok) throw new Error(body.detail || 'Install failed');
-      setPendingConfig({ componentType: body.component_type, initialAttributes: {} });
+      // The CLI now reports `dagster_community_components.<Class>` (no `.components.<id>.` segment), which
+      // extractComponentId can't map back to an id -- the guided step never matched and the plain modal opened.
+      // The response also carries the short id, which is what the step routing and /templates/configure use.
+      setPendingConfig({ componentType: body.component_id || componentId, initialAttributes: {} });
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       notify.error(`Failed to open knowledge base builder: ${msg}`);
