@@ -25,7 +25,7 @@ from typing import Literal
 import httpx
 import psutil
 
-from ..core.uv_binary import find_uv_binary, venv_bin_path, project_subprocess_env
+from ..core.uv_binary import find_uv_binary, venv_bin_path, project_subprocess_env, env_with_bundled_uv_on_path
 
 DESIGNER_LOCS_ROOT = Path.home() / ".dagster-designer" / "designer-locs"
 DESIGNER_LOCS_ROOT.mkdir(parents=True, exist_ok=True)
@@ -403,8 +403,11 @@ def _run_dagster_component_add(state: DesignerLocState, component_id: str) -> tu
         # This sandbox dir has its own .venv (see venv_bin_path(state.dir()
         # / ".venv", ...) elsewhere in this file) -- point VIRTUAL_ENV at
         # it rather than leaking this backend process's own, same as every
-        # other project-scoped subprocess call.
-        env=project_subprocess_env(state.dir()),
+        # other project-scoped subprocess call. The CLI also shells out to a
+        # bare `uv` for the component's pip deps, which a Finder-launched app
+        # can't find on its minimal PATH -- put the bundled uv on PATH too
+        # (this was the 400 "No such file or directory: 'uv'" on Add data).
+        env=env_with_bundled_uv_on_path(project_subprocess_env(state.dir())),
         capture_output=True,
         text=True,
         timeout=300,
