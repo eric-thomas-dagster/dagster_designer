@@ -16,6 +16,8 @@ import { DOCUMENT_EXTRACTOR_FAMILY } from '@/lib/documentExtractorFamily';
 import { extractComponentId } from '@/lib/componentId';
 import { isFieldVisible as isFieldVisibleRule, labelFor as labelForRule } from '@/lib/fieldVisibility';
 import { IngestionWizardBody } from './IngestionWizardBody';
+import { ReplicationWizardBody } from './ReplicationWizardBody';
+import { isReplicationSchema } from '@/lib/replicationWizard';
 import { isSaasIngestionSchema } from '@/lib/ingestionWizard';
 import { GENERIC_FIELD_GROUPS, classifyGenericField, prettifyFieldName, type GenericFieldGroupKey } from '@/lib/genericFields';
 import { dbg } from '@/lib/debug';
@@ -2622,7 +2624,9 @@ export function ComponentConfigModal({
 
   const properties = componentSchema.schema?.properties || {};
   // New SaaS ingestions get the guided wizard instead of the all-fields form.
-  const wizardActive = isNew && !wizardAdvanced && isSaasIngestionSchema(type, properties);
+  const wizardKind: 'replication' | 'saas' | null =
+    !isNew || wizardAdvanced ? null : isReplicationSchema(type, properties) ? 'replication' : isSaasIngestionSchema(type, properties) ? 'saas' : null;
+  const wizardActive = wizardKind !== null;
 
   return (
     <>
@@ -2987,9 +2991,10 @@ export function ComponentConfigModal({
                 else mainEntries.push([fieldName, fieldSchema]);
               }
 
-              if (wizardActive) {
+              if (wizardKind) {
+                const Wizard = wizardKind === 'replication' ? ReplicationWizardBody : IngestionWizardBody;
                 return (
-                  <IngestionWizardBody
+                  <Wizard
                     componentType={type}
                     displayName={componentSchema.name.replace(/\s*(Ingestion)?$/i, '')}
                     properties={properties}
