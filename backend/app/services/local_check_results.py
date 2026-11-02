@@ -278,13 +278,14 @@ def read_check_history(project_dir: Path, monitor_id: str, limit: int = 200) -> 
             "run_id": run_id,
             "metadata": info.get("metadata") or [],
         }
-        numeric = [e for e in event["metadata"] if e["type"] in ("float", "int") and e["value"] is not None]
-        chosen = next((e for e in numeric if e["label"] not in _LOW_PRIORITY_NUMERIC_LABELS), None) or (numeric[0] if numeric else None)
+        from ..core.metadata_numeric import entry_number
+        numeric = [(e, n) for e in event["metadata"] if (n := entry_number(e)) is not None]
+        chosen = next((x for x in numeric if x[0]["label"] not in _LOW_PRIORITY_NUMERIC_LABELS), None) or (numeric[0] if numeric else None)
         if chosen:
-            event["value"], event["value_label"] = float(chosen["value"]), chosen["label"]
-        failed_rows = next((e for e in numeric if e["label"].endswith("failed_row_count")), None)
+            event["value"], event["value_label"] = chosen[1], chosen[0]["label"]
+        failed_rows = next((x for x in numeric if x[0]["label"].endswith("failed_row_count")), None)
         if failed_rows:
-            event["failures"] = int(failed_rows["value"])
+            event["failures"] = int(failed_rows[1])
         events.append(event)
         if len(events) >= limit:
             break

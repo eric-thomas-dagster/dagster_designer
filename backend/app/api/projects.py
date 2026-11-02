@@ -9590,10 +9590,13 @@ async def get_monitor_history(project_id: str, monitor_id: str, limit: int = 200
         status = e.get("status")
         for me in (e.get("metadata") or []):
             label = me.get("label")
-            v = me.get("value")
-            if not label or not isinstance(v, (int, float)):
+            # Number-looking text ("1234", "12.5%") trends too: a check that
+            # used to report text and now reports a real number is one series.
+            from ..core.metadata_numeric import entry_number
+            v = entry_number(me)
+            if not label or v is None:
                 continue
-            metrics_by_label.setdefault(label, []).append({"ts": ts, "value": float(v), "status": status})
+            metrics_by_label.setdefault(label, []).append({"ts": ts, "value": v, "status": status})
     # `event.value`/`value_label` — the legacy single-metric fallback,
     # used by locally-recorded dbt-test events which don't have a
     # `metadata` list. Keep it in the map so those series still render.

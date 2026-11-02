@@ -210,12 +210,18 @@ def numeric_metadata_value(raw_entries: list[dict] | None) -> tuple[float, str] 
     a monitor/check's numeric-metric chart the same way a dbt test's
     `failures` count does locally. Returns None if the check/materialization
     didn't report any numeric metadata."""
-    numeric = [e for e in normalize_metadata_entries(raw_entries) if e["type"] in ("float", "int") and e["value"] is not None]
-    preferred = next((e for e in numeric if e["label"] not in _LOW_PRIORITY_NUMERIC_LABELS), None)
+    from ..core.metadata_numeric import entry_number
+    numeric = []
+    for e in normalize_metadata_entries(raw_entries):
+        n = entry_number(e)
+        if n is not None:
+            numeric.append((e, n))
+    preferred = next((x for x in numeric if x[0]["label"] not in _LOW_PRIORITY_NUMERIC_LABELS), None)
     chosen = preferred or (numeric[0] if numeric else None)
     if chosen is None:
         return None
-    return float(chosen["value"]), (chosen["label"] or chosen["type"])
+    entry, number = chosen
+    return number, (entry["label"] or entry["type"])
 
 
 # --- Query catalog ----------------------------------------------------------
