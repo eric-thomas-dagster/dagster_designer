@@ -15,6 +15,9 @@ import { AGENTIC_PIPELINE_FAMILY } from '@/lib/agenticPipelineFamily';
 import { DOCUMENT_EXTRACTOR_FAMILY } from '@/lib/documentExtractorFamily';
 import { extractComponentId } from '@/lib/componentId';
 import { isFieldVisible as isFieldVisibleRule, labelFor as labelForRule } from '@/lib/fieldVisibility';
+import { IngestionWizardBody } from './IngestionWizardBody';
+import { isSaasIngestionSchema } from '@/lib/ingestionWizard';
+import { GENERIC_FIELD_GROUPS, classifyGenericField, prettifyFieldName, type GenericFieldGroupKey } from '@/lib/genericFields';
 import { dbg } from '@/lib/debug';
 
 // `x-dagster-io` type fields (inputs.type, outputs.type, accepts[]) are
@@ -29,43 +32,6 @@ import { dbg } from '@/lib/debug';
 function isDataFrameType(t: unknown): boolean {
   return typeof t === 'string' && t.toLowerCase().includes('dataframe');
 }
-
-// Generic-field grouping: many catalog components independently declare
-// the same handful of cross-cutting concerns (freshness policy, partition
-// config, retry policy, metadata) as plain schema fields, which rendered
-// as one long undifferentiated list -- confirmed directly against a real
-// ingestion component's schema (freshness_max_lag_minutes/freshness_cron,
-// partition_type/partition_start/partition_values/dynamic_partition_name/
-// partition_dimensions, retry_policy_max_retries/retry_policy_delay_
-// seconds/retry_policy_backoff, description/group_name/owners/asset_tags/
-// kinds, all flat and unlabeled). Classifying by NAME PATTERN (not a
-// per-component allowlist) means this groups correctly for every
-// component that follows these common conventions, not just the one it
-// was found on. Fields that don't match any pattern stay in the main,
-// ungrouped area -- this only tidies the common, recurring concerns, not
-// a component's own unique configuration.
-type GenericFieldGroupKey = 'metadata' | 'freshness' | 'partition' | 'retry' | 'preview' | 'dependencies';
-
-const GENERIC_FIELD_GROUPS: Array<{ key: GenericFieldGroupKey; label: string; test: (name: string) => boolean }> = [
-  { key: 'freshness', label: 'Freshness policy', test: (n) => /^freshness_/.test(n) },
-  { key: 'partition', label: 'Partitioning', test: (n) => /^partition_/.test(n) || n === 'dynamic_partition_name' },
-  { key: 'retry', label: 'Retry policy', test: (n) => /^retry_policy_|^retry_/.test(n) },
-  { key: 'preview', label: 'Preview', test: (n) => n === 'include_preview_metadata' || n === 'preview_rows' },
-  {
-    key: 'metadata',
-    label: 'Metadata',
-    test: (n) => ['description', 'group_name', 'owners', 'tags', 'asset_tags', 'kinds', 'column_lineage'].includes(n),
-  },
-  // `deps` only -- NOT upstream_asset_key(s)/left_asset_key/etc, which are
-  // component-specific "main data source" fields with their own per-
-  // component semantics, always left prominent in the main area. Only
-  // reached when `deps` isn't already suppressed by commonFieldNames
-  // (i.e. new/factory components, where Post-processing's own
-  // Dependencies section isn't available yet) -- previously sat alone,
-  // ungrouped, next to e.g. partition/retry fields that DO get a labeled
-  // home.
-  { key: 'dependencies', label: 'Dependencies', test: (n) => n === 'deps' },
-];
 
 // Matches `resource_key` plus every variant spelling the community
 // catalog actually uses for "this field references another installed
@@ -97,28 +63,6 @@ const RESOURCE_REFERENCE_FIELD_PATTERN = /(^|_)resource_(key|name)$/;
 function isResourceReferenceField(fieldName: string, fieldSchema?: any): boolean {
   if (fieldSchema?.['ui:widget'] === 'resource-picker') return true;
   return RESOURCE_REFERENCE_FIELD_PATTERN.test(fieldName);
-}
-
-function classifyGenericField(fieldName: string): GenericFieldGroupKey | null {
-  const lower = fieldName.toLowerCase();
-  for (const group of GENERIC_FIELD_GROUPS) {
-    if (group.test(lower)) return group.key;
-  }
-  return null;
-}
-
-// snake_case/SCREAMING_CASE -> "Title Case" for any field whose label isn't
-// already special-cased (Data source, Destination resource) -- e.g.
-// `group_name` -> "Group Name". Applied as the generic fallback instead of
-// the raw field name verbatim, which is what `isUnifiedSource`/
-// `isDestinationResourceKey`'s hand-written labels were already doing for
-// just the two fields someone had gotten around to special-casing.
-function prettifyFieldName(name: string): string {
-  return name
-    .split(/[_\s]+/)
-    .filter(Boolean)
-    .map((w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
-    .join(' ');
 }
 
 // A component's single-asset identifier can be a plain string
@@ -254,6 +198,8 @@ export function ComponentConfigModal({
     component?.attributes || initialAttributes || {},
   );
   const [label, setLabel] = useState(component?.label || '');
+  // "Switch to the advanced form" on the guided ingestion wizard.
+  const [wizardAdvanced, setWizardAdvanced] = useState(false);
   const [description, setDescription] = useState(component?.description || '');
   const [translation, setTranslation] = useState<Record<string, any>>(component?.translation || {});
   // Custom-lineage-backed "Dependencies" field -- the asset keys this
@@ -2675,6 +2621,8 @@ export function ComponentConfigModal({
   };
 
   const properties = componentSchema.schema?.properties || {};
+  // New SaaS ingestions get the guided wizard instead of the all-fields form.
+  const wizardActive = isNew && !wizardAdvanced && isSaasIngestionSchema(type, properties);
 
   return (
     <>
@@ -2714,7 +2662,7 @@ export function ComponentConfigModal({
         <div className="flex-1 overflow-y-auto p-6 space-y-4">
           {/* Component Label / Instance Name - only show for non-community or multi-asset components.
               Also hidden in draft-authoring mode — Designer auto-generates the component_id there. */}
-          {!isDraftMode && (!isCommunityComponent || !hasSingleAssetField) && (
+          {!wizardActive && !isDraftMode && (!isCommunityComponent || !hasSingleAssetField) && (
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">
                 {isCommunityComponent ? 'Instance Name' : 'Label'}
@@ -2928,7 +2876,7 @@ export function ComponentConfigModal({
 
           {/* Dynamic fields from schema */}
           <div className="space-y-4">
-            <h3 className="text-sm font-semibold text-gray-900">Configuration</h3>
+            {!wizardActive && <h3 className="text-sm font-semibold text-gray-900">Configuration</h3>}
 
             {/* Special handling for Enhanced Data Quality Checks */}
             {type.includes('EnhancedDataQualityChecks') ? (
@@ -3037,6 +2985,24 @@ export function ComponentConfigModal({
                 const groupKey = isSpecial ? null : classifyGenericField(fieldName);
                 if (groupKey) grouped[groupKey].push([fieldName, fieldSchema]);
                 else mainEntries.push([fieldName, fieldSchema]);
+              }
+
+              if (wizardActive) {
+                return (
+                  <IngestionWizardBody
+                    componentType={type}
+                    displayName={componentSchema.name.replace(/\s*(Ingestion)?$/i, '')}
+                    properties={properties}
+                    required={componentSchema.schema?.required || []}
+                    formData={formData}
+                    onFieldChange={handleFieldChange}
+                    renderEntry={renderGenericFieldEntry}
+                    onFinish={handleSave}
+                    onAdvanced={() => setWizardAdvanced(true)}
+                    onCancel={onClose}
+                    isDraft={isDraftMode}
+                  />
+                );
               }
 
               return (
@@ -3206,7 +3172,7 @@ export function ComponentConfigModal({
               inert there (not just redundant) -- showing an "Advanced"
               section whose one remaining field does nothing isn't progress
               over the clutter it replaced. */}
-          {likelyUsesTranslation && (
+          {!wizardActive && likelyUsesTranslation && (
             <details className="border border-gray-200 rounded-md mt-4">
               <summary className="cursor-pointer text-sm font-medium text-gray-700 hover:text-gray-900 select-none px-3 py-2 bg-gray-50 rounded-md">
                 Advanced: customize how this asset is generated (optional)
@@ -3231,7 +3197,8 @@ export function ComponentConfigModal({
           )}
         </div>
 
-        {/* Footer */}
+        {/* Footer (the ingestion wizard has its own Back/Next/Add buttons) */}
+        {!wizardActive && (
         <div className="p-4 border-t border-gray-200 flex justify-end space-x-2">
           <button
             onClick={onClose}
@@ -3247,6 +3214,7 @@ export function ComponentConfigModal({
             <span>{isDraftMode ? 'Save' : 'Save Component'}</span>
           </button>
         </div>
+        )}
       </div>
     </div>
 
