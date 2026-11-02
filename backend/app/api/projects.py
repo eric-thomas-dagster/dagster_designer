@@ -9589,14 +9589,13 @@ async def get_monitor_history(project_id: str, monitor_id: str, limit: int = 200
         ts = e.get("ts")
         status = e.get("status")
         for me in (e.get("metadata") or []):
-            label = me.get("label")
             # Number-looking text ("1234", "12.5%") trends too: a check that
             # used to report text and now reports a real number is one series.
-            from ..core.metadata_numeric import entry_number
-            v = entry_number(me)
-            if not label or v is None:
-                continue
-            metrics_by_label.setdefault(label, []).append({"ts": ts, "value": v, "status": status})
+            # Bools chart as 1/0 and JSON dicts expand to one series per
+            # numeric key (`label.key`).
+            from ..core.metadata_numeric import series_numbers
+            for series_label, v in series_numbers(me):
+                metrics_by_label.setdefault(series_label, []).append({"ts": ts, "value": v, "status": status})
     # `event.value`/`value_label` — the legacy single-metric fallback,
     # used by locally-recorded dbt-test events which don't have a
     # `metadata` list. Keep it in the map so those series still render.
