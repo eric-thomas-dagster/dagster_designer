@@ -58,7 +58,7 @@ export function GuidedWizard({
   stepErrors, fieldNote, onFinish, onAdvanced, onCancel, isDraft,
 }: GuidedWizardProps) {
   // Steps with nothing to ask are skipped; the review step always closes the flow.
-  const stepList = useMemo(() => stepDefs.filter((d) => d.entries.length > 0), [stepDefs]);
+  const stepList = useMemo(() => stepDefs.filter((d) => d.entries.length > 0 || d.custom), [stepDefs]);
   const steps = useMemo<string[]>(() => [...stepList.map((d) => d.key), 'review'], [stepList]);
   const defFor = (k: string) => stepList.find((d) => d.key === k);
 
@@ -150,9 +150,13 @@ export function GuidedWizard({
     );
   };
 
-  const summaryRows = stepList.flatMap((d) => d.entries).filter(
-    (e) => isFilled(values[e.name]) && typeof values[e.name] !== 'boolean',
-  );
+  const summaryRows = stepList
+    .flatMap((d) => [
+      ...d.entries
+        .filter((e) => isFilled(values[e.name]) && typeof values[e.name] !== 'boolean')
+        .map((e) => ({ key: e.name, label: e.schema?.label || prettifyFieldName(e.name), value: summarize(e.name, e.schema, values[e.name]) })),
+      ...(d.summary?.(values) ?? []).map((r) => ({ key: `${d.key}:${r.label}`, ...r })),
+    ]);
 
   const activeMore = moreGroups.filter((g) => g.entries.length > 0);
 
@@ -186,7 +190,12 @@ export function GuidedWizard({
         <p className="text-xs text-gray-500">{defFor(step)?.blurb ?? REVIEW_BLURB}</p>
       </div>
 
-      {step !== 'review' && <div className="space-y-4">{stepEntries(step).map(renderOne)}</div>}
+      {step !== 'review' && (
+        <div className="space-y-4">
+          {stepEntries(step).map(renderOne)}
+          {defFor(step)?.custom?.()}
+        </div>
+      )}
       {step !== 'review' && showErrors && problemsFor(step).map((m) => (
         <p key={m} className="text-xs text-red-600">{m}</p>
       ))}
@@ -195,10 +204,10 @@ export function GuidedWizard({
         <>
           <dl className="rounded-md border border-gray-200 divide-y divide-gray-100 text-sm">
             {summaryRows.length === 0 && <div className="px-3 py-2 text-gray-500">Nothing filled in yet.</div>}
-            {summaryRows.map((e) => (
-              <div key={e.name} className="flex gap-3 px-3 py-1.5">
-                <dt className="w-40 flex-shrink-0 text-gray-500">{e.schema?.label || prettifyFieldName(e.name)}</dt>
-                <dd className="min-w-0 break-words font-mono text-xs text-gray-900 pt-0.5">{summarize(e.name, e.schema, values[e.name])}</dd>
+            {summaryRows.map((r) => (
+              <div key={r.key} className="flex gap-3 px-3 py-1.5">
+                <dt className="w-40 flex-shrink-0 text-gray-500">{r.label}</dt>
+                <dd className="min-w-0 break-words font-mono text-xs text-gray-900 pt-0.5">{r.value}</dd>
               </div>
             ))}
           </dl>

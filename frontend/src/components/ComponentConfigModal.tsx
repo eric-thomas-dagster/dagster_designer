@@ -17,6 +17,8 @@ import { extractComponentId } from '@/lib/componentId';
 import { isFieldVisible as isFieldVisibleRule, labelFor as labelForRule } from '@/lib/fieldVisibility';
 import { IngestionWizardBody } from './IngestionWizardBody';
 import { ReplicationWizardBody } from './ReplicationWizardBody';
+import { DltRestWizardBody } from './DltRestWizardBody';
+import { isDltRestSchema, resourcesAreWizardEditable } from '@/lib/dltRestWizard';
 import { isReplicationSchema } from '@/lib/replicationWizard';
 import { isSaasIngestionSchema } from '@/lib/ingestionWizard';
 import { GENERIC_FIELD_GROUPS, classifyGenericField, prettifyFieldName, type GenericFieldGroupKey } from '@/lib/genericFields';
@@ -2624,8 +2626,12 @@ export function ComponentConfigModal({
 
   const properties = componentSchema.schema?.properties || {};
   // New SaaS ingestions get the guided wizard instead of the all-fields form.
-  const wizardKind: 'replication' | 'saas' | null =
-    !isNew || wizardAdvanced ? null : isReplicationSchema(type, properties) ? 'replication' : isSaasIngestionSchema(type, properties) ? 'saas' : null;
+  // The dlt REST wizard can't show a starting point that already chains dependent endpoints; those get the full form.
+  const wizardKind: 'replication' | 'saas' | 'dlt' | null =
+    !isNew || wizardAdvanced ? null
+      : isDltRestSchema(type, properties) && resourcesAreWizardEditable(formData.resources) ? 'dlt'
+      : isReplicationSchema(type, properties) ? 'replication'
+      : isSaasIngestionSchema(type, properties) ? 'saas' : null;
   const wizardActive = wizardKind !== null;
 
   return (
@@ -2992,7 +2998,7 @@ export function ComponentConfigModal({
               }
 
               if (wizardKind) {
-                const Wizard = wizardKind === 'replication' ? ReplicationWizardBody : IngestionWizardBody;
+                const Wizard = wizardKind === 'dlt' ? DltRestWizardBody : wizardKind === 'replication' ? ReplicationWizardBody : IngestionWizardBody;
                 return (
                   <Wizard
                     componentType={type}
